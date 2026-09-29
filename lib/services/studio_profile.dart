@@ -1,3 +1,8 @@
+import 'dart:async';
+
+import 'package:flutter/widgets.dart';
+
+import '../store/project_store.dart';
 import 'project_templates.dart';
 
 /// 产品线名称登记表。语言 App 的 UI 标题从这里取，后续新增产品时不必散落硬编码。
@@ -86,6 +91,8 @@ class StudioProfile {
     required this.appTitle,
     required this.templates,
     this.runner,
+    this.webPreviewFactory,
+    this.toolsPageBuilder,
     this.entryFileNames = const [],
     this.isOffline = false,
     this.productKey = StudioProductCatalog.qfliStudioKey,
@@ -110,6 +117,12 @@ class StudioProfile {
 
   /// 本地运行后端。null 表示沿用 [RunnerService] 的默认行为。
   final ProgramRunner? runner;
+
+  /// Product-owned local web preview implementation.
+  final Future<WebPreviewSession> Function(String projectPath)? webPreviewFactory;
+
+  /// Product-owned tools screen in the existing Functions navigation.
+  final Widget Function(ProjectStore store)? toolsPageBuilder;
 
   /// 额外识别的入口文件名（优先于默认列表），例如 `'main.c'`。
   final List<String> entryFileNames;
@@ -154,6 +167,12 @@ class StudioProfile {
     final allowed = templates.map((t) => t.language).toSet();
     return source.where(allowed.contains).toList(growable: false);
   }
+}
+
+abstract interface class WebPreviewSession {
+  String get url;
+  Stream<String> get debugStream;
+  Future<void> stop();
 }
 
 /// 当前档位下可选的模板。未设置档位时即全部模板。

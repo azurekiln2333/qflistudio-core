@@ -161,12 +161,14 @@ class _HomePageState extends State<HomePage> {
     };
   }
 
-  bool get _isContentProduct => switch (StudioProfile.current?.productKey) {
-    StudioProductCatalog.jsonKey ||
-    StudioProductCatalog.noteKey ||
-    StudioProductCatalog.sqlabKey => true,
-    _ => false,
-  };
+  bool get _isContentProduct =>
+      StudioProfile.current?.toolsPageBuilder != null ||
+      switch (StudioProfile.current?.productKey) {
+        StudioProductCatalog.jsonKey ||
+        StudioProductCatalog.noteKey ||
+        StudioProductCatalog.sqlabKey => true,
+        _ => false,
+      };
 }
 
 class _KeepAlivePage extends StatefulWidget {

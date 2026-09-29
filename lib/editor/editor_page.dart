@@ -96,7 +96,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _aiCollapsed = false;
   _BottomPanel _bottomPanel = _BottomPanel.none;
   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
-  LocalWebServer? _previewServer;
+  WebPreviewSession? _previewServer;
   StreamSubscription<String>? _debugSub;
   Timer? _autoSaveTimer;
   Timer? _historyTimer;
@@ -602,17 +602,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     if (ext == '.html' || ext == '.htm') {
       await _previewServer?.stop();
       try {
-        final server = await LocalWebServer.start(widget.project.path);
+        final server = await (StudioProfile.current?.webPreviewFactory?.call(
+              widget.project.path,
+            ) ??
+            LocalWebServer.start(widget.project.path));
+        if (!mounted) {
+          await server.stop();
+          return;
+        }
         _previewServer = server;
         // 页面 console 日志转发到终端面板（Web 调试）。
         _debugSub?.cancel();
         _debugSub = server.debugStream.listen((line) {
           _terminalKey.currentState?.appendDebug(line);
         });
-        await RunnerService.runProject(
-          projectPath: widget.project.path,
-          entryFile: entry,
-        );
+        await RunnerService.openUrl(server.url);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(

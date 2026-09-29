@@ -119,7 +119,7 @@ abstract final class RunnerService {
       case '.html':
       case '.htm':
         final server = await LocalWebServer.start(projectPath);
-        await _openUrl(server.url);
+        await openUrl(server.url);
         return RunResult(title: server.url, webServer: server);
       case '.py':
       case '.dart':
@@ -186,7 +186,7 @@ abstract final class RunnerService {
   }
 
   /// ohos/android 上通过原生通道打开浏览器；桌面端直接起进程。
-  static Future<void> _openUrl(String url) async {
+  static Future<void> openUrl(String url) async {
     if (AppPaths.isDesktop) {
       await UrlOpener.open(url);
       return;

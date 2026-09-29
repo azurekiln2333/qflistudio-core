@@ -42,18 +42,21 @@ class FunctionsTab extends StatelessWidget {
             const SizedBox(height: 8),
             _QuickToolTile(
               icon: switch (StudioProfile.current?.productKey) {
+                StudioProductCatalog.webForgeKey => Icons.language,
                 StudioProductCatalog.jsonKey => Icons.data_object,
                 StudioProductCatalog.noteKey => Icons.article_outlined,
                 StudioProductCatalog.sqlabKey => Icons.storage_outlined,
                 _ => Icons.build_outlined,
               },
               title: switch (StudioProfile.current?.productKey) {
+                StudioProductCatalog.webForgeKey => 'Web 工具',
                 StudioProductCatalog.jsonKey => l10n.jsonTools,
                 StudioProductCatalog.noteKey => l10n.markdownTools,
                 StudioProductCatalog.sqlabKey => l10n.sqlTools,
                 _ => l10n.functions,
               },
               subtitle: switch (StudioProfile.current?.productKey) {
+                StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
                 StudioProductCatalog.jsonKey => l10n.jsonStructure,
                 StudioProductCatalog.noteKey => l10n.markdownPreview,
                 StudioProductCatalog.sqlabKey => l10n.executeQuery,
@@ -76,6 +79,8 @@ class ContentToolsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final profile = StudioProfile.current;
+    final customTools = profile?.toolsPageBuilder;
+    if (customTools != null) return customTools(store);
     return switch (profile?.productKey) {
       StudioProductCatalog.jsonKey => const JsonToolPage(),
       StudioProductCatalog.noteKey => const MarkdownToolPage(),
