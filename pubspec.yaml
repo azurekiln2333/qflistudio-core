@@ -3,9 +3,6 @@ description: "QFLIStudio+ 的共享 IDE 内核：编辑器、文件树、高亮�
 publish_to: 'none'
 version: 1.0.0+1
 
-# 由仓库根 pubspec.yaml 的 workspace 统一解析，共用一份 pubspec.lock。
-resolution: workspace
-
 environment:
   sdk: ^3.11.5
 
@@ -26,6 +23,10 @@ dependencies:
   intl: ^0.20.2
   fast_gbk: ^1.0.0
   xml: ^6.6.1
+
+dependency_overrides:
+  re_editor:
+    path: vendor/re_editor
 
 dev_dependencies:
   flutter_test:
