@@ -2097,7 +2097,9 @@ class _CodeLineEditingControllerDelegate implements CodeLineEditingController {
       value.addListener(listener);
     }
     _delegate = value;
-    notifyListeners();
+    if (_listeners.isNotEmpty) {
+      notifyListeners();
+    }
   }
 
   @override

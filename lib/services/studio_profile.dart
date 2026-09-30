@@ -93,6 +93,7 @@ class StudioProfile {
     this.runner,
     this.webPreviewFactory,
     this.toolsPageBuilder,
+    this.editorFileTools = const [],
     this.entryFileNames = const [],
     this.isOffline = false,
     this.productKey = StudioProductCatalog.qfliStudioKey,
@@ -119,10 +120,14 @@ class StudioProfile {
   final ProgramRunner? runner;
 
   /// Product-owned local web preview implementation.
-  final Future<WebPreviewSession> Function(String projectPath)? webPreviewFactory;
+  final Future<WebPreviewSession> Function(String projectPath)?
+  webPreviewFactory;
 
   /// Product-owned tools screen in the existing Functions navigation.
   final Widget Function(ProjectStore store)? toolsPageBuilder;
+
+  /// Actions contributed by a language product to the current-file menu.
+  final List<EditorFileTool> editorFileTools;
 
   /// 额外识别的入口文件名（优先于默认列表），例如 `'main.c'`。
   final List<String> entryFileNames;
@@ -167,6 +172,30 @@ class StudioProfile {
     final allowed = templates.map((t) => t.language).toSet();
     return source.where(allowed.contains).toList(growable: false);
   }
+}
+
+class EditorFileTool {
+  const EditorFileTool({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.extensions,
+    required this.run,
+  });
+
+  final String id;
+  final String label;
+  final IconData icon;
+  final List<String> extensions;
+  final Future<EditorFileToolResult> Function(String file, String projectPath)
+  run;
+}
+
+class EditorFileToolResult {
+  const EditorFileToolResult({required this.success, required this.message});
+
+  final bool success;
+  final String message;
 }
 
 abstract interface class WebPreviewSession {

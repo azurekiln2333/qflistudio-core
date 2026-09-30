@@ -92,6 +92,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   bool? _explorerVisible;
   bool _terminalCollapsed = false;
+  bool _runningFileTool = false;
   double _terminalHeight = 240;
   bool _aiCollapsed = false;
   _BottomPanel _bottomPanel = _BottomPanel.none;
@@ -564,6 +565,43 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
+  Future<void> _runEditorTool(String id) async {
+    final open = _editor.current;
+    final tool = StudioProfile.current?.editorFileTools
+        .where((tool) => tool.id == id)
+        .firstOrNull;
+    if (_runningFileTool || open == null || open.readOnly || tool == null) return;
+    if (!tool.extensions.contains(p.extension(open.path).toLowerCase())) return;
+    setState(() => _runningFileTool = true);
+    try {
+      await _saveCurrent();
+      if (!mounted || !_editor.files.contains(open) || open.dirty) return;
+      final EditorFileToolResult result;
+      try {
+        result = await tool.run(open.path, open.projectRootPath);
+      } catch (error) {
+        if (mounted) _showSnack('${tool.label}失败：$error');
+        return;
+      }
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('${tool.label}${result.success ? '完成' : '失败'}'),
+          content: SingleChildScrollView(child: SelectableText(result.message)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _runningFileTool = false);
+    }
+  }
+
   void _openContentTool() {
     final open = _editor.current;
     if (open == null) return;
@@ -809,6 +847,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                   tooltip: '更多',
                                   icon: const Icon(Icons.more_vert),
                                   onSelected: (value) {
+                                    if (value.startsWith('file_tool:')) {
+                                      unawaited(
+                                        _runEditorTool(value.substring(10)),
+                                      );
+                                      return;
+                                    }
                                     switch (value) {
                                       case 'save':
                                         _saveCurrent();
@@ -869,6 +913,31 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     }
                                   },
                                   itemBuilder: (context) => [
+                                    for (final tool
+                                        in StudioProfile
+                                                .current
+                                                ?.editorFileTools ??
+                                            const <EditorFileTool>[])
+                                      if (tool.extensions.contains(
+                                        p
+                                            .extension(
+                                              _editor.current?.name ?? '',
+                                            )
+                                            .toLowerCase(),
+                                      ))
+                                        PopupMenuItem(
+                                          value: 'file_tool:${tool.id}',
+                                          enabled:
+                                              !_runningFileTool &&
+                                              _editor.current?.readOnly != true,
+                                          child: Row(
+                                            children: [
+                                              Icon(tool.icon, size: 20),
+                                              const SizedBox(width: 12),
+                                              Text(tool.label),
+                                            ],
+                                          ),
+                                        ),
                                     const PopupMenuItem(
                                       value: 'save',
                                       child: Row(
@@ -1658,88 +1727,100 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             color: scheme.surfaceContainerLow,
             border: Border(top: BorderSide(color: scheme.outlineVariant)),
           ),
-          child: Row(
-            children: [
-              // 编码 chip：点击弹出编码选择，重新解码文件（保存时应用）。
-              InkWell(
-                borderRadius: BorderRadius.circular(6),
-                onTap: () => _showEncodingDialog(open),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.abc_outlined, size: 13, color: scheme.primary),
-                      const SizedBox(width: 4),
-                      Text(
-                        open.encoding,
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: [
+                // 编码 chip：点击弹出编码选择，重新解码文件（保存时应用）。
+                InkWell(
+                  borderRadius: BorderRadius.circular(6),
+                  onTap: () => _showEncodingDialog(open),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.abc_outlined,
+                          size: 13,
                           color: scheme.primary,
-                          fontWeight: FontWeight.w600,
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              if (modifiedLabel.isNotEmpty) ...[
-                Text(
-                  modifiedLabel,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+                        const SizedBox(width: 4),
+                        Text(
+                          open.encoding,
+                          style: Theme.of(context).textTheme.labelSmall
+                              ?.copyWith(
+                                color: scheme.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
                 const SizedBox(width: 10),
-              ],
-              Text(
-                '第 $line 行，第 $column 列 · 共 $totalLines 行',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-              ),
-              if (widget.project.isCloud) ...[
-                const SizedBox(width: 12),
-                Icon(
-                  switch (_syncState) {
-                    SyncState.syncing => Icons.cloud_sync_outlined,
-                    SyncState.synced => Icons.cloud_done_outlined,
-                    SyncState.offline => Icons.cloud_off_outlined,
-                    SyncState.idle => Icons.cloud_outlined,
-                  },
-                  size: 14,
-                  color: switch (_syncState) {
-                    SyncState.offline => scheme.error,
-                    _ => scheme.primary,
-                  },
-                ),
-                if (_syncError != null) ...[
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      _syncError!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: scheme.error),
+                if (constraints.maxWidth >= 520 &&
+                    modifiedLabel.isNotEmpty) ...[
+                  Text(
+                    modifiedLabel,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
                     ),
+                  ),
+                  const SizedBox(width: 10),
+                ],
+                Flexible(
+                  child: Text(
+                    '第 $line 行，第 $column 列 · 共 $totalLines 行',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                if (widget.project.isCloud) ...[
+                  const SizedBox(width: 12),
+                  Icon(
+                    switch (_syncState) {
+                      SyncState.syncing => Icons.cloud_sync_outlined,
+                      SyncState.synced => Icons.cloud_done_outlined,
+                      SyncState.offline => Icons.cloud_off_outlined,
+                      SyncState.idle => Icons.cloud_outlined,
+                    },
+                    size: 14,
+                    color: switch (_syncState) {
+                      SyncState.offline => scheme.error,
+                      _ => scheme.primary,
+                    },
+                  ),
+                  if (_syncError != null) ...[
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        _syncError!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: scheme.error),
+                      ),
+                    ),
+                  ],
+                ],
+                if (open.dirty && !widget.project.isCloud) ...[
+                  const SizedBox(width: 12),
+                  Text(
+                    '未保存',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: scheme.primary),
                   ),
                 ],
               ],
-              if (open.dirty && !widget.project.isCloud) ...[
-                const SizedBox(width: 12),
-                Text(
-                  '未保存',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: scheme.primary),
-                ),
-              ],
-            ],
+            ),
           ),
         );
       },
