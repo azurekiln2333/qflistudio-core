@@ -1,18 +1,23 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../community/community_widgets.dart';
+import '../config/compliance_config.dart';
 import '../services/api_client.dart';
+import '../services/recovery_service.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
 import '../widgets/settings_section.dart';
 import 'audit_page.dart';
 import 'auth/login_page.dart';
-import 'my_posts_page.dart';
+import 'auth/agreement_page.dart';
+import 'recovery_page.dart';
 import 'settings_page.dart';
 import 'tasks_page.dart';
+import 'points_page.dart';
+import 'task_config_page.dart';
+import 'checkin_calendar_page.dart';
+import 'activity_stats_page.dart';
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({
@@ -31,56 +36,15 @@ class ProfileTab extends StatefulWidget {
 }
 
 class _ProfileTabState extends State<ProfileTab> {
-  int? _postCount;
-  String? _lastToken;
-  Future<void>? _statsRequest;
+  static const _cardShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.all(Radius.circular(8)),
+  );
 
-  @override
-  void initState() {
-    super.initState();
-    _lastToken = widget.auth.token;
-    widget.auth.addListener(_onAuthChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(_loadStats());
-    });
-  }
-
-  @override
-  void dispose() {
-    widget.auth.removeListener(_onAuthChanged);
-    super.dispose();
-  }
-
-  void _onAuthChanged() {
-    if (_lastToken == widget.auth.token) return;
-    _lastToken = widget.auth.token;
-    setState(() => _postCount = null);
-    unawaited(_loadStats());
-  }
-
-  Future<void> _loadStats() async {
-    // 旧账号请求完成后再加载当前账号，避免连续刷新产生重复请求。
-    if (_statsRequest != null) await _statsRequest;
-    final token = widget.auth.token;
-    if (token == null || !mounted) return;
-    final request = _fetchStats(token);
-    _statsRequest = request;
-    await request;
-    if (identical(_statsRequest, request)) _statsRequest = null;
-  }
-
-  Future<void> _fetchStats(String token) async {
-    try {
-      final result = await ApiClient.instance.meWithStats(token);
-      if (!mounted || widget.auth.token != token) return;
-      setState(() => _postCount = result.posts);
-    } on ApiException {
-      // 离线时保留已有统计，未加载过的数据用占位符表示。
-    }
-  }
+  int _avatarRevision = 0;
 
   Future<void> _refresh() async {
-    await Future.wait([widget.auth.refreshMe(), _loadStats()]);
+    await widget.auth.refreshMe();
+    if (mounted) setState(() => _avatarRevision++);
   }
 
   Future<void> _login() async {
@@ -92,12 +56,11 @@ class _ProfileTabState extends State<ProfileTab> {
   void _openSettings() {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) =>
-            SettingsPage(
-              settings: widget.settings,
-              auth: widget.auth,
-              store: widget.store,
-            ),
+        builder: (_) => SettingsPage(
+          settings: widget.settings,
+          auth: widget.auth,
+          store: widget.store,
+        ),
       ),
     );
   }
@@ -106,113 +69,127 @@ class _ProfileTabState extends State<ProfileTab> {
     if (!widget.auth.isLoggedIn) await _login();
     if (!mounted || !widget.auth.isLoggedIn) return;
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page()));
-    if (mounted) await _refresh();
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('我的'),
-        actions: [
-          IconButton(
-            tooltip: '设置',
-            onPressed: _openSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: ListenableBuilder(
-        listenable: widget.auth,
-        builder: (context, _) => Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 840),
-            child: RefreshIndicator(
-              onRefresh: _refresh,
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-                children: [
-                  _profileCard(context),
-                  const SizedBox(height: 16),
-                  if (widget.auth.isLoggedIn) ...[
-                    _statistics(context),
-                    const SizedBox(height: 24),
-                  ],
-                  SettingsSection(
-                    title: '创作与成长',
-                    children: [
-                      _entry(
-                        icon: Icons.task_alt_outlined,
-                        title: '签到任务',
-                        subtitle: widget.auth.isLoggedIn
-                            ? '已连续签到 ${widget.auth.user!.checkinStreak} 天'
-                            : '记录进步，积累积分',
-                        onTap: () => _openAccountPage(
-                          () => TasksPage(auth: widget.auth),
-                        ),
-                      ),
-                      _entry(
-                        icon: Icons.article_outlined,
-                        title: '我的帖子',
-                        subtitle: '管理发布的教程与讨论',
-                        onTap: () => _openAccountPage(
-                          () => MyPostsPage(auth: widget.auth),
-                        ),
-                      ),
+      body: SafeArea(
+        bottom: false,
+        child: ListenableBuilder(
+          listenable: widget.auth,
+          builder: (context, _) => Align(
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 840),
+              child: RefreshIndicator(
+                onRefresh: _refresh,
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                  children: [
+                    _profileHeader(context),
+                    const SizedBox(height: 16),
+                    if (widget.auth.isLoggedIn) ...[
+                      _statistics(context),
+                      const SizedBox(height: 24),
                     ],
-                  ),
-                  SettingsSection(
-                    title: '偏好与支持',
-                    children: [
-                      _entry(
-                        icon: Icons.tune_rounded,
-                        title: '设置',
-                        subtitle: '外观、代码高亮、AI 与存储',
-                        onTap: _openSettings,
-                      ),
-                      _entry(
-                        icon: Icons.info_outline,
-                        title: '关于 QFLIStudio+',
-                        subtitle: '一个轻量、专注的编程空间',
-                        onTap: () => showQfliAbout(context),
-                      ),
-                    ],
-                  ),
-                  if (widget.auth.user?.isAdmin == true)
                     SettingsSection(
-                      title: '管理',
+                      title: '签到与积分',
+                      cardShape: _cardShape,
                       children: [
                         _entry(
-                          icon: Icons.policy_outlined,
-                          title: '操作审计',
-                          subtitle: '查看平台操作记录',
+                          icon: Icons.task_alt_outlined,
+                          title: '每日任务',
                           onTap: () => _openAccountPage(
-                            () => AuditPage(auth: widget.auth),
+                            () => TasksPage(auth: widget.auth),
+                          ),
+                        ),
+                        _entry(
+                          icon: Icons.stars_outlined,
+                          title: '积分兑换',
+                          onTap: () => _openAccountPage(
+                            () => PointsPage(auth: widget.auth),
+                          ),
+                        ),
+                        _entry(
+                          icon: Icons.bar_chart_outlined,
+                          title: '统计',
+                          onTap: () => _openAccountPage(
+                            () => ActivityStatsPage(auth: widget.auth),
                           ),
                         ),
                       ],
                     ),
-                  if (widget.auth.isLoggedIn)
-                    Center(
-                      child: TextButton.icon(
-                        onPressed: _confirmSignOut,
-                        icon: const Icon(Icons.logout, size: 18),
-                        label: const Text('退出登录'),
+                    SettingsSection(
+                      title: '数据管理',
+                      cardShape: _cardShape,
+                      children: [
+                        for (final kind in RecoveryKind.values)
+                          _entry(
+                            icon: recoveryIcon(kind),
+                            title: recoveryTitle(kind),
+                            onTap: () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => RecoveryPage(
+                                  kind: kind,
+                                  store: widget.store,
+                                  settings: widget.settings,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    SettingsSection(
+                      title: '偏好与支持',
+                      cardShape: _cardShape,
+                      children: [
+                        _entry(
+                          icon: Icons.tune_rounded,
+                          title: '设置',
+                          onTap: _openSettings,
+                        ),
+                        _entry(
+                          icon: Icons.info_outline,
+                          title: '关于 QFLIStudio+',
+                          onTap: () => showQfliAbout(context),
+                        ),
+                      ],
+                    ),
+                    if (widget.auth.user?.isAdmin == true)
+                      SettingsSection(
+                        title: '管理',
+                        cardShape: _cardShape,
+                        children: [
+                          _entry(
+                            icon: Icons.tune_outlined,
+                            title: '任务配置',
+                            onTap: () => _openAccountPage(
+                              () => TaskConfigPage(auth: widget.auth),
+                            ),
+                          ),
+                          _entry(
+                            icon: Icons.policy_outlined,
+                            title: '操作审计',
+                            onTap: () => _openAccountPage(
+                              () => AuditPage(auth: widget.auth),
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'QFLIStudio+',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
+                    if (widget.auth.isLoggedIn)
+                      Center(
+                        child: TextButton.icon(
+                          onPressed: _confirmSignOut,
+                          icon: const Icon(Icons.logout, size: 18),
+                          label: const Text('退出登录'),
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    _icpFooter(),
+                  ],
+                ),
               ),
             ),
           ),
@@ -221,115 +198,137 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 
-  Widget _profileCard(BuildContext context) {
+  Widget _profileHeader(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final user = widget.auth.user;
     final loggedIn = widget.auth.isLoggedIn;
-    return Card.filled(
-      margin: EdgeInsets.zero,
-      color: scheme.primaryContainer,
+    return InkWell(
+      onTap: loggedIn ? null : _login,
       child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 20),
+        child: Row(
           children: [
-            Row(
-              children: [
-                if (loggedIn)
-                  Avatar(
-                    name: user!.nickname,
-                    color: user.avatarColor,
-                    size: 60,
-                  )
-                else
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: scheme.surface,
-                    foregroundColor: scheme.primary,
-                    child: const Icon(Icons.person_outline, size: 32),
+            if (loggedIn)
+              Avatar(
+                name: user!.nickname,
+                cacheKey: user.id,
+                refreshToken: _avatarRevision,
+                color: user.avatarColor,
+                imageUrl: user.avatarUrl,
+                size: 60,
+              )
+            else
+              CircleAvatar(
+                radius: 30,
+                backgroundColor: scheme.surfaceContainerHighest,
+                foregroundColor: scheme.onSurfaceVariant,
+                child: const Icon(Icons.person_outline, size: 32),
+              ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    loggedIn ? user!.nickname : '未登录',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      color: scheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        loggedIn ? user!.nickname : '未登录',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.headlineSmall?.copyWith(
-                          color: scheme.onPrimaryContainer,
+                  if (loggedIn) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Text(
+                          'LV.${user!.growth.level}',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: scheme.primary,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        loggedIn ? '@${user!.username}' : '让灵感与代码同行',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: scheme.onPrimaryContainer,
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            '${user.growth.levelExperience}/${user.growth.requiredExperience} 经验',
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (loggedIn)
-                  IconButton(
-                    tooltip: '编辑资料',
-                    onPressed: _editProfile,
-                    color: scheme.onPrimaryContainer,
-                    icon: const Icon(Icons.edit_outlined),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Text(
-              loggedIn
-                  ? (user!.bio.isEmpty ? '今天，也写一点喜欢的代码。' : user.bio)
-                  : '登录后同步云端项目，分享教程，参与开发者讨论。',
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: scheme.onPrimaryContainer,
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    LinearProgressIndicator(
+                      value: user.growth.progress,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(2),
+                      backgroundColor: scheme.primaryContainer,
+                      color: scheme.primary,
+                    ),
+                  ],
+                ],
               ),
             ),
-            if (!loggedIn) ...[
-              const SizedBox(height: 20),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton.icon(
-                  onPressed: _login,
-                  icon: const Icon(Icons.login),
-                  label: const Text('登录 / 注册'),
-                ),
+            if (loggedIn)
+              IconButton(
+                tooltip: '编辑资料',
+                onPressed: _editProfile,
+                color: scheme.onSurfaceVariant,
+                icon: const Icon(Icons.edit_outlined),
               ),
-            ],
           ],
         ),
       ),
     );
   }
+
+  Widget _icpFooter() => Center(
+    child: TextButton(
+      style: TextButton.styleFrom(
+        foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+        textStyle: const TextStyle(fontSize: 11),
+        minimumSize: const Size(0, 32),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      ),
+      onPressed: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => const AgreementPage(
+            title: '备案查询',
+            url: ComplianceConfig.icpQueryUrl,
+          ),
+        ),
+      ),
+      child: const Text(ComplianceConfig.icpRecord),
+    ),
+  );
 
   Widget _statistics(BuildContext context) {
     final user = widget.auth.user!;
     return Card.filled(
       margin: EdgeInsets.zero,
+      shape: _cardShape,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
         child: Row(
           children: [
-            _stat(context, '${user.points}', '积分'),
-            _stat(context, '${user.checkinStreak}', '连续签到'),
-            _stat(context, '${_postCount ?? '—'}', '发布内容'),
+            _stat(context, '${user.points}', '积分', onTap: () =>
+                _openAccountPage(() => PointsPage(auth: widget.auth))),
+            _stat(context, '${user.checkinStreak}', '连续签到', onTap: () =>
+                _openAccountPage(() => CheckinCalendarPage(auth: widget.auth))),
           ],
         ),
       ),
     );
   }
 
-  Widget _stat(BuildContext context, String value, String label) {
+  Widget _stat(BuildContext context, String value, String label, {VoidCallback? onTap}) {
     final theme = Theme.of(context);
     return Expanded(
-      child: Column(
+      child: InkWell(onTap: onTap, child: Column(
         children: [
           Text(value, style: theme.textTheme.titleLarge),
           const SizedBox(height: 4),
@@ -340,19 +339,17 @@ class _ProfileTabState extends State<ProfileTab> {
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 
   Widget _entry({
     required IconData icon,
     required String title,
-    required String subtitle,
     required VoidCallback onTap,
   }) => ListTile(
     leading: Icon(icon, color: Theme.of(context).colorScheme.primary),
     title: Text(title),
-    subtitle: Text(subtitle),
     trailing: const Icon(Icons.chevron_right),
     onTap: onTap,
   );

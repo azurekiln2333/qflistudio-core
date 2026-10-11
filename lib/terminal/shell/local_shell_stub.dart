@@ -1,9 +1,19 @@
 import 'shell_backend.dart';
+import 'sandbox_shell_backend.dart';
 
 /// Web (and any platform without `dart:io`) cannot spawn processes, so this
 /// backend reports the limitation and points at the sandbox shell instead.
 ShellBackend createLocalShell({String? workingDirectory}) =>
     _UnsupportedShellBackend(workingDirectory);
+
+/// Web cannot read the real filesystem either, so the unified sandbox reports
+/// the platform limitation honestly.
+ShellBackend createSandboxShell({
+  required String sandboxRoot,
+  String? startDirectory,
+  String label = 'Sandbox',
+  TerminalCommandDelegate? delegate,
+}) => _UnsupportedShellBackend(startDirectory ?? sandboxRoot);
 
 /// No `dart:io`, so there is no way to start a process at all.
 bool localShellAvailable() => false;
@@ -30,7 +40,7 @@ class _UnsupportedShellBackend extends BaseShellBackend {
       path.startsWith('/') ? path : '$cwd/${path.replaceAll(r'\', '/')}';
 
   @override
-  Future<bool> changeDirectory(String target) async {
+  Future<bool> changeDirectory(String target, {bool expandTilde = true}) async {
     emitLine('当前平台不支持目录操作，请使用沙盒终端。', OutputKind.stderr);
     return true;
   }

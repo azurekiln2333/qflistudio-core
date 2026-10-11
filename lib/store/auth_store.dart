@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,6 +16,7 @@ class AuthStore extends ChangeNotifier {
 
   final File? _storageOverride;
   File? _storage;
+  Future<void>? _writes;
 
   String? _token;
   CommunityUser? _user;
@@ -55,28 +57,37 @@ class AuthStore extends ChangeNotifier {
     return File(p.join(base, 'auth.json'));
   }
 
-  Future<void> _persist() async {
+  Future<void> _persist() {
     final file = _storage;
-    if (file == null) return;
-    await file.parent.create(recursive: true);
-    await file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert({
-        'serviceOrigin': ApiConfig.origin,
-        if (_token != null) 'token': _token,
-        if (_user != null)
-          'user': {
-            'id': _user!.id,
-            'username': _user!.username,
-            'nickname': _user!.nickname,
-            'bio': _user!.bio,
-            'avatarColor': _user!.avatarColor,
-            'points': _user!.points,
-            'checkinStreak': _user!.checkinStreak,
-            'provider': _user!.provider,
-            'isAdmin': _user!.isAdmin,
-          },
-      }),
-    );
+    if (file == null) return Future.value();
+    final encoded = const JsonEncoder.withIndent('  ').convert({
+      'serviceOrigin': ApiConfig.origin,
+      if (_token != null) 'token': _token,
+      if (_user != null)
+        'user': {
+          'id': _user!.id,
+          'gatewayUserId': ?_user!.gatewayUserId,
+          'username': _user!.username,
+          'nickname': _user!.nickname,
+          'bio': _user!.bio,
+          'avatarColor': _user!.avatarColor,
+          'avatarUrl': _user!.avatarUrl,
+          'points': _user!.points,
+          'checkinStreak': _user!.checkinStreak,
+          'growth': _user!.growth.toJson(),
+          'provider': _user!.provider,
+          'isAdmin': _user!.isAdmin,
+        },
+    });
+    Future<void> write() async {
+      await file.parent.create(recursive: true);
+      await file.writeAsString(encoded, flush: true);
+    }
+
+    final previous = _writes;
+    return _writes = previous == null
+        ? write()
+        : previous.catchError((Object _) {}).then((_) => write());
   }
 
   Future<void> signIn(String token, CommunityUser user) async {
@@ -86,7 +97,7 @@ class AuthStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 刷新资料（进入我的页/编辑资料后调用）。
+  /// 手动下拉刷新资料；头像由独立 URL 缓存管理。
   Future<void> refreshMe() async {
     final token = _token;
     final client = ApiClient.instance;
@@ -97,8 +108,8 @@ class AuthStore extends ChangeNotifier {
       _user = fresh;
       await _persist();
       notifyListeners();
-    } on ApiException {
-      // 网络不通时保留本地缓存。
+    } on ApiException catch (e) {
+      if (e.statusCode == 401 && _token == token) await signOut();
     }
   }
 
@@ -113,26 +124,44 @@ class AuthStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void updatePoints({int? points, int? streak}) {
+  Future<void> updatePoints({
+    int? points,
+    int? streak,
+    UserGrowth? growth,
+  }) async {
     if (_user == null) return;
     _user = CommunityUser(
       id: _user!.id,
+      gatewayUserId: _user!.gatewayUserId,
       username: _user!.username,
       nickname: _user!.nickname,
       bio: _user!.bio,
       avatarColor: _user!.avatarColor,
+      avatarUrl: _user!.avatarUrl,
       points: points ?? _user!.points,
       checkinStreak: streak ?? _user!.checkinStreak,
       provider: _user!.provider,
       isAdmin: _user!.isAdmin,
+      growth: growth ?? _user!.growth,
     );
     notifyListeners();
+    await _persist();
   }
 
   Future<void> signOut() async {
+    final token = _token;
     _token = null;
     _user = null;
     await _persist();
     notifyListeners();
+    if (token != null) unawaited(_revokeSession(token));
+  }
+
+  Future<void> _revokeSession(String token) async {
+    try {
+      await ApiClient.instance.logout(token);
+    } on ApiException {
+      // Local sign-out still completes when the server cannot be reached.
+    }
   }
 }

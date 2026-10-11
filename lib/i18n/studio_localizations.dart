@@ -54,21 +54,39 @@ class StudioLocalizations {
   String get terminalSubtitle => _text('terminalSubtitle');
   String get close => _text('close');
   String get execute => _text('execute');
+  String get runExample => _text('runExample');
   String get clear => _text('clear');
   String get copyTerminal => _text('copyTerminal');
   String get loading => _text('loading');
   String get noWorkingDirectory => _text('noWorkingDirectory');
   String get localTutorialMissing => _text('localTutorialMissing');
   String get localExamplesMissing => _text('localExamplesMissing');
+  String get savedExamplesUnavailable => _text('savedExamplesUnavailable');
   String get copyExample => _text('copyExample');
   String get exampleCopied => _text('exampleCopied');
   String get importExampleProject => _text('importExampleProject');
+  String get importCodeEditor => _text('importCodeEditor');
+  String get importCodeProject => _text('importCodeProject');
+  String get importAndOpen => _text('importAndOpen');
+  String get targetProject => _text('targetProject');
+  String get fileName => _text('fileName');
+  String get className => _text('className');
+  String get invalidFileName => _text('invalidFileName');
+  String get fileAlreadyExists => _text('fileAlreadyExists');
+  String get projectUnavailable => _text('projectUnavailable');
+  String get codeStorageUnavailable => _text('codeStorageUnavailable');
+  String codeImportFailed(String reason) =>
+      _text('codeImportFailed').replaceAll('{reason}', reason);
   String get restoreDefault => _text('restoreDefault');
   String get saveExample => _text('saveExample');
+  String get exampleSaved => _text('exampleSaved');
   String get projectImported => _text('projectImported');
   String get sampleCode => _text('sampleCode');
   String get expectedOutput => _text('expectedOutput');
   String get practice => _text('practice');
+  String get objective => _text('objective');
+  String get prerequisites => _text('prerequisites');
+  String get pitfalls => _text('pitfalls');
   String get exitSearch => _text('exitSearch');
   String get searchProjects => _text('searchProjects');
   String get more => _text('more');
@@ -116,10 +134,9 @@ class StudioLocalizations {
       '${_text('missingProjectPath')}$path';
   String deletedProject(String name) =>
       _text('deletedProject').replaceAll('{name}', name);
-  String removeMissingMessage(int count, String names) =>
-      _text('removeMissingMessage')
-          .replaceAll('{count}', '$count')
-          .replaceAll('{names}', names);
+  String removeMissingMessage(int count, String names) => _text(
+    'removeMissingMessage',
+  ).replaceAll('{count}', '$count').replaceAll('{names}', names);
   String cloudRefreshFailed(String message) =>
       _text('cloudRefreshFailed').replaceAll('{message}', message);
   String get refreshProjectsFailed => _text('refreshProjectsFailed');
@@ -178,21 +195,38 @@ class StudioLocalizations {
     'terminalSubtitle': '在本地工作目录执行命令',
     'close': '关闭',
     'execute': '执行',
+    'runExample': '运行示例',
     'clear': '清屏',
     'copyTerminal': '复制终端内容',
     'loading': '正在加载…',
     'noWorkingDirectory': '没有可用的本地工作目录。',
     'localTutorialMissing': '本地教程文件不存在或无法读取。',
     'localExamplesMissing': '本地示例代码不存在或无法读取。',
+    'savedExamplesUnavailable': '已保存的示例暂时无法读取，正在显示内置示例。',
     'copyExample': '复制示例代码',
     'exampleCopied': '示例代码已复制',
     'importExampleProject': '导入新建项目',
+    'importCodeEditor': '导入编辑器',
+    'codeImportFailed': '代码导入失败：{reason}',
+    'importCodeProject': '导入项目',
+    'importAndOpen': '导入并打开',
+    'targetProject': '目标项目',
+    'fileName': '文件名',
+    'className': '类名',
+    'invalidFileName': '请输入有效的文件名，不能包含路径或特殊字符',
+    'fileAlreadyExists': '同名文件已存在，请修改文件名',
+    'projectUnavailable': '项目目录不可用，请重新选择项目',
+    'codeStorageUnavailable': '未找到可写的代码目录',
     'restoreDefault': '恢复默认',
     'saveExample': '保存示例',
+    'exampleSaved': '示例已保存',
     'projectImported': '示例已导入新项目',
     'sampleCode': '示例代码',
     'expectedOutput': '预期输出',
     'practice': '练习',
+    'objective': '学习目标',
+    'prerequisites': '前置知识',
+    'pitfalls': '易错点',
     'exitSearch': '退出搜索',
     'searchProjects': '搜索项目',
     'more': '更多',
@@ -237,7 +271,7 @@ class StudioLocalizations {
     'removeMissingMessage': '以下 {count} 个项目的目录已不存在，将仅从列表移除：\n\n{names}',
     'cloudRefreshFailed': '云端列表刷新失败：{message}',
     'refreshProjectsFailed': '暂时无法刷新项目列表，请重试',
-    'examplesCount': '来自本地教程的 {count} 个示例',
+    'examplesCount': '{count} 个示例',
     'runMode': '运行方式：',
     'limits': '限制：',
     'hint': '提示：',
@@ -280,21 +314,38 @@ class StudioLocalizations {
     'terminalSubtitle': '在本機工作目錄執行指令',
     'close': '關閉',
     'execute': '執行',
+    'runExample': '執行範例',
     'clear': '清除畫面',
     'copyTerminal': '複製終端內容',
     'loading': '載入中…',
     'noWorkingDirectory': '沒有可用的本機工作目錄。',
     'localTutorialMissing': '本機教學檔案不存在或無法讀取。',
     'localExamplesMissing': '本機範例程式碼不存在或無法讀取。',
+    'savedExamplesUnavailable': '已儲存的範例暫時無法讀取，正在顯示內建範例。',
     'copyExample': '複製範例程式碼',
     'exampleCopied': '範例程式碼已複製',
     'importExampleProject': '匯入並建立專案',
+    'importCodeEditor': '匯入編輯器',
+    'codeImportFailed': '程式碼匯入失敗：{reason}',
+    'importCodeProject': '匯入專案',
+    'importAndOpen': '匯入並開啟',
+    'targetProject': '目標專案',
+    'fileName': '檔名',
+    'className': '類別名稱',
+    'invalidFileName': '請輸入有效的檔名，不能包含路徑或特殊字元',
+    'fileAlreadyExists': '同名檔案已存在，請修改檔名',
+    'projectUnavailable': '專案目錄無法使用，請重新選擇專案',
+    'codeStorageUnavailable': '找不到可寫入的程式碼目錄',
     'restoreDefault': '還原預設',
     'saveExample': '儲存範例',
+    'exampleSaved': '範例已儲存',
     'projectImported': '範例已匯入新專案',
     'sampleCode': '範例程式碼',
     'expectedOutput': '預期輸出',
     'practice': '練習',
+    'objective': '學習目標',
+    'prerequisites': '前置知識',
+    'pitfalls': '易錯點',
     'exitSearch': '離開搜尋',
     'searchProjects': '搜尋專案',
     'more': '更多',
@@ -339,7 +390,7 @@ class StudioLocalizations {
     'removeMissingMessage': '以下 {count} 個專案的目錄已不存在，只會從清單移除：\n\n{names}',
     'cloudRefreshFailed': '雲端清單更新失敗：{message}',
     'refreshProjectsFailed': '暫時無法更新專案清單，請重試',
-    'examplesCount': '來自本機教學的 {count} 個範例',
+    'examplesCount': '{count} 個範例',
     'runMode': '執行方式：',
     'limits': '限制：',
     'hint': '提示：',
@@ -382,21 +433,42 @@ class StudioLocalizations {
     'terminalSubtitle': 'Run commands in a local working directory',
     'close': 'Close',
     'execute': 'Run',
+    'runExample': 'Run example',
     'clear': 'Clear',
     'copyTerminal': 'Copy terminal output',
     'loading': 'Loading…',
     'noWorkingDirectory': 'No local working directory is available.',
     'localTutorialMissing': 'The local tutorial file is missing or unreadable.',
     'localExamplesMissing': 'Local examples are missing or unreadable.',
+    'savedExamplesUnavailable':
+        'Saved examples are unavailable. Showing bundled examples.',
     'copyExample': 'Copy example code',
     'exampleCopied': 'Example code copied',
     'importExampleProject': 'Import into new project',
+    'importCodeEditor': 'Import into editor',
+    'codeImportFailed': 'Code import failed: {reason}',
+    'importCodeProject': 'Import into project',
+    'importAndOpen': 'Import and open',
+    'targetProject': 'Destination project',
+    'fileName': 'File name',
+    'className': 'Class name',
+    'invalidFileName':
+        'Enter a valid file name without paths or special characters',
+    'fileAlreadyExists':
+        'A file with this name already exists. Choose another name.',
+    'projectUnavailable':
+        'The project directory is unavailable. Choose another project.',
+    'codeStorageUnavailable': 'No writable code directory is available.',
     'restoreDefault': 'Restore default',
     'saveExample': 'Save example',
+    'exampleSaved': 'Example saved',
     'projectImported': 'Example imported into a new project',
     'sampleCode': 'Example code',
     'expectedOutput': 'Expected output',
     'practice': 'Practice',
+    'objective': 'Objective',
+    'prerequisites': 'Prerequisites',
+    'pitfalls': 'Pitfalls',
     'exitSearch': 'Exit search',
     'searchProjects': 'Search projects',
     'more': 'More',
@@ -409,7 +481,8 @@ class StudioLocalizations {
     'favoriteProjects': 'Favorite projects',
     'cloudProjects': 'Cloud projects',
     'favoriteProjectHint': 'Choose “Favorite” from a project card menu',
-    'cloudProjectHint': 'Sign in, then create a cloud project from More; source syncs automatically.',
+    'cloudProjectHint':
+        'Sign in, then create a cloud project from More; source syncs automatically.',
     'searchProjectHint': 'Search project name or path',
     'allLanguages': 'All languages',
     'removeFromList': 'Remove from list',
@@ -423,12 +496,15 @@ class StudioLocalizations {
     'create': 'Create',
     'invalidProjectName': r'Name cannot contain \\ / : * ? " < > |',
     'creatingCloudProject': 'Creating cloud project…',
-    'cloudProjectCreated': 'Cloud project created. Edits will sync to the server automatically.',
+    'cloudProjectCreated':
+        'Cloud project created. Edits will sync to the server automatically.',
     'noMatchingProjects': 'No matching projects',
     'searchProjectsHint': 'Try another keyword. Names and paths are supported.',
     'noProjects': 'No projects yet',
-    'desktopCreateProjectHint': 'Create a project or add a folder already on disk',
-    'mobileCreateProjectHint': 'Tap the button below to create your first project',
+    'desktopCreateProjectHint':
+        'Create a project or add a folder already on disk',
+    'mobileCreateProjectHint':
+        'Tap the button below to create your first project',
     'importResource': 'Import resource from files',
     'importPhoto': 'Import image from photos',
     'replaceExistingResource': 'Resource already exists',
@@ -437,11 +513,13 @@ class StudioLocalizations {
     'importFinished': 'Imported {count} resources',
     'importFailed': 'Some resources failed to import: ',
     'missingProjectPath': 'Project directory does not exist: ',
-    'deletedProject': 'Deleted “{name}”. The backup is in app data at recyclebin/projects_bin.',
-    'removeMissingMessage': 'The directories for these {count} projects no longer exist. Only remove them from the list:\n\n{names}',
+    'deletedProject':
+        'Deleted “{name}”. The backup is in app data at recyclebin/projects_bin.',
+    'removeMissingMessage':
+        'The directories for these {count} projects no longer exist. Only remove them from the list:\n\n{names}',
     'cloudRefreshFailed': 'Cloud project refresh failed: {message}',
     'refreshProjectsFailed': 'Unable to refresh projects. Please try again.',
-    'examplesCount': '{count} examples from the bundled tutorial',
+    'examplesCount': '{count} examples',
     'runMode': 'Runtime: ',
     'limits': 'Limits: ',
     'hint': 'Hint: ',

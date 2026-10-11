@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'i18n/studio_localizations.dart';
+import 'editor/editor_fonts.dart';
 import 'pages/home_page.dart';
 import 'services/studio_profile.dart';
 import 'splash_screen.dart';
@@ -18,12 +19,17 @@ class QfliApp extends StatefulWidget {
     required this.auth,
     this.settings,
     this.ready,
+    this.navigatorKey,
   });
 
   final ProjectStore store;
   final AuthStore auth;
   final SettingsStore? settings;
   final ValueListenable<bool>? ready;
+
+  /// Lets a product push routes from outside the widget tree, e.g. when the
+  /// OS opens a document with this app.
+  final GlobalKey<NavigatorState>? navigatorKey;
 
   static const Color brandSeed = AppTheme.brandSeed;
 
@@ -33,22 +39,63 @@ class QfliApp extends StatefulWidget {
 
 class _QfliAppState extends State<QfliApp> {
   late final SettingsStore _fallbackSettings = SettingsStore();
+  late final ValueNotifier<({ThemeMode theme, bool ready})> _appearance;
+
+  SettingsStore get _settings => widget.settings ?? _fallbackSettings;
+
+  @override
+  void initState() {
+    super.initState();
+    EditorFonts.registerLicense();
+    _appearance = ValueNotifier((
+      theme: _settings.themeModeValue,
+      ready: widget.ready?.value ?? true,
+    ));
+    _settings.addListener(_updateAppearance);
+    widget.ready?.addListener(_updateAppearance);
+  }
+
+  void _updateAppearance() {
+    _appearance.value = (
+      theme: _settings.themeModeValue,
+      ready: widget.ready?.value ?? true,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant QfliApp oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings != widget.settings) {
+      (oldWidget.settings ?? _fallbackSettings).removeListener(
+        _updateAppearance,
+      );
+      _settings.addListener(_updateAppearance);
+    }
+    if (oldWidget.ready != widget.ready) {
+      oldWidget.ready?.removeListener(_updateAppearance);
+      widget.ready?.addListener(_updateAppearance);
+    }
+    _updateAppearance();
+  }
 
   @override
   void dispose() {
+    _settings.removeListener(_updateAppearance);
+    widget.ready?.removeListener(_updateAppearance);
+    _appearance.dispose();
     _fallbackSettings.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final settings = widget.settings ?? _fallbackSettings;
-    return ListenableBuilder(
-      listenable: Listenable.merge([settings, widget.ready]),
-      builder: (context, _) => MaterialApp(
+    final settings = _settings;
+    return ValueListenableBuilder<({ThemeMode theme, bool ready})>(
+      valueListenable: _appearance,
+      builder: (context, appearance, _) => MaterialApp(
+        navigatorKey: widget.navigatorKey,
         title:
-            StudioProfile.current?.appTitle ??
-            StudioProductCatalog.qfliStudio,
+            StudioProfile.current?.appTitle ?? StudioProductCatalog.qfliStudio,
         debugShowCheckedModeBanner: false,
         locale: StudioLocalizations.resolveLocale(
           WidgetsBinding.instance.platformDispatcher.locale,
@@ -62,8 +109,8 @@ class _QfliAppState extends State<QfliApp> {
         ],
         theme: AppTheme.light,
         darkTheme: AppTheme.dark,
-        themeMode: settings.themeModeValue,
-        home: widget.ready?.value == false
+        themeMode: appearance.theme,
+        home: !appearance.ready
             ? const SplashScreen()
             : HomePage(
                 store: widget.store,

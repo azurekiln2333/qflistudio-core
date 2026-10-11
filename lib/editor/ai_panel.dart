@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../services/ai_service.dart';
 import '../store/settings_store.dart';
+import 'editor_fonts.dart';
 
 /// 打开 AI 设置对话框并在确认后保存到 [SettingsStore]。
 /// 接口地址 / API Key / 模型全部支持自定义（任何 OpenAI 兼容服务）。
@@ -16,62 +17,80 @@ Future<void> editAiSettings(
   final baseUrl = TextEditingController(text: settings.aiBaseUrl);
   final apiKey = TextEditingController(text: settings.aiApiKey);
   final model = TextEditingController(text: settings.aiModel);
-  final saved = await showDialog<bool>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('AI 接口设置'),
-      content: SizedBox(
-        width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: baseUrl,
-              decoration: const InputDecoration(
-                labelText: '接口地址（OpenAI 兼容）',
-                helperText: '如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1',
-                prefixIcon: Icon(Icons.dns_outlined),
+  bool? saved;
+  String? savedBaseUrl;
+  String? savedApiKey;
+  String? savedModel;
+  try {
+    saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('AI 接口设置'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: baseUrl,
+                decoration: const InputDecoration(
+                  labelText: '接口地址（OpenAI 兼容）',
+                  helperText:
+                      '如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1',
+                  prefixIcon: Icon(Icons.dns_outlined),
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: apiKey,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'API Key（本地服务可留空）',
-                prefixIcon: Icon(Icons.key_outlined),
+              const SizedBox(height: 16),
+              TextField(
+                controller: apiKey,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'API Key（本地服务可留空）',
+                  prefixIcon: Icon(Icons.key_outlined),
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: model,
-              decoration: const InputDecoration(
-                labelText: '模型名称',
-                helperText: '如 deepseek-chat / glm-4-flash / qwen2.5-coder:7b',
-                prefixIcon: Icon(Icons.memory_outlined),
+              const SizedBox(height: 16),
+              TextField(
+                controller: model,
+                decoration: const InputDecoration(
+                  labelText: '模型名称',
+                  helperText:
+                      '如 deepseek-chat / glm-4-flash / qwen2.5-coder:7b',
+                  prefixIcon: Icon(Icons.memory_outlined),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('保存'),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('保存'),
-        ),
-      ],
-    ),
-  );
+    );
+    if (saved == true) {
+      savedBaseUrl = baseUrl.text.trim();
+      savedApiKey = apiKey.text.trim();
+      savedModel = model.text.trim();
+    }
+  } finally {
+    baseUrl.dispose();
+    apiKey.dispose();
+    model.dispose();
+  }
   if (saved == true) {
     await settings.saveAi(
-      baseUrl: baseUrl.text.trim(),
-      apiKey: apiKey.text.trim(),
-      model: model.text.trim(),
+      baseUrl: savedBaseUrl!,
+      apiKey: savedApiKey!,
+      model: savedModel!,
     );
   }
 }
@@ -87,6 +106,7 @@ class AiPanel extends StatefulWidget {
     this.onClose,
     this.onCollapseChanged,
     this.onFileCreated,
+    this.compact = false,
   });
 
   final String projectPath;
@@ -102,16 +122,16 @@ class AiPanel extends StatefulWidget {
   /// AI 生成的文件保存成功后回调（编辑器打开该文件）。
   final ValueChanged<String>? onFileCreated;
 
+  final bool compact;
+
   @override
   State<AiPanel> createState() => AiPanelState();
 }
 
 class _ChatMessage {
-  _ChatMessage.user(this.content)
-      : isUser = true,
-        generating = false;
+  _ChatMessage.user(this.content) : isUser = true, generating = false;
   _ChatMessage.assistant(this.content, {this.generating = false})
-      : isUser = false;
+    : isUser = false;
 
   final bool isUser;
   String content;
@@ -181,8 +201,9 @@ class AiPanelState extends State<AiPanel> {
     } on AiException catch (e) {
       assistant.generating = false;
       final note = '⚠ ${e.message}';
-      assistant.content =
-          assistant.content.isEmpty ? note : '${assistant.content}\n\n$note';
+      assistant.content = assistant.content.isEmpty
+          ? note
+          : '${assistant.content}\n\n$note';
     } finally {
       if (mounted) {
         setState(() => _generating = false);
@@ -210,8 +231,9 @@ class AiPanelState extends State<AiPanel> {
     }
     relative = relative.replaceAll('\\', '/');
     if (relative.startsWith('/') || relative.split('/').contains('..')) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('路径非法')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('路径非法')));
       return;
     }
     final fullPath = p.join(widget.projectPath, relative);
@@ -220,14 +242,15 @@ class AiPanelState extends State<AiPanel> {
       await File(fullPath).writeAsString(block.code ?? '', flush: true);
     } on FileSystemException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('保存失败：${e.message}')));
       return;
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已保存 $relative')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('已保存 $relative')));
     widget.onFileCreated?.call(fullPath);
   }
 
@@ -236,6 +259,7 @@ class AiPanelState extends State<AiPanel> {
     return showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: const Text('保存为文件'),
         content: TextField(
           controller: controller,
@@ -263,13 +287,15 @@ class AiPanelState extends State<AiPanel> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    if (_collapsed) {
+    if (_collapsed || widget.compact) {
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () {
-          setState(() => _collapsed = false);
-          widget.onCollapseChanged?.call(false);
-        },
+        onTap: widget.compact
+            ? null
+            : () {
+                setState(() => _collapsed = false);
+                widget.onCollapseChanged?.call(false);
+              },
         child: Container(
           height: 36,
           color: scheme.surfaceContainerHigh,
@@ -278,17 +304,25 @@ class AiPanelState extends State<AiPanel> {
             children: [
               Icon(Icons.auto_awesome, size: 16, color: scheme.primary),
               const SizedBox(width: 8),
-              Text(
-                'AI 助手（已收起，点击展开）',
-                style: Theme.of(context)
-                    .textTheme
-                    .labelMedium
-                    ?.copyWith(color: scheme.onSurfaceVariant),
+              Expanded(
+                child: Text(
+                  widget.compact ? 'AI 助手' : 'AI 助手（已收起，点击展开）',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
               ),
               const Spacer(),
               IconButton(
                 tooltip: '关闭',
                 visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints.tightFor(
+                  width: 36,
+                  height: 36,
+                ),
+                padding: EdgeInsets.zero,
                 onPressed: widget.onClose,
                 icon: const Icon(Icons.close, size: 18),
               ),
@@ -317,21 +351,30 @@ class AiPanelState extends State<AiPanel> {
                         : 'AI 助手 · ${widget.settings.aiModel}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelMedium
-                        ?.copyWith(color: scheme.onSurfaceVariant),
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 IconButton(
                   tooltip: 'AI 接口设置',
                   visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
                   onPressed: () => editAiSettings(context, widget.settings),
                   icon: const Icon(Icons.settings_outlined, size: 18),
                 ),
                 IconButton(
                   tooltip: '收起',
                   visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
                   onPressed: () {
                     setState(() => _collapsed = true);
                     widget.onCollapseChanged?.call(true);
@@ -341,6 +384,11 @@ class AiPanelState extends State<AiPanel> {
                 IconButton(
                   tooltip: '关闭',
                   visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  padding: EdgeInsets.zero,
                   onPressed: widget.onClose,
                   icon: const Icon(Icons.close, size: 18),
                 ),
@@ -357,9 +405,9 @@ class AiPanelState extends State<AiPanel> {
                           : '先点右上角 ⚙ 配置 AI 接口（支持 DeepSeek / 智谱 /\nKimi / Ollama 等任何 OpenAI 兼容接口）',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                            height: 1.6,
-                          ),
+                        color: scheme.onSurfaceVariant,
+                        height: 1.6,
+                      ),
                     ),
                   )
                 : ListView.builder(
@@ -397,8 +445,9 @@ class AiPanelState extends State<AiPanel> {
                           borderSide: BorderSide.none,
                         ),
                         filled: true,
-                        fillColor:
-                            scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                        fillColor: scheme.surfaceContainerHighest.withValues(
+                          alpha: 0.5,
+                        ),
                       ),
                     ),
                   ),
@@ -437,10 +486,9 @@ class AiPanelState extends State<AiPanel> {
           ),
           child: SelectableText(
             message.content,
-            style: Theme.of(context)
-                .textTheme
-                .bodyMedium
-                ?.copyWith(color: scheme.onPrimaryContainer),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: scheme.onPrimaryContainer),
           ),
         ),
       );
@@ -483,10 +531,9 @@ class AiPanelState extends State<AiPanel> {
                     const SizedBox(width: 6),
                     Text(
                       '生成中…',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelSmall
-                          ?.copyWith(color: scheme.onSurfaceVariant),
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ),
@@ -517,7 +564,9 @@ class AiPanelState extends State<AiPanel> {
             padding: const EdgeInsets.symmetric(horizontal: 8),
             decoration: BoxDecoration(
               color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(8),
+              ),
             ),
             child: Row(
               children: [
@@ -528,17 +577,17 @@ class AiPanelState extends State<AiPanel> {
                     label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context)
-                        .textTheme
-                        .labelSmall
-                        ?.copyWith(color: scheme.onSurfaceVariant),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 IconButton(
                   tooltip: '复制代码',
                   visualDensity: VisualDensity.compact,
-                  onPressed: () =>
-                      Clipboard.setData(ClipboardData(text: segment.code ?? '')),
+                  onPressed: () => Clipboard.setData(
+                    ClipboardData(text: segment.code ?? ''),
+                  ),
                   icon: const Icon(Icons.content_copy_outlined, size: 16),
                 ),
                 IconButton(
@@ -557,8 +606,8 @@ class AiPanelState extends State<AiPanel> {
               child: SelectableText(
                 segment.code ?? '',
                 style: TextStyle(
-                  fontFamily: 'Consolas',
-                  fontFamilyFallback: const ['Courier New', 'monospace'],
+                  fontFamily: EditorFonts.bundledFamily,
+                  fontFamilyFallback: EditorFonts.fallbacks,
                   fontSize: 12,
                   height: 1.45,
                   color: scheme.onSurface,

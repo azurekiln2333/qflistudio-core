@@ -1,5 +1,6 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
@@ -9,14 +10,26 @@ import '../models/tutorial.dart';
 import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
+import '../store/settings_store.dart';
 import '../services/example_code_store.dart';
+import '../widgets/code_snippet.dart';
 
 /// 离线语言 App 的第二页：从随包 JSON 加载入门教程。
 class LocalTutorialsTab extends StatefulWidget {
-  const LocalTutorialsTab({super.key, required this.language, this.repository});
+  const LocalTutorialsTab({
+    super.key,
+    required this.language,
+    this.repository,
+    this.store,
+    this.auth,
+    this.settings,
+  });
 
   final String language;
   final ContentRepository? repository;
+  final ProjectStore? store;
+  final AuthStore? auth;
+  final SettingsStore? settings;
 
   @override
   State<LocalTutorialsTab> createState() => _LocalTutorialsTabState();
@@ -67,7 +80,12 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
           if (tutorial == null) {
             return _LocalContentError(message: l10n.localTutorialMissing);
           }
-          return _TutorialList(tutorial: tutorial);
+          return _TutorialList(
+            tutorial: tutorial,
+            store: widget.store,
+            auth: widget.auth,
+            settings: widget.settings,
+          );
         },
       ),
     );
@@ -82,6 +100,7 @@ class ExampleCodeTab extends StatefulWidget {
     this.repository,
     this.store,
     this.auth,
+    this.settings,
     this.examples,
   });
 
@@ -89,6 +108,7 @@ class ExampleCodeTab extends StatefulWidget {
   final ContentRepository? repository;
   final ProjectStore? store;
   final AuthStore? auth;
+  final SettingsStore? settings;
   final ExampleCodeStore? examples;
 
   @override
@@ -110,17 +130,38 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
   void didUpdateWidget(covariant ExampleCodeTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.language != widget.language ||
-        oldWidget.repository != widget.repository) {
+        oldWidget.repository != widget.repository ||
+        oldWidget.examples != widget.examples) {
       _repository = widget.repository ?? AssetContentRepository();
       _examples = _loadExamples();
     }
   }
 
-  Future<List<ExampleCode>> _loadExamples() => LocalContentAdapter.loadExamples(
-    repository: _repository,
-    language: widget.language,
-    productKey: StudioProfile.current?.productKey,
-  );
+  Future<List<ExampleCode>> _loadExamples() async {
+    final store = widget.examples;
+    final bundled = await LocalContentAdapter.loadExamples(
+      repository: _repository,
+      language: widget.language,
+      productKey: StudioProfile.current?.productKey,
+    );
+    if (mounted) {
+      try {
+        await store?.load(defaults: bundled);
+      } on FileSystemException {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                StudioLocalizations.of(context).savedExamplesUnavailable,
+              ),
+            ),
+          );
+        });
+      }
+    }
+    return bundled;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -143,6 +184,7 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
             items: examples,
             store: widget.store,
             auth: widget.auth,
+            settings: widget.settings,
             examples: widget.examples,
           );
         },
@@ -152,33 +194,56 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
 }
 
 class _TutorialList extends StatelessWidget {
-  const _TutorialList({required this.tutorial});
+  const _TutorialList({
+    required this.tutorial,
+    this.store,
+    this.auth,
+    this.settings,
+  });
 
   final Tutorial tutorial;
+  final ProjectStore? store;
+  final AuthStore? auth;
+  final SettingsStore? settings;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+    return _ContentList(
+      padding: const EdgeInsets.only(top: 8, bottom: 32),
       children: [
-        _RuntimeSummary(tutorial: tutorial),
-        const SizedBox(height: 12),
         for (final chapter in tutorial.chapters) ...[
           Padding(
-            padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
-            child: Text(chapter.title, style: theme.textTheme.titleMedium),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              chapter.title,
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: theme.colorScheme.primary,
+              ),
+            ),
           ),
           for (final lesson in chapter.lessons)
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.menu_book_outlined),
-                title: Text(lesson.title),
-                subtitle: Text(lesson.summary),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => _LessonPage(lesson: lesson),
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              leading: const Icon(Icons.menu_book_outlined),
+              title: Text(
+                lesson.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                lesson.summary,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => _LessonPage(
+                    lesson: lesson,
+                    store: store,
+                    auth: auth,
+                    settings: settings,
                   ),
                 ),
               ),
@@ -194,37 +259,54 @@ class _ExampleCodeList extends StatelessWidget {
     required this.items,
     this.store,
     this.auth,
+    this.settings,
     this.examples,
   });
 
   final List<ExampleCode> items;
   final ProjectStore? store;
   final AuthStore? auth;
+  final SettingsStore? settings;
   final ExampleCodeStore? examples;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = StudioLocalizations.of(context);
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+    return _ContentList(
+      padding: const EdgeInsets.only(top: 8, bottom: 32),
       children: [
-        Text(
-          l10n.examplesCount(items.length),
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Text(
+            l10n.examplesCount(items.length),
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ),
-        const SizedBox(height: 8),
         for (final example in items)
-          _ExampleCodeCard(
-            example: example,
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            leading: const Icon(Icons.code_outlined),
+            title: Text(
+              example.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              example.summary,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute(
                 builder: (_) => ExampleDetailPage(
                   example: example,
                   store: store,
                   auth: auth,
+                  settings: settings,
                   examples: examples,
                 ),
               ),
@@ -235,88 +317,20 @@ class _ExampleCodeList extends StatelessWidget {
   }
 }
 
-class _ExampleCodeCard extends StatelessWidget {
-  const _ExampleCodeCard({required this.example, this.onTap});
-
-  final ExampleCode example;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = StudioLocalizations.of(context);
-    return Card(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 12, 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      example.title,
-                      style: theme.textTheme.titleSmall,
-                    ),
-                  ),
-                  Text(example.type),
-                  IconButton(
-                    tooltip: l10n.copyExample,
-                    icon: const Icon(Icons.copy_outlined),
-                    onPressed: () async {
-                      await Clipboard.setData(
-                        ClipboardData(text: example.code),
-                      );
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text(l10n.exampleCopied)),
-                      );
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SelectableText(
-                      example.code,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class ExampleDetailPage extends StatefulWidget {
   const ExampleDetailPage({
     super.key,
     required this.example,
     this.store,
     this.auth,
+    this.settings,
     this.examples,
   });
 
   final ExampleCode example;
   final ProjectStore? store;
   final AuthStore? auth;
+  final SettingsStore? settings;
   final ExampleCodeStore? examples;
 
   @override
@@ -324,9 +338,18 @@ class ExampleDetailPage extends StatefulWidget {
 }
 
 class _ExampleDetailPageState extends State<ExampleDetailPage> {
-  late final TextEditingController _code = TextEditingController(
-    text: widget.example.code,
-  );
+  late final TextEditingController _code;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final saved = widget.examples?.items.firstWhere(
+      (example) => example.id == widget.example.id,
+      orElse: () => widget.example,
+    );
+    _code = TextEditingController(text: saved?.code ?? widget.example.code);
+  }
 
   @override
   void dispose() {
@@ -338,30 +361,18 @@ class _ExampleDetailPageState extends State<ExampleDetailPage> {
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.example.title),
-        actions: [
-          IconButton(
-            tooltip: l10n.copyExample,
-            icon: const Icon(Icons.copy_outlined),
-            onPressed: () => Clipboard.setData(ClipboardData(text: _code.text)),
-          ),
-        ],
-      ),
-      body: ListView(
+      appBar: AppBar(title: Text(widget.example.title)),
+      body: _ContentList(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
         children: [
-          Text(widget.example.type),
-          const SizedBox(height: 8),
           Text(widget.example.summary),
           const SizedBox(height: 16),
-          TextField(
+          CodeSnippet(
+            example: widget.example,
             controller: _code,
-            minLines: 12,
-            maxLines: 24,
-            expands: false,
-            style: const TextStyle(fontFamily: 'monospace'),
-            decoration: const InputDecoration(border: OutlineInputBorder()),
+            store: widget.store,
+            auth: widget.auth,
+            settings: widget.settings,
           ),
           const SizedBox(height: 16),
           Text(l10n.expectedOutput),
@@ -372,20 +383,20 @@ class _ExampleDetailPageState extends State<ExampleDetailPage> {
             spacing: 8,
             runSpacing: 8,
             children: [
-              FilledButton.icon(
-                onPressed: widget.store == null ? null : _importProject,
-                icon: const Icon(Icons.create_new_folder_outlined),
-                label: Text(l10n.importExampleProject),
-              ),
-              OutlinedButton.icon(
-                onPressed: _reset,
+              IconButton.filledTonal(
+                tooltip: l10n.restoreDefault,
+                onPressed: _saving ? null : _reset,
                 icon: const Icon(Icons.restore),
-                label: Text(l10n.restoreDefault),
               ),
-              OutlinedButton.icon(
-                onPressed: widget.examples == null ? null : _save,
-                icon: const Icon(Icons.save_outlined),
-                label: Text(l10n.saveExample),
+              IconButton.filledTonal(
+                tooltip: l10n.saveExample,
+                onPressed: widget.examples == null || _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_outlined),
               ),
             ],
           ),
@@ -397,59 +408,39 @@ class _ExampleDetailPageState extends State<ExampleDetailPage> {
   void _reset() => setState(() => _code.text = widget.example.code);
 
   Future<void> _save() async {
-    await widget.examples!.upsert(widget.example.copyWith(code: _code.text));
-  }
-
-  Future<void> _importProject() async {
-    final result = await widget.store!.createProjectFromExample(
-      name: widget.example.title,
-      example: widget.example.copyWith(code: _code.text),
-    );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          result.error ?? StudioLocalizations.of(context).projectImported,
-        ),
-      ),
-    );
-  }
-}
-
-class _RuntimeSummary extends StatelessWidget {
-  const _RuntimeSummary({required this.tutorial});
-
-  final Tutorial tutorial;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final l10n = StudioLocalizations.of(context);
-    final runtime = tutorial.runtime;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(tutorial.displayName, style: theme.textTheme.titleLarge),
-            const SizedBox(height: 6),
-            Text(l10n.runMode(runtime.engine)),
-            if (runtime.limits case final limits? when limits.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(l10n.limits(limits)),
-            ],
-          ],
-        ),
-      ),
-    );
+    final store = widget.examples;
+    if (_saving || store == null) return;
+    final example = widget.example.copyWith(code: _code.text);
+    setState(() => _saving = true);
+    try {
+      await store.upsert(example);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(StudioLocalizations.of(context).exampleSaved)),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 }
 
 class _LessonPage extends StatelessWidget {
-  const _LessonPage({required this.lesson});
+  const _LessonPage({
+    required this.lesson,
+    this.store,
+    this.auth,
+    this.settings,
+  });
 
   final TutorialLesson lesson;
+  final ProjectStore? store;
+  final AuthStore? auth;
+  final SettingsStore? settings;
 
   @override
   Widget build(BuildContext context) {
@@ -457,16 +448,29 @@ class _LessonPage extends StatelessWidget {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
       appBar: AppBar(title: Text(lesson.title)),
-      body: ListView(
+      body: _ContentList(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
         children: [
           Text(lesson.summary, style: theme.textTheme.titleMedium),
+          if (lesson.objective.trim().isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text(l10n.objective, style: theme.textTheme.titleMedium),
+            const SizedBox(height: 6),
+            Text(lesson.objective),
+          ],
+          if (lesson.prerequisites.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text(l10n.prerequisites, style: theme.textTheme.titleMedium),
+            const SizedBox(height: 6),
+            for (final item in lesson.prerequisites)
+              _BulletLine(text: item),
+          ],
           const SizedBox(height: 12),
           Text(lesson.explain),
           const SizedBox(height: 20),
           Text(l10n.sampleCode, style: theme.textTheme.titleMedium),
           const SizedBox(height: 8),
-          _ExampleCodeCard(
+          CodeSnippet(
             example: ExampleCode(
               id: lesson.id,
               type: lesson.type,
@@ -476,11 +480,21 @@ class _LessonPage extends StatelessWidget {
               output: lesson.output,
               sourceLessonId: lesson.id,
             ),
+            store: store,
+            auth: auth,
+            settings: settings,
           ),
           const SizedBox(height: 16),
           Text(l10n.expectedOutput, style: theme.textTheme.titleMedium),
           const SizedBox(height: 8),
           SelectableText(lesson.output),
+          if (lesson.pitfalls.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            Text(l10n.pitfalls, style: theme.textTheme.titleMedium),
+            const SizedBox(height: 6),
+            for (final item in lesson.pitfalls)
+              _BulletLine(text: item, error: true),
+          ],
           if (lesson.tasks.isNotEmpty) ...[
             const SizedBox(height: 20),
             Text(l10n.practice, style: theme.textTheme.titleMedium),
@@ -498,6 +512,53 @@ class _LessonPage extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A single bulleted line used for prerequisites and pitfalls.
+class _BulletLine extends StatelessWidget {
+  const _BulletLine({required this.text, this.error = false});
+
+  final String text;
+  final bool error;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6, right: 8),
+            child: Icon(
+              error ? Icons.warning_amber_outlined : Icons.check_circle_outline,
+              size: 16,
+              color: error
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.primary,
+            ),
+          ),
+          Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ContentList extends StatelessWidget {  const _ContentList({required this.padding, required this.children});
+
+  final EdgeInsetsGeometry padding;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Align(
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 960),
+      child: ListView(padding: padding, children: children),
+    ),
+  );
 }
 
 class _LocalContentError extends StatelessWidget {

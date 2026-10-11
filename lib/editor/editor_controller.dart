@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 
 import '../services/file_encoding.dart';
+import '../services/file_backup.dart';
 
 import '../models/project.dart';
 import 'open_file.dart';
@@ -13,11 +14,13 @@ import 'project_history.dart';
 
 /// 编辑器页面的状态：打开的标签页、当前标签、读取与保存。
 class EditorController extends ChangeNotifier {
-  EditorController({required this.project});
+  EditorController({required this.project, this.onContentChanged});
 
   static const int maxFileSize = 2 * 1024 * 1024;
 
   final Project project;
+  final ValueChanged<OpenFile>? onContentChanged;
+  bool _disposed = false;
   final List<OpenFile> files = [];
   int _currentIndex = -1;
 
@@ -41,6 +44,7 @@ class EditorController extends ChangeNotifier {
     String? timeLabel,
     FileCursor? cursor,
   }) async {
+    if (_disposed) return 'Editor closed';
     final existing = files.indexWhere((f) => p.equals(f.path, path));
     if (existing >= 0) {
       select(existing);
@@ -48,12 +52,15 @@ class EditorController extends ChangeNotifier {
     }
 
     final file = File(path);
-    if (!file.existsSync()) return '文件不存在';
     try {
-      if (file.lengthSync() > maxFileSize) {
+      final stat = await file.stat();
+      if (_disposed) return 'Editor closed';
+      if (stat.type != FileSystemEntityType.file) return '文件不存在';
+      if (stat.size > maxFileSize) {
         return '文件超过 2 MB，暂不支持在编辑器中打开';
       }
       final bytes = await file.readAsBytes();
+      if (_disposed) return 'Editor closed';
       if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
       final encoding = TextCodec.detect(bytes);
       final content = TextCodec.byName(encoding).decode(bytes);
@@ -66,6 +73,7 @@ class EditorController extends ChangeNotifier {
         readOnly: readOnly,
         timeLabel: timeLabel,
         encoding: encoding,
+        modifiedAt: stat.modified,
       );
       // 历史快照只读：不标记脏、不走保存/云同步。
       if (!readOnly) {
@@ -104,7 +112,6 @@ class EditorController extends ChangeNotifier {
   }
 
   void _markDirty(OpenFile open) {
-    if (open.dirty) return;
     // re_editor 在 CodeEditor 首次挂载时会在 build 阶段同步通知一次，
     // 这是初始化而非内容修改：此刻 notifyListeners 会打断构建，
     // 还会把刚打开的文件误标为未保存，直接忽略。
@@ -119,8 +126,11 @@ class EditorController extends ChangeNotifier {
         identical(pre.codeLines, open.controller.value.codeLines)) {
       return;
     }
+    open.revision++;
+    final wasDirty = open.dirty;
     open.dirty = true;
-    notifyListeners();
+    if (!wasDirty) notifyListeners();
+    onContentChanged?.call(open);
   }
 
   void select(int index) {
@@ -161,21 +171,46 @@ class EditorController extends ChangeNotifier {
   }
 
   /// 保存指定标签页；失败返回错误信息。
-  Future<String?> saveAt(int index) async {
-    if (index < 0 || index >= files.length) return null;
-    final open = files[index];
-    if (open.readOnly) return null; // 历史快照只读
-    try {
-      await File(open.path).writeAsBytes(
-        TextCodec.byName(open.encoding).encode(open.controller.text),
-        flush: true,
-      );
-    } on FileSystemException catch (e) {
-      return '保存失败：${e.message}';
-    }
-    open.dirty = false;
-    notifyListeners();
-    return null;
+  Future<String?> saveAt(int index) {
+    if (index < 0 || index >= files.length) return Future.value();
+    return saveFile(files[index]);
+  }
+
+  Future<String?> saveFile(
+    OpenFile open, {
+    bool backup = false,
+    List<int>? bytes,
+  }) {
+    if (open.readOnly) return Future.value();
+    final snapshot =
+        bytes ?? TextCodec.byName(open.encoding).encode(open.controller.text);
+    final revision = open.revision;
+    final previous = open.pendingSave;
+    // Capture content before queueing; later edits and tab switches cannot alter it.
+    final write = () async {
+      if (previous != null) await previous;
+      try {
+        final file = File(open.path);
+        if (backup) {
+          await FileBackup.backupBeforeOverwrite(
+            file,
+            projectName: project.name,
+          );
+        }
+        await file.writeAsBytes(snapshot, flush: true);
+        open.modifiedAt = (await file.stat()).modified;
+        final wasDirty = open.dirty;
+        open.dirty = open.revision != revision;
+        if (!_disposed && files.contains(open) && wasDirty != open.dirty) {
+          notifyListeners();
+        }
+        return null;
+      } on FileSystemException catch (e) {
+        return '保存失败：${e.message}';
+      }
+    }();
+    open.pendingSave = write;
+    return write;
   }
 
   /// 用指定编码重新解码文件（不写盘；保存时将使用新编码）。
@@ -185,6 +220,7 @@ class EditorController extends ChangeNotifier {
     if (open.readOnly) return '历史快照只读';
     try {
       final bytes = await File(open.path).readAsBytes();
+      open.modifiedAt = (await File(open.path).stat()).modified;
       final text = TextCodec.byName(encoding).decode(bytes);
       open.encoding = encoding;
       open.controller.text = text;
@@ -234,6 +270,7 @@ class EditorController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     for (final open in files) {
       open.dispose();
     }

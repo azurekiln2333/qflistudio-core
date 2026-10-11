@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../editor/ai_panel.dart';
 import '../services/app_paths.dart';
 import '../services/file_backup.dart';
+import '../services/file_service.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
@@ -16,6 +17,8 @@ import '../services/project_archive_service.dart';
 import '../services/picker_service.dart';
 import '../widgets/settings_section.dart';
 import 'highlight_settings_page.dart';
+import 'editor_font_settings_page.dart';
+import '../editor/editor_fonts.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -84,6 +87,20 @@ class _SettingsPageState extends State<SettingsPage> {
                 SettingsSection(
                   title: '编辑器',
                   children: [
+                    ListTile(
+                      leading: const Icon(Icons.text_fields),
+                      title: const Text('编辑器字体'),
+                      subtitle: Text(
+                        '${EditorFonts.choices[settings.editorFont]} · ${settings.editorFontSize.toStringAsFixed(1)}',
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              EditorFontSettingsPage(settings: settings),
+                        ),
+                      ),
+                    ),
                     SwitchListTile(
                       secondary: const Icon(Icons.map_outlined),
                       title: const Text('代码鸟瞰图'),
@@ -101,7 +118,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     SwitchListTile(
                       secondary: const Icon(Icons.autorenew_outlined),
                       title: const Text('自动保存'),
-                      subtitle: const Text('停止输入 2.5 秒后保存修改'),
+                      subtitle: const Text('每次修改后立即保存'),
                       value: settings.autoSave,
                       onChanged: settings.setAutoSave,
                     ),
@@ -248,21 +265,20 @@ class _SettingsPageState extends State<SettingsPage> {
       final picked = await PickerService.pickDocument();
       if (picked == null) return;
       final source = await _readPickedDocument(picked);
-      final data = jsonDecode(source);
-      final name = data is Map && data['name'] is String
-          ? (data['name'] as String).trim()
-          : '';
-      if (name.isEmpty || RegExp(r'[\\/:*?"<>|]').hasMatch(name)) {
+      final metadata = ProjectArchiveService.readMetadata(source);
+      final name = metadata.name;
+      if (!FileService.isValidEntryName(name) || name.contains('\u0000')) {
         _showMessage('归档缺少有效项目名称');
         return;
       }
       final root = await AppPaths.projectsRoot(create: true);
       if (root == null) throw const FileSystemException('没有可写项目目录');
-      final target = p.join(root, name);
-      if (Directory(target).existsSync()) {
-        _showMessage('项目已存在：$name');
-        return;
-      }
+      final target = AppPaths.createProjectDirectory(
+        location: root,
+        name: name,
+        type: metadata.type,
+        language: metadata.language,
+      ).path;
       await ProjectArchiveService.restoreProject(
         source: source,
         targetDirectory: target,
@@ -287,8 +303,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<Project?> _pickProject() async {
     final projects = widget.store!.projects
         .where(
-          (project) =>
-              !project.isCloud && Directory(project.path).existsSync(),
+          (project) => !project.isCloud && Directory(project.path).existsSync(),
         )
         .toList();
     if (projects.isEmpty) {
@@ -303,7 +318,15 @@ class _SettingsPageState extends State<SettingsPage> {
           for (final project in projects)
             SimpleDialogOption(
               onPressed: () => Navigator.pop(context, project),
-              child: Text(project.name),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(project.name),
+                subtitle: Text(
+                  project.path,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ),
         ],
       ),
@@ -312,7 +335,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
   void _showMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   static Future<String?> _backupPath() async {

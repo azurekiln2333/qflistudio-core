@@ -108,7 +108,10 @@ class TerminalSession extends ChangeNotifier {
     final List<TerminalSegment> echoLine;
     if (!attached) {
       echoLine = <TerminalSegment>[
-        TerminalSegment('${backend.prompt} ', emphasis: TerminalEmphasis.prompt),
+        TerminalSegment(
+          '${backend.prompt} ',
+          emphasis: TerminalEmphasis.prompt,
+        ),
         TerminalSegment(raw, emphasis: TerminalEmphasis.command),
       ];
     } else if (echo) {
@@ -171,14 +174,11 @@ class TerminalSession extends ChangeNotifier {
       } else {
         for (var i = 0; i < _history.length; i++) {
           _lines.add(
-            TerminalLine(
-              <TerminalSegment>[
-                TerminalSegment(
-                  '${(i + 1).toString().padLeft(4)}  ${_history[i]}',
-                ),
-              ],
-              TerminalLineKind.output,
-            ),
+            TerminalLine(<TerminalSegment>[
+              TerminalSegment(
+                '${(i + 1).toString().padLeft(4)}  ${_history[i]}',
+              ),
+            ], TerminalLineKind.output),
           );
         }
         _trim();
@@ -189,20 +189,23 @@ class TerminalSession extends ChangeNotifier {
 
     _scheduleNotify();
     await backend.execute(command);
+    // Surface the real numeric status of an external command. Success is
+    // silent; only a nonzero exit is shown, and it is not localized.
+    final code = backend.lastExitCode;
+    if (code != null && code != 0) {
+      appendNotice('exit code $code', error: true);
+    }
   }
 
   /// Appends an app-generated notice (not shell output).
   void appendNotice(String text, {bool error = false}) {
     _lines.add(
-      TerminalLine(
-        <TerminalSegment>[
-          TerminalSegment(
-            text,
-            emphasis: error ? TerminalEmphasis.error : TerminalEmphasis.system,
-          ),
-        ],
-        error ? TerminalLineKind.error : TerminalLineKind.system,
-      ),
+      TerminalLine(<TerminalSegment>[
+        TerminalSegment(
+          text,
+          emphasis: error ? TerminalEmphasis.error : TerminalEmphasis.system,
+        ),
+      ], error ? TerminalLineKind.error : TerminalLineKind.system),
     );
     _trim();
     _scheduleNotify();
@@ -326,7 +329,9 @@ class TerminalSession extends ChangeNotifier {
 
   void _commitPending() {
     if (_pending.isEmpty) {
-      _lines.add(const TerminalLine(<TerminalSegment>[], TerminalLineKind.output));
+      _lines.add(
+        const TerminalLine(<TerminalSegment>[], TerminalLineKind.output),
+      );
     } else {
       _lines.add(
         TerminalLine(

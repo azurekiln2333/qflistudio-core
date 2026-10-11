@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
-import '../../services/api_client.dart';
-import '../../store/auth_store.dart';
+import '../community/models.dart';
+import '../services/api_client.dart';
+import '../services/task_activity_service.dart';
+import '../store/auth_store.dart';
 
-/// 签到任务页：每日签到（连签奖励）+ 任务列表。
 class TasksPage extends StatefulWidget {
   const TasksPage({super.key, required this.auth});
 
@@ -14,227 +17,166 @@ class TasksPage extends StatefulWidget {
 }
 
 class _TasksPageState extends State<TasksPage> {
-  bool _checkedToday = false;
-  int _streak = 0;
-  int _points = 0;
-  final List<_TaskRow> _tasks = [];
-  bool _loading = true;
+  final TaskActivityService _activity = TaskActivityService.instance;
   bool _checking = false;
-  String? _error;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
-  }
-
-  Future<void> _load() async {
-    final token = widget.auth.token;
-    if (token == null) {
-      setState(() => _loading = false);
-      return;
-    }
-    try {
-      final result = await ApiClient.instance.tasks(token);
-      if (!mounted) return;
-      setState(() {
-        _checkedToday = result.checkedToday;
-        _streak = result.streak;
-        _points = result.points;
-        _tasks
-          ..clear()
-          ..addAll([
-            for (final t in result.tasks)
-              _TaskRow(
-                key: t.key,
-                label: t.label,
-                done: t.done,
-                reward: t.reward,
-              ),
-          ]);
-        _loading = false;
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.message;
-        _loading = false;
-      });
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _activity.initialize();
+      if (mounted) setState(() {});
+      unawaited(_activity.refreshIfDue(widget.auth));
+    });
   }
 
   Future<void> _checkin() async {
-    if (_checking || _checkedToday) return;
+    if (_checking) return;
     setState(() => _checking = true);
     try {
-      final token = widget.auth.token!;
-      final result = await ApiClient.instance.checkin(token);
+      final result = await _activity.checkin(widget.auth);
       if (!mounted) return;
-      setState(() {
-        _checkedToday = true;
-        _streak = result.streak;
-        _points = result.points;
-      });
-      widget.auth.updatePoints(points: result.points, streak: result.streak);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             result.alreadyChecked
-                ? '今天已签到过啦'
-                : '签到成功，获得 ${result.reward} 积分，已连签 ${result.streak} 天',
+                ? '今天已签到'
+                : '签到成功，获得 ${result.reward} 积分，已连续 ${result.streak} 天',
           ),
         ),
       );
-      await _load();
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+    } on ApiException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
     } finally {
       if (mounted) setState(() => _checking = false);
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(title: const Text('签到任务')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                Card.filled(
-                  margin: EdgeInsets.zero,
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            _Stat(
-                              icon: Icons.local_fire_department_outlined,
-                              label: '连签',
-                              value: '$_streak 天',
-                            ),
-                            Container(
-                              width: 1,
-                              height: 40,
-                              color: scheme.outlineVariant,
-                            ),
-                            _Stat(
-                              icon: Icons.stars_outlined,
-                              label: '积分',
-                              value: '$_points',
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
-                        FilledButton.icon(
-                          onPressed: _checking || _checkedToday
-                              ? null
-                              : _checkin,
-                          icon: Icon(
-                            _checkedToday
-                                ? Icons.check_circle_outline
-                                : Icons.calendar_today_outlined,
-                          ),
-                          label: Text(_checkedToday ? '今日已签到' : '立即签到'),
-                        ),
-                      ],
-                    ),
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('每日任务'),
+      actions: [
+        IconButton(
+          tooltip: '刷新任务',
+          icon: const Icon(Icons.refresh),
+          onPressed: () => _activity.refreshIfDue(widget.auth, force: true),
+        ),
+      ],
+    ),
+    body: ListenableBuilder(
+      listenable: Listenable.merge([_activity, widget.auth]),
+      builder: (context, _) {
+        final snapshot = _activity.snapshotFor(widget.auth);
+        final tasks = _activity.visibleTasks(widget.auth);
+        final pending = _activity.pendingCount(widget.auth);
+        final scheme = Theme.of(context).colorScheme;
+        return RefreshIndicator(
+          onRefresh: () => _activity.refreshIfDue(widget.auth, force: true),
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+            children: [
+              Card.filled(
+                margin: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.stars_rounded,
+                        size: 32,
+                        color: scheme.primary,
+                      ),
+                      const SizedBox(width: 14),
+                      const Expanded(child: Text('可用积分')),
+                      Text(
+                        '${widget.auth.user?.points ?? snapshot?.points ?? 0}',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 16),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Text(
-                      _error!,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+              if (pending > 0 || _activity.lastError != null) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _activity.lastError ?? '$pending 次操作待同步',
+                        style: TextStyle(
+                          color: _activity.lastError == null
+                              ? scheme.onSurfaceVariant
+                              : scheme.error,
+                        ),
+                      ),
                     ),
-                  )
-                else
-                  Card.filled(
-                    margin: EdgeInsets.zero,
-                    clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      children: [
-                        for (final task in _tasks)
-                          ListTile(
-                            leading: Icon(
-                              task.done
-                                  ? Icons.check_circle
-                                  : Icons.radio_button_unchecked,
-                              color: task.done ? scheme.primary : null,
-                            ),
-                            title: Text(task.label),
-                            trailing: Text(
-                              task.done ? '已完成' : '+${task.reward} 积分',
-                              style: Theme.of(context).textTheme.labelMedium
-                                  ?.copyWith(
-                                    color: task.done
-                                        ? scheme.primary
-                                        : scheme.onSurfaceVariant,
-                                  ),
-                            ),
-                          ),
-                      ],
+                    IconButton(
+                      tooltip: '重试同步',
+                      icon: const Icon(Icons.sync),
+                      onPressed: () =>
+                          _activity.refreshIfDue(widget.auth, force: true),
                     ),
-                  ),
+                  ],
+                ),
               ],
-            ),
-    );
-  }
-}
+              const SizedBox(height: 24),
+              Text('今日进度', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              if (snapshot == null)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 28),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (tasks.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 28),
+                  child: Center(child: Text('今天暂无任务')),
+                )
+              else
+                for (final task in tasks) _taskRow(task, scheme),
+            ],
+          ),
+        );
+      },
+    ),
+  );
 
-class _Stat extends StatelessWidget {
-  const _Stat({required this.icon, required this.label, required this.value});
-
-  final IconData icon;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+  Widget _taskRow(TaskInfo task, ColorScheme scheme) {
+    final progress = task.progress.clamp(0, task.target);
+    final isCheckin = task.eventKey == 'checkin';
     return Column(
-      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, color: scheme.primary),
-        const SizedBox(height: 6),
-        Text(
-          value,
-          style: Theme.of(
-            context,
-          ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(
+            task.done ? Icons.check_circle : Icons.radio_button_unchecked,
+            color: task.done ? scheme.primary : scheme.onSurfaceVariant,
+          ),
+          title: Text(task.label),
+          subtitle: Text('+${task.reward} 积分'),
+          trailing: isCheckin && !task.done
+              ? FilledButton(
+                  onPressed: _checking ? null : _checkin,
+                  child: const Text('签到'),
+                )
+              : Text(
+                  '${task.progress}/${task.target}',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
         ),
-        Text(
-          label,
-          style: Theme.of(
-            context,
-          ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+        LinearProgressIndicator(
+          value: progress / task.target,
+          minHeight: 3,
+          backgroundColor: scheme.surfaceContainerHighest,
         ),
+        const SizedBox(height: 10),
       ],
     );
   }
-}
-
-class _TaskRow {
-  const _TaskRow({
-    required this.key,
-    required this.label,
-    required this.done,
-    required this.reward,
-  });
-
-  final String key;
-  final String label;
-  final bool done;
-  final int reward;
 }

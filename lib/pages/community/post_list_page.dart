@@ -28,7 +28,7 @@ class PostListPageState extends State<PostListPage> {
   List<TagCount> _tags = [];
   final List<Post> _posts = [];
 
-  int? _selectedZone;
+  String? _selectedZone;
   String? _selectedTag;
   String _keyword = '';
   bool _searchOpen = false;
@@ -37,19 +37,40 @@ class PostListPageState extends State<PostListPage> {
   bool _loading = false;
   bool _loadingMore = false;
   String? _error;
+  late bool _loggedIn;
 
   @override
   void initState() {
     super.initState();
+    _loggedIn = widget.auth.isLoggedIn;
+    widget.auth.addListener(_onAuthChanged);
     _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _initialLoad());
   }
 
   @override
   void dispose() {
+    widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant PostListPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.auth != widget.auth) {
+      oldWidget.auth.removeListener(_onAuthChanged);
+      widget.auth.addListener(_onAuthChanged);
+      _loggedIn = widget.auth.isLoggedIn;
+    }
+  }
+
+  void _onAuthChanged() {
+    final loggedIn = widget.auth.isLoggedIn;
+    if (mounted && loggedIn != _loggedIn) {
+      setState(() => _loggedIn = loggedIn);
+    }
   }
 
   void _onScroll() {
@@ -131,7 +152,7 @@ class PostListPageState extends State<PostListPage> {
     }
   }
 
-  Future<void> _setZone(int? zoneId) async {
+  Future<void> _setZone(String? zoneId) async {
     setState(() => _selectedZone = zoneId);
     await _refresh();
   }

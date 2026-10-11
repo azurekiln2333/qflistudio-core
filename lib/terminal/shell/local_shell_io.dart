@@ -5,6 +5,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../../services/process_supervisor.dart';
+import 'command_parser.dart';
+import 'portable_filesystem.dart';
+import 'sandbox_shell_backend.dart';
 import 'shell_backend.dart';
 
 /// Creates a shell backed by real OS processes.
@@ -14,6 +17,42 @@ import 'shell_backend.dart';
 /// interactive shell. Output is streamed as it is produced.
 ShellBackend createLocalShell({String? workingDirectory}) =>
     LocalShellBackend(workingDirectory: workingDirectory);
+
+/// Creates the unified in-app sandbox terminal backend used across the app.
+///
+/// Commands run against real files under [sandboxRoot] via Dart file IO, so the
+/// terminal works where exec is forbidden. Desktop additionally forwards
+/// non-built-in commands to the real shell so ordinary tools keep working;
+/// [delegate] (the Java app) can claim `java`/`javac` on any platform.
+ShellBackend createSandboxShell({
+  required String sandboxRoot,
+  String? startDirectory,
+  String label = 'Sandbox',
+  TerminalCommandDelegate? delegate,
+}) {
+  final desktopShell = localShellAvailable()
+      ? LocalShellBackend(workingDirectory: startDirectory ?? sandboxRoot)
+      : null;
+  final sandbox = SandboxShellBackend(
+    sandboxRoot: sandboxRoot,
+    startDirectory: startDirectory,
+    label: label,
+    delegate: (backend, command) async {
+      if (delegate != null && await delegate(backend, command)) return true;
+      // Desktop fallback: let the real shell run a tool that is not a sandbox
+      // built-in (e.g. git/grep), keeping desktop parity. Mobile has none. The
+      // shell's output must be mirrored into the sandbox; simply calling
+      // `execute` would drop everything and the command would look silent.
+      final shell = desktopShell;
+      if (shell != null) {
+        await backend.delegateToProcessShell(shell, command);
+        return true;
+      }
+      return false;
+    },
+  );
+  return sandbox;
+}
 
 /// Whether the local shell can be expected to work on this platform.
 ///
@@ -96,7 +135,13 @@ List<String> _shellCandidates() {
 }
 
 List<String> _probeArgs(String binary) => binary == 'powershell.exe'
-    ? const <String>['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0']
+    ? const <String>[
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'exit 0',
+      ]
     : const <String>['-c', 'exit 0'];
 
 class LocalShellBackend extends BaseShellBackend {
@@ -110,6 +155,11 @@ class LocalShellBackend extends BaseShellBackend {
 
   final ProcessSupervisor _processSupervisor = ProcessSupervisor();
   ManagedProcess? _process;
+
+  /// Completes with the started process, or null when startup failed/was
+  /// cancelled. [interrupt] awaits this so it can cancel a process that is
+  /// still being spawned.
+  Completer<ManagedProcess?>? _startPending;
 
   /// Directory that `~` stands for.
   ///
@@ -148,7 +198,8 @@ class LocalShellBackend extends BaseShellBackend {
   bool get canInterrupt => true;
 
   @override
-  String get helpText => '''
+  String get helpText =>
+      '''
 QFLI 终端 · $shellLabel
 
 内置命令（由应用处理）:
@@ -158,6 +209,11 @@ QFLI 终端 · $shellLabel
   help         显示这份帮助
 
 其他命令会交给系统 $shellLabel 执行。''';
+
+  @override
+  EscapePolicy get escapePolicy => Platform.isWindows
+      ? EscapePolicy.backslashLiteral
+      : EscapePolicy.backslashEscapes;
 
   List<String> _buildCommand(String shell, String command) {
     if (Platform.isWindows) {
@@ -177,78 +233,127 @@ QFLI 终端 · $shellLabel
 
   @override
   Future<void> runExternal(String command) async {
-    final shell = await _resolveShell();
-    if (shell == null) {
-      emitLine('本平台不允许应用启动子进程，无法执行系统命令。', OutputKind.stderr);
-      emitLine(
-        '请新建一个「沙盒终端」：它内置完整的虚拟文件系统，网络工具也照样能用。',
-        OutputKind.system,
-      );
-      return;
-    }
-
-    final directory = Directory(cwd);
-    final workingDirectory = directory.existsSync() ? cwd : Directory.current.path;
-
-    final argv = _buildCommand(shell, command);
-    final ManagedProcess process;
+    final startPending = Completer<ManagedProcess?>();
+    _startPending = startPending;
     try {
-      process = await _processSupervisor.start(
-        argv.first,
-        argv.sublist(1),
-        workingDirectory: workingDirectory,
-        runInShell: false,
-      );
-    } on ProcessException catch (error) {
-      // Report which binary and why, instead of letting a bare
-      // "ProcessException: Permission denied" reach the user.
-      emitLine('无法启动 $shell：${error.message}', OutputKind.stderr);
-      emitLine(
-        '该平台可能不允许应用执行系统命令，可以改用「沙盒终端」。',
-        OutputKind.system,
-      );
-      return;
-    }
-    _process = process;
+      final shell = await _resolveShell();
+      if (cancelRequested) {
+        startPending.complete(null);
+        return;
+      }
+      if (shell == null) {
+        startPending.complete(null);
+        emitLine('当前平台不允许应用执行系统命令，便携命令（ls/cd/cat 等）仍可使用。', OutputKind.stderr);
+        return;
+      }
 
-    const decoder = Utf8Decoder(allowMalformed: true);
-    await Future.wait<void>(<Future<void>>[
-      process.stdout
-          .transform(decoder)
-          .forEach((chunk) => emit(chunk, OutputKind.stdout)),
-      process.stderr
-          .transform(decoder)
-          .forEach((chunk) => emit(chunk, OutputKind.stderr)),
-    ]);
+      // Never fall back to an unrelated process directory: if the session cwd
+      // is gone, report it instead of silently running elsewhere.
+      final directory = Directory(cwd);
+      if (!directory.existsSync()) {
+        startPending.complete(null);
+        emitLine('无法执行：当前目录不存在：$cwd', OutputKind.stderr);
+        return;
+      }
+      final workingDirectory = cwd;
 
-    final exitCode = await process.exitCode;
-    _process = null;
-    if (exitCode != 0) {
-      emitLine('[进程退出，代码 $exitCode]', OutputKind.system);
+      final argv = _buildCommand(shell, command);
+      final ManagedProcess process;
+      try {
+        process = await _processSupervisor.start(
+          argv.first,
+          argv.sublist(1),
+          workingDirectory: workingDirectory,
+          runInShell: false,
+        );
+      } on ProcessException catch (error) {
+        startPending.complete(null);
+        // Report which binary and why, instead of letting a bare
+        // "ProcessException: Permission denied" reach the user.
+        emitLine('无法启动 $shell：${error.message}', OutputKind.stderr);
+        emitLine('该平台可能不允许应用执行系统命令，可以改用「沙盒终端」。', OutputKind.system);
+        return;
+      }
+
+      // An interrupt may have arrived while the process was being spawned; when
+      // so, cancel it immediately instead of running it to completion.
+      if (cancelRequested) {
+        startPending.complete(null);
+        await process.cancel();
+        return;
+      }
+      _process = process;
+      startPending.complete(process);
+
+      const decoder = Utf8Decoder(allowMalformed: true);
+      await Future.wait<void>(<Future<void>>[
+        process.stdout
+            .transform(decoder)
+            .forEach((chunk) => emit(chunk, OutputKind.stdout)),
+        process.stderr
+            .transform(decoder)
+            .forEach((chunk) => emit(chunk, OutputKind.stderr)),
+      ]);
+
+      final exitCode = await process.exitCode;
+      _process = null;
+      if (cancelRequested) {
+        // A cancelled command's status is not a program result.
+        lastExitCode = null;
+        return;
+      }
+      // Expose the real numeric status; the pane renders the concise English
+      // line, so the backend must not emit its own localized banner.
+      lastExitCode = exitCode;
+    } finally {
+      if (!startPending.isCompleted) startPending.complete(null);
+      if (identical(_startPending, startPending)) _startPending = null;
     }
   }
 
   @override
-  Future<bool> changeDirectory(String target) async {
-    final resolved = resolvePath(target);
+  Future<bool> changeDirectory(String target, {bool expandTilde = true}) async {
+    final resolved = resolvePath(target, expandTilde: expandTilde);
     final directory = Directory(resolved);
 
     if (!directory.existsSync()) {
       emitLine('cd: 目录不存在: $target', OutputKind.stderr);
       return true;
     }
+    if (FileSystemEntity.typeSync(resolved) != FileSystemEntityType.directory) {
+      emitLine('cd: 不是目录: $target', OutputKind.stderr);
+      return true;
+    }
     cwd = directory.absolute.path;
     return true;
   }
 
-  /// Resolves [target] the way a shell would: `~` expands to the home
-  /// directory, rooted paths are used as-is and anything else is relative to
-  /// the session's current directory (never the host process directory).
-  String resolvePath(String target) {
-    var path = target.trim();
-    if (path.isEmpty) path = '~';
+  @override
+  bool handlePortableBuiltin(CommandToken name, List<CommandToken> args) {
+    if (!PortableFilesystem.handles(name.text)) return false;
+    final filesystem = PortableFilesystem(
+      cwd: cwd,
+      homeDirectory: homeDirectory,
+      sink: this,
+    );
+    try {
+      filesystem.run(name, args);
+    } on CommandFailure {
+      // PortableFilesystem already emitted the user-facing error; swallow only
+      // this deliberate marker so unrelated errors still surface.
+    }
+    return true;
+  }
 
-    if (path == '~' || path.startsWith('~/') || path.startsWith(r'~\')) {
+  /// Resolves [target] the way a shell would: a leading `~` expands to the
+  /// home directory when [expandTilde] is true, rooted paths are used as-is
+  /// and anything else is relative to the session's current directory. Never
+  /// falls back to the host process directory.
+  String resolvePath(String target, {bool expandTilde = true}) {
+    var path = target;
+
+    if (expandTilde &&
+        (path == '~' || path.startsWith('~/') || path.startsWith(r'~\'))) {
       final home = homeDirectory;
       if (home != null && home.isNotEmpty) {
         path = path.length == 1 ? home : '$home${path.substring(1)}';
@@ -257,18 +362,10 @@ QFLI 终端 · $shellLabel
 
     if (_isRooted(path)) return Directory(path).absolute.path;
 
-    final relative = Directory(
+    return Directory(
       '$cwd${Platform.pathSeparator}'
       '${path.replaceAll('/', Platform.pathSeparator)}',
-    );
-    if (relative.existsSync()) return relative.absolute.path;
-
-    // Not found relative to the session cwd: fall back to the host process
-    // directory so that drive-less Windows paths still resolve.
-    final fallback = Directory(path);
-    if (fallback.existsSync()) return fallback.absolute.path;
-
-    return relative.absolute.path;
+    ).absolute.path;
   }
 
   bool _isRooted(String path) {
@@ -278,9 +375,24 @@ QFLI 终端 · $shellLabel
 
   @override
   Future<void> onInterrupt() async {
+    // requestCancel() already set the flag at the base level; just cancel the
+    // process (or await startup so a process that appears late is cancelled).
+    emitLine('^C', OutputKind.system);
+
+    final pending = _startPending;
+    if (pending != null && !pending.isCompleted) {
+      // Startup is still in flight; wait for the handle (or failure) so we can
+      // cancel a process that appears after this interrupt arrived.
+      final process = await pending.future;
+      if (process != null) {
+        await process.cancel();
+        if (identical(_process, process)) _process = null;
+      }
+      return;
+    }
+
     final process = _process;
     if (process == null) return;
-    emitLine('^C', OutputKind.system);
     await process.cancel();
     _process = null;
   }

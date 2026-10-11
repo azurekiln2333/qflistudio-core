@@ -216,6 +216,9 @@ class _CodeParagraphProvider {
       strutStyle: StrutStyle(
         fontSize: style.fontSize,
         fontFamily: style.fontFamily,
+        fontFamilyFallback: style.fontFamilyFallback,
+        fontWeight: style.fontWeight,
+        fontStyle: style.fontStyle,
         height: style.height,
         forceStrutHeight: true,
       )

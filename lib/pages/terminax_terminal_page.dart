@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../i18n/studio_localizations.dart';
 import '../services/app_paths.dart';
+import '../services/studio_profile.dart';
 import '../store/project_store.dart';
 import '../terminal/models/terminal_session.dart';
 import '../terminal/state/terminal_manager.dart';
@@ -36,6 +36,10 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
   @override
   void initState() {
     super.initState();
+    // The app-level terminal shares the editor terminal's language toolchain
+    // hook, so `java`/`javac` (and future profiles' tools) work here too. The
+    // shared core stays product-agnostic: the profile is the only coupling.
+    _manager.commandDelegate = StudioProfile.current?.terminalCommandDelegate;
     _manager.addListener(_handleManagerChanged);
     _pages.addListener(_handlePageChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -61,13 +65,11 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
   }
 
   Future<String?> _resolveWorkingDirectory() async {
-    for (final project in widget.store.projects) {
-      if (!project.isCloud && Directory(project.path).existsSync()) {
-        return project.path;
-      }
-    }
-    final root = await AppPaths.projectsRoot(create: true);
-    return root ?? AppPaths.writableDirectory();
+    // App-level terminal: the sandbox root is the app private data directory,
+    // so every project directory inside it is reachable.
+    final storage = await AppPaths.storageDirectory();
+    if (storage != null && storage.isNotEmpty) return storage;
+    return AppPaths.writableDirectory();
   }
 
   void _handlePageChanged() {
@@ -101,7 +103,11 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
       _editors.putIfAbsent(id, _SessionEditor.new);
 
   void _createSession(String path) {
-    final session = _manager.create(workingDirectory: path);
+    // Re-assert the hook on every creation: `_newSession` and the auto-recreate
+    // after the last tab closes both go through here, and the profile may have
+    // been swapped since initState in tests and multi-profile hosts.
+    _manager.commandDelegate = StudioProfile.current?.terminalCommandDelegate;
+    final session = _manager.create(sandboxRoot: path, startDirectory: path);
     _editorFor(session.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _editorFor(session.id).focusNode.requestFocus();
@@ -407,6 +413,7 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
     final result = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: Text(StudioLocalizations.of(context).terminal),
         content: TextField(controller: controller, autofocus: true),
         actions: [

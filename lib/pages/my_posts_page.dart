@@ -105,7 +105,7 @@ class _MyPostsPageState extends State<MyPostsPage> {
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute(
                           builder: (_) => PostDetailPage(
-                            postId: (post['id'] as num).toInt(),
+                            postId: post['id'] as String,
                             auth: widget.auth,
                           ),
                         ),

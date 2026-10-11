@@ -74,8 +74,12 @@ void main() {
       find.text('${StudioProductCatalog.forge} ${l10n.examples}'),
       findsOneWidget,
     );
-    expect(find.byIcon(Icons.copy_outlined), findsWidgets);
+    expect(find.byIcon(Icons.copy_outlined), findsNothing);
+    expect(find.text('#include <stdio.h>'), findsNothing);
     expect(find.text('C 示例 001: 数据建模与不变量'), findsOneWidget);
+    await tester.tap(find.text('C 示例 001: 数据建模与不变量'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
   });
 }
 

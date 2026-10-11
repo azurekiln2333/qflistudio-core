@@ -1,6 +1,6 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../editor/editor_fonts.dart';
 import '../shell/ansi.dart';
 
 /// Material 3 theming for Terminax.
@@ -21,38 +21,6 @@ class AppTheme {
     (label: '石墨', color: Color(0xFF4A5568)),
   ];
 
-  static const List<String> _monoFallback = <String>[
-    'JetBrains Mono',
-    'Cascadia Mono',
-    'Cascadia Code',
-    'Consolas',
-    'SF Mono',
-    'Menlo',
-    'Roboto Mono',
-    'DejaVu Sans Mono',
-    'Noto Sans Mono',
-    // Consolas and friends have no CJK glyphs, so Chinese output needs a
-    // fallback or it renders as tofu.
-    'Microsoft YaHei',
-    'PingFang SC',
-    'Noto Sans CJK SC',
-    'monospace',
-  ];
-
-  /// Best-effort monospace family for the current platform.
-  static String get _monoFamily {
-    switch (defaultTargetPlatform) {
-      case TargetPlatform.windows:
-        return 'Consolas';
-      case TargetPlatform.macOS:
-      case TargetPlatform.iOS:
-        return 'Menlo';
-      default:
-        // Android, Linux, Fuchsia, OpenHarmony and everything else.
-        return 'monospace';
-    }
-  }
-
   /// Monospace text style used by the terminal canvas.
   static TextStyle mono(
     double fontSize, {
@@ -61,8 +29,8 @@ class AppTheme {
     double height = 1.45,
   }) {
     return TextStyle(
-      fontFamily: _monoFamily,
-      fontFamilyFallback: _monoFallback,
+      fontFamily: EditorFonts.bundledFamily,
+      fontFamilyFallback: EditorFonts.fallbacks,
       fontSize: fontSize,
       height: height,
       color: color,

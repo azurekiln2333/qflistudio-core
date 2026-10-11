@@ -2,7 +2,6 @@ import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 
-
 /// 编辑器中一个已打开的文件（对应一个标签页）。
 class OpenFile {
   OpenFile({
@@ -14,9 +13,10 @@ class OpenFile {
     this.readOnly = false,
     this.timeLabel,
     this.encoding = 'UTF-8',
-  })  : controller = CodeLineEditingController.fromText(content),
-        scrollController = CodeScrollController(),
-        focusNode = FocusNode() {
+    this.modifiedAt,
+  }) : controller = CodeLineEditingController.fromText(content),
+       scrollController = CodeScrollController(),
+       focusNode = FocusNode() {
     _highlightTheme = highlightTheme;
     findController = CodeFindController(controller);
   }
@@ -35,12 +35,15 @@ class OpenFile {
 
   /// 文件编码（打开时自动识别，可在状态栏切换）。
   String encoding;
+  DateTime? modifiedAt;
   final CodeLineEditingController controller;
   late final CodeFindController findController;
   final CodeScrollController scrollController;
   final FocusNode focusNode;
   CodeHighlightTheme? _highlightTheme;
   bool dirty = false;
+  int revision = 0;
+  Future<String?>? pendingSave;
 
   /// 文件的语法高亮主题（超大文件为 null，走纯文本渲染）。
   CodeHighlightTheme? get highlightTheme => _highlightTheme;

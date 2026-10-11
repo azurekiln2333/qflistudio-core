@@ -149,6 +149,9 @@ class TutorialLessonContent {
     required this.code,
     required this.output,
     required this.exercises,
+    this.objective = '',
+    this.prerequisites = const [],
+    this.pitfalls = const [],
   });
 
   final String id;
@@ -159,6 +162,15 @@ class TutorialLessonContent {
   final String code;
   final String output;
   final List<ContentExercise> exercises;
+
+  /// One-line learning objective (what the learner should be able to do).
+  final String objective;
+
+  /// Concepts the learner should know before this lesson.
+  final List<String> prerequisites;
+
+  /// Common mistakes and important caveats for this lesson.
+  final List<String> pitfalls;
 }
 
 class ContentExercise {
@@ -419,6 +431,9 @@ TutorialLessonContent _parseLesson(
     explain: _text(map['explain']),
     code: _rawText(map['code']),
     output: _rawText(map['output']),
+    objective: _text(map['objective']),
+    prerequisites: _strings(map['prerequisites']),
+    pitfalls: _strings(map['pitfalls']),
     exercises: [
       for (final raw in _list(exercisesValue))
         _parseExercise(_map(raw, 'tutorials.exercises')),

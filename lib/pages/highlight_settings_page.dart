@@ -119,8 +119,13 @@ class _HighlightSettingsPageState extends State<HighlightSettingsPage> {
                             readOnly: true,
                             autofocus: false,
                             style: CodeEditorStyle(
-                              fontSize: 13,
-                              fontFamily: 'monospace',
+                              fontSize: settings.editorFontSize,
+                              fontFamily: settings.editorTextStyle.fontFamily,
+                              fontFamilyFallback:
+                                  settings.editorTextStyle.fontFamilyFallback,
+                              fontWeight: settings.editorTextStyle.fontWeight,
+                              fontStyle: settings.editorTextStyle.fontStyle,
+                              fontHeight: settings.editorLineHeight,
                               backgroundColor:
                                   codeTheme?.theme['root']?.backgroundColor ??
                                   scheme.surfaceContainerLow,

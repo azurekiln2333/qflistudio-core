@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import '../editor/editor_fonts.dart';
 
 import '../models/project.dart';
 import '../services/api_client.dart';
@@ -50,7 +51,10 @@ class _GitPageState extends State<GitPage> {
     });
   }
 
-  Future<void> _runLocal(String label, Future<GitResult> Function() action) async {
+  Future<void> _runLocal(
+    String label,
+    Future<GitResult> Function() action,
+  ) async {
     if (_busy) return;
     setState(() => _busy = true);
     _append('\$ git $label');
@@ -75,10 +79,16 @@ class _GitPageState extends State<GitPage> {
     _append('git $action$suffix');
     try {
       _cloud ??= await CloudSyncService.open(
-        cloudId: int.parse(widget.project.cloudId!),
+        cloudId: widget.project.cloudId!,
+        cachePath: widget.project.path,
         name: widget.project.name,
       );
-      final result = await _cloud!.git(token, action, message: message, url: url);
+      final result = await _cloud!.git(
+        token,
+        action,
+        message: message,
+        url: url,
+      );
       if (result.stdout.trim().isNotEmpty) _append(result.stdout.trimRight());
       if (result.stderr.trim().isNotEmpty) {
         _append(result.stderr.trimRight(), isError: true);
@@ -96,6 +106,7 @@ class _GitPageState extends State<GitPage> {
     final message = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: const Text('提交到 Git'),
         content: TextField(
           controller: _commitController,
@@ -124,10 +135,17 @@ class _GitPageState extends State<GitPage> {
       await _runCloud('addAll');
       await _runCloud('commit', message: message.trim());
     } else {
-      await _runLocal('git add -A', () => GitService.run(widget.project.path, ['add', '-A']));
+      await _runLocal(
+        'git add -A',
+        () => GitService.run(widget.project.path, ['add', '-A']),
+      );
       await _runLocal(
         'git commit -m "${message.trim()}"',
-        () => GitService.run(widget.project.path, ['commit', '-m', message.trim()]),
+        () => GitService.run(widget.project.path, [
+          'commit',
+          '-m',
+          message.trim(),
+        ]),
       );
     }
     _commitController.clear();
@@ -137,6 +155,7 @@ class _GitPageState extends State<GitPage> {
     final url = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: const Text('设置远程仓库'),
         content: TextField(
           controller: _remoteController,
@@ -194,11 +213,12 @@ class _GitPageState extends State<GitPage> {
             child: Row(
               children: [
                 Text(
-                  _cloudMode ? '云端项目 · 服务器执行 git' : (desktop ? '本地项目 · 本机 git' : '当前平台无 git，请使用在线终端'),
-                  style: Theme.of(context)
-                      .textTheme
-                      .labelMedium
-                      ?.copyWith(color: scheme.onSurfaceVariant),
+                  _cloudMode
+                      ? '云端项目 · 服务器执行 git'
+                      : (desktop ? '本地项目 · 本机 git' : '当前平台无 git，请使用在线终端'),
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
@@ -219,16 +239,22 @@ class _GitPageState extends State<GitPage> {
                     onPressed: _busy
                         ? null
                         : () => _cloudMode
-                            ? _runCloud('status')
-                            : _runLocal('git status', () => GitService.status(widget.project.path)),
+                              ? _runCloud('status')
+                              : _runLocal(
+                                  'git status',
+                                  () => GitService.status(widget.project.path),
+                                ),
                     child: const Text('状态'),
                   ),
                   OutlinedButton(
                     onPressed: _busy
                         ? null
                         : () => _cloudMode
-                            ? _runCloud('log')
-                            : _runLocal('git log', () => GitService.log(widget.project.path)),
+                              ? _runCloud('log')
+                              : _runLocal(
+                                  'git log',
+                                  () => GitService.log(widget.project.path),
+                                ),
                     child: const Text('历史'),
                   ),
                   OutlinedButton(
@@ -239,23 +265,32 @@ class _GitPageState extends State<GitPage> {
                     onPressed: _busy
                         ? null
                         : () => _cloudMode
-                            ? _runCloud('push')
-                            : _runLocal('git push', () => GitService.push(widget.project.path)),
+                              ? _runCloud('push')
+                              : _runLocal(
+                                  'git push',
+                                  () => GitService.push(widget.project.path),
+                                ),
                     child: const Text('推送'),
                   ),
                   OutlinedButton(
                     onPressed: _busy
                         ? null
                         : () => _cloudMode
-                            ? _runCloud('pull')
-                            : _runLocal('git pull', () => GitService.pull(widget.project.path)),
+                              ? _runCloud('pull')
+                              : _runLocal(
+                                  'git pull',
+                                  () => GitService.pull(widget.project.path),
+                                ),
                     child: const Text('拉取'),
                   ),
                   if (!_cloudMode)
                     OutlinedButton(
                       onPressed: _busy
                           ? null
-                          : () => _runLocal('git init', () => GitService.init(widget.project.path)),
+                          : () => _runLocal(
+                              'git init',
+                              () => GitService.init(widget.project.path),
+                            ),
                       child: const Text('init'),
                     ),
                 ],
@@ -268,10 +303,9 @@ class _GitPageState extends State<GitPage> {
                 ? Center(
                     child: Text(
                       canGit ? '选择上面的 git 操作，输出会显示在这里' : '此平台无法本地使用 git',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: scheme.onSurfaceVariant),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   )
                 : ListView.builder(
@@ -281,11 +315,13 @@ class _GitPageState extends State<GitPage> {
                     itemBuilder: (context, i) => SelectableText(
                       _lines[i].text,
                       style: TextStyle(
-                        fontFamily: 'Consolas',
-                        fontFamilyFallback: const ['Courier New', 'monospace'],
+                        fontFamily: EditorFonts.bundledFamily,
+                        fontFamilyFallback: EditorFonts.fallbacks,
                         fontSize: 12.5,
                         height: 1.45,
-                        color: _lines[i].isError ? scheme.error : scheme.onSurface,
+                        color: _lines[i].isError
+                            ? scheme.error
+                            : scheme.onSurface,
                       ),
                     ),
                   ),

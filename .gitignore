@@ -107,3 +107,9 @@ app.*.map.json
 /.gitstatus.txt
 /.gs.txt
 /.st.txt
+
+# Trellis/AI-agent working files: task research artifacts (screenshot and
+# source snapshots are large and reproducible) and local agent configuration.
+/.trellis/**/research/
+/.codex/
+/.trae/

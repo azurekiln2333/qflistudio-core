@@ -6,7 +6,9 @@ import 'package:path/path.dart' as p;
 
 import 'app_paths.dart';
 import 'local_web_server.dart';
+import 'online_program.dart';
 import 'process_supervisor.dart';
+import 'project_config.dart';
 import 'studio_profile.dart';
 
 /// 运行结果：输出行由终端面板显示。
@@ -55,6 +57,27 @@ abstract final class RunnerService {
   /// 语言档位声明的 [StudioProfile.entryFileNames] 优先，保证 C 版一定会先
   /// 命中 `main.c` 而不是同目录下别的语言入口。
   static String? findEntry(String projectPath) {
+    final configuredEntry = ProjectConfig.read(projectPath)?['entryFile'];
+    if (configuredEntry is String &&
+        configuredEntry.isNotEmpty &&
+        !configuredEntry.contains('\u0000') &&
+        !p.posix.isAbsolute(configuredEntry) &&
+        !p.windows.isAbsolute(configuredEntry) &&
+        p.windows.rootPrefix(configuredEntry).isEmpty) {
+      final root = p.normalize(p.absolute(projectPath));
+      final path = p.normalize(
+        p.join(root, configuredEntry.replaceAll('\\', '/')),
+      );
+      if (p.isWithin(root, path) && File(path).existsSync()) {
+        try {
+          final resolvedRoot = Directory(root).resolveSymbolicLinksSync();
+          final resolvedPath = File(path).resolveSymbolicLinksSync();
+          if (p.isWithin(resolvedRoot, resolvedPath)) return path;
+        } on FileSystemException {
+          // A stale or inaccessible explicit entry falls back to legacy names.
+        }
+      }
+    }
     final profile = StudioProfile.current;
     final candidates = <String>[
       ...?profile?.entryFileNames,
@@ -83,6 +106,8 @@ abstract final class RunnerService {
     'src/main.lua',
     'src/main.js',
     'src/main.ts',
+    'src/main.sh',
+    'src/main.sql',
     'src/main.kt',
     'src/main.go',
     'src/main.rs',
@@ -143,6 +168,18 @@ abstract final class RunnerService {
               '请在编辑器中打开「在线终端」，由服务器编译执行并回显输出。',
         );
       default:
+        // 编辑器看到 hint 后会按 OnlineProgram.supports 转入在线运行。
+        if (OnlineProgram.supports(entryFile)) {
+          return RunResult(
+            title: '运行',
+            hint: StudioProfile.current?.isOffline == true
+                ? '本地没有 $ext 运行时，离线版无法使用在线终端。'
+                : '本地没有 $ext 运行时，使用在线终端执行。',
+          );
+        }
+        if (ext == '.kt' || ext == '.cs') {
+          return RunResult(title: '运行', hint: '$ext 暂不支持运行：本地和在线镜像都没有对应的编译器。');
+        }
         return RunResult(
           title: '运行',
           hint: '无法识别可运行的入口文件（index.html/main.py/main.c 等）。',

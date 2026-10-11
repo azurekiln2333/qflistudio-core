@@ -2,15 +2,27 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 import '../models/tutorial.dart';
+import 'app_paths.dart';
 
 /// JSON-backed user examples layered over bundled defaults.
 class ExampleCodeStore extends ChangeNotifier {
   ExampleCodeStore({File? storageFile}) : _storageOverride = storageFile;
 
+  /// Bumped when the bundled Java tutorial/example content is wholly replaced.
+  /// A persisted document written with an older version has all of its Java
+  /// content records purged once, so obsolete local Java examples cannot
+  /// survive the replacement. Other languages and post-migration Java entries
+  /// are untouched.
+  static const int contentVersion = 2;
+
   final File? _storageOverride;
   File? _storage;
+  Future<void>? _loading;
+  Future<void>? _writes;
+  bool _disposed = false;
   final Map<String, ExampleCode> _defaults = {};
   final Map<String, ExampleCode> _custom = {};
 
@@ -27,39 +39,91 @@ class ExampleCodeStore extends ChangeNotifier {
     }
   }
 
-  Future<void> load({Iterable<ExampleCode> defaults = const []}) async {
+  Future<void> load({Iterable<ExampleCode> defaults = const []}) {
+    if (_disposed) return Future<void>.value();
     seed(defaults);
-    _storage = _storageOverride;
-    if (_storage == null || !await _storage!.exists()) return;
+    return _loading ??= _loadStorage();
+  }
+
+  Future<void> _loadStorage() async {
+    final root = _storageOverride == null
+        ? await AppPaths.storageDirectory()
+        : null;
+    if (_disposed) return;
+    if (_storageOverride == null && root == null) {
+      throw const FileSystemException('未找到可写的存储目录');
+    }
+    final file = _storage =
+        _storageOverride ?? File(p.join(root!, 'examples.json'));
+    if (!await file.exists() || _disposed) return;
+    final loaded = <String, ExampleCode>{};
+    var storedVersion = 0;
     try {
-      final data = jsonDecode(await _storage!.readAsString());
+      final data = jsonDecode(await file.readAsString());
       if (data is! Map || data['examples'] is! List) return;
+      storedVersion = (data['contentVersion'] as num?)?.toInt() ?? 0;
       for (final raw in data['examples'] as List) {
         if (raw is! Map) continue;
         final example = _fromJson(Map<String, dynamic>.from(raw));
-        if (example != null) _custom[example.id] = example;
+        if (example != null) loaded[example.id] = example;
       }
-    } on Object {
-      _custom.clear();
+    } on FormatException {
+      return;
+    } on TypeError {
+      return;
+    }
+    if (_disposed) return;
+    final migrated = _migrateOnLoad(loaded, storedVersion);
+    _custom.addAll(migrated.records);
+    if (migrated.changed) {
+      await _persistCurrent();
+      if (_disposed) return;
     }
     notifyListeners();
   }
 
-  Future<void> upsert(ExampleCode example) async {
-    _custom[example.id] = example;
-    notifyListeners();
-    await _persist();
+  /// One-time content migration. When the persisted [storedVersion] is older
+  /// than [contentVersion], every Java content record is removed (the two Java
+  /// pages were fully replaced) while other languages are preserved. Running
+  /// again with an up-to-date version is a no-op.
+  _MigrationOutcome _migrateOnLoad(
+    Map<String, ExampleCode> loaded,
+    int storedVersion,
+  ) {
+    if (storedVersion >= contentVersion) {
+      return _MigrationOutcome(loaded, changed: false);
+    }
+    final kept = <String, ExampleCode>{
+      for (final entry in loaded.entries)
+        if (!_isJavaType(entry.value.type)) entry.key: entry.value,
+    };
+    return _MigrationOutcome(kept, changed: true);
   }
 
-  Future<void> reset(String id) async {
-    _custom.remove(id);
-    notifyListeners();
-    await _persist();
+  static bool _isJavaType(String type) => type.trim().toLowerCase() == 'java';
+
+  /// Writes the current [_custom] map with the up-to-date content version.
+  Future<void> _persistCurrent() async {
+    final file = _storage;
+    if (file == null) return;
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(_document(_custom.values)),
+      flush: true,
+    );
   }
 
-  Map<String, dynamic> toJson() => {
+  Future<void> upsert(ExampleCode example) =>
+      _updateCustom((items) => items[example.id] = example);
+
+  Future<void> reset(String id) => _updateCustom((items) => items.remove(id));
+
+  Map<String, dynamic> toJson() => _document(_custom.values);
+
+  static Map<String, dynamic> _document(Iterable<ExampleCode> items) => {
     'schemaVersion': 1,
-    'examples': [for (final example in _custom.values) _toJson(example)],
+    'contentVersion': contentVersion,
+    'examples': [for (final example in items) _toJson(example)],
   };
 
   String encode() => const JsonEncoder.withIndent('  ').convert(toJson());
@@ -76,18 +140,47 @@ class ExampleCodeStore extends ChangeNotifier {
       if (example == null || example.type.isEmpty) continue;
       imported[example.id] = example;
     }
-    _custom
-      ..clear()
-      ..addAll(imported);
-    notifyListeners();
-    await _persist();
+    await _updateCustom((items) {
+      items
+        ..clear()
+        ..addAll(imported);
+    });
   }
 
-  Future<void> _persist() async {
-    final file = _storage;
-    if (file == null) return;
-    await file.parent.create(recursive: true);
-    await file.writeAsString(encode());
+  Future<void> _updateCustom(
+    void Function(Map<String, ExampleCode> items) update,
+  ) async {
+    await load();
+    Future<void> write() async {
+      if (_disposed) throw StateError('ExampleCodeStore has been disposed');
+      final updated = Map<String, ExampleCode>.from(_custom);
+      update(updated);
+      final file = _storage!;
+      await file.parent.create(recursive: true);
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(_document(updated.values)),
+        flush: true,
+      );
+      if (_disposed) return;
+      _custom
+        ..clear()
+        ..addAll(updated);
+      notifyListeners();
+    }
+
+    // Commit each change only after its write succeeds, in request order.
+    final previous = _writes;
+    final current = previous == null
+        ? write()
+        : previous.catchError((Object _) {}).then((_) => write());
+    _writes = current;
+    await current;
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 
   static Map<String, dynamic> _toJson(ExampleCode example) => {
@@ -97,7 +190,8 @@ class ExampleCodeStore extends ChangeNotifier {
     'summary': example.summary,
     'code': example.code,
     'output': example.output,
-    if (example.sourceLessonId != null) 'sourceLessonId': example.sourceLessonId,
+    if (example.sourceLessonId != null)
+      'sourceLessonId': example.sourceLessonId,
   };
 
   static ExampleCode? _fromJson(Map<String, dynamic> json) {
@@ -105,7 +199,9 @@ class ExampleCodeStore extends ChangeNotifier {
     final type = json['type'] as String?;
     final title = json['title'] as String?;
     final code = json['code'] as String?;
-    if (id == null || type == null || title == null || code == null) return null;
+    if (id == null || type == null || title == null || code == null) {
+      return null;
+    }
     return ExampleCode(
       id: id,
       type: type,
@@ -116,4 +212,12 @@ class ExampleCodeStore extends ChangeNotifier {
       sourceLessonId: json['sourceLessonId'] as String?,
     );
   }
+}
+
+/// Result of a load-time content migration.
+class _MigrationOutcome {
+  const _MigrationOutcome(this.records, {required this.changed});
+
+  final Map<String, ExampleCode> records;
+  final bool changed;
 }

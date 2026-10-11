@@ -43,12 +43,8 @@ enum ProjectTemplate {
   python('Python', Icons.terminal_outlined, 'Python', [
     TemplateFile('src/main.py', _pythonMain),
   ]),
-  c('C', Icons.code_outlined, 'C', [
-    TemplateFile('src/main.c', _cMain),
-  ]),
-  cpp('C++', Icons.code, 'C++', [
-    TemplateFile('src/main.cpp', _cppMain),
-  ]),
+  c('C', Icons.code_outlined, 'C', [TemplateFile('src/main.c', _cMain)]),
+  cpp('C++', Icons.code, 'C++', [TemplateFile('src/main.cpp', _cppMain)]),
   html('Web', Icons.web_outlined, 'Web', [
     TemplateFile('src/index.html', _htmlIndex),
     TemplateFile('src/style.css', _htmlCss),
@@ -57,9 +53,7 @@ enum ProjectTemplate {
   dart('Dart', Icons.flutter_dash, 'Dart', [
     TemplateFile('src/main.dart', _dartMain),
   ]),
-  lua('Lua', Icons.terminal, 'Lua', [
-    TemplateFile('src/main.lua', _luaMain),
-  ]),
+  lua('Lua', Icons.terminal, 'Lua', [TemplateFile('src/main.lua', _luaMain)]),
   javascript('JavaScript', Icons.javascript_outlined, 'JavaScript', [
     TemplateFile('src/main.js', _jsMain),
   ]),
@@ -81,9 +75,7 @@ enum ProjectTemplate {
   kotlin('Kotlin', Icons.code_off_outlined, 'Kotlin', [
     TemplateFile('src/main.kt', _kotlinMain),
   ]),
-  go('Go', Icons.bolt_outlined, 'Go', [
-    TemplateFile('src/main.go', _goMain),
-  ]),
+  go('Go', Icons.bolt_outlined, 'Go', [TemplateFile('src/main.go', _goMain)]),
   rust('Rust', Icons.settings_suggest_outlined, 'Rust', [
     TemplateFile('src/main.rs', _rustMain),
   ]),
@@ -130,10 +122,20 @@ enum ProjectTemplate {
     ProjectTemplate.ruby => 'ruby',
   };
 
+  String get directoryName => '${type}Projects';
+
   static ProjectTemplate? fromType(String value) {
     final normalized = value.trim().toLowerCase();
     for (final template in values) {
       if (template.type == normalized) return template;
+    }
+    return null;
+  }
+
+  static ProjectTemplate? fromLanguage(String value) {
+    final normalized = value.trim().toLowerCase();
+    for (final template in values) {
+      if (template.language.toLowerCase() == normalized) return template;
     }
     return null;
   }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -7,8 +8,10 @@ import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/api_client.dart';
 import '../services/cloud_sync_service.dart';
+import '../services/example_code_store.dart';
 import '../services/project_templates.dart';
 import '../services/studio_profile.dart';
+import '../services/task_activity_service.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
@@ -19,6 +22,7 @@ import '../i18n/studio_localizations.dart';
 import 'community/post_list_page.dart';
 import '../widgets/project_card.dart';
 import '../widgets/project_dialogs.dart';
+import '../widgets/retained_page.dart';
 import 'profile_page.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
@@ -39,23 +43,70 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  int _currentIndex = 0;
+  final _currentIndex = ValueNotifier<int>(0);
+  final _examples = ExampleCodeStore();
   late final PageController _pageController;
+  final Map<int, Widget> _pages = {};
+  late Widget _pageView;
 
   @override
   void initState() {
     super.initState();
     _pageController = PageController();
+    _pageView = _createPageView();
   }
+
+  @override
+  void didUpdateWidget(covariant HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.store != widget.store ||
+        oldWidget.auth != widget.auth ||
+        oldWidget.settings != widget.settings) {
+      _pages.clear();
+      _pageView = _createPageView();
+    }
+  }
+
+  Widget _createPageView() => PageView.builder(
+    key: const ValueKey('home-page-view'),
+    controller: _pageController,
+    itemCount: 4,
+    onPageChanged: (index) => _currentIndex.value = index,
+    itemBuilder: (context, index) => _pages.putIfAbsent(index, () {
+      final profile = StudioProfile.current;
+      return RetainedPage(
+        key: ValueKey('home-page-$index'),
+        child: ValueListenableBuilder<int>(
+          valueListenable: _currentIndex,
+          child: _buildPage(
+            this.context,
+            index,
+            profile?.isOffline == true,
+            profile,
+          ),
+          builder: (context, selected, child) =>
+              TickerMode(enabled: selected == index, child: child!),
+        ),
+      );
+    }),
+  );
 
   @override
   void dispose() {
     _pageController.dispose();
+    _currentIndex.dispose();
+    _examples.dispose();
     super.dispose();
   }
 
   void _selectPage(int index) {
-    if (index == _currentIndex) return;
+    if (!_pageController.hasClients) return;
+    final page = _pageController.page ?? _currentIndex.value.toDouble();
+    if ((page - index).abs() < 0.001) return;
+    if ((page - index).abs() > 1) {
+      _pageController.jumpToPage(index);
+      return;
+    }
     _pageController.animateToPage(
       index,
       duration: const Duration(milliseconds: 220),
@@ -68,52 +119,70 @@ class _HomePageState extends State<HomePage> {
     final profile = StudioProfile.current;
     final offline = profile?.isOffline == true;
     final l10n = StudioLocalizations.of(context);
-    const pageCount = 4;
-    return Scaffold(
-      body: PageView.builder(
-        key: const ValueKey('home-page-view'),
-        controller: _pageController,
-        itemCount: pageCount,
-        allowImplicitScrolling: true,
-        onPageChanged: (index) {
-          if (_currentIndex != index) {
-            setState(() => _currentIndex = index);
-          }
-        },
-        itemBuilder: (context, index) => _KeepAlivePage(
-          key: ValueKey('home-page-$index'),
-          child: TickerMode(
-            enabled: _currentIndex == index,
-            child: _buildPage(context, index, offline, profile),
-          ),
-        ),
+    final wide = MediaQuery.sizeOf(context).width >= 900;
+    final extendedRail = MediaQuery.sizeOf(context).width >= 1200;
+    final destinations = [
+      NavigationDestination(
+        icon: const Icon(Icons.home_outlined),
+        selectedIcon: const Icon(Icons.home),
+        label: l10n.home,
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: _selectPage,
-        destinations: [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home),
-            label: l10n.home,
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.apps_outlined),
-            selectedIcon: Icon(Icons.apps),
-            label: l10n.functions,
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.menu_book_outlined),
-            selectedIcon: Icon(Icons.menu_book),
-            label: l10n.tutorial,
-          ),
-          NavigationDestination(
-            icon: Icon(offline ? Icons.code_outlined : Icons.person_outline),
-            selectedIcon: Icon(offline ? Icons.code : Icons.person),
-            label: offline ? l10n.examples : l10n.profile,
-          ),
+      NavigationDestination(
+        icon: const Icon(Icons.apps_outlined),
+        selectedIcon: const Icon(Icons.apps),
+        label: l10n.functions,
+      ),
+      NavigationDestination(
+        icon: const Icon(Icons.menu_book_outlined),
+        selectedIcon: const Icon(Icons.menu_book),
+        label: l10n.tutorial,
+      ),
+      NavigationDestination(
+        icon: Icon(offline ? Icons.code_outlined : Icons.person_outline),
+        selectedIcon: Icon(offline ? Icons.code : Icons.person),
+        label: offline ? l10n.examples : l10n.profile,
+      ),
+    ];
+    return Scaffold(
+      body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (wide) ...[
+            ValueListenableBuilder<int>(
+              valueListenable: _currentIndex,
+              builder: (context, selected, _) => NavigationRail(
+                selectedIndex: selected,
+                onDestinationSelected: _selectPage,
+                extended: extendedRail,
+                labelType: extendedRail
+                    ? NavigationRailLabelType.none
+                    : NavigationRailLabelType.all,
+                groupAlignment: -0.7,
+                destinations: [
+                  for (final destination in destinations)
+                    NavigationRailDestination(
+                      icon: destination.icon,
+                      selectedIcon: destination.selectedIcon,
+                      label: Text(destination.label),
+                    ),
+                ],
+              ),
+            ),
+            const VerticalDivider(width: 1, thickness: 1),
+          ],
+          Expanded(child: _pageView),
         ],
       ),
+      bottomNavigationBar: wide
+          ? null
+          : ValueListenableBuilder<int>(
+              valueListenable: _currentIndex,
+              builder: (context, selected, _) => NavigationBar(
+                selectedIndex: selected,
+                onDestinationSelected: _selectPage,
+                destinations: destinations,
+              ),
+            ),
     );
   }
 
@@ -143,20 +212,29 @@ class _HomePageState extends State<HomePage> {
               )
             : null,
       ),
-      2 => offline
-          ? LocalTutorialsTab(language: profile!.id)
-          : TutorialsTab(auth: widget.auth),
-      3 => offline
-          ? ExampleCodeTab(
-              language: profile!.id,
-              store: widget.store,
-              auth: widget.auth,
-            )
-          : ProfileTab(
-            auth: widget.auth,
-            settings: widget.settings,
-            store: widget.store,
-          ),
+      2 =>
+        offline
+            ? LocalTutorialsTab(
+                language: profile!.id,
+                store: widget.store,
+                auth: widget.auth,
+                settings: widget.settings,
+              )
+            : TutorialsTab(auth: widget.auth),
+      3 =>
+        offline
+            ? ExampleCodeTab(
+                language: profile!.id,
+                store: widget.store,
+                auth: widget.auth,
+                settings: widget.settings,
+                examples: _examples,
+              )
+            : ProfileTab(
+                auth: widget.auth,
+                settings: widget.settings,
+                store: widget.store,
+              ),
       _ => const SizedBox.shrink(),
     };
   }
@@ -171,29 +249,8 @@ class _HomePageState extends State<HomePage> {
       };
 }
 
-class _KeepAlivePage extends StatefulWidget {
-  const _KeepAlivePage({super.key, required this.child});
-
-  final Widget child;
-
-  @override
-  State<_KeepAlivePage> createState() => _KeepAlivePageState();
-}
-
-class _KeepAlivePageState extends State<_KeepAlivePage>
-    with AutomaticKeepAliveClientMixin {
-  @override
-  bool get wantKeepAlive => true;
-
-  @override
-  Widget build(BuildContext context) {
-    super.build(context);
-    return widget.child;
-  }
-}
-
 /// 主页 Tab：项目列表 + 搜索 + 更多操作。
-/// 内部 4 个子页签：全部项目（首字母）/ 历史（最近打开）/ 收藏 / 云端。
+/// 内部 4 个子页签：最近打开 / 全部项目 / 收藏 / 云端。
 class HomeTab extends StatefulWidget {
   const HomeTab({
     super.key,
@@ -218,6 +275,7 @@ class _HomeTabState extends State<HomeTab>
   bool _searchOpen = false;
   String _query = '';
   String _languageFilter = '';
+  late bool _loggedIn;
   Future<void>? _refreshRequest;
   late final List<_ProjectScope> _scopes =
       StudioProfile.current?.showHomeTabs == false
@@ -234,12 +292,38 @@ class _HomeTabState extends State<HomeTab>
   bool get wantKeepAlive => true;
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
+  void initState() {
+    super.initState();
+    _loggedIn = widget.auth.isLoggedIn;
+    widget.auth.addListener(_onAuthChanged);
+    if (_loggedIn) {
+      unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant HomeTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.auth != widget.auth) {
+      oldWidget.auth.removeListener(_onAuthChanged);
+      widget.auth.addListener(_onAuthChanged);
+      _loggedIn = widget.auth.isLoggedIn;
+    }
+  }
+
+  void _onAuthChanged() {
+    final loggedIn = widget.auth.isLoggedIn;
+    if (mounted && loggedIn != _loggedIn) {
+      setState(() => _loggedIn = loggedIn);
+      if (loggedIn) {
+        unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
+      }
+    }
   }
 
   @override
   void dispose() {
+    widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _projectTabs.dispose();
     super.dispose();
@@ -336,7 +420,7 @@ class _HomeTabState extends State<HomeTab>
                         children: [
                           Icon(Icons.folder_delete_outlined, size: 20),
                           SizedBox(width: 12),
-                            Text(l10n.removeMissingProjects),
+                          Text(l10n.removeMissingProjects),
                         ],
                       ),
                     ),
@@ -353,7 +437,7 @@ class _HomeTabState extends State<HomeTab>
               label: Text(l10n.createProject),
             ),
       body: ListenableBuilder(
-        listenable: Listenable.merge([widget.store, widget.auth]),
+        listenable: widget.store,
         builder: (context, _) {
           if (_searchOpen) {
             return _buildProjectList(
@@ -524,10 +608,9 @@ class _HomeTabState extends State<HomeTab>
                   : _EmptyState(onCreate: () => _createProject(context)),
             )
           : _buildGridOrList(context, projects);
-      // 语言标签栏只在完整的 QFLI Studio 里出现；语言专属 App（只服务一门语言）
-      // 显示这排芯片既没有筛选意义，也白占一行高度。
+      // The main app also has a profile; use its homepage-tab setting.
       final showLanguageChips =
-          StudioProfile.current == null && chipList.length > 1;
+          (StudioProfile.current?.showHomeTabs ?? true) && chipList.length > 1;
       return Column(
         children: [
           if (showLanguageChips)
@@ -603,12 +686,21 @@ class _HomeTabState extends State<HomeTab>
       if (!mounted || widget.auth.token != token) return;
       final projects = <Project>[];
       for (final item in remote) {
-        final id = (item['id'] as num?)?.toInt();
+        final id = item['id'] as String?;
         final name = item['name'] as String?;
-        if (id == null || id <= 0 || name == null) continue;
-        final mirror = await CloudSyncService.open(cloudId: id, name: name);
+        if (id == null || id.isEmpty || name == null) continue;
+        final legacyId = item['legacyId'] as String?;
+        if (legacyId != null) await widget.store.remapCloudId(legacyId, id);
+        final existing = widget.store.projects.where(
+          (project) => project.cloudId == id,
+        );
+        final mirror = await CloudSyncService.open(
+          cloudId: id,
+          name: name,
+          cachePath: existing.isEmpty ? null : existing.first.path,
+        );
         projects.add(
-          Project.create(name: name, path: mirror.localPath, cloudId: '$id'),
+          Project.create(name: name, path: mirror.localPath, cloudId: id),
         );
         mirror.dispose();
       }
@@ -620,9 +712,9 @@ class _HomeTabState extends State<HomeTab>
         SnackBar(
           content: Text(
             error is ApiException
-                ? StudioLocalizations.of(context).cloudRefreshFailed(
-                    error.message,
-                  )
+                ? StudioLocalizations.of(
+                    context,
+                  ).cloudRefreshFailed(error.message)
                 : StudioLocalizations.of(context).refreshProjectsFailed,
           ),
         ),
@@ -667,17 +759,24 @@ class _HomeTabState extends State<HomeTab>
         final wide = constraints.maxWidth > 720;
         const padding = EdgeInsets.fromLTRB(12, 8, 12, 96);
         if (wide) {
-          return GridView.builder(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: padding,
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: 420,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              mainAxisExtent: 90,
+          final scale = MediaQuery.textScalerOf(context).scale(1);
+          final itemExtent = (24 + 38 * scale).clamp(90.0, 180.0).toDouble();
+          return Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 1360),
+              child: GridView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: padding,
+                gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 420,
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  mainAxisExtent: itemExtent,
+                ),
+                itemCount: projects.length,
+                itemBuilder: (context, i) => _buildCard(context, projects[i]),
+              ),
             ),
-            itemCount: projects.length,
-            itemBuilder: (context, i) => _buildCard(context, projects[i]),
           );
         }
         return ListView.builder(
@@ -705,6 +804,7 @@ class _HomeTabState extends State<HomeTab>
   Future<void> _createProject(BuildContext context) async {
     final result = await showCreateProjectDialog(context, widget.store);
     if (result != null && context.mounted) {
+      TaskActivityService.report(widget.auth, 'create_project');
       await _openProject(
         context,
         result.project,
@@ -733,6 +833,7 @@ class _HomeTabState extends State<HomeTab>
       return;
     }
     widget.store.touch(project);
+    TaskActivityService.report(widget.auth, 'open_project');
     if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -785,10 +886,10 @@ class _HomeTabState extends State<HomeTab>
         .where((p) => !p.isCloud && !Directory(p.path).existsSync())
         .toList();
     if (missing.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(
-        SnackBar(content: Text(StudioLocalizations.of(context).noMissingProjects)),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(StudioLocalizations.of(context).noMissingProjects),
+        ),
       );
       return;
     }
@@ -928,10 +1029,11 @@ class _HomeTabState extends State<HomeTab>
       ).showSnackBar(SnackBar(content: Text(registered.error!)));
       return;
     }
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(content: Text(StudioLocalizations.of(context).cloudProjectCreated)),
+    TaskActivityService.report(widget.auth, 'create_project');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(StudioLocalizations.of(context).cloudProjectCreated),
+      ),
     );
   }
 }

@@ -1,10 +1,12 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'app_paths.dart';
+import 'project_config.dart';
 
 /// 回收站：删除项目/文件前先压缩备份到应用数据目录。
 ///
@@ -18,9 +20,22 @@ abstract final class RecycleBin {
   @visibleForTesting
   static String? baseOverride;
 
+  static Future<Directory> directory(String bin) async {
+    if (bin != projectsBin && bin != filesBin) throw ArgumentError.value(bin);
+    final base = baseOverride ?? await AppPaths.storageDirectory();
+    if (base == null) throw const FileSystemException('未找到应用数据目录');
+    return Directory(p.join(base, 'recyclebin', bin));
+  }
+
   /// 删除整个项目文件夹前的备份。返回错误信息，null 表示成功。
-  static Future<String?> backupProject(Directory projectDir) =>
-      _zipToBin(sourcePath: projectDir.path, bin: projectsBin);
+  static Future<String?> backupProject(
+    Directory projectDir, {
+    String? projectName,
+  }) => _zipToBin(
+    sourcePath: projectDir.path,
+    bin: projectsBin,
+    namePrefix: projectName,
+  );
 
   /// 删除文件/文件夹前的备份（files_bin），[projectName] 用于命名防混淆。
   static Future<String?> backupEntry(
@@ -45,10 +60,33 @@ abstract final class RecycleBin {
       final binDir = Directory(p.join(base, 'recyclebin', bin));
       await binDir.create(recursive: true);
       final target = File(
-        p.join(binDir.path, await _zipName(binDir, sourcePath, namePrefix)),
+        p.join(
+          binDir.path,
+          await _zipName(
+            binDir,
+            sourcePath,
+            bin == projectsBin ? null : namePrefix,
+          ),
+        ),
       );
       final bytes = await _compress(sourcePath, name: p.basename(sourcePath));
       await target.writeAsBytes(bytes, flush: true);
+      final metadata = bin == projectsBin
+          ? ProjectConfig.readMetadata(sourcePath)
+          : null;
+      await File('${target.path}.metadata.json').writeAsString(
+        jsonEncode({
+          'originalPath': p.normalize(p.absolute(sourcePath)),
+          'projectName': metadata?.name ?? namePrefix,
+          'name': bin == projectsBin
+              ? metadata?.name ?? namePrefix ?? p.basename(sourcePath)
+              : p.basename(sourcePath),
+          if (metadata?.language != null) 'language': metadata!.language,
+          if (metadata?.type != null) 'type': metadata!.type,
+          'time': DateTime.now().toIso8601String(),
+        }),
+        flush: true,
+      );
       return null;
     } catch (e) {
       return '备份失败：$e';

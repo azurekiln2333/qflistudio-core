@@ -10,6 +10,7 @@ import 'package:re_highlight/languages/java.dart';
 import 'package:re_highlight/languages/javascript.dart';
 import 'package:re_highlight/languages/json.dart';
 import 'package:re_highlight/languages/kotlin.dart';
+import 'package:re_highlight/languages/markdown.dart';
 import 'package:re_highlight/languages/python.dart';
 import 'package:re_highlight/languages/xml.dart';
 import 'package:re_highlight/styles/github-dark.dart';
@@ -34,6 +35,7 @@ abstract final class HighlightThemes {
     'css': langCss,
     'xml': _htmlMode(),
     'json': langJson,
+    'markdown': langMarkdown,
   };
 
   static const _extToLang = {
@@ -60,6 +62,8 @@ abstract final class HighlightThemes {
     '.xml': 'xml',
     '.svg': 'xml',
     '.json': 'json',
+    '.md': 'markdown',
+    '.markdown': 'markdown',
   };
 
   static const tokenLabels = {

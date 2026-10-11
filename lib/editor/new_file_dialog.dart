@@ -83,6 +83,7 @@ Future<String?> showNewFileDialog(
         }
 
         return AlertDialog(
+          scrollable: true,
           title: const Text('新建文件'),
           content: SizedBox(
             width: 400,
@@ -199,6 +200,7 @@ Future<String?> _askCustomExt(BuildContext context) {
   return showDialog<String>(
     context: context,
     builder: (context) => AlertDialog(
+      scrollable: true,
       title: const Text('自定义后缀'),
       content: TextField(
         controller: controller,

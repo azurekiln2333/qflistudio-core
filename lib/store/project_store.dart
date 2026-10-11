@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import '../models/project.dart';
 import '../models/tutorial.dart';
 import '../services/app_paths.dart';
+import '../services/code_import_service.dart';
+import '../services/file_service.dart';
 import '../services/project_config.dart';
 import '../services/project_templates.dart';
 import '../services/recycle_bin.dart';
@@ -31,8 +33,11 @@ typedef ProjectResult = ({String? error, Project? project});
     try {
       final project = Project.fromJson(Map<String, dynamic>.from(item));
       if (!ids.add(project.id)) continue;
-      if (!project.isCloud && project.language.isEmpty) {
-        project.language = ProjectConfig.readLanguage(project.path) ?? '';
+      if (!project.isCloud) {
+        final metadata = ProjectConfig.readMetadata(project.path);
+        project.name = metadata.name ?? project.name;
+        project.language = metadata.language ?? project.language;
+        project.type = metadata.type ?? project.type;
       }
       projects.add(project);
     } catch (_) {
@@ -45,12 +50,13 @@ typedef ProjectResult = ({String? error, Project? project});
   );
 }
 
-/// 项目列表的唯一数据源，负责内存状态与本地 JSON 持久化。
+/// 项目注册表管理身份、路径和列表状态；名称与语言优先读取项目配置。
 class ProjectStore extends ChangeNotifier {
   ProjectStore({File? storageFile}) : _storageOverride = storageFile;
 
   final File? _storageOverride;
   final List<Project> _projects = [];
+  final Set<Project> _pendingLocalRegistrations = {};
   File? _storage;
   bool _loaded = false;
   Future<void>? _writes;
@@ -86,8 +92,13 @@ class ProjectStore extends ChangeNotifier {
 
   Future<void> _reload() async {
     _storage ??= _storageOverride ?? await _resolveStorageFile();
-    final pendingWrite = _writes;
-    if (pendingWrite != null) await pendingWrite;
+    // New registrations can queue while refresh waits for an earlier write.
+    while (true) {
+      final pendingWrite = _writes;
+      if (pendingWrite == null) break;
+      await pendingWrite;
+      if (identical(pendingWrite, _writes)) break;
+    }
     final revision = _revision;
     final result = await compute(_readProjectRegistry, _storage!.path);
     // 读取期间发生了创建、收藏等操作时保留较新的内存状态。
@@ -106,30 +117,90 @@ class ProjectStore extends ChangeNotifier {
     return File(p.join(base, 'projects.json'));
   }
 
-  Future<void> _persist() {
+  Future<void> _persist({VoidCallback? onFailure, Project? registering}) {
     _revision++;
     final file = _storage;
-    if (file == null) return Future.value();
-    final data = {
-      'version': 1,
-      'projects': _projects.map((e) => e.toJson()).toList(),
-      if (lastBrowsedProjectId != null)
-        'lastBrowsedProjectId': lastBrowsedProjectId,
-    };
-    final encoded = const JsonEncoder.withIndent('  ').convert(data);
+    if (file == null) {
+      _pendingLocalRegistrations.remove(registering);
+      return Future.value();
+    }
     // 顺序落盘，避免收藏、最近打开与下拉刷新相互覆盖。
     Future<void> write() async {
-      await file.parent.create(recursive: true);
-      await file.writeAsString(encoded);
+      Directory? temporaryDirectory;
+      File? temporaryFile;
+      try {
+        final data = {
+          'version': 1,
+          'projects': [
+            for (final project in _projects)
+              if (!_pendingLocalRegistrations.contains(project) ||
+                  identical(project, registering))
+                project.toJson(),
+          ],
+          if (lastBrowsedProjectId != null)
+            'lastBrowsedProjectId': lastBrowsedProjectId,
+        };
+        final encoded = const JsonEncoder.withIndent('  ').convert(data);
+        await file.parent.create(recursive: true);
+        temporaryDirectory = await file.parent.createTemp(
+          '.qfli-project-registry-',
+        );
+        temporaryFile = File(p.join(temporaryDirectory.path, 'registry.json'));
+        await temporaryFile.writeAsString(encoded, flush: true);
+        await temporaryFile.rename(file.path);
+        _pendingLocalRegistrations.remove(registering);
+      } catch (_) {
+        onFailure?.call();
+        rethrow;
+      } finally {
+        if (temporaryFile != null) {
+          try {
+            await temporaryFile.delete();
+          } on FileSystemException {
+            // Successful replacement already moved the temporary file.
+          }
+        }
+        if (temporaryDirectory != null) {
+          try {
+            await temporaryDirectory.delete();
+          } on FileSystemException {
+            // Leave any unrelated entries that appeared during the write.
+          }
+        }
+      }
     }
 
     final previous = _writes;
-    return _writes = previous == null
-        ? write()
-        : previous.catchError((Object _) {}).then((_) => write());
+    final pending = previous == null ? write() : previous.then((_) => write());
+    // Callers receive the failure, while refresh and later writes can continue.
+    _writes = pending.catchError((Object _) {});
+    return pending;
   }
 
-  /// 在 [location] 下创建名为 [name] 的文件夹并注册为项目，
+  Future<ProjectResult> _registerLocalProject(Project project) async {
+    _projects.add(project);
+    _pendingLocalRegistrations.add(project);
+    try {
+      await _persist(
+        registering: project,
+        onFailure: () {
+          _pendingLocalRegistrations.remove(project);
+          _projects.remove(project);
+          _revision++;
+        },
+      );
+    } catch (error) {
+      notifyListeners();
+      return (
+        error: error is FileSystemException ? error.message : '$error',
+        project: null,
+      );
+    }
+    notifyListeners();
+    return (error: null, project: project);
+  }
+
+  /// 在 [location] 下按语言创建项目目录；显示名称独立保存在项目配置中。
   /// [template] 决定写入哪些初始 demo 文件。
   Future<ProjectResult> createProject({
     required String name,
@@ -149,28 +220,70 @@ class ProjectStore extends ChangeNotifier {
     required String name,
     required ExampleCode example,
     String? location,
+    String? fileName,
   }) async {
+    final selectedFileName =
+        fileName ?? CodeImportService.suggestedFileName(example.type);
+    if (!CodeImportService.isValidFileName(selectedFileName)) {
+      throw CodeImportException(
+        CodeImportFailure.invalidFileName,
+        selectedFileName,
+      );
+    }
     final root = location ?? await AppPaths.projectsRoot(create: true);
     if (root == null) {
       return (error: '未找到可写的项目目录', project: null);
     }
-    final template = ProjectTemplate.fromType(example.type) ??
-        ProjectTemplate.fromType(example.type == 'html' ? 'web' : example.type) ??
+    final template =
+        ProjectTemplate.fromType(example.type) ??
+        ProjectTemplate.fromType(
+          example.type.trim().toLowerCase() == 'html' ? 'web' : example.type,
+        ) ??
         ProjectTemplate.empty;
-    final result = await createProject(
+
+    // Java: the entry file must be `<ClassName>.java` and the source's entry
+    // class/constructors/self-references renamed to match. The dialog passes the
+    // bare class name; resolveImport throws clearly when the source cannot be
+    // safely interpreted or the rename would collide.
+    var source = example.code;
+    var entryName = selectedFileName;
+    if (CodeImportService.isJavaType(example.type)) {
+      final resolved = CodeImportService.resolveImport(
+        example,
+        selectedFileName,
+      );
+      entryName = resolved.fileName;
+      source = resolved.code;
+    }
+
+    final entryFile = p.join(
+      p.dirname(template.mainFile ?? 'src/snippet.txt'),
+      entryName,
+    );
+    final files = <TemplateFile>[
+      for (final file in template.files)
+        if (file.path != template.mainFile &&
+            p.normalize(file.path) != p.normalize(entryFile))
+          file,
+      TemplateFile(entryFile, source),
+    ];
+    return _createProject(
       name: name,
       location: root,
       template: template,
+      cloudId: null,
+      files: files,
+      entryFile: entryFile,
+      // Imported examples get a unique ASCII `demo_*` directory so a Chinese
+      // display title never becomes a filesystem name.
+      asciiDemoDirectory: true,
+      type: template == ProjectTemplate.empty
+          ? example.type.trim().toLowerCase()
+          : template.type,
+      language: template == ProjectTemplate.empty
+          ? example.type.trim()
+          : template.language,
     );
-    final project = result.project;
-    final mainFile = template.mainFile;
-    if (project == null || mainFile == null) return result;
-    try {
-      await File(p.join(project.path, mainFile)).writeAsString(example.code);
-    } on FileSystemException catch (error) {
-      return (error: '写入示例代码失败：${error.message}', project: project);
-    }
-    return result;
   }
 
   Future<ProjectResult> _createProject({
@@ -178,10 +291,17 @@ class ProjectStore extends ChangeNotifier {
     required String location,
     required ProjectTemplate template,
     required String? cloudId,
+    List<TemplateFile>? files,
+    String? entryFile,
+    String? type,
+    String? language,
+    bool asciiDemoDirectory = false,
   }) async {
+    final projectType = type ?? template.type;
+    final projectLanguage = language ?? template.language;
     final trimmed = name.trim();
     if (trimmed.isEmpty) return (error: '请输入项目名称', project: null);
-    if (RegExp(r'[\\/:*?"<>|]').hasMatch(trimmed)) {
+    if (!FileService.isValidEntryName(trimmed) || trimmed.contains('\u0000')) {
       return (error: '项目名称不能包含 \\ / : * ? " < > | 等字符', project: null);
     }
     final locationPath = location.trim();
@@ -189,37 +309,62 @@ class ProjectStore extends ChangeNotifier {
     if (locationPath.isEmpty || !dir.existsSync()) {
       return (error: '位置目录不存在：$locationPath', project: null);
     }
-    final fullPath = p.join(dir.path, trimmed);
-    if (Directory(fullPath).existsSync() || File(fullPath).existsSync()) {
-      return (error: '目录已存在：$fullPath', project: null);
+    late final String fullPath;
+    Directory? createdDirectory;
+    Future<void> discardExampleDirectory() async {
+      final directory = createdDirectory;
+      if (files == null || directory == null) return;
+      try {
+        await directory.delete(recursive: true);
+      } on FileSystemException {
+        // Keep the original import failure if cleanup is also denied.
+      }
     }
+
     try {
+      final directory = asciiDemoDirectory && files != null
+          ? AppPaths.createAsciiDemoProjectDirectory(
+              location: dir.path,
+              type: projectType,
+              language: projectLanguage,
+            )
+          : AppPaths.createProjectDirectory(
+              location: dir.path,
+              name: trimmed,
+              type: projectType,
+              language: projectLanguage,
+            );
+      createdDirectory = directory;
+      fullPath = directory.path;
       await Directory(p.join(fullPath, 'src')).create(recursive: true);
-      for (final file in template.files) {
-        await File(
-          p.join(fullPath, file.path),
-        ).writeAsString(file.content, flush: true);
+      for (final file in files ?? template.files) {
+        final target = File(p.join(fullPath, file.path));
+        await target.parent.create(recursive: true);
+        await target.create(exclusive: true);
+        await target.writeAsString(file.content, flush: true);
       }
       await ProjectConfig.write(
         projectRoot: fullPath,
         name: trimmed,
-        language: template.language,
-        type: template.type,
+        language: projectLanguage,
+        type: projectType,
+        entryFile: entryFile,
+        strict: true,
       );
     } on FileSystemException catch (e) {
+      await discardExampleDirectory();
       return (error: '创建项目失败：${e.message}', project: null);
     }
     final project = Project.create(
       name: trimmed,
       path: fullPath,
       cloudId: cloudId,
-      language: template.language,
-      type: template.type,
+      language: projectLanguage,
+      type: projectType,
     );
-    _projects.add(project);
-    await _persist();
-    notifyListeners();
-    return (error: null, project: project);
+    final result = await _registerLocalProject(project);
+    if (result.error != null) await discardExampleDirectory();
+    return result;
   }
 
   /// 注册一个磁盘上已存在的文件夹。
@@ -234,14 +379,16 @@ class ProjectStore extends ChangeNotifier {
     )) {
       return (error: '该项目已在列表中', project: null);
     }
-    var name = p.basename(normalized);
+    final metadata = ProjectConfig.readMetadata(normalized);
+    var name = metadata.name ?? p.basename(normalized);
     if (name.isEmpty) name = normalized; // 盘符根目录
     // 语言优先取项目配置文件（.qfli/project.json），没有才做扩展名检测。
-    final configLanguage = ProjectConfig.readLanguage(normalized) ?? '';
-    final configType = ProjectConfig.readType(normalized) ?? '';
+    final configLanguage = metadata.language ?? '';
     final language = configLanguage.isNotEmpty
         ? configLanguage
         : detectLanguage(normalized);
+    final configType =
+        metadata.type ?? ProjectTemplate.fromLanguage(language)?.type ?? '';
     await ProjectConfig.write(
       projectRoot: normalized,
       name: name,
@@ -252,11 +399,9 @@ class ProjectStore extends ChangeNotifier {
       name: name,
       path: normalized,
       language: language,
+      type: configType,
     );
-    _projects.add(project);
-    await _persist();
-    notifyListeners();
-    return (error: null, project: project);
+    return _registerLocalProject(project);
   }
 
   /// 注册一个云端项目（本地镜像目录 + 服务器 cloudId）。
@@ -282,6 +427,14 @@ class ProjectStore extends ChangeNotifier {
   }
 
   /// 合并云端目录信息；保留本地收藏、最近打开时间和未同步文件。
+  Future<void> remapCloudId(String oldId, String newId) async {
+    for (final project in _projects) {
+      if (project.cloudId == oldId) project.cloudId = newId;
+    }
+    await _persist();
+    notifyListeners();
+  }
+
   Future<void> mergeCloudProjects(Iterable<Project> projects) async {
     for (final project in projects) {
       if (!project.isCloud) continue;
@@ -311,7 +464,10 @@ class ProjectStore extends ChangeNotifier {
     if (project.isCloud) return '云端项目请在云端管理中删除';
     final dir = Directory(project.path);
     if (dir.existsSync()) {
-      final backupError = await RecycleBin.backupProject(dir);
+      final backupError = await RecycleBin.backupProject(
+        dir,
+        projectName: project.name,
+      );
       if (backupError != null) return backupError;
       try {
         await dir.delete(recursive: true);

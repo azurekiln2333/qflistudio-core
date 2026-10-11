@@ -8,11 +8,9 @@ import 'package:re_editor/re_editor.dart';
 
 import '../models/project.dart';
 import '../pages/git_page.dart';
-import '../pages/online_terminal_page.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
-import '../services/file_backup.dart';
 import '../community/community_widgets.dart';
 import 'editor_delete_fix.dart';
 import 'editor_selection_toolbar.dart';
@@ -21,8 +19,13 @@ import '../services/file_encoding.dart';
 import '../services/code_formatter.dart';
 import '../services/local_web_server.dart';
 import '../services/runner_service.dart';
+import '../services/online_program.dart';
 import '../services/share_service.dart';
 import '../services/studio_profile.dart';
+import '../services/web_preview_file.dart';
+import '../services/task_activity_service.dart';
+import '../widgets/retained_page.dart';
+import 'editor_fonts.dart';
 import 'code_minimap.dart';
 import 'symbols_bar.dart';
 import 'editor_controller.dart';
@@ -93,19 +96,42 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool? _explorerVisible;
   bool _terminalCollapsed = false;
   bool _runningFileTool = false;
-  double _terminalHeight = 240;
+  bool _terminalCreated = false;
+  bool _runningProject = false;
+
+  /// Preferred expanded height, preserved across collapse and viewport clamps.
+  double _terminalHeight = TerminalPanelMetrics.defaultExpandedHeight;
+
+  /// Live height while a resize drag is in progress. Null when not dragging; the
+  /// displayed height then comes from viewport clamping of [_terminalHeight].
+  double? _terminalDragHeight;
+  bool _draggingTerminal = false;
+
+  /// Raw accumulated drag displacement from the anchor, kept *unclamped* so
+  /// many small steps can cross the collapse threshold. The displayed height is
+  /// [_terminalDragHeight] (clamped); the preference commits on drag end.
+  double _terminalDragTotal = 0;
+
+  /// Height the panel had when the current drag began. Raw gesture displacement
+  /// is added to this anchor, so many small steps accumulate instead of each
+  /// being clamped away.
+  double _terminalDragAnchor = 0;
+
   bool _aiCollapsed = false;
   _BottomPanel _bottomPanel = _BottomPanel.none;
   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
   WebPreviewSession? _previewServer;
   StreamSubscription<String>? _debugSub;
-  Timer? _autoSaveTimer;
   Timer? _historyTimer;
+  final Map<String, Timer> _activityTimers = {};
+  final Map<String, int> _manualSaveGeneration = {};
+  final Map<String, int> _autoEditGeneration = {};
+  bool _leaving = false;
 
   // 双指缩放字号 + 滚动收键盘（raw pointer，不与编辑器手势竞争）。
-  double _fontSize = 13.5;
-  static const double _minFontSize = 9;
-  static const double _maxFontSize = 30;
+  late double _fontSize;
+  late double _savedFontSize;
+  final Map<OpenFile, Widget> _codeViews = {};
   final Map<int, Offset> _activePointers = {};
   double? _pinchStartDistance;
   double? _pinchStartFontSize;
@@ -118,19 +144,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   CloudSyncService? _cloud;
   StreamSubscription<SyncState>? _cloudSub;
   SyncState _syncState = SyncState.idle;
-  Timer? _syncDebounce;
   String? _syncError;
 
   @override
   void initState() {
     super.initState();
-    _editor = EditorController(project: widget.project);
+    _fontSize = _savedFontSize = widget.settings.editorFontSize;
+    _editor = EditorController(
+      project: widget.project,
+      onContentChanged: _onFileContentChanged,
+    );
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
     if (widget.project.isCloud && StudioProfile.current?.isOffline != true) {
       CloudSyncService.open(
-        cloudId: int.parse(widget.project.cloudId!),
+        cloudId: widget.project.cloudId!,
+        cachePath: widget.project.path,
         name: widget.project.name,
       ).then((service) {
         if (!mounted) return;
@@ -141,20 +171,28 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         _pullInitial();
       });
     }
-    // 会话恢复：优先恢复上次打开的文件与光标；无历史时打开模板主文件。
+    // Restore existing tabs, then select an explicitly requested file.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoreSession();
     });
   }
 
   Future<void> _restoreSession() async {
+    if (!mounted) return;
     final session = await ProjectHistory.load(widget.project.path);
+    if (!mounted) return;
     final opened = <String>[];
     for (final rel in session.openFiles) {
       final abs = p.isAbsolute(rel) ? rel : p.join(widget.project.path, rel);
       if (!File(abs).existsSync()) continue;
       final error = await _editor.openPath(abs, cursor: session.cursors[rel]);
+      if (!mounted) return;
       if (error == null) opened.add(rel);
+    }
+    final initialPath = widget.initialOpenPath;
+    if (initialPath != null) {
+      await _openInitialFile(initialPath);
+      return;
     }
     if (opened.isNotEmpty) {
       final activeRel = session.activeFile;
@@ -173,10 +211,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         }
       }
       return;
-    }
-    final initialPath = widget.initialOpenPath;
-    if (initialPath != null) {
-      await _openInitialFile(initialPath);
     }
   }
 
@@ -211,13 +245,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _leaving = true;
+    for (final timer in _activityTimers.values) {
+      timer.cancel();
+      TaskActivityService.report(widget.auth, 'save_file');
+    }
+    _activityTimers.clear();
     _saveHistory(); // 离开编辑器时保存现场（异步落盘）
     widget.settings.removeListener(_onSettingsChanged);
     _editor.removeListener(_syncTabController);
     _editor.removeListener(_onEditorChanged);
     _longPressTimer?.cancel();
-    _autoSaveTimer?.cancel();
-    _syncDebounce?.cancel();
     _historyTimer?.cancel();
     _cloudSub?.cancel();
     _debugSub?.cancel();
@@ -251,65 +289,88 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _onSettingsChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {
+      if (_savedFontSize != widget.settings.editorFontSize) {
+        _fontSize = _savedFontSize = widget.settings.editorFontSize;
+      }
+      _codeViews.clear();
+    });
   }
 
-  /// 本地项目：开启自动保存后，编辑停止 2.5 秒自动写盘，
-  /// 覆盖前把磁盘上的上一版本带时间戳备份到 files_backup。
-  Future<void> _autoSaveNow() async {
-    final index = _editor.currentIndex;
-    final open = _editor.current;
-    if (index < 0 || open == null || !open.dirty) return;
-    if (widget.settings.backupEnabled) {
-      await FileBackup.backupBeforeOverwrite(
-        File(open.path),
-        projectName: widget.project.name,
-      );
-    }
-    final error = await _editor.saveAt(index);
-    if (error != null && mounted) {
-      _showSnack('自动保存失败：$error');
-    }
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _codeViews.clear();
   }
 
-  /// 云端项目：编辑停止 2.5 秒后自动写盘并推送（实时同步）。
   void _onEditorChanged() {
     if (_editor.current?.readOnly == true) return; // 历史快照只读
+    _scheduleHistorySave();
+  }
+
+  void _scheduleHistorySave() {
     _historyTimer?.cancel();
     _historyTimer = Timer(const Duration(milliseconds: 1500), () {
       unawaited(_saveHistory());
     });
-    if (_cloud == null && widget.settings.autoSave) {
-      _autoSaveTimer?.cancel();
-      _autoSaveTimer = Timer(const Duration(milliseconds: 2500), _autoSaveNow);
+  }
+
+  void _onFileContentChanged(OpenFile open) {
+    _scheduleHistorySave();
+    if (!widget.settings.autoSave && !widget.project.isCloud) return;
+    _activityTimers.remove(open.path)?.cancel();
+    final editGeneration = (_autoEditGeneration[open.path] ?? 0) + 1;
+    _autoEditGeneration[open.path] = editGeneration;
+    final bytes = TextCodec.byName(open.encoding).encode(open.controller.text);
+    final save = _editor.saveFile(
+      open,
+      backup: widget.settings.backupEnabled,
+      bytes: bytes,
+    );
+    unawaited(
+      _finishAutoSave(
+        open.path,
+        bytes,
+        save,
+        widget.auth.token,
+        _manualSaveGeneration[open.path] ?? 0,
+        editGeneration,
+      ),
+    );
+  }
+
+  Future<void> _finishAutoSave(
+    String path,
+    List<int> bytes,
+    Future<String?> save,
+    String? token,
+    int manualGeneration,
+    int editGeneration,
+  ) async {
+    final error = await save;
+    if (error != null) {
+      if (mounted) _showSnack('自动保存失败：$error');
+      return;
     }
-    if (_cloud == null) return;
-    _syncDebounce?.cancel();
-    _syncDebounce = Timer(const Duration(milliseconds: 2500), () async {
-      final open = _editor.current;
-      final token = widget.auth.token;
-      if (open == null || token == null) return;
-      final file = File(open.path);
-      // 云端实时同步本身也是一次自动保存，覆盖前同样备份（可关）。
-      if (widget.settings.backupEnabled) {
-        await FileBackup.backupBeforeOverwrite(
-          file,
-          projectName: widget.project.name,
-        );
+    if ((_manualSaveGeneration[path] ?? 0) == manualGeneration &&
+        _autoEditGeneration[path] == editGeneration) {
+      if (_leaving) {
+        TaskActivityService.report(widget.auth, 'save_file');
+      } else {
+        _activityTimers.remove(path)?.cancel();
+        _activityTimers[path] = Timer(const Duration(seconds: 2), () {
+          _activityTimers.remove(path);
+          TaskActivityService.report(widget.auth, 'save_file');
+        });
       }
-      try {
-        await file.writeAsBytes(
-          TextCodec.byName(open.encoding).encode(open.controller.text),
-          flush: true,
-        );
-      } on FileSystemException catch (e) {
-        if (mounted) setState(() => _syncError = '本地写入失败：${e.message}');
-        return;
-      }
-      open.dirty = false;
-      final error = await _cloud!.pushFile(token, open.path);
-      if (mounted) setState(() => _syncError = error);
-    });
+    }
+    final cloud = _cloud;
+    if (cloud == null || token == null || widget.auth.token != token) return;
+    final syncError = await cloud.pushBytes(token, path, bytes);
+    if (mounted && _syncError != syncError) {
+      setState(() => _syncError = syncError);
+    }
   }
 
   Future<void> _pullFromCloud() async {
@@ -413,7 +474,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       if (_pinchStartDistance! > 0) {
         setState(() {
           _fontSize = (_pinchStartFontSize! * distance / _pinchStartDistance!)
-              .clamp(_minFontSize, _maxFontSize);
+              .clamp(EditorFonts.minSize, EditorFonts.maxSize);
+          _codeViews.clear();
         });
       }
       return;
@@ -425,12 +487,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _longPressTimer = null;
     _activePointers.remove(event.pointer);
     if (_activePointers.length < 2) {
+      if (_pinchStartFontSize != null) {
+        unawaited(widget.settings.setEditorFont(size: _fontSize));
+      }
       _pinchStartDistance = null;
       _pinchStartFontSize = null;
     }
   }
 
   Future<void> _openInitialFile(String path) async {
+    if (!mounted) return;
     // 模板主文件是相对路径（如 src/main.py），必须拼到项目根下。
     final abs = p.isAbsolute(path) ? path : p.join(widget.project.path, path);
     final error = await _editor.openPath(abs);
@@ -445,6 +511,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   void _syncTabController() {
     if (!mounted) return;
     final count = _editor.files.length;
+    _codeViews.removeWhere((file, _) => !_editor.files.contains(file));
     final old = _tabController;
     if (old != null && old.length == count) {
       if (old.index != _editor.currentIndex &&
@@ -492,16 +559,24 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   // ---- 编辑动作 ----
 
   Future<void> _saveCurrent() async {
-    final index = _editor.currentIndex;
-    if (index < 0) return;
-    final error = await _editor.saveAt(index);
+    final open = _editor.current;
+    if (open == null || open.readOnly) return;
+    final wasDirty = open.dirty;
+    final token = widget.auth.token;
+    final bytes = TextCodec.byName(open.encoding).encode(open.controller.text);
+    final error = await _editor.saveFile(open, bytes: bytes);
     if (error != null) {
-      _showSnack(error);
+      if (mounted) _showSnack(error);
       return;
     }
-    if (_cloud != null && widget.auth.token != null) {
-      final path = _editor.current!.path;
-      final syncError = await _cloud!.pushFile(widget.auth.token!, path);
+    if (wasDirty) {
+      _manualSaveGeneration[open.path] =
+          (_manualSaveGeneration[open.path] ?? 0) + 1;
+      _activityTimers.remove(open.path)?.cancel();
+      TaskActivityService.report(widget.auth, 'save_file');
+    }
+    if (_cloud != null && token != null && widget.auth.token == token) {
+      final syncError = await _cloud!.pushBytes(token, open.path, bytes);
       if (mounted) setState(() => _syncError = syncError);
     }
   }
@@ -570,7 +645,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final tool = StudioProfile.current?.editorFileTools
         .where((tool) => tool.id == id)
         .firstOrNull;
-    if (_runningFileTool || open == null || open.readOnly || tool == null) return;
+    if (_runningFileTool || open == null || open.readOnly || tool == null) {
+      return;
+    }
     if (!tool.extensions.contains(p.extension(open.path).toLowerCase())) return;
     setState(() => _runningFileTool = true);
     try {
@@ -602,9 +679,39 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 当前文件能否交给产品自带的整页文档工具（如 Markdown 编辑/预览工作台）。
+  bool _hasDocumentTool(OpenFile? open) {
+    final profile = StudioProfile.current;
+    if (open == null || profile?.documentToolBuilder == null) return false;
+    return profile!.supportedFileExtensions.contains(
+      p.extension(open.name).toLowerCase(),
+    );
+  }
+
   void _openContentTool() {
     final open = _editor.current;
     if (open == null) return;
+    final documentTool = StudioProfile.current?.documentToolBuilder;
+    if (documentTool != null && _hasDocumentTool(open)) {
+      final page = documentTool(
+        DocumentToolRequest(
+          path: open.path,
+          name: open.name,
+          text: open.controller.text,
+          projectPath: open.projectRootPath,
+          readOnly: open.readOnly,
+          save: (text) async {
+            if (!mounted || !_editor.files.contains(open)) return '文件已关闭';
+            if (open.controller.text != text) {
+              setState(() => open.controller.text = text);
+            }
+            return _editor.saveFile(open);
+          },
+        ),
+      );
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+      return;
+    }
     final extension = p.extension(open.name).toLowerCase();
     if (extension != '.json' &&
         extension != '.md' &&
@@ -623,100 +730,242 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 
-  Future<void> _runProject() async {
-    final entry = RunnerService.findEntry(widget.project.path);
-    if (entry == null) {
-      final hint = StudioProfile.current?.entryFileNames;
-      _showSnack(
-        hint == null || hint.isEmpty
-            ? '未找到可运行的入口文件（index.html / main.py / Main.java 等）'
-            : '未找到可运行的入口文件（${hint.join(' / ')}）',
-      );
-      return;
-    }
-    final ext = p.extension(entry).toLowerCase();
-    setState(() => _bottomPanel = _BottomPanel.terminal);
-
-    if (ext == '.html' || ext == '.htm') {
-      await _previewServer?.stop();
-      try {
-        final server = await (StudioProfile.current?.webPreviewFactory?.call(
-              widget.project.path,
-            ) ??
-            LocalWebServer.start(widget.project.path));
-        if (!mounted) {
-          await server.stop();
-          return;
-        }
-        _previewServer = server;
-        // 页面 console 日志转发到终端面板（Web 调试）。
-        _debugSub?.cancel();
-        _debugSub = server.debugStream.listen((line) {
-          _terminalKey.currentState?.appendDebug(line);
-        });
-        await RunnerService.openUrl(server.url);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('预览服务已启动：${server.url}'),
-              action: SnackBarAction(
-                label: '复制地址',
-                onPressed: () =>
-                    Clipboard.setData(ClipboardData(text: server.url)),
-              ),
-            ),
-          );
-        }
-      } on SocketException catch (e) {
-        _showSnack('启动预览服务失败：${e.message}');
-      }
-      return;
-    }
-
-    setState(() => _bottomPanel = _BottomPanel.terminal);
-    // 让终端面板先完成一帧挂载（重建 TerminalPane 状态），
-    // 否则 _terminalKey.currentState 仍为 null，输出只能等到下一次点击才显示。
+  /// Runs the project entry on a normal tap, or an explicit [entryOverride]
+  /// (the active file captured by a long press) through the same save and
+  /// runtime routing. Calls with an override must validate it first.
+  Future<void> _runProject({String? entryOverride}) async {
+    if (_runningProject) return;
+    setState(() {
+      _runningProject = true;
+      _terminalCreated = true;
+      _terminalCollapsed = false;
+      _bottomPanel = _BottomPanel.terminal;
+    });
     await WidgetsBinding.instance.endOfFrame;
     if (!mounted) return;
-    final result = await RunnerService.runProject(
-      projectPath: widget.project.path,
-      entryFile: entry,
-    );
-    if (!mounted) return;
-    final hint = result?.hint;
-    if (hint != null) {
-      _terminalKey.currentState?.appendSystem(hint);
+    final pane = _terminalKey.currentState;
+    if (pane == null) {
+      setState(() => _runningProject = false);
       return;
     }
-    // 应用内运行时（语言 App 注入）：直接接管输出流。
-    final stdout = result?.stdout;
-    final stderr = result?.stderr;
-    final exitCode = result?.exitCode;
-    if (result != null &&
-        stdout != null &&
-        stderr != null &&
-        exitCode != null) {
-      _terminalKey.currentState?.attachOutput(
-        title: result.title,
-        stdout: stdout,
-        stderr: stderr,
-        exitCode: exitCode,
-        cancel: result.cancel,
+    pane.expand();
+    var preparing = false;
+    try {
+      if (pane.busy) return;
+      pane.beginPreparation();
+      preparing = true;
+      for (final open in List<OpenFile>.of(_editor.files)) {
+        final error = await _editor.saveFile(open);
+        if (!mounted || !pane.mounted) return;
+        if (error != null) {
+          pane.appendSystem(error);
+          return;
+        }
+      }
+      final entry =
+          entryOverride ?? RunnerService.findEntry(widget.project.path);
+      if (entry == null) {
+        final hint = StudioProfile.current?.entryFileNames;
+        pane.appendSystem(
+          hint == null || hint.isEmpty
+              ? '未找到可运行的入口文件（index.html / main.py / Main.java 等）'
+              : '未找到可运行的入口文件（${hint.join(' / ')}）',
+        );
+        return;
+      }
+      final ext = p.extension(entry).toLowerCase();
+      // Without a language runner (SQLab has one), .sql goes to cloud MySQL.
+      if (ext == '.sql' &&
+          StudioProfile.current?.runner == null &&
+          StudioProfile.current?.isOffline != true) {
+        pane.finishPreparation();
+        await pane.runCloudSql(entry);
+        return;
+      }
+      if (pane.onlineSelected && ext != '.html' && ext != '.htm') {
+        pane.finishPreparation();
+        await pane.runOnlineProject(widget.project.path, entry);
+        return;
+      }
+
+      if (ext == '.html' || ext == '.htm') {
+        // Detach and stop the previous preview before starting a replacement so
+        // no stale session or debug listener survives.
+        await _debugSub?.cancel();
+        _debugSub = null;
+        final previous = _previewServer;
+        _previewServer = null;
+        await previous?.stop();
+        WebPreviewSession? server;
+        try {
+          server =
+              await (StudioProfile.current?.webPreviewFactory?.call(
+                    widget.project.path,
+                  ) ??
+                  LocalWebServer.start(widget.project.path));
+          if (!mounted) {
+            await server.stop();
+            return;
+          }
+          // A long-press run targets the active file; a tap keeps the default
+          // entry. The session owns the real document root, so it resolves the
+          // URL. An unsupported session or an unreachable file fails here
+          // instead of silently opening the default page.
+          final String targetUrl;
+          if (entryOverride != null) {
+            if (server is! WebFilePreviewSession) {
+              throw StateError('preview does not support individual files');
+            }
+            targetUrl = server.urlForFile(entryOverride);
+          } else {
+            targetUrl = server.url;
+          }
+          _previewServer = server;
+          // 页面 console 日志转发到终端面板（Web 调试）。
+          _debugSub = server.debugStream.listen((line) {
+            _terminalKey.currentState?.appendDebug(line);
+          });
+          await RunnerService.openUrl(targetUrl);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('预览服务已启动：$targetUrl'),
+                action: SnackBarAction(
+                  label: '复制地址',
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: targetUrl)),
+                ),
+              ),
+            );
+          }
+        } catch (error) {
+          // Any failure (including SocketException) tears down the session this
+          // run just created and leaves no stopped reference behind.
+          await _debugSub?.cancel();
+          _debugSub = null;
+          if (identical(_previewServer, server)) _previewServer = null;
+          await server?.stop();
+          if (mounted) {
+            _showSnack(
+              error is SocketException ? '启动预览服务失败：${error.message}' : '$error',
+            );
+          }
+        }
+        return;
+      }
+
+      final result = await RunnerService.runProject(
+        projectPath: widget.project.path,
+        entryFile: entry,
       );
+      if (!mounted || !pane.mounted) {
+        await result?.cancel?.call();
+        await result?.managedProcess?.cancel();
+        result?.process?.kill();
+        return;
+      }
+      pane.finishPreparation();
+      final hint = result?.hint;
+      if (hint != null) {
+        pane.appendSystem(hint);
+        if (StudioProfile.current?.isOffline != true &&
+            OnlineProgram.supports(entry)) {
+          await pane.runOnlineProject(widget.project.path, entry);
+        }
+        return;
+      }
+      // 应用内运行时（语言 App 注入）：直接接管输出流。
+      final stdout = result?.stdout;
+      final stderr = result?.stderr;
+      final exitCode = result?.exitCode;
+      if (result != null &&
+          stdout != null &&
+          stderr != null &&
+          exitCode != null) {
+        final code = await pane.attachOutput(
+          title: result.title,
+          stdout: stdout,
+          stderr: stderr,
+          exitCode: exitCode,
+          cancel: result.cancel,
+        );
+        if (code == kProgramNotRunExitCode &&
+            mounted &&
+            pane.mounted &&
+            StudioProfile.current?.isOffline != true &&
+            OnlineProgram.supports(entry)) {
+          pane.appendSystem('本地运行时不可用，转入在线运行');
+          await pane.runOnlineProject(widget.project.path, entry);
+        }
+        return;
+      }
+      final managedProcess = result?.managedProcess;
+      if (managedProcess != null) {
+        pane.attachManagedProcess(result!.title, managedProcess);
+        return;
+      }
+      final process = result?.process;
+      if (process != null) {
+        pane.attachProcess(result!.title, process);
+      }
+    } catch (error) {
+      if (mounted && pane.mounted) pane.appendSystem('cannot execute: $error');
+    } finally {
+      if (pane.mounted && preparing) pane.finishPreparation();
+      if (mounted) setState(() => _runningProject = false);
+    }
+  }
+
+  /// Long press on Run: run the file that is active when the gesture fires.
+  ///
+  /// Validation happens before any save so an invalid or deleted active file
+  /// never gets recreated and never falls back to the project entry. A valid
+  /// file reuses the same save and runtime routing as [_runProject].
+  Future<void> _runActiveFile() async {
+    if (_runningProject) return;
+    final open = _editor.current;
+    final reason = _activeFileRunError(open);
+    if (reason != null) {
+      setState(() {
+        _terminalCreated = true;
+        _terminalCollapsed = false;
+        _bottomPanel = _BottomPanel.terminal;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _terminalKey.currentState?.expand();
+      _terminalKey.currentState?.appendSystem(reason);
       return;
     }
-    final managedProcess = result?.managedProcess;
-    if (managedProcess != null) {
-      _terminalKey.currentState?.attachManagedProcess(
-        result!.title,
-        managedProcess,
-      );
-      return;
+    await _runProject(entryOverride: p.normalize(p.absolute(open!.path)));
+  }
+
+  /// Returns a short English reason when [open] cannot be run directly, or
+  /// null when the selected file can be handed to the project runner.
+  String? _activeFileRunError(OpenFile? open) {
+    if (open == null) return 'no active file to run';
+    if (open.readOnly) return 'active file is read-only';
+    final profile = StudioProfile.current;
+    final ext = p.extension(open.name).toLowerCase();
+    final supported = profile?.supportedFileExtensions ?? const <String>[];
+    if (supported.isNotEmpty && !supported.contains(ext)) {
+      return '${ext.isEmpty ? 'file' : ext} is not runnable here';
     }
-    final process = result?.process;
-    if (process != null) {
-      _terminalKey.currentState?.attachProcess(result!.title, process);
-    }
+    final root = p.normalize(p.absolute(widget.project.path));
+    final path = p.normalize(p.absolute(open.path));
+    if (!p.isWithin(root, path)) return 'active file is outside the project';
+    if (!File(path).existsSync()) return 'active file no longer exists';
+    return null;
+  }
+
+  Future<void> _openOnlineTerminal() async {
+    setState(() {
+      _terminalCreated = true;
+      _terminalCollapsed = false;
+      _bottomPanel = _BottomPanel.terminal;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) await _terminalKey.currentState?.showOnline();
   }
 
   void _showSnack(String message) {
@@ -838,11 +1087,46 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                       : _undoCurrent,
                                   icon: const Icon(Icons.undo),
                                 ),
-                                IconButton(
-                                  tooltip: '运行',
-                                  onPressed: _runProject,
-                                  icon: const Icon(Icons.play_arrow),
-                                ),
+                                if (_hasDocumentTool(_editor.current))
+                                  IconButton(
+                                    tooltip: '编辑与预览',
+                                    onPressed: _openContentTool,
+                                    icon: const Icon(
+                                      Icons.chrome_reader_mode_outlined,
+                                    ),
+                                  )
+                                else
+                                  // One gesture owner: a normal tap runs the
+                                  // configured project entry, a long press runs
+                                  // the file that is active when it fires.
+                                  Tooltip(
+                                    message: '运行（长按运行当前文件）',
+                                    child: Semantics(
+                                      button: true,
+                                      enabled: !_runningProject,
+                                      child: InkResponse(
+                                        onTap: _runningProject
+                                            ? null
+                                            : _runProject,
+                                        onLongPress: _runningProject
+                                            ? null
+                                            : _runActiveFile,
+                                        canRequestFocus: !_runningProject,
+                                        radius: 24,
+                                        child: SizedBox.square(
+                                          dimension: kMinInteractiveDimension,
+                                          child: Icon(
+                                            Icons.play_arrow,
+                                            color: _runningProject
+                                                ? Theme.of(
+                                                    context,
+                                                  ).disabledColor
+                                                : null,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                 PopupMenuButton<String>(
                                   tooltip: '更多',
                                   icon: const Icon(Icons.more_vert),
@@ -869,6 +1153,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           !widget.settings.minimap,
                                         );
                                       case 'terminal':
+                                        _terminalCreated = true;
                                         setState(
                                           () => _bottomPanel =
                                               _bottomPanel ==
@@ -899,13 +1184,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                               : _BottomPanel.ai,
                                         );
                                       case 'online_terminal':
-                                        Navigator.of(context).push(
-                                          MaterialPageRoute(
-                                            builder: (_) => OnlineTerminalPage(
-                                              auth: widget.auth,
-                                            ),
-                                          ),
-                                        );
+                                        unawaited(_openOnlineTerminal());
                                       case 'git':
                                         _openGit();
                                       case 'cloud_pull':
@@ -1043,9 +1322,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ),
                                           const SizedBox(width: 12),
                                           Text(
-                                            _terminalVisible
-                                                ? '关闭本地终端'
-                                                : '打开本地终端',
+                                            _terminalVisible ? '关闭终端' : '打开终端',
                                           ),
                                         ],
                                       ),
@@ -1153,100 +1430,136 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
-            body: ListenableBuilder(
-              listenable: _editor,
-              builder: (context, _) {
-                _syncTabControllerIfNeeded();
-                return Column(
-                  children: [
-                    Expanded(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (wide) ...[
-                            ClipRect(
-                              child: AnimatedAlign(
-                                duration: const Duration(milliseconds: 200),
-                                curve: Curves.easeOutCubic,
-                                alignment: Alignment.centerLeft,
-                                widthFactor: sidebarVisible ? 1.0 : 0.0,
-                                child: Padding(
-                                  padding: const EdgeInsets.all(_cardMargin),
-                                  child: SizedBox(
-                                    width: _sidebarWidth,
-                                    child: _buildExplorerCard(context),
+            body: LayoutBuilder(
+              builder: (context, constraints) {
+                final bodyHeight = constraints.maxHeight;
+                final collapsedPanelHeight =
+                    bodyHeight < TerminalPanelMetrics.collapsedTotalHeight
+                    ? bodyHeight
+                    : TerminalPanelMetrics.collapsedTotalHeight;
+                // Leave a usable editor area: never let the panel exceed 70%, and
+                // never compress the editor body below its minimum so the code
+                // view can still lay out (re_editor asserts on a zero height).
+                const minEditorHeight = 140.0;
+                final seventyPercent = (bodyHeight * 0.7).toDouble();
+                final heightLimited = bodyHeight - minEditorHeight;
+                final ceiling = seventyPercent < heightLimited
+                    ? seventyPercent
+                    : heightLimited;
+                final maxPanelHeight = ceiling
+                    .clamp(collapsedPanelHeight, bodyHeight)
+                    .toDouble();
+                // The AI panel keeps its own pre-existing geometry: a 36 px
+                // collapsed header and its original 112 px compact threshold,
+                // independent of the terminal's metrics.
+                const aiCollapsedHeight = 36.0;
+                final aiCompact = maxPanelHeight < 112;
+                // The terminal is compact (header only) when the viewport cannot
+                // offer at least its minimum expanded height.
+                final compactPanel =
+                    maxPanelHeight < TerminalPanelMetrics.minExpandedHeight;
+                // While dragging, the displayed height follows the raw gesture;
+                // otherwise it is the preserved preference clamped to the
+                // current viewport.
+                final effectivePreferred =
+                    _terminalDragHeight ?? _terminalHeight;
+                final terminalPanelHeight = _terminalCollapsed || compactPanel
+                    ? collapsedPanelHeight
+                    : effectivePreferred
+                          .clamp(
+                            TerminalPanelMetrics.minExpandedHeight,
+                            maxPanelHeight,
+                          )
+                          .toDouble();
+                final aiPanelHeight = _aiCollapsed || aiCompact
+                    ? aiCollapsedHeight
+                    : 320.0.clamp(aiCollapsedHeight, maxPanelHeight).toDouble();
+                return ListenableBuilder(
+                  listenable: _editor,
+                  builder: (context, _) {
+                    _syncTabControllerIfNeeded();
+                    return Column(
+                      children: [
+                        Expanded(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (wide) ...[
+                                ClipRect(
+                                  child: AnimatedAlign(
+                                    duration: const Duration(milliseconds: 200),
+                                    curve: Curves.easeOutCubic,
+                                    alignment: Alignment.centerLeft,
+                                    widthFactor: sidebarVisible ? 1.0 : 0.0,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(
+                                        _cardMargin,
+                                      ),
+                                      child: SizedBox(
+                                        width: _sidebarWidth,
+                                        child: _buildExplorerCard(context),
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ),
+                              ],
+                              Expanded(child: _buildEditorArea(context)),
+                            ],
+                          ),
+                        ),
+                        if (_terminalCreated)
+                          Offstage(
+                            // Hide the terminal entirely when the body cannot host
+                            // both a useful terminal and the editor's minimum, so
+                            // the code view never collapses to zero height.
+                            offstage:
+                                _bottomPanel != _BottomPanel.terminal ||
+                                bodyHeight -
+                                        (bodyHeight <
+                                                TerminalPanelMetrics
+                                                    .collapsedTotalHeight
+                                            ? bodyHeight
+                                            : TerminalPanelMetrics
+                                                  .collapsedTotalHeight) <
+                                    minEditorHeight,
+                            child: _buildTerminalPanel(
+                              terminalPanelHeight: terminalPanelHeight,
+                              maxPanelHeight: maxPanelHeight,
+                              collapsedPanelHeight: collapsedPanelHeight,
+                              compactPanel: compactPanel,
                             ),
-                          ],
-                          Expanded(child: _buildEditorArea(context)),
-                        ],
-                      ),
-                    ),
-                    if (_bottomPanel == _BottomPanel.terminal)
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        height: _terminalCollapsed ? 36 : _terminalHeight,
-                        child: TerminalPane(
-                          key: _terminalKey,
-                          workingDirectory: widget.project.path,
-                          onCollapseChanged: (collapsed) {
-                            if (mounted) {
-                              setState(() => _terminalCollapsed = collapsed);
-                            }
-                          },
-                          onResizeDelta: (delta) {
-                            if (!mounted) return;
-                            final maxHeight =
-                                MediaQuery.sizeOf(context).height * 0.7;
-                            setState(() {
-                              _terminalHeight = (_terminalHeight + delta).clamp(
-                                150.0,
-                                maxHeight,
-                              );
-                            });
-                          },
-                          onClose: () {
-                            _debugSub?.cancel();
-                            _debugSub = null;
-                            if (mounted) {
-                              setState(() {
-                                _bottomPanel = _BottomPanel.none;
-                                _terminalCollapsed = false;
-                              });
-                            }
-                          },
-                        ),
-                      ),
-                    if (_bottomPanel == _BottomPanel.ai)
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        height: _aiCollapsed ? 36 : 320,
-                        child: AiPanel(
-                          projectPath: widget.project.path,
-                          projectName: widget.project.name,
-                          language: widget.project.language,
-                          settings: widget.settings,
-                          onCollapseChanged: (collapsed) {
-                            if (mounted) {
-                              setState(() => _aiCollapsed = collapsed);
-                            }
-                          },
-                          onClose: () {
-                            if (mounted) {
-                              setState(() {
-                                _bottomPanel = _BottomPanel.none;
-                                _aiCollapsed = false;
-                              });
-                            }
-                          },
-                          onFileCreated: (path) {
-                            _editor.openPath(path);
-                          },
-                        ),
-                      ),
-                  ],
+                          ),
+                        if (_bottomPanel == _BottomPanel.ai && bodyHeight >= 36)
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 150),
+                            height: aiPanelHeight,
+                            child: AiPanel(
+                              projectPath: widget.project.path,
+                              projectName: widget.project.name,
+                              language: widget.project.language,
+                              settings: widget.settings,
+                              compact: aiCompact,
+                              onCollapseChanged: (collapsed) {
+                                if (mounted) {
+                                  setState(() => _aiCollapsed = collapsed);
+                                }
+                              },
+                              onClose: () {
+                                if (mounted) {
+                                  setState(() {
+                                    _bottomPanel = _BottomPanel.none;
+                                    _aiCollapsed = false;
+                                  });
+                                }
+                              },
+                              onFileCreated: (path) {
+                                _editor.openPath(path);
+                              },
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 );
               },
             ),
@@ -1268,36 +1581,138 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
-  /// 文件树卡片：圆角 + 细描边、无阴影（对应原生的卡片式抽屉主体）。
+  /// The embedded terminal panel. Owns the authoritative collapsed state and
+  /// the continuous resize gesture. Height animation is disabled while the user
+  /// is actively dragging so the panel tracks the pointer without lag.
+  Widget _buildTerminalPanel({
+    required double terminalPanelHeight,
+    required double maxPanelHeight,
+    required double collapsedPanelHeight,
+    required bool compactPanel,
+  }) {
+    final pane = TerminalPane(
+      key: _terminalKey,
+      workingDirectory: widget.project.path,
+      auth: widget.auth,
+      onlineEnabled: StudioProfile.current?.isOffline != true,
+      compact: compactPanel,
+      collapsed: _terminalCollapsed,
+      onCollapseChanged: (collapsed) {
+        if (!mounted) return;
+        setState(() {
+          _terminalCollapsed = collapsed;
+          if (!collapsed) {
+            // A fresh expand carries the last user-preferred height back in.
+            _terminalDragHeight = null;
+          }
+        });
+      },
+      onResizeStart: () {
+        if (!mounted) return;
+        setState(() {
+          _draggingTerminal = true;
+          _terminalDragAnchor = _terminalCollapsed
+              ? collapsedPanelHeight
+              : terminalPanelHeight;
+          _terminalDragTotal = _terminalDragAnchor;
+          _terminalDragHeight = _terminalDragAnchor;
+          // A resize gesture must not pop the soft keyboard.
+          _terminalKey.currentState?.unfocusInput();
+        });
+      },
+      onResizeDelta: (delta) {
+        if (!mounted) return;
+        setState(() {
+          // Accumulate the raw displacement unclamped so many small steps can
+          // cross the collapse threshold or grow past the minimum.
+          final anchor = _terminalDragAnchor > 0
+              ? _terminalDragAnchor
+              : (_terminalCollapsed
+                    ? collapsedPanelHeight
+                    : terminalPanelHeight);
+          _terminalDragAnchor = anchor;
+          _terminalDragTotal += delta;
+          final next = _terminalDragTotal;
+          if (next < TerminalPanelMetrics.collapseThreshold) {
+            // Below the threshold the panel is collapsed to its header.
+            _terminalCollapsed = true;
+            _terminalDragHeight = collapsedPanelHeight;
+            return;
+          }
+          _terminalCollapsed = false;
+          final minExpanded =
+              maxPanelHeight < TerminalPanelMetrics.minExpandedHeight
+              ? maxPanelHeight
+              : TerminalPanelMetrics.minExpandedHeight;
+          // Clamp only the displayed drag height; the raw total keeps moving so
+          // a drag can continue through the clamped band without stalling.
+          _terminalDragHeight = next
+              .clamp(minExpanded, maxPanelHeight)
+              .toDouble();
+        });
+      },
+      onResizeEnd: () {
+        if (!mounted) return;
+        setState(() {
+          _draggingTerminal = false;
+          // Commit the final expanded height as the preserved preference; a
+          // collapsed end keeps the previous preferred height intact.
+          final committed = _terminalDragHeight;
+          if (!_terminalCollapsed && committed != null) {
+            _terminalHeight = committed;
+          }
+          _terminalDragHeight = null;
+        });
+      },
+      onClose: () {
+        _debugSub?.cancel();
+        _debugSub = null;
+        if (mounted) {
+          setState(() {
+            _bottomPanel = _BottomPanel.none;
+            _terminalCollapsed = false;
+            _terminalCreated = false;
+            _terminalDragHeight = null;
+            _draggingTerminal = false;
+          });
+        }
+      },
+    );
+
+    // During an active drag (or once collapsed to the header), skip the height
+    // animation entirely so the panel follows the pointer without a 150ms lag.
+    // Skip the height animation when dragging, collapsed, or compact: an
+    // animated transition through a tiny height briefly starves the editor body
+    // (re_editor asserts on a zero-height line-number column).
+    if (_draggingTerminal || _terminalCollapsed || compactPanel) {
+      return SizedBox(height: terminalPanelHeight, child: pane);
+    }
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      height: terminalPanelHeight,
+      child: pane,
+    );
+  }
+
+  /// 文件树卡片：外观（圆角 + 细描边、无阴影）由 [FileExplorer] 自绘。
   Widget _buildExplorerCard(
     BuildContext context, {
     VoidCallback? onFileOpened,
   }) {
-    final scheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant, width: 1),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: FileExplorer(
-          project: widget.project,
-          editor: _editor,
-          store: widget.store,
-          settings: widget.settings,
-          onFileOpened: onFileOpened,
-          onEntryDeleted: _cloud == null
-              ? null
-              : (path) async {
-                  final token = widget.auth.token;
-                  if (token == null) return;
-                  final error = await _cloud!.pushDelete(token, path);
-                  if (mounted) setState(() => _syncError = error);
-                },
-        ),
-      ),
+    return FileExplorer(
+      project: widget.project,
+      editor: _editor,
+      store: widget.store,
+      settings: widget.settings,
+      onFileOpened: onFileOpened,
+      onEntryDeleted: _cloud == null
+          ? null
+          : (path) async {
+              final token = widget.auth.token;
+              if (token == null) return;
+              final error = await _cloud!.pushDelete(token, path);
+              if (mounted) setState(() => _syncError = error);
+            },
     );
   }
 
@@ -1354,32 +1769,55 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         ),
       );
     }
-    return Column(
-      children: [
-        if (widget.settings.showEditorTabs) _buildTabBar(context),
-        Expanded(
-          child: TabBarView(
-            controller: _tabController,
-            children: [
-              for (final file in _editor.files) _buildCodeView(context, file),
-            ],
-          ),
-        ),
-        SymbolsBar(
-          language: languageForFileName(open.name).isNotEmpty
-              ? languageForFileName(open.name)
-              : widget.project.language,
-          controller: open.controller,
-          symbols: _symbolsFor(open),
-          onSymbolsEdited: (tokens) {
-            final lang = languageForFileName(open.name).isNotEmpty
-                ? languageForFileName(open.name)
-                : widget.project.language;
-            widget.settings.setSymbolBar(lang, tokens.join(' '));
-          },
-        ),
-        _buildStatusBar(context, open),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Fixed chrome (tab bar + symbols bar + status bar) must never starve
+        // the code view: re_editor asserts when its height reaches zero. Shed
+        // optional chrome as the available height shrinks.
+        final available = constraints.maxHeight;
+        final showTabs = widget.settings.showEditorTabs && available >= 220;
+        final showSymbols = available >= 160;
+        final showStatus = available >= 110;
+        return Column(
+          children: [
+            if (showTabs) _buildTabBar(context),
+            Expanded(
+              child: _editor.files.length <= 1 || !showTabs
+                  ? _buildCodeView(context, open)
+                  : TabBarView(
+                      controller: _tabController,
+                      children: [
+                        for (final file in _editor.files)
+                          TickerMode(
+                            key: ObjectKey(file),
+                            enabled: identical(file, open),
+                            child: _codeViews.putIfAbsent(
+                              file,
+                              () => RetainedPage(child: _buildCodeView(context, file)),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+            if (showSymbols)
+              SymbolsBar(
+                language: languageForFileName(open.name).isNotEmpty
+                    ? languageForFileName(open.name)
+                    : widget.project.language,
+                controller: open.controller,
+                symbols: _symbolsFor(open),
+                onSymbolsEdited: (tokens) {
+                  final lang = languageForFileName(open.name).isNotEmpty
+                      ? languageForFileName(open.name)
+                      : widget.project.language;
+                  widget.settings.setSymbolBar(lang, tokens.join(' '));
+                  setState(() {});
+                },
+              ),
+            if (showStatus) _buildStatusBar(context, open),
+          ],
+        );
+      },
     );
   }
 
@@ -1555,6 +1993,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   Widget _buildCodeView(BuildContext context, OpenFile open) {
     final scheme = Theme.of(context).colorScheme;
+    final textStyle = widget.settings.editorTextStyle;
     final theme = HighlightThemes.themeFor(
       context,
       open.name,
@@ -1572,13 +2011,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             onPointerCancel: _handlePointerUp,
             child: CodeEditor(
               controller: open.controller,
+              focusNode: open.focusNode,
               scrollController: open.scrollController,
               findController: open.findController,
               shortcutOverrideActions: editorShortcutOverrides(open.controller),
               style: CodeEditorStyle(
                 fontSize: _fontSize,
-                fontFamily: 'Consolas',
-                fontFamilyFallback: const ['Cascadia Mono', 'Courier New'],
+                fontFamily: textStyle.fontFamily,
+                fontFamilyFallback: textStyle.fontFamilyFallback,
+                fontWeight: textStyle.fontWeight,
+                fontStyle: textStyle.fontStyle,
+                fontHeight: textStyle.height,
                 backgroundColor:
                     theme?.theme['root']?.backgroundColor ?? scheme.surface,
                 textColor: theme?.theme['root']?.color ?? scheme.onSurface,
@@ -1615,17 +2058,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                           controller: editingController,
                           notifier: notifier,
                           minNumberCount: 1,
-                          textStyle: TextStyle(
+                          textStyle: textStyle.copyWith(
                             color: scheme.onSurfaceVariant.withValues(
                               alpha: 0.55,
                             ),
-                            fontSize: 12,
-                            fontFamily: 'Consolas',
+                            fontSize: _fontSize,
                           ),
-                          focusedTextStyle: TextStyle(
+                          focusedTextStyle: textStyle.copyWith(
                             color: scheme.primary,
-                            fontSize: 12,
-                            fontFamily: 'Consolas',
+                            fontSize: _fontSize,
                           ),
                         ),
                         DefaultCodeChunkIndicator(
@@ -1690,12 +2131,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         ? languageForFileName(open.name)
         : widget.project.language;
     final custom = widget.settings.symbolBars[lang];
-    if (custom != null && custom.trim().isNotEmpty) {
-      return custom
-          .trim()
-          .split(RegExp(r'\s+'))
-          .where((s) => s.isNotEmpty)
-          .toList();
+    if (custom != null) {
+      final value = custom.trim();
+      if (value.isEmpty) return const [];
+      return value.split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
     }
     return kDefaultSymbolSets[lang] ??
         const [';', ':', '(', ')', '[', ']', '"', "'", '=', '<', '>'];
@@ -1711,15 +2150,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         final column = selection.extentOffset + 1;
         final totalLines = open.controller.codeLines.length;
         String modifiedLabel = '';
-        try {
-          final stat = FileStat.statSync(open.path);
+        final modified = open.modifiedAt;
+        if (modified != null) {
           final now = DateTime.now();
-          final m = stat.modified;
+          final m = modified;
           modifiedLabel =
               (m.year == now.year && m.month == now.month && m.day == now.day)
               ? '修改于 ${m.hour.toString().padLeft(2, '0')}:${m.minute.toString().padLeft(2, '0')}'
               : '修改于 ${m.month}/${m.day}';
-        } catch (_) {}
+        }
         return Container(
           height: 30,
           padding: const EdgeInsets.symmetric(horizontal: 12),

@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import 'studio_profile.dart';
+import 'web_preview_file.dart';
 
 /// 页面注入脚本：劫持 console 与 window.onerror，
 /// 把日志转发到预览服务器 /__debug，由编辑器的调试输出显示。
@@ -40,7 +40,7 @@ const String _debugInjectScript = '<script>\n'
 
 /// 项目内静态文件服务器：绑定 127.0.0.1 随机端口，供 HTML 项目预览。
 /// 预览 HTML 会注入调试桥，收集页面 console 日志（系统浏览器打开也有效）。
-class LocalWebServer implements WebPreviewSession {
+class LocalWebServer implements WebFilePreviewSession {
   LocalWebServer._(this._server, this.rootDir, this.port);
 
   final HttpServer _server;
@@ -56,6 +56,16 @@ class LocalWebServer implements WebPreviewSession {
   /// 页面日志流。
   @override
   Stream<String> get debugStream => _debugController.stream;
+
+  /// Resolves a project file to its served URL. The legacy server keeps
+  /// `index.html` discovery for the root URL but still answers any real file
+  /// under [rootDir], so the shared resolver is the single source of truth.
+  @override
+  String urlForFile(String absolutePath) => webPreviewUrlForFile(
+    baseUrl: 'http://127.0.0.1:$port/',
+    documentRoot: rootDir,
+    filePath: absolutePath,
+  );
 
   /// 已收到的日志（历史缓冲）。
   List<String> get debugBuffer => List.unmodifiable(_debugBuffer);

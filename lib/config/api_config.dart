@@ -1,7 +1,7 @@
 /// QFLI 官方服务的唯一地址配置。切换部署域名后重新构建应用即可。
 /// 账号、社区、云端项目和在线终端都通过这里访问同一服务。
 abstract final class ApiConfig {
-  static const String baseUrl = 'https://qfli.lqsxm666.top';
+  static const String baseUrl = 'https://qfli.suanxiwanjie.cn';
   static const Duration requestTimeout = Duration(seconds: 25);
 
   static Uri endpoint(String path, [Map<String, Object>? query]) {

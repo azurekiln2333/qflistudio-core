@@ -1,6 +1,5 @@
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
 import '../services/app_paths.dart';
@@ -145,7 +144,7 @@ class _CreateProjectDialogState extends State<_CreateProjectDialog> {
   }
 
   Future<void> _initDefaultLocation() async {
-    // 默认在应用数据目录的 projects/ 下创建项目。
+    // The selected root is grouped by the chosen source-language template.
     final dir = await AppPaths.projectsRoot(create: true);
     if (!mounted) return;
     setState(() {
@@ -166,7 +165,12 @@ class _CreateProjectDialogState extends State<_CreateProjectDialog> {
     final name = _nameController.text.trim();
     if (location.isEmpty && name.isEmpty) return '';
     if (location.isEmpty) return name;
-    return p.join(location, name);
+    final root = AppPaths.languageProjectsRoot(location, type: _template.type);
+    if (name.isEmpty) return root;
+    if (!FileService.isValidEntryName(name) || name.contains('\u0000')) {
+      return '';
+    }
+    return AppPaths.availableProjectPath(directory: root, name: name);
   }
 
   bool get _canSubmit {
@@ -218,6 +222,7 @@ class _CreateProjectDialogState extends State<_CreateProjectDialog> {
     final location = _locationController.text.trim();
     final noWritableDir = !_desktop && _locationResolved && location.isEmpty;
     return AlertDialog(
+      scrollable: true,
       title: const Text('新建项目'),
       content: SizedBox(
         width: 440,
@@ -264,7 +269,6 @@ class _CreateProjectDialogState extends State<_CreateProjectDialog> {
                 onChanged: (_) => setState(() {}),
                 decoration: InputDecoration(
                   labelText: '位置',
-                  helperText: '将在此目录下创建同名文件夹',
                   prefixIcon: const Icon(Icons.folder_open_outlined),
                   suffixIcon: IconButton(
                     tooltip: '选择目录',
@@ -307,7 +311,7 @@ class _CreateProjectDialogState extends State<_CreateProjectDialog> {
                     child: Text(
                       noWritableDir
                           ? '未找到可写目录'
-                          : (location.isEmpty ? '正在查找可写目录…' : '将创建到：$location'),
+                          : (location.isEmpty ? '正在查找可写目录…' : _fullPath),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -407,6 +411,7 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: const Text('添加现有项目'),
       content: SizedBox(
         width: 440,
@@ -486,6 +491,7 @@ class _NameDialogState extends State<_NameDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: Text(widget.title),
       content: TextField(
         controller: _controller,

@@ -6,7 +6,7 @@ import 'store/auth_store.dart';
 import 'store/project_store.dart';
 import 'store/settings_store.dart';
 
-/// 与原生启动窗口同色的轻量首帧，不等待网络或人为延时。
+/// Flutter startup fallback for entry shells without a native loading layer.
 class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
 
@@ -28,13 +28,13 @@ class SplashScreen extends StatelessWidget {
               ),
             ),
           ),
-          // 进度条压底：不定色（组件自适应明暗），细条全宽。
-          const LinearProgressIndicator(minHeight: 3),
-          // 深色模式下底部安全区不影响进度条贴底观感。
-          SizedBox(
-            height: MediaQuery.paddingOf(context).bottom,
-            width: double.infinity,
-            child: ColoredBox(color: background),
+          SafeArea(
+            top: false,
+            minimum: const EdgeInsets.fromLTRB(32, 0, 32, 48),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: const LinearProgressIndicator(minHeight: 4),
+            ),
           ),
         ],
       ),
@@ -51,12 +51,16 @@ class AppBootstrap {
     required AuthStore auth,
     required SettingsStore settings,
     required ValueNotifier<bool> ready,
+    ValueChanged<double>? onProgress,
   }) async {
+    var completed = 0;
     Future<void> loadSafely(Future<void> Function() load) async {
       try {
         await load();
       } catch (error, stack) {
         debugPrint('本地配置加载失败：$error\n$stack');
+      } finally {
+        onProgress?.call(++completed / 3);
       }
     }
 

@@ -10,7 +10,7 @@ import '../../store/auth_store.dart';
 class PostDetailPage extends StatefulWidget {
   const PostDetailPage({super.key, required this.postId, required this.auth});
 
-  final int postId;
+  final String postId;
   final AuthStore auth;
 
   @override
@@ -251,12 +251,6 @@ class _PostDetailPageState extends State<PostDetailPage> {
                 const SizedBox(height: 12),
                 Row(
                   children: [
-                    Avatar(
-                      name: post.author.nickname,
-                      color: post.author.avatarColor,
-                      size: 36,
-                    ),
-                    const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,

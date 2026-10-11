@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../editor/editor_fonts.dart';
+
 import '../i18n/studio_localizations.dart';
 import '../services/structured_content_service.dart';
 
@@ -60,7 +62,7 @@ class _JsonToolPageState extends State<JsonToolPage> {
             minLines: 12,
             maxLines: 24,
             onChanged: (_) => _analyze(),
-            style: const TextStyle(fontFamily: 'monospace'),
+            style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
             decoration: InputDecoration(
               border: const OutlineInputBorder(),
               labelText: l10n.jsonSource,
@@ -219,7 +221,7 @@ class _MarkdownToolPageState extends State<MarkdownToolPage> {
                 controller: _controller,
                 expands: true,
                 maxLines: null,
-                style: const TextStyle(fontFamily: 'monospace'),
+                style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
                 decoration: InputDecoration(
                   border: const OutlineInputBorder(),
                   labelText: l10n.markdownSource,
@@ -247,7 +249,7 @@ class _MarkdownToolPageState extends State<MarkdownToolPage> {
     for (final line in source.split('\n')) {
       if (line.trimLeft().startsWith('```')) {
         if (inCode) {
-          widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: 'monospace')));
+          widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: EditorFonts.bundledFamily)));
           code.clear();
         }
         inCode = !inCode;
@@ -269,7 +271,7 @@ class _MarkdownToolPageState extends State<MarkdownToolPage> {
         widgets.add(Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(line)));
       }
     }
-    if (code.isNotEmpty) widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: 'monospace')));
+    if (code.isNotEmpty) widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: EditorFonts.bundledFamily)));
     return widgets;
   }
 }
@@ -317,7 +319,7 @@ class _SqlToolPageState extends State<SqlToolPage> {
             controller: _controller,
             minLines: 8,
             maxLines: 16,
-            style: const TextStyle(fontFamily: 'monospace'),
+            style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
             decoration: InputDecoration(border: const OutlineInputBorder(), labelText: l10n.sqlSource),
           ),
           const SizedBox(height: 12),
@@ -328,7 +330,7 @@ class _SqlToolPageState extends State<SqlToolPage> {
           ),
           if (_result case final result?) ...[
             const SizedBox(height: 16),
-            SelectableText(result.error ?? result.output, style: const TextStyle(fontFamily: 'monospace')),
+            SelectableText(result.error ?? result.output, style: const TextStyle(fontFamily: EditorFonts.bundledFamily)),
           ],
         ],
       ),

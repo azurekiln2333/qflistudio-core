@@ -18,12 +18,12 @@ class CloudProjectInfo {
     required this.fileCount,
   });
 
-  final int id;
+  final String id;
   final String name;
   final int fileCount;
 
   static CloudProjectInfo fromJson(Map<String, dynamic> j) => CloudProjectInfo(
-    id: (j['id'] as num).toInt(),
+    id: j['id'] as String,
     name: j['name'] as String,
     fileCount: (j['files'] as num?)?.toInt() ?? 0,
   );
@@ -48,16 +48,17 @@ enum SyncState { idle, syncing, synced, offline }
 /// 云端项目同步客户端：
 /// 本地镜像目录（应用沙箱 cloud_projects/云端ID）与服务器逐文件同步。
 /// - 拉取：打开项目时把服务器文件树下载到镜像目录
-/// - 推送：编辑防抖后把单个文件 PUT 上去；保存立即推送
+/// - 推送：内容修改后立即排队推送，单文件按修改顺序执行
 class CloudSyncService {
   CloudSyncService._({required this.cloudId, required this.localPath});
 
-  final int cloudId;
+  final String cloudId;
   final String localPath;
 
   final _stateController = StreamController<SyncState>.broadcast();
   Stream<SyncState> get stateStream => _stateController.stream;
   SyncState _state = SyncState.idle;
+  final Map<String, Future<String?>> _pushes = {};
   SyncState get state => _state;
 
   void _setState(SyncState s) {
@@ -78,18 +79,21 @@ class CloudSyncService {
 
   /// 打开（或创建）某个云端项目的本地镜像。
   static Future<CloudSyncService> open({
-    required int cloudId,
+    required String cloudId,
     required String name,
     String? testHome,
+    String? cachePath,
   }) async {
-    final localPath = testHome != null
-        ? p.join(
-            testHome,
-            'cloud_projects',
-            Uri.encodeComponent(ApiConfig.origin),
-            '$cloudId',
-          )
-        : p.join(await _cacheRoot(), '$cloudId');
+    final localPath =
+        cachePath ??
+        (testHome != null
+            ? p.join(
+                testHome,
+                'cloud_projects',
+                Uri.encodeComponent(ApiConfig.origin),
+                cloudId,
+              )
+            : p.join(await _cacheRoot(), cloudId));
     await Directory(localPath).create(recursive: true);
     return CloudSyncService._(cloudId: cloudId, localPath: localPath);
   }
@@ -167,13 +171,44 @@ class CloudSyncService {
 
   // ---- 推送 ----
 
-  /// 推送单个文件（编辑防抖 / 保存时调用）。
+  /// 推送单个文件。
   Future<String?> pushFile(String token, String absolutePath) async {
+    try {
+      return await pushBytes(
+        token,
+        absolutePath,
+        await File(absolutePath).readAsBytes(),
+      );
+    } on FileSystemException catch (e) {
+      return '读取同步文件失败：${e.message}';
+    }
+  }
+
+  Future<String?> pushBytes(
+    String token,
+    String absolutePath,
+    List<int> bytes,
+  ) {
+    final previous = _pushes[absolutePath];
+    final next = () async {
+      if (previous != null) await previous;
+      return _pushBytes(token, absolutePath, bytes);
+    }();
+    _pushes[absolutePath] = next;
+    return next.whenComplete(() {
+      if (identical(_pushes[absolutePath], next)) _pushes.remove(absolutePath);
+    });
+  }
+
+  Future<String?> _pushBytes(
+    String token,
+    String absolutePath,
+    List<int> bytes,
+  ) async {
     if (!p.isWithin(localPath, absolutePath)) return '文件不在云端项目目录内';
     final rel = p.relative(absolutePath, from: localPath).replaceAll(r'\', '/');
     _setState(SyncState.syncing);
     try {
-      final bytes = await File(absolutePath).readAsBytes();
       await ApiClient.instance.cloudWriteFile(
         token,
         cloudId,
@@ -206,14 +241,14 @@ class CloudSyncService {
   // ---- 创建 ----
 
   /// 在服务器创建云端项目并推送模板文件；返回服务器项目 ID。
-  static Future<({int? id, String? error})> createCloudProject({
+  static Future<({String? id, String? error})> createCloudProject({
     required String token,
     required String name,
     required ProjectTemplate template,
   }) async {
     try {
       final created = await ApiClient.instance.cloudCreateProject(token, name);
-      final id = (created['id'] as num).toInt();
+      final id = created['id'] as String;
       final service = await CloudSyncService.open(
         cloudId: id,
         name: name,

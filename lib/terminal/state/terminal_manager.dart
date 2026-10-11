@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/terminal_session.dart';
 import '../shell/local_shell.dart';
+import '../shell/sandbox_shell_backend.dart';
 
 /// Owns every open QFLI terminal session.
 class TerminalManager extends ChangeNotifier {
@@ -9,6 +10,12 @@ class TerminalManager extends ChangeNotifier {
 
   String? _activeId;
   int _counter = 0;
+
+  /// Optional host command delegate (java/javac and other host tools).
+  TerminalCommandDelegate? commandDelegate;
+
+  /// Display label of the sandbox backend.
+  String shellLabel = 'Sandbox';
 
   List<TerminalSession> get sessions => List<TerminalSession>.unmodifiable(_sessions);
 
@@ -30,9 +37,18 @@ class TerminalManager extends ChangeNotifier {
 
   /// Creates and focuses a new terminal. Returns null when the requested
   /// backend cannot be started.
-  TerminalSession create({String? workingDirectory}) {
+  ///
+  /// [sandboxRoot] is the directory the sandbox is confined to: the current
+  /// project when opened from the editor, or the app private data directory
+  /// when opened from the app, so every project file is reachable.
+  TerminalSession create({required String sandboxRoot, String? startDirectory}) {
     _counter++;
-    final backend = createLocalShell(workingDirectory: workingDirectory);
+    final backend = createSandboxShell(
+      sandboxRoot: sandboxRoot,
+      startDirectory: startDirectory,
+      label: shellLabel,
+      delegate: commandDelegate,
+    );
 
     final session = TerminalSession(
       id: 'session-$_counter',

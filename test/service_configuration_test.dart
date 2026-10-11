@@ -44,7 +44,7 @@ void main() {
     expect(local.path, legacy.path);
     expect(Project.fromJson(project.toJson()).isCloud, isTrue);
     final service = await CloudSyncService.open(
-      cloudId: 7,
+      cloudId: 'proj_0123456789abcdef0123456789abcdef',
       name: 'demo',
       testHome: directory.path,
     );
@@ -81,7 +81,7 @@ void main() {
     await client.terminalExec(auth.token, 'pwd');
     expect(requests, hasLength(4));
     for (final request in requests) {
-      expect(request.url.origin, 'https://qfli.lqsxm666.top');
+      expect(request.url.origin, 'https://qfli.suanxiwanjie.cn');
       expect(request.followRedirects, isFalse);
     }
     expect(requests[0].headers['authorization'], isNull);
@@ -100,13 +100,13 @@ void main() {
       () => ApiConfig.endpoint('https://example.com/api/posts'),
       throwsArgumentError,
     );
-    expect(ApiConfig.ownsSession('https://qfli.lqsxm666.top/'), isTrue);
+    expect(ApiConfig.ownsSession('https://qfli.suanxiwanjie.cn/'), isTrue);
     expect(
-      ApiConfig.ownsSession('https://qfli.lqsxm666.top.example.org'),
+      ApiConfig.ownsSession('https://qfli.suanxiwanjie.cn.example.org'),
       isFalse,
     );
-    expect(ApiConfig.ownsSession('https://name@qfli.lqsxm666.top'), isFalse);
-    expect(ApiConfig.ownsSession('http://qfli.lqsxm666.top'), isFalse);
+    expect(ApiConfig.ownsSession('https://name@qfli.suanxiwanjie.cn'), isFalse);
+    expect(ApiConfig.ownsSession('http://qfli.suanxiwanjie.cn'), isFalse);
   });
 
   test('网关 HTML、重定向、网络失败均返回可重试的 API 错误', () async {
@@ -135,7 +135,10 @@ void main() {
       transport: MockClient((_) async => http.Response('', 204)),
     );
     addTearDown(client.close);
-    await client.deletePost('test-token', 1);
+    await client.deletePost(
+      'test-token',
+      'post_0123456789abcdef0123456789abcdef',
+    );
   });
 
   group('登录态迁移', () {

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
@@ -33,6 +34,12 @@ abstract final class FileBackup {
   @visibleForTesting
   static String? baseOverride;
 
+  static Future<Directory> directory() async {
+    final base = baseOverride ?? await AppPaths.storageDirectory();
+    if (base == null) throw const FileSystemException('未找到应用数据目录');
+    return Directory(p.join(base, dirName));
+  }
+
   /// 把文件当前磁盘内容备份为带时间戳的副本（覆盖写入前调用）。
   /// 文件尚不存在（新建）或无应用数据目录时跳过；备份失败不阻塞保存。
   static Future<String?> backupBeforeOverwrite(
@@ -40,9 +47,9 @@ abstract final class FileBackup {
     required String projectName,
   }) async {
     try {
-      if (!file.existsSync()) return null;
+      if (!await file.exists()) return null;
       final base = baseOverride ?? await AppPaths.storageDirectory();
-      if (base == null) return null;
+      if (base == null) return '未找到应用数据目录';
       final projectDir = Directory(
         p.join(base, dirName, _sanitize(projectName)),
       );
@@ -52,14 +59,23 @@ abstract final class FileBackup {
       final stamp = _stamp(DateTime.now());
       var target = p.join(projectDir.path, '$name-$stamp$ext');
       var i = 1;
-      while (File(target).existsSync()) {
+      while (await File(target).exists()) {
         target = p.join(projectDir.path, '$name-$stamp-${i++}$ext');
       }
       await file.copy(target);
+      await File('$target.metadata.json').writeAsString(
+        jsonEncode({
+          'originalPath': p.normalize(file.absolute.path),
+          'projectName': projectName,
+          'name': p.basename(file.path),
+          'time': DateTime.now().toIso8601String(),
+        }),
+        flush: true,
+      );
       return null;
-    } catch (_) {
+    } catch (error) {
       // 备份失败不阻塞自动保存。
-      return null;
+      return '备份失败：$error';
     }
   }
 
@@ -76,7 +92,7 @@ abstract final class FileBackup {
       final name = p.basenameWithoutExtension(original.path);
       final ext = p.extension(original.path);
       final pattern = RegExp(
-        '${RegExp.escape(name)}-(\\d{8}-\\d{6}-\\d{3})'
+        '^${RegExp.escape(name)}-(\\d{8}-\\d{6}-\\d{3})(?:-\\d+)?'
         '${RegExp.escape(ext)}\$',
       );
       final versions = <BackupVersion>[];
@@ -84,13 +100,24 @@ abstract final class FileBackup {
         if (entity is! File) continue;
         final match = pattern.firstMatch(p.basename(entity.path));
         if (match == null) continue;
+        final metadata = File('${entity.path}.metadata.json');
+        if (await metadata.exists()) {
+          try {
+            final data =
+                jsonDecode(await metadata.readAsString())
+                    as Map<String, dynamic>;
+            final source = data['originalPath'] as String?;
+            if (source != null &&
+                !p.equals(source, p.normalize(original.absolute.path))) {
+              continue;
+            }
+          } catch (_) {}
+        }
         final time = _parseStamp(match.group(1)!);
         if (time == null) continue;
-        versions.add(BackupVersion(
-          file: entity,
-          time: time,
-          size: entity.lengthSync(),
-        ));
+        versions.add(
+          BackupVersion(file: entity, time: time, size: entity.lengthSync()),
+        );
       }
       versions.sort((a, b) => b.time.compareTo(a.time));
       return versions;
@@ -105,15 +132,20 @@ abstract final class FileBackup {
     File original, {
     required String projectName,
   }) async {
-    await backupBeforeOverwrite(original, projectName: projectName);
+    final error = await backupBeforeOverwrite(
+      original,
+      projectName: projectName,
+    );
+    if (error != null) throw FileSystemException(error);
     await Directory(p.dirname(original.path)).create(recursive: true);
     await version.file.copy(original.path);
   }
 
   static DateTime? _parseStamp(String stamp) {
     // yyyyMMdd-HHmmss-mmm
-    final m = RegExp(r'^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(\d{3})$')
-        .firstMatch(stamp);
+    final m = RegExp(
+      r'^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(\d{3})$',
+    ).firstMatch(stamp);
     if (m == null) return null;
     try {
       return DateTime(

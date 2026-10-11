@@ -19,6 +19,22 @@ class ProjectArchiveException implements Exception {
 abstract final class ProjectArchiveService {
   static const schemaVersion = 1;
 
+  static ({String name, String language, String type}) readMetadata(
+    String source,
+  ) {
+    final data = _decode(source);
+    final nested = data['project'];
+    final project = ProjectConfig.metadataFromJson(
+      nested is Map ? Map<String, dynamic>.from(nested) : null,
+    );
+    final metadata = ProjectConfig.metadataFromJson(data);
+    return (
+      name: metadata.name ?? project.name ?? '',
+      language: metadata.language ?? project.language ?? '',
+      type: metadata.type ?? project.type ?? '',
+    );
+  }
+
   static Future<String> exportProject(Project project) async {
     final root = Directory(project.path);
     if (!root.existsSync()) {
@@ -43,12 +59,21 @@ abstract final class ProjectArchiveService {
       });
     }
     files.sort((a, b) => (a['path'] as String).compareTo(b['path'] as String));
+    final metadata = ProjectConfig.readMetadata(project.path);
+    final name = metadata.name ?? project.name;
+    final language = metadata.language ?? project.language;
+    final type = metadata.type ?? project.type;
     final data = {
       'schemaVersion': schemaVersion,
-      'project': project.toJson(),
-      'name': project.name,
-      'language': project.language,
-      'type': project.type,
+      'project': {
+        ...project.toJson(),
+        'name': name,
+        'language': language,
+        'type': type,
+      },
+      'name': name,
+      'language': language,
+      'type': type,
       'files': files,
     };
     return const JsonEncoder.withIndent('  ').convert(data);
@@ -86,20 +111,24 @@ abstract final class ProjectArchiveService {
       }
       final encoding = item['encoding'];
       final bytes = switch (encoding) {
-        'utf8' when item['content'] is String => utf8.encode(item['content'] as String),
-        'base64' when item['bytesBase64'] is String => _decodeBase64(item['bytesBase64'] as String),
+        'utf8' when item['content'] is String => utf8.encode(
+          item['content'] as String,
+        ),
+        'base64' when item['bytesBase64'] is String => _decodeBase64(
+          item['bytesBase64'] as String,
+        ),
         _ => throw ProjectArchiveException('文件编码无效：$relative'),
       };
       await target.parent.create(recursive: true);
       await target.writeAsBytes(bytes, flush: true);
     }
-    final project = data['project'];
-    final metadata = project is Map ? Map<String, dynamic>.from(project) : <String, dynamic>{};
+    final metadata = readMetadata(source);
     await ProjectConfig.write(
       projectRoot: root.path,
-      name: data['name'] as String? ?? p.basename(root.path),
-      language: data['language'] as String? ?? metadata['language'] as String? ?? '',
-      type: data['type'] as String? ?? metadata['type'] as String? ?? '',
+      name: metadata.name.isEmpty ? p.basename(root.path) : metadata.name,
+      language: metadata.language,
+      type: metadata.type,
+      strict: true,
     );
   }
 
@@ -118,7 +147,10 @@ abstract final class ProjectArchiveService {
       throw const ProjectArchiveException('归档包含空路径');
     }
     final relative = _normalize(value);
-    if (p.isAbsolute(relative) || relative == '.' || relative.startsWith('../') || relative.contains('/../')) {
+    if (p.isAbsolute(relative) ||
+        relative == '.' ||
+        relative.startsWith('../') ||
+        relative.contains('/../')) {
       throw ProjectArchiveException('归档路径越界：$value');
     }
     return relative;
@@ -146,7 +178,12 @@ abstract final class ProjectArchiveService {
 
   static bool _isTransient(String path) {
     final parts = path.split('/');
-    return parts.any((part) =>
-        part == '.dart_tool' || part == 'build' || part == '.idea' || part == '.git');
+    return parts.any(
+      (part) =>
+          part == '.dart_tool' ||
+          part == 'build' ||
+          part == '.idea' ||
+          part == '.git',
+    );
   }
 }

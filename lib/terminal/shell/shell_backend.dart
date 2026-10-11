@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'command_parser.dart';
+
 /// Where a chunk of shell output came from.
 enum OutputKind {
   stdout,
@@ -56,6 +58,10 @@ abstract class ShellBackend extends ChangeNotifier {
   /// Runs [command]. Built-in commands are handled by the backend itself.
   Future<void> execute(String command);
 
+  /// Exit status of the most recent external command, or null when the last
+  /// command was a built-in (which has no process status) or none ran yet.
+  int? get lastExitCode;
+
   /// Best-effort cancellation of the running command (Ctrl+C).
   Future<void> interrupt();
 
@@ -95,9 +101,23 @@ abstract class ShellBackend extends ChangeNotifier {
   void detach();
 }
 
+/// Minimal output surface shared by the portable built-in helper and the
+/// backends, so the helper can be unit-tested without a [ChangeNotifier].
+abstract interface class ShellSink {
+  /// Emits [text] verbatim (no trailing newline is added).
+  void raw(String text);
+
+  /// Emits [text] followed by a newline.
+  void line(String text);
+
+  /// Emits a user-facing error line.
+  void error(String text);
+}
+
 /// Shared plumbing: output stream, built-in commands, busy bookkeeping and the
 /// [NetHost] implementation every backend hands to the network toolkit.
-abstract class BaseShellBackend extends ChangeNotifier implements ShellBackend {
+abstract class BaseShellBackend extends ChangeNotifier
+    implements ShellBackend, ShellSink {
   // Synchronous delivery matters: output must land in the session buffer before
   // `execute` completes, otherwise a following command echo could be inserted
   // in the middle of this command's output.
@@ -107,8 +127,18 @@ abstract class BaseShellBackend extends ChangeNotifier implements ShellBackend {
   bool _busy = false;
   bool _disposed = false;
   String _cwd = '';
+  int? _lastExitCode;
+
+  @override
+  int? get lastExitCode => _lastExitCode;
+
+  /// Records the exit status of the last external command. Called by
+  /// [runExternal] implementations; resets to null for built-ins.
+  @protected
+  set lastExitCode(int? value) => _lastExitCode = value;
 
   void Function()? _cancelHandler;
+  bool _cancelRequested = false;
 
   @override
   Stream<ShellChunk> get output => _controller.stream;
@@ -191,6 +221,15 @@ abstract class BaseShellBackend extends ChangeNotifier implements ShellBackend {
     _controller.add(ShellChunk(text, kind));
   }
 
+  @override
+  void raw(String text) => emit(text);
+
+  @override
+  void line(String text) => emitLine(text);
+
+  @override
+  void error(String text) => emitLine(text, OutputKind.stderr);
+
   @protected
   void emitLine(String text, [OutputKind kind = OutputKind.stdout]) =>
       emit('$text\n', kind);
@@ -202,50 +241,167 @@ abstract class BaseShellBackend extends ChangeNotifier implements ShellBackend {
     if (_busy || attached) return;
     final trimmed = command.trim();
     if (trimmed.isEmpty) return;
-    if (await handleBuiltin(trimmed)) return;
-
+    // The whole lifecycle — built-in or external, sync or async — runs under
+    // `busy` so the pane's derived state cannot get stuck and a second command
+    // cannot race the first.
     busyState = true;
+    // Open the cancellation window *before* the first asynchronous boundary so
+    // an interrupt() in the same turn as execute() is not lost. The subclass
+    // reads this flag and must not reset it.
+    _cancelRequested = false;
+    onCommandStart();
     try {
+      // Built-ins have no process status.
+      _lastExitCode = null;
+      if (await handleBuiltin(trimmed)) return;
       await runExternal(trimmed);
     } catch (error) {
       emitLine('shell: $error', OutputKind.stderr);
     } finally {
       busyState = false;
+      onCommandEnd();
     }
   }
 
+  /// True once [interrupt] has been requested for the current command.
+  @protected
+  bool get cancelRequested => _cancelRequested;
+
+  /// Called at the start of an accepted command, before its first await, so a
+  /// subclass can install its cancellation bookkeeping.
+  @protected
+  void onCommandStart() {}
+
+  /// Called when an accepted command finishes (success, failure, cancel).
+  @protected
+  void onCommandEnd() {}
+
+  /// Records a cancellation request for the running command. A request with no
+  /// command in flight is dropped so it cannot poison the next command.
+  @protected
+  void requestCancel() {
+    if (_busy) _cancelRequested = true;
+  }
+
   /// Commands shared by every backend. Returns true when fully handled.
+  ///
+  /// Order is deliberate:
+  ///   1. Shell syntax (pipes/redirection/chaining/expansion) is classified
+  ///      first and, when present, is never treated as built-in operands.
+  ///   2. Trivial cross-platform built-ins (`clear`, `pwd`, `help`, `cd`).
+  ///   3. Portable real-filesystem commands provided by the IO implementation.
+  ///
+  /// A portable command that fails (bad option, missing file) still returns
+  /// true: it was recognised, so it must not fall through to a shell that would
+  /// silently reinterpret it.
   @protected
   Future<bool> handleBuiltin(String command) async {
-    switch (command) {
+    final policy = escapePolicy;
+    final syntax = CommandParser.classify(command, escapePolicy: policy);
+    if (syntax == CommandSyntax.empty) return true;
+
+    // Compound syntax needs a real shell. Signal the caller to use the
+    // external path; built-ins must never see the operator characters.
+    if (syntax == CommandSyntax.compound) return false;
+
+    final parsed = CommandParser.tokenize(command, escapePolicy: policy);
+    if (!parsed.ok) {
+      emitLine(parsed.error!, OutputKind.stderr);
+      return true;
+    }
+    final tokens = parsed.tokens;
+    if (tokens.isEmpty) return true;
+
+    final name = tokens.first.text;
+    final args = tokens.sublist(1);
+    switch (name) {
       case 'clear':
       case 'cls':
+        if (args.isNotEmpty) {
+          emitLine('$name: too many arguments', OutputKind.stderr);
+          return true;
+        }
         emit('clear', OutputKind.control);
         return true;
       case 'pwd':
+        if (args.isNotEmpty) {
+          emitLine('pwd: too many arguments', OutputKind.stderr);
+          return true;
+        }
         emitLine(cwd);
         return true;
       case 'help':
         emitLine(helpText);
         return true;
+      case 'cd':
+        return changeDirectoryTokens(args);
     }
 
-    if (command == 'cd' || command.startsWith('cd ')) {
-      final target = command == 'cd' ? '~' : command.substring(3).trim();
-      return changeDirectory(target);
-    }
-
-    return false;
+    return handlePortableBuiltin(tokens.first, args);
   }
+
+  /// Runs a portable real-filesystem command, or returns false when [name] is
+  /// not one of them. Implemented by the IO backend; the default reports the
+  /// platform limitation.
+  @protected
+  bool handlePortableBuiltin(CommandToken name, List<CommandToken> args) =>
+      false;
+
+  /// How this backend's host treats backslashes. Defaults to POSIX escaping;
+  /// the Windows IO backend overrides it to a literal-separator policy so
+  /// classification and tokenization stay consistent on both hosts.
+  @protected
+  EscapePolicy get escapePolicy => EscapePolicy.backslashEscapes;
+
+  /// [cd] with already-tokenized arguments, so quoted paths survive.
+  @protected
+  Future<bool> changeDirectoryTokens(List<CommandToken> args) async {
+    final operands = <CommandToken>[];
+    var optionsDone = false;
+    for (final arg in args) {
+      if (!optionsDone && arg.text == '--') {
+        optionsDone = true;
+        continue;
+      }
+      if (!optionsDone && arg.text.startsWith('-') && arg.text.length > 1) {
+        emitLine('cd: unsupported option: ${arg.text}', OutputKind.stderr);
+        return true;
+      }
+      operands.add(arg);
+    }
+    if (operands.length > 1) {
+      emitLine('cd: too many arguments', OutputKind.stderr);
+      return true;
+    }
+    if (operands.isEmpty) {
+      // Only `cd` with no argument defaults to the home directory.
+      return changeDirectoryToken(null);
+    }
+    final operand = operands.first;
+    if (operand.text.isEmpty) {
+      emitLine('cd: empty path operand', OutputKind.stderr);
+      return true;
+    }
+    return changeDirectoryToken(operand);
+  }
+
+  /// Changes directory for an already-tokenized operand. A null token means a
+  /// no-argument `cd` (home). Quoted operands do not expand a literal `~`.
+  @protected
+  Future<bool> changeDirectoryToken(CommandToken? operand) => changeDirectory(
+    operand == null || !operand.quoted ? (operand?.text ?? '~') : operand.text,
+    expandTilde: operand == null || !operand.quoted,
+  );
 
   /// Multi-line help text shown by the `help` built-in.
   @protected
   String get helpText;
 
   /// Resolves [target] and updates [cwd]. Returns true when handled, even if
-  /// the directory does not exist (the error is reported via [emit]).
+  /// the directory does not exist (the error is reported via [emit]). When
+  /// [expandTilde] is false a literal `~` operand is not the home directory.
   @protected
-  Future<bool> changeDirectory(String target);
+  Future<bool> changeDirectory(String target, {bool expandTilde = true});
 
   /// Executes a non-built-in command.
   @protected
@@ -257,11 +413,13 @@ abstract class BaseShellBackend extends ChangeNotifier implements ShellBackend {
   }
 
   @override
-  void detach() {
-  }
+  void detach() {}
 
   @override
   Future<void> interrupt() async {
+    // Mark first so the request survives even if it arrives before the child
+    // process exists.
+    requestCancel();
     final cancel = _cancelHandler;
     if (cancel != null) {
       emitLine('^C', OutputKind.system);

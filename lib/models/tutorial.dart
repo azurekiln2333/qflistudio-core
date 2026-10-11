@@ -122,6 +122,9 @@ class TutorialLesson {
     required this.code,
     required this.output,
     required this.tasks,
+    this.objective = '',
+    this.prerequisites = const [],
+    this.pitfalls = const [],
   });
 
   final String id;
@@ -145,6 +148,15 @@ class TutorialLesson {
 
   /// 练习题。
   final List<TutorialTask> tasks;
+
+  /// 学习目标（这一课学完能做到什么）。
+  final String objective;
+
+  /// 前置知识。
+  final List<String> prerequisites;
+
+  /// 常见易错点与注意事项。
+  final List<String> pitfalls;
 }
 
 /// A first-class example entry. It is intentionally separate from lessons so

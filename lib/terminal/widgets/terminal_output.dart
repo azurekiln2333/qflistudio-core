@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/terminal_session.dart';
 import '../shell/ansi.dart';
@@ -204,7 +205,14 @@ class _TerminalOutputViewState extends State<TerminalOutputView> {
     // Deferred by one frame: an enclosing SelectionArea takes focus on tap up,
     // so requesting it now would be undone immediately.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) widget.focusNode.requestFocus();
+      if (!mounted) return;
+      if (!widget.focusNode.hasFocus) {
+        widget.focusNode.requestFocus();
+      } else {
+        // Already focused but the keyboard may be dismissed: ask the platform
+        // to show it, so tapping the panel always raises the keyboard.
+        SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      }
     });
   }
 
@@ -351,7 +359,9 @@ class _TerminalOutputViewState extends State<TerminalOutputView> {
               // typing behind dots.
               obscureText: attached && backend.attachSecret,
               maxLines: 1,
-              textInputAction: TextInputAction.send,
+              // `none` keeps the soft keyboard open after Return instead of the
+              // platform dismissing it (the send/done actions dismiss it).
+              textInputAction: TextInputAction.none,
               onSubmitted: widget.onSubmitted,
               autocorrect: false,
               enableSuggestions: false,

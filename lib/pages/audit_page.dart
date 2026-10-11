@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../editor/editor_fonts.dart';
 
 import '../community/community_widgets.dart';
 import '../services/api_client.dart';
@@ -160,7 +161,7 @@ class _AuditPageState extends State<AuditPage> {
                       title: Text(
                         action,
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          fontFamily: 'Consolas',
+                          fontFamily: EditorFonts.bundledFamily,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
@@ -173,7 +174,9 @@ class _AuditPageState extends State<AuditPage> {
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(fontFamily: 'Consolas'),
+                                  ?.copyWith(
+                                    fontFamily: EditorFonts.bundledFamily,
+                                  ),
                             ),
                           Text(
                             '${log['username'] ?? '-'} · '

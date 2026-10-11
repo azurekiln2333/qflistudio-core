@@ -158,34 +158,54 @@ class _ProjectCardState extends State<ProjectCard> {
                       const SizedBox(height: 4),
 
                       // 第二行：路径 + 时间
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Tooltip(
-                              message: project.path,
-                              waitDuration: const Duration(milliseconds: 500),
-                              child: _LeftEllipsisText(
-                                project.path,
-                                style: textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant.withValues(
-                                    alpha: 0.7,
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final scale = MediaQuery.textScalerOf(
+                            context,
+                          ).scale(1);
+                          final showOpenedAt =
+                              constraints.maxWidth >= 172 && scale < 1.6;
+                          return Row(
+                            children: [
+                              Expanded(
+                                child: Tooltip(
+                                  message: project.path,
+                                  waitDuration: const Duration(
+                                    milliseconds: 500,
                                   ),
-                                  fontSize: 11,
+                                  child: _LeftEllipsisText(
+                                    project.path,
+                                    style: textTheme.bodySmall?.copyWith(
+                                      color: scheme.onSurfaceVariant.withValues(
+                                        alpha: 0.7,
+                                      ),
+                                      fontSize: 11,
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _timeAgo(project.lastOpenedAt),
-                            style: textTheme.labelSmall?.copyWith(
-                              color: scheme.onSurfaceVariant.withValues(
-                                alpha: 0.5,
-                              ),
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
+                              if (showOpenedAt) ...[
+                                const SizedBox(width: 8),
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 88,
+                                  ),
+                                  child: Text(
+                                    _timeAgo(project.lastOpenedAt),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textTheme.labelSmall?.copyWith(
+                                      color: scheme.onSurfaceVariant.withValues(
+                                        alpha: 0.5,
+                                      ),
+                                      fontSize: 10,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          );
+                        },
                       ),
                     ],
                   ),

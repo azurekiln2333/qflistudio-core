@@ -36,7 +36,13 @@ class FileExplorer extends StatefulWidget {
     required this.settings,
     this.onFileOpened,
     this.onEntryDeleted,
+    this.outlined = true,
   });
+
+  /// 是否由本组件自绘 MD3 outlined 卡片外观（圆角 + 细描边）。
+  ///
+  /// 设为 false 时仅渲染内容，外观交给外层容器（例如抽屉里的自定义卡片）。
+  final bool outlined;
 
   final Project project;
   final EditorController editor;
@@ -67,10 +73,12 @@ class FileExplorer extends StatefulWidget {
       } on FileSystemException {
         return;
       }
-      entries.sort((a, b) => p
-          .basename(a.path)
-          .toLowerCase()
-          .compareTo(p.basename(b.path).toLowerCase()));
+      entries.sort(
+        (a, b) => p
+            .basename(a.path)
+            .toLowerCase()
+            .compareTo(p.basename(b.path).toLowerCase()),
+      );
       for (final e in entries) {
         final name = p.basename(e.path);
         if (e is Directory) {
@@ -87,8 +95,7 @@ class FileExplorer extends StatefulWidget {
     return results;
   }
 
-
-    @override
+  @override
   State<FileExplorer> createState() => _FileExplorerState();
 }
 
@@ -149,11 +156,11 @@ class _FileExplorerState extends State<FileExplorer> {
       if (!Directory(abs).existsSync()) continue;
       _expanded.add(abs);
       if (!_children.containsKey(abs)) {
-        unawaited(_loadChildren(FileNode(
-          path: abs,
-          name: p.basename(abs),
-          isDir: true,
-        )));
+        unawaited(
+          _loadChildren(
+            FileNode(path: abs, name: p.basename(abs), isDir: true),
+          ),
+        );
       }
     }
     if (mounted) setState(() {});
@@ -182,8 +189,9 @@ class _FileExplorerState extends State<FileExplorer> {
     );
     if (!mounted) return;
     if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
       return;
     }
     widget.onFileOpened?.call();
@@ -218,7 +226,10 @@ class _FileExplorerState extends State<FileExplorer> {
     }
   }
 
-  Future<void> _importResources(FileNode directory, {required bool photos}) async {
+  Future<void> _importResources(
+    FileNode directory, {
+    required bool photos,
+  }) async {
     final documents = <PickedDocument>[];
     if (photos) {
       documents.addAll(await PickerService.pickPhotos());
@@ -517,19 +528,22 @@ class _FileExplorerState extends State<FileExplorer> {
                         timeLabel: timeLabel,
                       )
                       .then((error) {
-                    if (error != null && mounted) {
-                      ScaffoldMessenger.of(context)
-                          .showSnackBar(SnackBar(content: Text(error)));
-                    }
-                  });
+                        if (error != null && mounted) {
+                          ScaffoldMessenger.of(
+                            context,
+                          ).showSnackBar(SnackBar(content: Text(error)));
+                        }
+                      });
                 },
                 onRestored: () async {
                   // 恢复后刷新原文件内容（已打开的普通标签）。
-                  final idx = widget.editor.files
-                      .indexWhere((f) => p.equals(f.path, node.path));
+                  final idx = widget.editor.files.indexWhere(
+                    (f) => p.equals(f.path, node.path),
+                  );
                   if (idx >= 0 && !widget.editor.files[idx].readOnly) {
-                    widget.editor.files[idx].controller.text =
-                        await File(node.path).readAsString();
+                    widget.editor.files[idx].controller.text = await File(
+                      node.path,
+                    ).readAsString();
                   }
                 },
               ),
@@ -541,16 +555,14 @@ class _FileExplorerState extends State<FileExplorer> {
 
   Widget _buildSearchResults(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final results =
-        FileExplorer.searchFiles(_browsing.path, _searchQuery);
+    final results = FileExplorer.searchFiles(_browsing.path, _searchQuery);
     if (results.isEmpty) {
       return Center(
         child: Text(
           '没有匹配的文件',
-          style: Theme.of(context)
-              .textTheme
-              .bodySmall
-              ?.copyWith(color: scheme.onSurfaceVariant),
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
         ),
       );
     }
@@ -580,10 +592,9 @@ class _FileExplorerState extends State<FileExplorer> {
             rel,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: Theme.of(context)
-                .textTheme
-                .labelSmall
-                ?.copyWith(color: scheme.onSurfaceVariant),
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
           ),
           onTap: () => _openSearchResult(node.path),
         );
@@ -594,18 +605,35 @@ class _FileExplorerState extends State<FileExplorer> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
+    final body = _buildBody(context, scheme);
+    if (!widget.outlined) {
+      return ColoredBox(color: scheme.surfaceContainerLow, child: body);
+    }
+    // MaterialCardView outlined：圆角表面 + outlineVariant 细描边，无阴影。
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
       color: scheme.surfaceContainerLow,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: 48,
-            child: Row(
-              children: [
-                const SizedBox(width: 8),
-                Expanded(
-                  child: PopupMenuButton<Project>(
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: scheme.outlineVariant, width: 1),
+      ),
+      child: body,
+    );
+  }
+
+  Widget _buildBody(BuildContext context, ColorScheme scheme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: 48,
+          child: Row(
+            children: [
+              const SizedBox(width: 8),
+              Expanded(
+                child: PopupMenuButton<Project>(
                   tooltip: '切换项目（跨项目打开文件）',
                   onSelected: _switchProject,
                   itemBuilder: (context) => [
@@ -668,77 +696,76 @@ class _FileExplorerState extends State<FileExplorer> {
                     ),
                   ),
                 ),
+              ),
+              IconButton(
+                tooltip: '新建文件',
+                icon: const Icon(Icons.note_add_outlined, size: 20),
+                onPressed: () => _create(null, false),
+              ),
+              IconButton(
+                tooltip: '新建文件夹',
+                icon: const Icon(Icons.create_new_folder_outlined, size: 20),
+                onPressed: () => _create(null, true),
+              ),
+              IconButton(
+                tooltip: _searchOpen ? '退出搜索' : '搜索文件',
+                icon: Icon(_searchOpen ? Icons.close : Icons.search),
+                onPressed: () {
+                  setState(() {
+                    _searchOpen = !_searchOpen;
+                    _searchQuery = '';
+                    _searchController.clear();
+                  });
+                },
+              ),
+              IconButton(
+                tooltip: '刷新',
+                icon: const Icon(Icons.refresh, size: 20),
+                onPressed: _refresh,
+              ),
+              const SizedBox(width: 4),
+            ],
+          ),
+        ),
+        Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
+        if (_searchOpen)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: TextField(
+              controller: _searchController,
+              autofocus: true,
+              style: Theme.of(context).textTheme.bodyMedium,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '按文件名搜索（含子目录）',
+                prefixIcon: const Icon(Icons.search, size: 18),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
                 ),
-                IconButton(
-                  tooltip: '新建文件',
-                  icon: const Icon(Icons.note_add_outlined, size: 20),
-                  onPressed: () => _create(null, false),
-                ),
-                IconButton(
-                  tooltip: '新建文件夹',
-                  icon: const Icon(Icons.create_new_folder_outlined, size: 20),
-                  onPressed: () => _create(null, true),
-                ),
-                IconButton(
-                  tooltip: _searchOpen ? '退出搜索' : '搜索文件',
-                  icon: Icon(_searchOpen ? Icons.close : Icons.search),
-                  onPressed: () {
-                    setState(() {
-                      _searchOpen = !_searchOpen;
-                      _searchQuery = '';
-                      _searchController.clear();
-                    });
-                  },
-                ),
-                IconButton(
-                  tooltip: '刷新',
-                  icon: const Icon(Icons.refresh, size: 20),
-                  onPressed: _refresh,
-                ),
-                const SizedBox(width: 4),
-              ],
+              ),
+              onChanged: (value) => setState(() => _searchQuery = value),
             ),
           ),
-          Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
-          if (_searchOpen)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: TextField(
-                controller: _searchController,
-                autofocus: true,
-                style: Theme.of(context).textTheme.bodyMedium,
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: '按文件名搜索（含子目录）',
-                  prefixIcon: const Icon(Icons.search, size: 18),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
+        Expanded(
+          child: _searchOpen && _searchQuery.trim().isNotEmpty
+              ? _buildSearchResults(context)
+              : GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (details) =>
+                      _showMenu(_root, details.globalPosition),
+                  child: ListView(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    children: [
+                      _buildRow(context, _root, 0),
+                      if (_expanded.contains(_root.path))
+                        for (final node in _childrenOf(_root))
+                          _buildNode(context, node, 1),
+                    ],
                   ),
                 ),
-                onChanged: (value) => setState(() => _searchQuery = value),
-              ),
-            ),
-          Expanded(
-            child: _searchOpen && _searchQuery.trim().isNotEmpty
-                ? _buildSearchResults(context)
-                : GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onSecondaryTapUp: (details) =>
-                  _showMenu(_root, details.globalPosition),
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                children: [
-                  _buildRow(context, _root, 0),
-                  if (_expanded.contains(_root.path))
-                    for (final node in _childrenOf(_root))
-                      _buildNode(context, node, 1),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 

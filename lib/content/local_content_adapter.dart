@@ -43,6 +43,9 @@ abstract final class LocalContentAdapter {
                   explain: lesson.explain,
                   code: lesson.code,
                   output: lesson.output,
+                  objective: lesson.objective,
+                  prerequisites: lesson.prerequisites,
+                  pitfalls: lesson.pitfalls,
                   tasks: [
                     for (final exercise in lesson.exercises)
                       TutorialTask(

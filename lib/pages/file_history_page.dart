@@ -62,23 +62,21 @@ class FileHistoryPage extends StatelessWidget {
                       Icon(
                         Icons.history,
                         size: 56,
-                        color:
-                            scheme.onSurfaceVariant.withValues(alpha: 0.5),
+                        color: scheme.onSurfaceVariant.withValues(alpha: 0.5),
                       ),
                       const SizedBox(height: 12),
-                      Text('暂无历史版本',
-                          style: Theme.of(context).textTheme.titleMedium),
+                      Text(
+                        '暂无历史版本',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                       const SizedBox(height: 6),
                       Text(
                         '开启自动保存后，每次覆盖写入前\n会自动备份一份带时间戳的版本',
                         textAlign: TextAlign.center,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                              height: 1.6,
-                            ),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          height: 1.6,
+                        ),
                       ),
                     ],
                   ),
@@ -146,15 +144,24 @@ class FileHistoryPage extends StatelessWidget {
       ),
     );
     if (confirmed != true) return;
-    await FileBackup.restoreVersion(
-      version,
-      original,
-      projectName: projectName,
-    );
+    try {
+      await FileBackup.restoreVersion(
+        version,
+        original,
+        projectName: projectName,
+      );
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('恢复失败：$error')));
+      }
+      return;
+    }
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已恢复 ${version.timeLabel} 的内容')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('已恢复 ${version.timeLabel} 的内容')));
     await onRestored();
     if (context.mounted) Navigator.of(context).pop();
   }
@@ -204,24 +211,25 @@ class _FileInfoCard extends StatelessWidget {
                     fileName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700),
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     relativePath,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: scheme.onSurfaceVariant),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
               ),
             ),
             const SizedBox(width: 8),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 color: exists
                     ? scheme.primaryContainer.withValues(alpha: 0.7)
@@ -278,8 +286,9 @@ class _TimelineTile extends StatelessWidget {
                   child: Center(
                     child: Container(
                       width: 2,
-                      color:
-                          isFirst ? Colors.transparent : scheme.outlineVariant,
+                      color: isFirst
+                          ? Colors.transparent
+                          : scheme.outlineVariant,
                     ),
                   ),
                 ),
@@ -295,7 +304,9 @@ class _TimelineTile extends StatelessWidget {
                   child: Center(
                     child: Container(
                       width: 2,
-                      color: isLast ? Colors.transparent : scheme.outlineVariant,
+                      color: isLast
+                          ? Colors.transparent
+                          : scheme.outlineVariant,
                     ),
                   ),
                 ),
@@ -361,8 +372,10 @@ class _TimelineTile extends StatelessWidget {
                               visualDensity: VisualDensity.compact,
                             ),
                             onPressed: onPreview,
-                            icon: const Icon(Icons.visibility_outlined,
-                                size: 16),
+                            icon: const Icon(
+                              Icons.visibility_outlined,
+                              size: 16,
+                            ),
                             label: const Text('打开预览'),
                           ),
                           const SizedBox(width: 8),

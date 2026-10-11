@@ -1,40 +1,119 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../community/models.dart';
+import '../services/avatar_cache.dart';
 
-/// 字母头像（颜色来自服务端的 avatarColor）。
-class Avatar extends StatelessWidget {
-  const Avatar({super.key, required this.name, this.color, this.size = 40});
+/// 网关头像加载失败时使用昵称首字母。
+class Avatar extends StatefulWidget {
+  const Avatar({
+    super.key,
+    required this.name,
+    this.color,
+    this.imageUrl = '',
+    this.size = 40,
+    required this.cacheKey,
+    this.refreshToken = 0,
+  });
 
   final String name;
   final String? color;
+  final String imageUrl;
   final double size;
+  final String cacheKey;
+  final int refreshToken;
+
+  @override
+  State<Avatar> createState() => _AvatarState();
+}
+
+class _AvatarState extends State<Avatar> {
+  File? _image;
+  int _request = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant Avatar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final changedAccount = oldWidget.cacheKey != widget.cacheKey;
+    if (changedAccount || widget.imageUrl.trim().isEmpty) _image = null;
+    if (changedAccount ||
+        oldWidget.imageUrl != widget.imageUrl ||
+        oldWidget.refreshToken != widget.refreshToken) {
+      _load(recheck: oldWidget.refreshToken != widget.refreshToken);
+    }
+  }
+
+  Future<void> _load({bool recheck = false}) async {
+    final request = ++_request;
+    final url = widget.imageUrl.trim();
+    if (url.isEmpty) return;
+    final image = await AvatarCache.resolve(
+      widget.cacheKey,
+      url,
+      recheck: recheck,
+    );
+    if (!mounted || request != _request || image == null) return;
+    var failed = false;
+    await precacheImage(
+      FileImage(image),
+      context,
+      onError: (_, _) => failed = true,
+    );
+    if (!mounted || request != _request || failed) return;
+    if (_image?.path != image.path) setState(() => _image = image);
+  }
 
   Color get _bg {
-    final hex = (color ?? '#2196F3').replaceFirst('#', '');
+    final hex = (widget.color ?? '#2196F3').replaceFirst('#', '');
     final value = int.tryParse(hex, radix: 16) ?? 0x2196F3;
     return Color(0xFF000000 | value);
   }
 
   @override
   Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? '?' : name.trim().characters.first;
+    final initial = widget.name.trim().isEmpty
+        ? '?'
+        : widget.name.trim().characters.first;
     return Container(
-      width: size,
-      height: size,
+      width: widget.size,
+      height: widget.size,
       decoration: BoxDecoration(shape: BoxShape.circle, color: _bg),
       alignment: Alignment.center,
-      child: Text(
-        initial.toUpperCase(),
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: size * 0.42,
-          fontWeight: FontWeight.w600,
-        ),
+      child: ClipOval(
+        child: _image == null
+            ? _initial(initial)
+            : Image.file(
+                _image!,
+                width: widget.size,
+                height: widget.size,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                frameBuilder: (context, child, frame, synchronous) =>
+                    synchronous || frame != null ? child : _initial(initial),
+                errorBuilder: (context, error, stackTrace) => _initial(initial),
+              ),
       ),
     );
   }
+
+  Widget _initial(String initial) => Center(
+    child: Text(
+      initial.toUpperCase(),
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: widget.size * 0.42,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
 }
 
 /// 标签 chip（#xxx）。
@@ -58,9 +137,9 @@ class TagChip extends StatelessWidget {
         ),
         child: Text(
           '#$tag',
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: scheme.onSecondaryContainer,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.labelSmall?.copyWith(color: scheme.onSecondaryContainer),
         ),
       ),
     );
@@ -105,10 +184,10 @@ class PostCard extends StatelessWidget {
                     child: Text(
                       isTutorial ? '教程' : '讨论',
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: isTutorial
-                                ? scheme.onPrimaryContainer
-                                : scheme.onTertiaryContainer,
-                          ),
+                        color: isTutorial
+                            ? scheme.onPrimaryContainer
+                            : scheme.onTertiaryContainer,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -116,8 +195,8 @@ class PostCard extends StatelessWidget {
                     child: Text(
                       post.zoneName,
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
+                        color: scheme.onSurfaceVariant,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -129,29 +208,22 @@ class PostCard extends StatelessWidget {
                 post.title,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w600),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
               Text(
                 post.excerpt,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
               ),
               const SizedBox(height: 10),
               Row(
                 children: [
-                  Avatar(
-                    name: post.author.nickname,
-                    color: post.author.avatarColor,
-                    size: 22,
-                  ),
-                  const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       post.author.nickname,
@@ -204,7 +276,7 @@ class CommentTree extends StatelessWidget {
 
   final List<Comment> comments;
   final ValueChanged<Comment> onReply;
-  final int? currentUserId;
+  final String? currentUserId;
 
   @override
   Widget build(BuildContext context) {
@@ -215,8 +287,8 @@ class CommentTree extends StatelessWidget {
           '还没有评论，来抢沙发',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
         ),
       );
     }
@@ -244,7 +316,7 @@ class _CommentNode extends StatelessWidget {
 
   final Comment comment;
   final ValueChanged<Comment> onReply;
-  final int? currentUserId;
+  final String? currentUserId;
   final int depth;
 
   @override
@@ -258,12 +330,6 @@ class _CommentNode extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Avatar(
-                name: comment.author.nickname,
-                color: comment.author.avatarColor,
-                size: 30,
-              ),
-              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -273,9 +339,7 @@ class _CommentNode extends StatelessWidget {
                         Expanded(
                           child: Text(
                             comment.author.nickname,
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelMedium
+                            style: Theme.of(context).textTheme.labelMedium
                                 ?.copyWith(fontWeight: FontWeight.w600),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
@@ -284,9 +348,8 @@ class _CommentNode extends StatelessWidget {
                         if (currentUserId == comment.author.id)
                           Text(
                             '（我）',
-                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                ),
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: scheme.onSurfaceVariant),
                           ),
                       ],
                     ),
@@ -306,9 +369,7 @@ class _CommentNode extends StatelessWidget {
                         ),
                         Text(
                           comment.createdAt,
-                          style: Theme.of(context)
-                              .textTheme
-                              .labelSmall
+                          style: Theme.of(context).textTheme.labelSmall
                               ?.copyWith(color: scheme.onSurfaceVariant),
                         ),
                       ],
@@ -348,6 +409,10 @@ String relativeTime(String raw) {
 void copyWithToast(BuildContext context, String text) {
   Clipboard.setData(ClipboardData(text: text));
   ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text('已复制：${text.length > 40 ? '${text.substring(0, 40)}…' : text}')),
+    SnackBar(
+      content: Text(
+        '已复制：${text.length > 40 ? '${text.substring(0, 40)}…' : text}',
+      ),
+    ),
   );
 }

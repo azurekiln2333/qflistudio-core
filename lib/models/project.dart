@@ -24,8 +24,8 @@ class Project {
   DateTime createdAt;
   DateTime lastOpenedAt;
 
-  /// 云端项目在服务器上的数字 ID（字符串存储）；本地项目为 null。
-  final String? cloudId;
+  /// 云端项目在服务器上的 proj_ ID；本地项目为 null。
+  String? cloudId;
 
   /// 是否已收藏。
   bool favorite;

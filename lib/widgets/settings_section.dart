@@ -6,10 +6,12 @@ class SettingsSection extends StatelessWidget {
     super.key,
     required this.title,
     required this.children,
+    this.cardShape,
   });
 
   final String title;
   final List<Widget> children;
+  final ShapeBorder? cardShape;
 
   @override
   Widget build(BuildContext context) {
@@ -30,6 +32,7 @@ class SettingsSection extends StatelessWidget {
           ),
           Card.filled(
             margin: EdgeInsets.zero,
+            shape: cardShape,
             child: Column(children: children),
           ),
         ],

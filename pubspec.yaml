@@ -32,6 +32,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  path_provider_platform_interface: ^2.1.2
 
 flutter:
   uses-material-design: true
@@ -41,3 +42,18 @@ flutter:
   assets:
     - assets/tutorials/
     - assets/content/
+    - assets/fonts/roboto_mono/OFL.txt
+
+  fonts:
+    - family: RobotoMono
+      fonts:
+        - asset: assets/fonts/roboto_mono/static/RobotoMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/roboto_mono/static/RobotoMono-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/roboto_mono/static/RobotoMono-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/roboto_mono/static/RobotoMono-BoldItalic.ttf
+          weight: 700
+          style: italic

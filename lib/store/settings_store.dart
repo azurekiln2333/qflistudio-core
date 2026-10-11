@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../services/app_paths.dart';
 import '../editor/highlight_import.dart';
 import '../editor/textmate_grammar.dart';
+import '../editor/editor_fonts.dart';
 
 ImportedHighlightTheme _parseHighlightTheme(
   ({String source, String name}) input,
@@ -66,8 +67,22 @@ class SettingsStore extends ChangeNotifier {
   /// 编辑器顶部的打开文件标签栏可见。
   bool showEditorTabs = true;
 
-  /// 自动保存：编辑停止 2.5 秒后写盘，写盘前把上一版本备份到 files_backup。
+  /// 自动保存：每次内容修改后立即排队写盘，覆盖前备份上一版本。
   bool autoSave = false;
+
+  String editorFont = EditorFonts.defaultFont;
+  double editorFontSize = EditorFonts.defaultSize;
+  double editorLineHeight = 1.4;
+  bool editorBold = true;
+  bool editorItalic = false;
+
+  TextStyle get editorTextStyle => EditorFonts.style(
+    font: editorFont,
+    size: editorFontSize,
+    height: editorLineHeight,
+    bold: editorBold,
+    italic: editorItalic,
+  );
 
   /// 外观主题：system / light / dark。
   String themeMode = 'system';
@@ -111,6 +126,27 @@ class SettingsStore extends ChangeNotifier {
           minimap = data['minimap'] as bool? ?? minimap;
           showEditorTabs = data['showEditorTabs'] as bool? ?? showEditorTabs;
           autoSave = data['autoSave'] as bool? ?? autoSave;
+          final font = data['editorFont'] == 'systemMono'
+              ? EditorFonts.defaultFont
+              : data['editorFont'];
+          if (font is String && EditorFonts.choices.containsKey(font)) {
+            editorFont = font;
+          }
+          final size = data['editorFontSize'];
+          if (size is num && size.isFinite) {
+            editorFontSize = size.toDouble().clamp(
+              EditorFonts.minSize,
+              EditorFonts.maxSize,
+            );
+          }
+          final height = data['editorLineHeight'];
+          if (height is num && height.isFinite) {
+            editorLineHeight = height.toDouble().clamp(1.0, 2.0);
+          }
+          editorBold = data['editorBoldDefaultVersion'] == 1
+              ? data['editorBold'] as bool? ?? true
+              : true;
+          editorItalic = data['editorItalic'] as bool? ?? false;
           themeMode = data['themeMode'] as String? ?? themeMode;
           syntaxHighlighting = data['syntaxHighlighting'] as bool? ?? true;
           textMateEnabled = data['textMateEnabled'] as bool? ?? true;
@@ -182,6 +218,12 @@ class SettingsStore extends ChangeNotifier {
       'minimap': minimap,
       'showEditorTabs': showEditorTabs,
       'autoSave': autoSave,
+      'editorFont': editorFont,
+      'editorFontSize': editorFontSize,
+      'editorLineHeight': editorLineHeight,
+      'editorBold': editorBold,
+      'editorBoldDefaultVersion': 1,
+      'editorItalic': editorItalic,
       'themeMode': themeMode,
       'syntaxHighlighting': syntaxHighlighting,
       'textMateEnabled': textMateEnabled,
@@ -347,6 +389,44 @@ class SettingsStore extends ChangeNotifier {
   Future<void> setMinimap(bool value) async {
     if (minimap == value) return;
     minimap = value;
+    notifyListeners();
+    await _persist();
+  }
+
+  Future<void> setEditorFont({
+    String? font,
+    double? size,
+    double? height,
+    bool? bold,
+    bool? italic,
+  }) async {
+    if (font != null && !EditorFonts.choices.containsKey(font)) {
+      throw ArgumentError.value(font, 'font', '无效的编辑器字体');
+    }
+    if ((size != null && !size.isFinite) ||
+        (height != null && !height.isFinite)) {
+      throw ArgumentError('字号和行高必须为有限数值');
+    }
+    final nextFont = font ?? editorFont;
+    final nextSize = (size ?? editorFontSize).clamp(
+      EditorFonts.minSize,
+      EditorFonts.maxSize,
+    );
+    final nextHeight = (height ?? editorLineHeight).clamp(1.0, 2.0);
+    final nextBold = bold ?? editorBold;
+    final nextItalic = italic ?? editorItalic;
+    if (nextFont == editorFont &&
+        nextSize == editorFontSize &&
+        nextHeight == editorLineHeight &&
+        nextBold == editorBold &&
+        nextItalic == editorItalic) {
+      return;
+    }
+    editorFont = nextFont;
+    editorFontSize = nextSize;
+    editorLineHeight = nextHeight;
+    editorBold = nextBold;
+    editorItalic = nextItalic;
     notifyListeners();
     await _persist();
   }

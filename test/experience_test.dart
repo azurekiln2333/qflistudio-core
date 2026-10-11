@@ -184,10 +184,14 @@ void main() {
     await tester.tap(find.byIcon(Icons.person_outline));
     await tester.pumpAndSettle();
     expect(find.text('未登录'), findsOneWidget);
-    expect(find.text('创作与成长'), findsOneWidget);
+    expect(find.text('签到与积分'), findsOneWidget);
     expect(tester.takeException(), isNull);
-    await tester.tap(find.text('登录 / 注册'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.text('未登录'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.tap(find.text('其他方式登录'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
     expect(find.byType(TextField), findsNWidgets(2));
     expect(find.text('服务器地址'), findsNothing);
     expect(tester.takeException(), isNull);

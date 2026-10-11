@@ -8,6 +8,8 @@ class CodeEditorStyle {
     this.fontSize,
     this.fontFamily,
     this.fontFamilyFallback,
+    this.fontWeight,
+    this.fontStyle,
     this.fontHeight,
     this.textColor,
     this.hintTextColor,
@@ -70,6 +72,10 @@ class CodeEditorStyle {
   /// The package name should be provided by the `package` argument in the
   /// constructor.
   final List<String>? fontFamilyFallback;
+
+  /// The weight and slant of the base editor text.
+  final FontWeight? fontWeight;
+  final FontStyle? fontStyle;
 
   /// The height of this text span, as a multiple of the font size.
   ///
@@ -497,6 +503,8 @@ class _CodeEditorState extends State<CodeEditor> {
       fontSize: widget.style?.fontSize ?? _kDefaultTextSize,
       fontFamily: widget.style?.fontFamily,
       fontFamilyFallback: widget.style?.fontFamilyFallback,
+      fontWeight: widget.style?.fontWeight,
+      fontStyle: widget.style?.fontStyle,
       height: widget.style?.fontHeight ?? _kDefaultFontHeight,
     );
     final bool readOnly = widget.readOnly ?? false;

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import '../store/project_store.dart';
+import '../terminal/shell/sandbox_shell_backend.dart';
 import 'project_templates.dart';
 
 /// 产品线名称登记表。语言 App 的 UI 标题从这里取，后续新增产品时不必散落硬编码。
@@ -93,6 +94,8 @@ class StudioProfile {
     this.runner,
     this.webPreviewFactory,
     this.toolsPageBuilder,
+    this.documentToolBuilder,
+    this.terminalCommandDelegate,
     this.editorFileTools = const [],
     this.entryFileNames = const [],
     this.isOffline = false,
@@ -125,6 +128,19 @@ class StudioProfile {
 
   /// Product-owned tools screen in the existing Functions navigation.
   final Widget Function(ProjectStore store)? toolsPageBuilder;
+
+  /// Optional terminal command hook.
+  ///
+  /// The shared terminal only knows the common file commands; each language App
+  /// injects its own toolchain here (Java: `javac`/`java`; Python: `python`).
+  /// When null, unknown commands report an honest "unsupported" message and the
+  /// common file commands keep working — other projects are unaffected.
+  final TerminalCommandDelegate? terminalCommandDelegate;
+
+  /// Product-owned full-screen editor for one open file (e.g. Markdown
+  /// edit/preview workspace). Used for files in [supportedFileExtensions];
+  /// null keeps the built-in content tools.
+  final Widget Function(DocumentToolRequest request)? documentToolBuilder;
 
   /// Actions contributed by a language product to the current-file menu.
   final List<EditorFileTool> editorFileTools;
@@ -172,6 +188,30 @@ class StudioProfile {
     final allowed = templates.map((t) => t.language).toSet();
     return source.where(allowed.contains).toList(growable: false);
   }
+}
+
+/// The file handed to [StudioProfile.documentToolBuilder].
+///
+/// The tool edits text in memory; [save] writes it back through the project
+/// editor so dirty state, backups and history stay owned by the editor.
+class DocumentToolRequest {
+  const DocumentToolRequest({
+    required this.path,
+    required this.name,
+    required this.text,
+    required this.projectPath,
+    required this.readOnly,
+    required this.save,
+  });
+
+  final String path;
+  final String name;
+  final String text;
+  final String projectPath;
+  final bool readOnly;
+
+  /// Applies [text] to the editor and saves; returns an error message or null.
+  final Future<String?> Function(String text) save;
 }
 
 class EditorFileTool {
