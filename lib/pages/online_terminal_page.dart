@@ -3,6 +3,7 @@ import '../editor/editor_fonts.dart';
 
 import '../services/api_client.dart';
 import '../store/auth_store.dart';
+import '../terminal/widgets/terminal_input.dart';
 
 /// Commands run in an isolated, ephemeral session through the business API.
 class OnlineTerminalPage extends StatefulWidget {
@@ -29,6 +30,13 @@ class _OnlineTerminalPageState extends State<OnlineTerminalPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _printCwd());
+  }
+
+  /// Submits the current input text and clears the field.
+  void _submitInput(String text) {
+    final raw = text.trim();
+    _inputController.clear();
+    if (raw.isNotEmpty) _run(raw);
   }
 
   @override
@@ -268,26 +276,39 @@ class _OnlineTerminalPageState extends State<OnlineTerminalPage> {
                   ),
                   const SizedBox(width: 6),
                   Expanded(
-                    child: TextField(
-                      controller: _inputController,
-                      enabled: !_running && !_resetting,
-                      maxLength: 2000,
-                      style: const TextStyle(
-                        fontFamily: EditorFonts.bundledFamily,
-                        fontSize: 13,
+                    child: Focus(
+                      onKeyEvent: (node, event) =>
+                          TerminalInputBehavior.handleHardwareKey(
+                            event,
+                            () => _submitInput(_inputController.text),
+                          ),
+                      child: TextField(
+                        controller: _inputController,
+                        enabled: !_running && !_resetting,
+                        maxLength: 2000,
+                        style: const TextStyle(
+                          fontFamily: EditorFonts.bundledFamily,
+                          fontSize: 13,
+                        ),
+                        decoration: InputDecoration(
+                          isCollapsed: true,
+                          border: InputBorder.none,
+                          counterText: '',
+                          hintText: _resetting
+                              ? '重置中…'
+                              : _running
+                              ? '执行中…'
+                              : '命令',
+                          hintStyle: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                        // `unspecified` submits Return via `onSubmitted` while
+                        // keeping the soft keyboard up; see
+                        // [TerminalInputBehavior].
+                        textInputAction: TerminalInputBehavior.action,
+                        onSubmitted: _run,
                       ),
-                      decoration: InputDecoration(
-                        isCollapsed: true,
-                        border: InputBorder.none,
-                        counterText: '',
-                        hintText: _resetting
-                            ? '重置中…'
-                            : _running
-                            ? '执行中…'
-                            : '命令',
-                        hintStyle: TextStyle(color: scheme.onSurfaceVariant),
-                      ),
-                      onSubmitted: _run,
                     ),
                   ),
                   IconButton(

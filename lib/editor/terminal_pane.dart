@@ -17,6 +17,7 @@ import '../services/app_paths.dart';
 import '../services/studio_profile.dart';
 import '../terminal/shell/shell_backend.dart' as shell;
 import '../terminal/shell/local_shell.dart' as shell_io;
+import '../terminal/widgets/terminal_input.dart';
 
 /// Shared terminal panel height constants, used by both the pane and the editor
 /// so they cannot drift apart.
@@ -730,6 +731,9 @@ class TerminalPaneState extends State<TerminalPane> {
 
   /// Brings the active session's prompt into view and focuses its input, even
   /// when the lazy list has not mounted the field yet.
+  ///
+  /// Raising the keyboard is a no-op when the field is already focused: tapping
+  /// a terminal whose keyboard is open must not make it pop again.
   void _focusInput(_TerminalSession session) {
     if (!mounted || session.disposed) return;
     if (session.running || _preparing) return;
@@ -737,23 +741,15 @@ class TerminalPaneState extends State<TerminalPane> {
     _scrollToBottom(session, true);
     // Focus immediately: a post-frame callback is unnecessary and can be
     // dropped when the tap is dispatched outside a build frame.
-    if (session.focusNode.canRequestFocus) {
-      session.focusNode.requestFocus();
-    }
-    // If the node already had focus but the keyboard was dismissed, requesting
-    // focus again is a no-op; explicitly ask the platform to show the keyboard
-    // so tapping the panel reliably raises the soft keyboard.
-    if (session.focusNode.hasFocus) {
-      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
-    }
+    TerminalInputBehavior.focusAndShowKeyboard(session.focusNode);
   }
 
   void _submit() {
     final session = _session;
-    final text = _inputController.text;
-    _inputController.clear();
+    final text = session.inputController.text;
+    session.inputController.clear();
     _run(text);
-    // Keep the keyboard up: Return must not drop focus on mobile.
+    // Return must not drop focus on mobile: the keyboard stays up.
     if (mounted && session.focusNode.canRequestFocus) {
       session.focusNode.requestFocus();
     }
@@ -761,6 +757,13 @@ class TerminalPaneState extends State<TerminalPane> {
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // Hardware Return submits, so a physical keyboard behaves like the soft
+    // one.
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      _submit();
+      return KeyEventResult.handled;
+    }
     if (event.logicalKey == LogicalKeyboardKey.arrowUp &&
         _history.isNotEmpty &&
         _historyIndex > 0) {
@@ -1349,11 +1352,10 @@ class TerminalPaneState extends State<TerminalPane> {
                     counterText: '',
                     contentPadding: EdgeInsets.zero,
                   ),
-                  // `send` is what makes Return submit; `none` disabled the
-                  // submit action entirely, so `onSubmitted` never fired and
-                  // the editor terminal accepted no commands. Keeping the soft
-                  // keyboard up is handled by re-focusing in `_submit`.
-                  textInputAction: TextInputAction.send,
+                  // `unspecified` submits Return via `onSubmitted` while
+                  // keeping the soft keyboard up; see [TerminalInputBehavior]
+                  // for why `send` and `none` both fail.
+                  textInputAction: TerminalInputBehavior.action,
                   onSubmitted: (_) => _submit(),
                 ),
               ),

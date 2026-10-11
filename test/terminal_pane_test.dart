@@ -285,18 +285,21 @@ void main() {
   ) async {
     await fixture.mount(tester);
     final prompt = find.byType(TextField);
-    // `receiveAction` below fires `onSubmitted` regardless of the field's
-    // action, so it cannot catch the shipped regression where
-    // `TextInputAction.none` disabled Return as a submit action on device.
-    // Assert the configuration too.
+    // The field must use `unspecified`: Flutter finalizes it with
+    // `shouldUnfocus: false`, so `onSubmitted` fires while the platform keeps
+    // the soft keyboard up. A terminating action (`send`) hides the keyboard on
+    // Return, and `none` is dropped by the OHOS engine's `handleFunctionKey`
+    // (it has no `NONE` branch). `receiveAction` alone cannot catch a
+    // keyboard-hiding regression because it bypasses the action entirely,
+    // which is how the previous `send` fix slipped through.
     expect(
       tester.widget<TextField>(prompt).textInputAction,
-      isNot(TextInputAction.none),
-      reason: 'TextInputAction.none makes Return stop submitting, so the '
-          'editor terminal accepts no commands at all.',
+      TextInputAction.unspecified,
+      reason: 'A terminating action hides the soft keyboard on Return; '
+          '`unspecified` submits and keeps it up.',
     );
     await tester.enterText(prompt, 'echo terminal-check');
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.testTextInput.receiveAction(TextInputAction.unspecified);
     await _pumpIoUntil(
       tester,
       () => !fixture.pane.busy && _line('terminal-check').evaluate().isNotEmpty,
@@ -337,6 +340,50 @@ void main() {
       tester.widget<TextField>(prompt).controller!.text,
       'second session draft',
     );
+  });
+
+  testWidgets('Return keeps the input focused so the keyboard stays up', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final prompt = find.byType(TextField);
+    final focusNode = tester.widget<TextField>(prompt).focusNode!;
+    await tester.tap(prompt);
+    await tester.pump();
+    expect(focusNode.hasFocus, isTrue);
+
+    await tester.enterText(prompt, 'echo stays-focused');
+    // Returning `unspecified` must not unfocus the field: that is what would
+    // let the platform dismiss the soft keyboard.
+    await tester.testTextInput.receiveAction(TextInputAction.unspecified);
+    await _pumpIoUntil(
+      tester,
+      () =>
+          !fixture.pane.busy &&
+          _line('stays-focused').evaluate().isNotEmpty,
+    );
+    expect(
+      focusNode.hasFocus,
+      isTrue,
+      reason: 'Return must not drop focus, or the soft keyboard collapses.',
+    );
+  });
+
+  testWidgets('a hardware Return key submits the command', (tester) async {
+    await fixture.mount(tester);
+    final prompt = find.byType(TextField);
+    await tester.tap(prompt);
+    await tester.enterText(prompt, 'echo hardware-return');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await _pumpIoUntil(
+      tester,
+      () =>
+          !fixture.pane.busy &&
+          _line('hardware-return').evaluate().isNotEmpty,
+    );
+
+    expect(_line('hardware-return'), findsOneWidget);
+    expect(tester.widget<TextField>(prompt).controller!.text, isEmpty);
   });
 
   testWidgets('a quiet successful command still bounds the transcript', (
@@ -443,6 +490,30 @@ void main() {
     await tester.pump(const Duration(milliseconds: 320));
     await _pumpFrames(tester, 4);
     expect(tester.widget<TextField>(textField).focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('tapping the canvas while focused keeps the input focused', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final textField = find.byType(TextField);
+    final focusNode = tester.widget<TextField>(textField).focusNode!;
+    focusNode.requestFocus();
+    await tester.pump();
+    expect(focusNode.hasFocus, isTrue);
+
+    // Tap the transcript canvas while already focused. This must not disturb
+    // focus, and — the behaviour this test cannot observe — must not re-issue
+    // `TextInput.show`, which is what made the keyboard pop on every tap.
+    final listRect = tester.getRect(find.byType(ListView));
+    final fieldBottom = tester.getBottomLeft(textField).dy;
+    await tester.tapAt(
+      Offset(listRect.left + 20, (fieldBottom + listRect.bottom) / 2),
+    );
+    await tester.pump(const Duration(milliseconds: 320));
+    await _pumpFrames(tester, 4);
+    expect(focusNode.hasFocus, isTrue);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('long output scrolls back while a stream still runs', (

@@ -128,7 +128,10 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
       _alt = false;
     });
     await session.submit(raw);
-    if (mounted) editor.focusNode.requestFocus();
+    // Return must not drop focus on mobile: keep the soft keyboard up.
+    if (mounted && editor.focusNode.canRequestFocus) {
+      editor.focusNode.requestFocus();
+    }
   }
 
   void _setInput(_SessionEditor editor, String text) {
@@ -297,6 +300,13 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
     final session = _manager.active;
     if (session == null) return KeyEventResult.ignored;
     final editor = _editorFor(session.id);
+    // Hardware Return submits, so a physical keyboard behaves like the soft
+    // one.
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      unawaited(_submit(session, editor.controller.text));
+      return KeyEventResult.handled;
+    }
     if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
       _handleShortcut(ShortcutKey.arrowUp);
       return KeyEventResult.handled;

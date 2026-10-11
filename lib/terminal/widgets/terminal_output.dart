@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../models/terminal_session.dart';
 import '../shell/ansi.dart';
 import '../theme/app_theme.dart';
+import 'terminal_input.dart';
 
 /// Owns the scroll position of one terminal view so the shortcut bar can drive
 /// page up / down / home / end on the active terminal.
@@ -201,18 +201,14 @@ class _TerminalOutputViewState extends State<TerminalOutputView> {
     _pointerDown = null;
     if (start == null) return;
     if ((event.position - start).distance > _tapSlop) return;
-    if (widget.focusNode.hasFocus) return;
     // Deferred by one frame: an enclosing SelectionArea takes focus on tap up,
     // so requesting it now would be undone immediately.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (!widget.focusNode.hasFocus) {
-        widget.focusNode.requestFocus();
-      } else {
-        // Already focused but the keyboard may be dismissed: ask the platform
-        // to show it, so tapping the panel always raises the keyboard.
-        SystemChannels.textInput.invokeMethod<void>('TextInput.show');
-      }
+      // Only raise the keyboard when the field is not already focused. Calling
+      // `TextInput.show` on a focused field makes the platform re-evaluate the
+      // IME, which visibly pops/jumps the keyboard on every tap.
+      TerminalInputBehavior.focusAndShowKeyboard(widget.focusNode);
     });
   }
 
@@ -359,12 +355,10 @@ class _TerminalOutputViewState extends State<TerminalOutputView> {
               // typing behind dots.
               obscureText: attached && backend.attachSecret,
               maxLines: 1,
-              // `send` is what makes Return submit. `none` was tried to stop
-              // the platform dismissing the keyboard, but it also removes
-              // Return as a submit action, so onSubmitted never fired and no
-              // command could be sent. Keeping the keyboard up is handled
-              // separately by re-focusing after submit.
-              textInputAction: TextInputAction.send,
+              // `unspecified` submits Return via `onSubmitted` while keeping
+              // the soft keyboard up; see [TerminalInputBehavior] for why `send`
+              // and `none` both fail.
+              textInputAction: TerminalInputBehavior.action,
               onSubmitted: widget.onSubmitted,
               autocorrect: false,
               enableSuggestions: false,

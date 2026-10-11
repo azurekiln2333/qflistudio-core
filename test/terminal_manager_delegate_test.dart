@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/pages/terminax_terminal_page.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
+import 'package:qfli_studio_core/terminal/widgets/terminal_input.dart';
 
 /// Verifies the app-level terminal (`TerminaxTerminalPage`, shared by the home
 /// built-in terminal and quick-tools local terminal) wires the host profile's
@@ -40,25 +41,24 @@ void main() {
     // the first session; wait for its input to appear.
     await _pumpIoUntil(tester, () => _hasInput(tester));
 
-    // Regression guard for the app-terminal Return path. `receiveAction`
-    // delivers the submit straight to `onSubmitted` regardless of the field's
-    // action, and the test binding does not route a hardware Enter into a
-    // submit either, so neither can distinguish the two configurations. The
-    // shipped regression was precisely a wrong *configuration*:
-    // `TextInputAction.none` removes Return as a submit action on a real
-    // device, so `onSubmitted` never fires and no command can be sent. The
-    // only reliable assertion is the configuration itself. Kept inside this
-    // test body because `AppPaths` caches its storage-directory probe in
-    // static futures; a second mounted page in the same file hangs on that
-    // stale future (a harness artifact, not product behaviour).
+    // The field must use `unspecified`: Flutter finalizes it with
+    // `shouldUnfocus: false`, so `onSubmitted` fires while the platform keeps
+    // the soft keyboard up. A terminating action (`send`) hides the keyboard on
+    // Return, and `none` is dropped by the OHOS engine's `handleFunctionKey`
+    // (it has no `NONE` branch). `onSubmitted` therefore stays wired.
+    // Kept inside this test body because `AppPaths` caches its
+    // storage-directory probe in static futures; a second mounted page in the
+    // same file hangs on that stale future (a harness artifact, not product
+    // behaviour).
     final inputField = tester.widget<TextField>(find.byType(TextField).last);
     expect(
       inputField.textInputAction,
-      isNot(TextInputAction.none),
-      reason: 'TextInputAction.none makes Return stop submitting, so the '
-          'terminal accepts no commands at all.',
+      TerminalInputBehavior.action,
+      reason: 'A terminating action hides the soft keyboard on Return; '
+          '`unspecified` submits and keeps it up.',
     );
-    expect(inputField.textInputAction, TextInputAction.send);
+    expect(inputField.textInputAction, TextInputAction.unspecified);
+    expect(inputField.onSubmitted, isNotNull);
 
     await _drive(tester, 'javac Main.java');
     await _pumpIoUntil(tester, () => executed.isNotEmpty);
