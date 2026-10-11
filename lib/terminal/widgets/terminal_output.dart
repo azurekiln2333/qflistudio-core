@@ -359,9 +359,12 @@ class _TerminalOutputViewState extends State<TerminalOutputView> {
               // typing behind dots.
               obscureText: attached && backend.attachSecret,
               maxLines: 1,
-              // `none` keeps the soft keyboard open after Return instead of the
-              // platform dismissing it (the send/done actions dismiss it).
-              textInputAction: TextInputAction.none,
+              // `send` is what makes Return submit. `none` was tried to stop
+              // the platform dismissing the keyboard, but it also removes
+              // Return as a submit action, so onSubmitted never fired and no
+              // command could be sent. Keeping the keyboard up is handled
+              // separately by re-focusing after submit.
+              textInputAction: TextInputAction.send,
               onSubmitted: widget.onSubmitted,
               autocorrect: false,
               enableSuggestions: false,

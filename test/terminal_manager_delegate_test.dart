@@ -40,6 +40,26 @@ void main() {
     // the first session; wait for its input to appear.
     await _pumpIoUntil(tester, () => _hasInput(tester));
 
+    // Regression guard for the app-terminal Return path. `receiveAction`
+    // delivers the submit straight to `onSubmitted` regardless of the field's
+    // action, and the test binding does not route a hardware Enter into a
+    // submit either, so neither can distinguish the two configurations. The
+    // shipped regression was precisely a wrong *configuration*:
+    // `TextInputAction.none` removes Return as a submit action on a real
+    // device, so `onSubmitted` never fires and no command can be sent. The
+    // only reliable assertion is the configuration itself. Kept inside this
+    // test body because `AppPaths` caches its storage-directory probe in
+    // static futures; a second mounted page in the same file hangs on that
+    // stale future (a harness artifact, not product behaviour).
+    final inputField = tester.widget<TextField>(find.byType(TextField).last);
+    expect(
+      inputField.textInputAction,
+      isNot(TextInputAction.none),
+      reason: 'TextInputAction.none makes Return stop submitting, so the '
+          'terminal accepts no commands at all.',
+    );
+    expect(inputField.textInputAction, TextInputAction.send);
+
     await _drive(tester, 'javac Main.java');
     await _pumpIoUntil(tester, () => executed.isNotEmpty);
     expect(executed, ['javac Main.java']);

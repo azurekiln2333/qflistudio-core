@@ -285,6 +285,16 @@ void main() {
   ) async {
     await fixture.mount(tester);
     final prompt = find.byType(TextField);
+    // `receiveAction` below fires `onSubmitted` regardless of the field's
+    // action, so it cannot catch the shipped regression where
+    // `TextInputAction.none` disabled Return as a submit action on device.
+    // Assert the configuration too.
+    expect(
+      tester.widget<TextField>(prompt).textInputAction,
+      isNot(TextInputAction.none),
+      reason: 'TextInputAction.none makes Return stop submitting, so the '
+          'editor terminal accepts no commands at all.',
+    );
     await tester.enterText(prompt, 'echo terminal-check');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await _pumpIoUntil(

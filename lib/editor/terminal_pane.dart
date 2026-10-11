@@ -1349,8 +1349,11 @@ class TerminalPaneState extends State<TerminalPane> {
                     counterText: '',
                     contentPadding: EdgeInsets.zero,
                   ),
-                  // Keep the soft keyboard open after Return; re-focus in _submit.
-                  textInputAction: TextInputAction.none,
+                  // `send` is what makes Return submit; `none` disabled the
+                  // submit action entirely, so `onSubmitted` never fired and
+                  // the editor terminal accepted no commands. Keeping the soft
+                  // keyboard up is handled by re-focusing in `_submit`.
+                  textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _submit(),
                 ),
               ),
