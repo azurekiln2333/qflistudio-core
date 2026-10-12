@@ -219,6 +219,7 @@ class _HomePageState extends State<HomePage> {
                 store: widget.store,
                 auth: widget.auth,
                 settings: widget.settings,
+                repository: StudioProfile.current?.contentRepositoryFactory?.call(),
               )
             : TutorialsTab(auth: widget.auth),
       3 =>
@@ -229,6 +230,7 @@ class _HomePageState extends State<HomePage> {
                 auth: widget.auth,
                 settings: widget.settings,
                 examples: _examples,
+                repository: StudioProfile.current?.contentRepositoryFactory?.call(),
               )
             : ProfileTab(
                 auth: widget.auth,

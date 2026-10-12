@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import '../store/project_store.dart';
+import '../content/content_repository.dart';
 import '../terminal/shell/sandbox_shell_backend.dart';
 import 'project_templates.dart';
 
@@ -96,6 +97,7 @@ class StudioProfile {
     this.toolsPageBuilder,
     this.documentToolBuilder,
     this.terminalCommandDelegate,
+    this.contentRepositoryFactory,
     this.editorFileTools = const [],
     this.entryFileNames = const [],
     this.isOffline = false,
@@ -164,6 +166,13 @@ class StudioProfile {
 
   /// File types that the declared runtime handles.
   final List<String> supportedFileExtensions;
+
+  /// Product-owned offline content source. Null keeps the shared catalog.
+  ///
+  /// When set, the offline tutorial/example tabs read this repository instead of
+  /// the shared aggregate assets, so a language app can ship its own curriculum
+  /// without editing other languages' content.
+  final ContentRepository Function()? contentRepositoryFactory;
 
   /// 当前生效的档位。为 null 时即全能版。
   static StudioProfile? current;
