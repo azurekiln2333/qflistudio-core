@@ -85,7 +85,10 @@ class _HomePageState extends State<HomePage> {
           child: _buildPage(
             this.context,
             index,
-            profile?.isOffline == true,
+            // Content tabs fall back to their local variants for an offline-only
+            // product, which is the one case where the community feed (a server
+            // feature) must not be reachable.
+            profile?.offlineOnly == true,
             profile,
           ),
           builder: (context, selected, child) =>
@@ -291,7 +294,7 @@ class _HomeTabState extends State<HomeTab>
   late final List<_ProjectScope> _scopes =
       StudioProfile.current?.showHomeTabs == false
       ? const [_ProjectScope.all]
-      : StudioProfile.current?.isOffline == true
+      : StudioProfile.current?.offlineOnly == true
       ? const [_ProjectScope.all, _ProjectScope.history, _ProjectScope.favorite]
       : _ProjectScope.values;
   late final TabController _projectTabs = TabController(
@@ -413,7 +416,7 @@ class _HomeTabState extends State<HomeTab>
                           ],
                         ),
                       ),
-                    if (StudioProfile.current?.isOffline != true &&
+                    if (StudioProfile.current?.offlineOnly != true &&
                         widget.auth.isLoggedIn)
                       PopupMenuItem(
                         value: 'new_cloud',
@@ -537,7 +540,7 @@ class _HomeTabState extends State<HomeTab>
     final all = widget.store.projects
         .where(
           (project) =>
-              StudioProfile.current?.isOffline != true || !project.isCloud,
+              StudioProfile.current?.offlineOnly != true || !project.isCloud,
         )
         .toList();
     switch (scope) {
@@ -687,7 +690,7 @@ class _HomeTabState extends State<HomeTab>
   Future<void> _reloadProjects(_ProjectScope scope) async {
     try {
       await widget.store.refresh();
-      if (StudioProfile.current?.isOffline == true) return;
+      if (StudioProfile.current?.offlineOnly == true) return;
       final token = widget.auth.token;
       if (token == null ||
           (scope != _ProjectScope.cloud && scope != _ProjectScope.all)) {

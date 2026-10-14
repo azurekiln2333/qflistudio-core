@@ -15,6 +15,7 @@ import '../store/project_store.dart';
 import '../models/project.dart';
 import '../services/project_archive_service.dart';
 import '../services/picker_service.dart';
+import '../services/studio_profile.dart';
 import '../widgets/settings_section.dart';
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
@@ -192,7 +193,9 @@ class _SettingsPageState extends State<SettingsPage> {
                   children: [
                     ListTile(
                       leading: const Icon(Icons.info_outline),
-                      title: const Text('关于 QFLIStudio+'),
+                      title: Text(
+                        '关于 ${StudioProfile.current?.appTitle ?? 'QFLIStudio+'}',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () => showQfliAbout(context),
                     ),

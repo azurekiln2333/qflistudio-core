@@ -173,7 +173,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
-    if (widget.project.isCloud && StudioProfile.current?.isOffline != true) {
+    if (widget.project.isCloud && StudioProfile.current?.offlineOnly != true) {
       CloudSyncService.open(
         cloudId: widget.project.cloudId!,
         cachePath: widget.project.path,
@@ -834,7 +834,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       // Without a language runner (SQLab has one), .sql goes to cloud MySQL.
       if (ext == '.sql' &&
           StudioProfile.current?.runner == null &&
-          StudioProfile.current?.isOffline != true) {
+          StudioProfile.current?.offlineOnly != true) {
         pane.finishPreparation();
         await pane.runCloudSql(entry);
         return;
@@ -925,7 +925,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       final hint = result?.hint;
       if (hint != null) {
         pane.appendSystem(hint);
-        if (StudioProfile.current?.isOffline != true &&
+        if (StudioProfile.current?.offlineOnly != true &&
             OnlineProgram.supports(entry)) {
           await pane.runOnlineProject(widget.project.path, entry);
         }
@@ -949,7 +949,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         if (code == kProgramNotRunExitCode &&
             mounted &&
             pane.mounted &&
-            StudioProfile.current?.isOffline != true &&
+            StudioProfile.current?.offlineOnly != true &&
             OnlineProgram.supports(entry)) {
           pane.appendSystem('本地运行时不可用，转入在线运行');
           await pane.runOnlineProject(widget.project.path, entry);
@@ -1228,7 +1228,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                               showAi:
                                                   StudioProfile
                                                       .current
-                                                      ?.isOffline !=
+                                                      ?.offlineOnly !=
                                                   true,
                                             ),
                                           ),
@@ -1424,7 +1424,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         ],
                                       ),
                                     ),
-                                    if (StudioProfile.current?.isOffline !=
+                                    if (StudioProfile.current?.offlineOnly !=
                                         true)
                                       PopupMenuItem(
                                         value: 'ai',
@@ -1445,7 +1445,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ],
                                         ),
                                       ),
-                                    if (StudioProfile.current?.isOffline !=
+                                    if (StudioProfile.current?.offlineOnly !=
                                         true)
                                       const PopupMenuItem(
                                         value: 'online_terminal',
@@ -1680,7 +1680,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       key: _terminalKey,
       workingDirectory: widget.project.path,
       auth: widget.auth,
-      onlineEnabled: StudioProfile.current?.isOffline != true,
+      onlineEnabled: StudioProfile.current?.offlineOnly != true,
       compact: compactPanel,
       collapsed: _terminalCollapsed,
       onCollapseChanged: (collapsed) {
