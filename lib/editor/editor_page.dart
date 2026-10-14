@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:qfli_studio_core/editor/editor_page_diag.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -35,6 +37,7 @@ import 'highlight_themes.dart';
 import 'open_file.dart';
 import 'project_history.dart';
 import 'terminal_pane.dart';
+import '../terminal/widgets/terminal_input.dart';
 import '../pages/settings_page.dart';
 import '../pages/content_tools_pages.dart';
 import 'ai_panel.dart';
@@ -120,6 +123,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _aiCollapsed = false;
   _BottomPanel _bottomPanel = _BottomPanel.none;
   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
+
+  /// Mirror of the terminal prompt's focus state, kept in sync by
+  /// [_onTerminalInputFocusChanged].
+  ///
+  /// `EditorPage` needs it during layout to decide whether the panel may become
+  /// header-only (see `build`'s `compactPanel`), and the pane owns the actual
+  /// `FocusNode`.
+  bool _terminalInputHasFocus = false;
   WebPreviewSession? _previewServer;
   StreamSubscription<String>? _debugSub;
   Timer? _historyTimer;
@@ -149,6 +160,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    // TEMP-DIAG (remove after device verification): trace every focus change so
+    // a device reproduction shows exactly what receives focus after a tab-bar
+    // touch, and in what order.
+    FocusManager.instance.addListener(_diagFocus);
+    EditorPageDiag.probeAlive('EditorPage.initState');
     _fontSize = _savedFontSize = widget.settings.editorFontSize;
     _editor = EditorController(
       project: widget.project,
@@ -245,6 +261,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    // TEMP-DIAG (remove after device verification).
+    FocusManager.instance.removeListener(_diagFocus);
     _leaving = true;
     for (final timer in _activityTimers.values) {
       timer.cancel();
@@ -433,10 +451,49 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   // ---- 双指缩放字号 + 滚动收键盘（raw pointer 监听，不参与手势竞技场）----
 
+  // TEMP-DIAG (remove after device verification): see [EditorPageDiag].
+  FocusNode? _diagLastFocus;
+  void _diagFocus() {
+    final node = FocusManager.instance.primaryFocus;
+    if (identical(node, _diagLastFocus)) return;
+    _diagLastFocus = node;
+    EditorPageDiag.diag(
+      'primaryFocus -> label=${node?.debugLabel} '
+      'widget=${node?.context?.widget.runtimeType} hasFocus=${node?.hasFocus}',
+    );
+  }
+
   void _handlePointerDown(PointerDownEvent event) {
-    // 触摸编辑器区域时收起已显示的粘贴工具栏。
+    EditorPageDiag.diag(
+      'editor Listener.onPointerDown pos=${event.position} '
+      'visible=$_terminalVisible collapsed=$_terminalCollapsed '
+      'dragging=$_draggingTerminal '
+      'focusBefore=${FocusManager.instance.primaryFocus?.debugLabel}',
+    );
+    // Touching the editor area hides a visible paste toolbar.
     if (_pasteToolbarVisible) {
       setState(() => _pasteToolbarVisible = false);
+    }
+    // Touching the editor hands the layout back to the code: collapse the
+    // terminal to its header. `_terminalHeight` is deliberately left untouched
+    // so re-expanding restores the height the user had dragged to.
+    //
+    // Skipped while the user is dragging the panel's height, because that drag
+    // drives the collapse state itself from the gesture.
+    //
+    // A raw `Listener.onPointerDown` is used (not a GestureDetector) so the
+    // editor keeps full ownership of taps, selection, scrolling and the soft
+    // keyboard: this only observes the touch.
+    if (_terminalVisible && !_terminalCollapsed && !_draggingTerminal) {
+      setState(() => _terminalCollapsed = true);
+    }
+    // OHOS fix: release the terminal's focus (and therefore its platform IME
+    // connection) *before* the editor's tap can request focus. re_editor opens
+    // its IME connection synchronously from a FocusNode listener, so without
+    // this ordering the terminal's teardown runs after the editor's
+    // TextInput.show and the OHOS IME dismisses the keyboard it just raised.
+    if (TerminalInputBehavior.isOhosPlatform && _terminalVisible) {
+      _terminalKey.currentState?.unfocusInput();
     }
     _activePointers[event.pointer] = event.position;
     if (_activePointers.length == 2) {
@@ -1456,20 +1513,42 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 final aiCompact = maxPanelHeight < 112;
                 // The terminal is compact (header only) when the viewport cannot
                 // offer at least its minimum expanded height.
-                final compactPanel =
+                final compactByHeight =
                     maxPanelHeight < TerminalPanelMetrics.minExpandedHeight;
+                // Protection: never collapse to the header-only layout while the
+                // prompt input holds focus.
+                //
+                // Opening the soft keyboard shrinks the body, which can push
+                // `maxPanelHeight` under the threshold. Collapsing then would
+                // hide the very input the user is typing into behind the
+                // keyboard — a visible, focused, zero-height field. Skipping the
+                // compact state instead compresses the transcript (and the
+                // editor), so the prompt row always stays on screen.
+                //
+                // This is a direct statement of the invariant ("a focused input
+                // must never be hidden") and therefore safer than recomputing
+                // the threshold from a keyboard-free height, which only works if
+                // the inset accounting stays in sync with the Scaffold's.
+                final compactPanel = compactByHeight && !_terminalInputHasFocus;
                 // While dragging, the displayed height follows the raw gesture;
                 // otherwise it is the preserved preference clamped to the
                 // current viewport.
                 final effectivePreferred =
                     _terminalDragHeight ?? _terminalHeight;
+                // The lower bound must never exceed the upper one: with the
+                // keyboard up, `maxPanelHeight` can fall below the preferred
+                // minimum (that is exactly the case the protection above keeps
+                // non-compact). Clamping to an inverted range throws, so the
+                // floor collapses to `maxPanelHeight` in that window and the
+                // prompt row simply gets whatever height remains.
+                final minPanelHeight =
+                    maxPanelHeight < TerminalPanelMetrics.minExpandedHeight
+                    ? maxPanelHeight
+                    : TerminalPanelMetrics.minExpandedHeight;
                 final terminalPanelHeight = _terminalCollapsed || compactPanel
                     ? collapsedPanelHeight
                     : effectivePreferred
-                          .clamp(
-                            TerminalPanelMetrics.minExpandedHeight,
-                            maxPanelHeight,
-                          )
+                          .clamp(minPanelHeight, maxPanelHeight)
                           .toDouble();
                 final aiPanelHeight = _aiCollapsed || aiCompact
                     ? aiCollapsedHeight
@@ -1512,16 +1591,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             // Hide the terminal entirely when the body cannot host
                             // both a useful terminal and the editor's minimum, so
                             // the code view never collapses to zero height.
+                            //
+                            // Never while the prompt holds focus: hiding it would
+                            // detach the caret's element and close the keyboard
+                            // the user is typing on. In that window the editor
+                            // gives up height instead (the `Expanded` above
+                            // shrinks), which is the lesser loss.
                             offstage:
                                 _bottomPanel != _BottomPanel.terminal ||
-                                bodyHeight -
-                                        (bodyHeight <
-                                                TerminalPanelMetrics
-                                                    .collapsedTotalHeight
-                                            ? bodyHeight
-                                            : TerminalPanelMetrics
-                                                  .collapsedTotalHeight) <
-                                    minEditorHeight,
+                                (!_terminalInputHasFocus &&
+                                    bodyHeight -
+                                            (bodyHeight <
+                                                    TerminalPanelMetrics
+                                                        .collapsedTotalHeight
+                                                ? bodyHeight
+                                                : TerminalPanelMetrics
+                                                      .collapsedTotalHeight) <
+                                        minEditorHeight),
                             child: _buildTerminalPanel(
                               terminalPanelHeight: terminalPanelHeight,
                               maxPanelHeight: maxPanelHeight,
@@ -1664,6 +1750,40 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           _terminalDragHeight = null;
         });
       },
+      // Touching the terminal re-opens it and puts the caret in the prompt.
+      // Expand first: the editor owns `_terminalCollapsed`, and focusing an
+      // input that is still collapsed (zero height) would be lost.
+      onActivated: () {
+        EditorPageDiag.diag(
+          'EditorPage.onActivated collapsed-before=$_terminalCollapsed '
+          'visible=$_terminalVisible focusBefore='
+          '${FocusManager.instance.primaryFocus?.debugLabel}',
+        );
+        if (!mounted) return;
+        final needsExpand = _terminalCollapsed;
+        if (!needsExpand) {
+          // Already open: just make sure the caret is in the prompt.
+          _terminalKey.currentState?.requestInputFocus();
+          return;
+        }
+        setState(() {
+          _terminalCollapsed = false;
+          // A fresh expand carries the last user-preferred height back in.
+          _terminalDragHeight = null;
+        });
+        // Focus after the expanded layout is on screen, otherwise the focus
+        // request lands on a zero-height input and is dropped.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _terminalKey.currentState?.requestInputFocus();
+        });
+      },
+      // Track the prompt's focus so `build` can refuse to collapse the panel to
+      // its header-only layout while the user is typing.
+      onInputFocusChanged: (focused) {
+        if (!mounted || focused == _terminalInputHasFocus) return;
+        setState(() => _terminalInputHasFocus = focused);
+      },
       onClose: () {
         _debugSub?.cancel();
         _debugSub = null;
@@ -1674,6 +1794,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             _terminalCreated = false;
             _terminalDragHeight = null;
             _draggingTerminal = false;
+            _terminalInputHasFocus = false;
           });
         }
       },
@@ -1684,7 +1805,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     // Skip the height animation when dragging, collapsed, or compact: an
     // animated transition through a tiny height briefly starves the editor body
     // (re_editor asserts on a zero-height line-number column).
-    if (_draggingTerminal || _terminalCollapsed || compactPanel) {
+    //
+    // Also skip it while the prompt holds focus: the keyboard is then shrinking
+    // the body every frame, and animating the panel toward its new height would
+    // transiently overshoot the available space and overflow the body Column.
+    if (_draggingTerminal ||
+        _terminalCollapsed ||
+        compactPanel ||
+        _terminalInputHasFocus) {
       return SizedBox(height: terminalPanelHeight, child: pane);
     }
     return AnimatedContainer(
