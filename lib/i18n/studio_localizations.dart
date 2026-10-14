@@ -44,6 +44,7 @@ class StudioLocalizations {
 
   String get home => _text('home');
   String get functions => _text('functions');
+  String get tools => _text('tools');
   String get quickTools => _text('quickTools');
   String get examples => _text('examples');
   String get discussion => _text('discussion');
@@ -185,6 +186,7 @@ class StudioLocalizations {
   static const _zhCn = <String, String>{
     'home': '主页',
     'functions': '功能',
+    'tools': '工具',
     'quickTools': '快捷功能',
     'examples': '示例代码',
     'discussion': '讨论',
@@ -304,6 +306,7 @@ class StudioLocalizations {
   static const _zhTw = <String, String>{
     'home': '首頁',
     'functions': '功能',
+    'tools': '工具',
     'quickTools': '快速功能',
     'examples': '範例程式碼',
     'discussion': '討論',
@@ -423,6 +426,7 @@ class StudioLocalizations {
   static const _en = <String, String>{
     'home': 'Home',
     'functions': 'Functions',
+    'tools': 'Tools',
     'quickTools': 'Quick tools',
     'examples': 'Examples',
     'discussion': 'Discussion',

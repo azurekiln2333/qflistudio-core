@@ -67,9 +67,7 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(
-        title: Text('${_displayName(widget.language)} ${l10n.tutorial}'),
-      ),
+      appBar: AppBar(title: Text(l10n.tutorial)),
       body: FutureBuilder<Tutorial?>(
         future: _tutorial,
         builder: (context, snapshot) {
@@ -167,9 +165,7 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(
-        title: Text('${_displayName(widget.language)} ${l10n.examples}'),
-      ),
+      appBar: AppBar(title: Text(l10n.examples)),
       body: FutureBuilder<List<ExampleCode>>(
         future: _examples,
         builder: (context, snapshot) {

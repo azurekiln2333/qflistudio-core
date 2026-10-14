@@ -70,7 +70,11 @@ class _HomePageState extends State<HomePage> {
   Widget _createPageView() => PageView.builder(
     key: const ValueKey('home-page-view'),
     controller: _pageController,
-    itemCount: 4,
+    // Five pages: home, tools, tutorial, examples and profile. This used to be
+    // 4, which made the profile page unreachable no matter what the navigation
+    // bar offered — the destination existed but the PageView would not scroll to
+    // it.
+    itemCount: 5,
     onPageChanged: (index) => _currentIndex.value = index,
     itemBuilder: (context, index) => _pages.putIfAbsent(index, () {
       final profile = StudioProfile.current;
@@ -116,8 +120,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final profile = StudioProfile.current;
-    final offline = profile?.isOffline == true;
     final l10n = StudioLocalizations.of(context);
     final wide = MediaQuery.sizeOf(context).width >= 900;
     final extendedRail = MediaQuery.sizeOf(context).width >= 1200;
@@ -130,7 +132,7 @@ class _HomePageState extends State<HomePage> {
       NavigationDestination(
         icon: const Icon(Icons.apps_outlined),
         selectedIcon: const Icon(Icons.apps),
-        label: l10n.functions,
+        label: l10n.tools,
       ),
       NavigationDestination(
         icon: const Icon(Icons.menu_book_outlined),
@@ -138,9 +140,18 @@ class _HomePageState extends State<HomePage> {
         label: l10n.tutorial,
       ),
       NavigationDestination(
-        icon: Icon(offline ? Icons.code_outlined : Icons.person_outline),
-        selectedIcon: Icon(offline ? Icons.code : Icons.person),
-        label: offline ? l10n.examples : l10n.profile,
+        icon: const Icon(Icons.code_outlined),
+        selectedIcon: const Icon(Icons.code),
+        label: l10n.examples,
+      ),
+      // The profile page is always offered, including for offline-only products.
+      // It used to be replaced by the examples tab under `isOffline`, which made
+      // the account/settings entry unreachable; the page itself now hides its
+      // networked sections when `offlineOnly` is set.
+      NavigationDestination(
+        icon: const Icon(Icons.person_outline),
+        selectedIcon: const Icon(Icons.person),
+        label: l10n.profile,
       ),
     ];
     return Scaffold(
@@ -222,21 +233,19 @@ class _HomePageState extends State<HomePage> {
                 repository: StudioProfile.current?.contentRepositoryFactory?.call(),
               )
             : TutorialsTab(auth: widget.auth),
-      3 =>
-        offline
-            ? ExampleCodeTab(
-                language: profile!.id,
-                store: widget.store,
-                auth: widget.auth,
-                settings: widget.settings,
-                examples: _examples,
-                repository: StudioProfile.current?.contentRepositoryFactory?.call(),
-              )
-            : ProfileTab(
-                auth: widget.auth,
-                settings: widget.settings,
-                store: widget.store,
-              ),
+      3 => ExampleCodeTab(
+        language: profile!.id,
+        store: widget.store,
+        auth: widget.auth,
+        settings: widget.settings,
+        examples: _examples,
+        repository: StudioProfile.current?.contentRepositoryFactory?.call(),
+      ),
+      4 => ProfileTab(
+        auth: widget.auth,
+        settings: widget.settings,
+        store: widget.store,
+      ),
       _ => const SizedBox.shrink(),
     };
   }

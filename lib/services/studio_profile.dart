@@ -101,6 +101,7 @@ class StudioProfile {
     this.editorFileTools = const [],
     this.entryFileNames = const [],
     this.isOffline = false,
+    this.offlineOnly = false,
     this.productKey = StudioProductCatalog.qfliStudioKey,
     this.showHomeTabs = true,
     this.runtimeKind = 'unavailable',
@@ -157,6 +158,16 @@ class StudioProfile {
 
   /// Whether homepage project-scope and language tabs are shown.
   final bool showHomeTabs;
+
+  /// Whether this product is purely offline, so the profile page must hide every
+  /// part that needs the network: the login entry, the account summary and the
+  /// sync/community actions.
+  ///
+  /// Distinct from [isOffline], which also swaps the tutorial and example tabs
+  /// to their local variants. A product can keep the local content tabs while
+  /// still offering an account page, so the two are separate switches. Defaults
+  /// to false, which leaves other products' behaviour unchanged.
+  final bool offlineOnly;
 
   /// Concrete execution or preview boundary advertised by this product.
   final String runtimeKind;

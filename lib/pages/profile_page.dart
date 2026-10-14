@@ -4,6 +4,7 @@ import '../community/community_widgets.dart';
 import '../config/compliance_config.dart';
 import '../services/api_client.dart';
 import '../services/recovery_service.dart';
+import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
@@ -73,6 +74,10 @@ class _ProfileTabState extends State<ProfileTab> {
 
   @override
   Widget build(BuildContext context) {
+    // A purely offline product has no account to show, so every networked
+    // section is omitted: the login entry, the account header/stats and the
+    // sign-out button. The local-only sections (recovery, settings, about) stay.
+    final offlineOnly = StudioProfile.current?.offlineOnly == true;
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -88,39 +93,40 @@ class _ProfileTabState extends State<ProfileTab> {
                   physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
                   children: [
-                    _profileHeader(context),
-                    const SizedBox(height: 16),
-                    if (widget.auth.isLoggedIn) ...[
+                    if (!offlineOnly) _profileHeader(context),
+                    if (!offlineOnly) const SizedBox(height: 16),
+                    if (!offlineOnly && widget.auth.isLoggedIn) ...[
                       _statistics(context),
                       const SizedBox(height: 24),
                     ],
-                    SettingsSection(
-                      title: '签到与积分',
-                      cardShape: _cardShape,
-                      children: [
-                        _entry(
-                          icon: Icons.task_alt_outlined,
-                          title: '每日任务',
-                          onTap: () => _openAccountPage(
-                            () => TasksPage(auth: widget.auth),
+                    if (!offlineOnly)
+                      SettingsSection(
+                        title: '签到与积分',
+                        cardShape: _cardShape,
+                        children: [
+                          _entry(
+                            icon: Icons.task_alt_outlined,
+                            title: '每日任务',
+                            onTap: () => _openAccountPage(
+                              () => TasksPage(auth: widget.auth),
+                            ),
                           ),
-                        ),
-                        _entry(
-                          icon: Icons.stars_outlined,
-                          title: '积分兑换',
-                          onTap: () => _openAccountPage(
-                            () => PointsPage(auth: widget.auth),
+                          _entry(
+                            icon: Icons.stars_outlined,
+                            title: '积分兑换',
+                            onTap: () => _openAccountPage(
+                              () => PointsPage(auth: widget.auth),
+                            ),
                           ),
-                        ),
-                        _entry(
-                          icon: Icons.bar_chart_outlined,
-                          title: '统计',
-                          onTap: () => _openAccountPage(
-                            () => ActivityStatsPage(auth: widget.auth),
+                          _entry(
+                            icon: Icons.bar_chart_outlined,
+                            title: '统计',
+                            onTap: () => _openAccountPage(
+                              () => ActivityStatsPage(auth: widget.auth),
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      ),
                     SettingsSection(
                       title: '数据管理',
                       cardShape: _cardShape,
@@ -152,12 +158,13 @@ class _ProfileTabState extends State<ProfileTab> {
                         ),
                         _entry(
                           icon: Icons.info_outline,
-                          title: '关于 QFLIStudio+',
+                          title:
+                              '关于 ${StudioProfile.current?.appTitle ?? 'QFLIStudio+'}',
                           onTap: () => showQfliAbout(context),
                         ),
                       ],
                     ),
-                    if (widget.auth.user?.isAdmin == true)
+                    if (!offlineOnly && widget.auth.user?.isAdmin == true)
                       SettingsSection(
                         title: '管理',
                         cardShape: _cardShape,
@@ -178,7 +185,7 @@ class _ProfileTabState extends State<ProfileTab> {
                           ),
                         ],
                       ),
-                    if (widget.auth.isLoggedIn)
+                    if (!offlineOnly && widget.auth.isLoggedIn)
                       Center(
                         child: TextButton.icon(
                           onPressed: _confirmSignOut,
