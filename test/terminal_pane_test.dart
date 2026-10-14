@@ -29,7 +29,7 @@ void main() {
       inInclusiveRange(6, 12),
     );
     expect(find.byIcon(Icons.play_arrow), findsNothing);
-    expect(find.text('Terminal 1'), findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
   });
 
   testWidgets('success preserves stdout and returns the next prompt silently', (
@@ -173,7 +173,7 @@ void main() {
     );
     await tester.pump();
     await _newSession(tester);
-    expect(find.text('Terminal 2'), findsOneWidget);
+    expect(find.text('2'), findsOneWidget);
     expect(find.byType(TextField), findsOneWidget);
 
     stdout.add('only the first session');
@@ -186,7 +186,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(_transcript(tester), isEmpty);
 
-    await tester.tap(find.text('Terminal 1'));
+    await tester.tap(find.text('1'));
     await tester.pumpAndSettle();
     expect(_line('only the first session'), findsOneWidget);
     expect(_line('first session diagnostic'), findsOneWidget);
@@ -201,8 +201,9 @@ void main() {
     await fixture.mount(tester);
     await _newSession(tester);
 
-    final first = find.text('Terminal 1');
-    final second = find.text('Terminal 2');
+    // Labels are the session id alone, so a tab stays narrow.
+    final first = find.text('1');
+    final second = find.text('2');
     expect(tester.getSemantics(first).flagsCollection.isButton, isTrue);
     expect(
       tester.getSemantics(first).flagsCollection.isSelected,
@@ -222,27 +223,27 @@ void main() {
       Tristate.isTrue,
     );
 
-    final close = find.byTooltip('Close Terminal 2');
-    expect(tester.getSize(close).width, greaterThanOrEqualTo(32));
-    expect(tester.getSize(close).height, greaterThanOrEqualTo(32));
+    // Close buttons are present per tab and sized to stay tappable while
+    // fitting inside the 30 px tab pill.
+    final close = find.byTooltip('Close terminal 2');
+    expect(tester.getSize(close).width, greaterThanOrEqualTo(24));
+    expect(tester.getSize(close).height, greaterThanOrEqualTo(24));
     final closeIcon = find.descendant(
       of: close,
       matching: find.byIcon(Icons.close),
     );
     expect(tester.getSemantics(closeIcon).flagsCollection.isButton, isTrue);
-    Focus.of(tester.element(closeIcon)).requestFocus();
-    await tester.pump();
-    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.tap(close);
     await tester.pumpAndSettle();
     expect(second, findsNothing);
     expect(first, findsOneWidget);
-    expect(find.byTooltip('Close Terminal 1'), findsNothing);
 
-    await _newSession(tester);
-    await tester.tap(find.byTooltip('Close Terminal 3'));
+    // The last remaining tab is closable too: closing it replaces the session
+    // with a fresh one rather than refusing or emptying the pane.
+    expect(find.byTooltip('Close terminal 1'), findsOneWidget);
+    await tester.tap(find.byTooltip('Close terminal 1'));
     await tester.pumpAndSettle();
-    expect(find.text('Terminal 3'), findsNothing);
-    expect(first, findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
     expect(tester.takeException(), isNull);
     semantics.dispose();
   });
@@ -322,7 +323,7 @@ void main() {
     await _newSession(tester);
     expect(tester.widget<TextField>(prompt).controller!.text, isEmpty);
     await tester.enterText(prompt, 'second session draft');
-    await tester.tap(find.text('Terminal 1'));
+    await tester.tap(find.text('1'));
     await tester.pump();
     expect(
       tester.widget<TextField>(prompt).controller!.text,
@@ -334,7 +335,7 @@ void main() {
       tester.widget<TextField>(prompt).controller!.text,
       'echo terminal-check',
     );
-    await tester.tap(find.text('Terminal 2'));
+    await tester.tap(find.text('2'));
     await tester.pump();
     expect(
       tester.widget<TextField>(prompt).controller!.text,
@@ -465,7 +466,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await _pumpIoUntil(tester, () => _line('marker').evaluate().isEmpty);
     await tester.pumpAndSettle();
-    expect(find.text('Terminal 1'), findsOneWidget);
+    expect(find.text('1'), findsOneWidget);
     expect(find.byType(TextField), findsOneWidget);
     expect(_line('marker'), findsNothing);
     expect(tester.takeException(), isNull);
@@ -578,7 +579,7 @@ void main() {
     second.jumpTo(second.position.maxScrollExtent);
     await tester.pump();
 
-    await tester.tap(find.text('Terminal 1'));
+    await tester.tap(find.text('1'));
     await _pumpFrames(tester, 5);
     final restored = tester.widget<ListView>(find.byType(ListView)).controller!;
     expect(restored.position.pixels, lessThan(1));
