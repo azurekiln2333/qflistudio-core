@@ -38,11 +38,14 @@ import 'open_file.dart';
 import 'project_history.dart';
 import 'terminal_pane.dart';
 import '../terminal/widgets/terminal_input.dart';
+import 'package:flutter/scheduler.dart';
+
 import '../pages/settings_page.dart';
 import '../pages/content_tools_pages.dart';
 import '../services/local_audit_service.dart';
 import '../services/local_stats_service.dart';
 import 'ai_panel.dart';
+import 'open_performance.dart';
 
 enum _BottomPanel { none, terminal, ai }
 
@@ -172,6 +175,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       project: widget.project,
       onContentChanged: _onFileContentChanged,
     );
+    OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
@@ -190,23 +194,37 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       });
     }
     // Restore existing tabs, then select an explicitly requested file.
+    //
+    // Deferred past the first frame so the route transition is not competing
+    // with file reads for the UI isolate: `_restoreSession` does stat/list IO
+    // per open file, and on a phone that is enough to drop the first frames of
+    // the push animation. The editor shows its empty state until this runs.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _restoreSession();
+      OpenPerformance.mark('EditorPage first frame');
+      SchedulerBinding.instance.scheduleTask(
+        () => _restoreSession(),
+        Priority.animation,
+        debugLabel: 'restoreSession',
+      );
     });
   }
 
   Future<void> _restoreSession() async {
     if (!mounted) return;
+    OpenPerformance.mark('restoreSession start');
     final session = await ProjectHistory.load(widget.project.path);
     if (!mounted) return;
     final opened = <String>[];
     for (final rel in session.openFiles) {
       final abs = p.isAbsolute(rel) ? rel : p.join(widget.project.path, rel);
-      if (!File(abs).existsSync()) continue;
+      // Async existence check: the sync form blocks the isolate once per
+      // remembered tab, and a project can remember several.
+      if (!await File(abs).exists()) continue;
       final error = await _editor.openPath(abs, cursor: session.cursors[rel]);
       if (!mounted) return;
       if (error == null) opened.add(rel);
     }
+    OpenPerformance.mark('restoreSession done (${opened.length} tabs)');
     final initialPath = widget.initialOpenPath;
     if (initialPath != null) {
       await _openInitialFile(initialPath);
@@ -602,6 +620,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     // 模板主文件是相对路径（如 src/main.py），必须拼到项目根下。
     final abs = p.isAbsolute(path) ? path : p.join(widget.project.path, path);
     final error = await _editor.openPath(abs);
+    OpenPerformance.mark('entry file loaded');
     if (error != null && mounted) {
       ScaffoldMessenger.of(
         context,
@@ -2180,6 +2199,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   Widget _buildCodeView(BuildContext context, OpenFile open) {
+    // Fires once per newly built code view: the point at which the entry file is
+    // actually on screen and the user can type.
+    OpenPerformance.mark('code view built (interactive)');
     final scheme = Theme.of(context).colorScheme;
     final textStyle = widget.settings.editorTextStyle;
     final theme = HighlightThemes.themeFor(

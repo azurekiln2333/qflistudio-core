@@ -118,12 +118,23 @@ class _FileExplorerState extends State<FileExplorer> {
   void initState() {
     super.initState();
     // 恢复上次浏览的项目（失效则回落到当前项目）。
+    // 先乐观地用记住的项目建树，再用异步校验纠正：`existsSync` 会在这里
+    // 阻塞首帧，而这个判断只是选择根目录，不值得卡住动画。
     final remembered = widget.store.projectById(
       widget.store.lastBrowsedProjectId,
     );
-    _browsing = (remembered != null && Directory(remembered.path).existsSync())
-        ? remembered
-        : widget.project;
+    _browsing = remembered ?? widget.project;
+    _rebuildRoot();
+    if (remembered != null && remembered.path != widget.project.path) {
+      unawaited(_verifyBrowsing(remembered));
+    }
+  }
+
+  /// 校验记住的项目目录是否还在，已失效则回落到当前项目。
+  Future<void> _verifyBrowsing(Project remembered) async {
+    final exists = await Directory(remembered.path).exists();
+    if (!mounted || exists) return;
+    setState(() => _browsing = widget.project);
     _rebuildRoot();
   }
 
@@ -200,8 +211,12 @@ class _FileExplorerState extends State<FileExplorer> {
   Future<void> _loadChildren(FileNode dir) async {
     List<FileNode> nodes = const [];
     try {
+      // Async listing: a project directory can hold thousands of entries, and
+      // the sync form blocks the isolate that is also driving the page
+      // transition.
+      final entities = await FileService.listSorted(dir.path);
       nodes = [
-        for (final entity in FileService.listSortedSync(dir.path))
+        for (final entity in entities)
           FileNode(
             path: entity.path,
             name: p.basename(entity.path),
