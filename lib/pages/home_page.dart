@@ -25,6 +25,7 @@ import '../widgets/project_dialogs.dart';
 import '../widgets/retained_page.dart';
 import 'profile_page.dart';
 import '../services/local_audit_service.dart';
+import '../editor/open_performance.dart';
 import '../services/local_stats_service.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
@@ -847,18 +848,29 @@ class _HomeTabState extends State<HomeTab>
     Project project, {
     String? initialOpenFile,
   }) async {
-    if (!project.isCloud && !Directory(project.path).existsSync()) {
-      ScaffoldMessenger.of(context).showSnackBar(
+    OpenPerformance.beginOpen(project.name);
+    // Captured before the await below: using the context after an async gap is
+    // unsafe, and awaiting the existence check is the whole point here.
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = StudioLocalizations.of(context);
+    // `exists` instead of `existsSync`: a missing-project check must not block
+    // the frame that starts the route transition. The rest of the method is
+    // unchanged, including the snackbar for a missing path.
+    final projectExists = project.isCloud
+        ? true
+        : await Directory(project.path).exists();
+    OpenPerformance.mark('project path checked');
+    if (!projectExists) {
+      messenger.showSnackBar(
         SnackBar(
-          content: Text(
-            StudioLocalizations.of(context).missingProjectPath(project.path),
-          ),
+          content: Text(l10n.missingProjectPath(project.path)),
           action: SnackBarAction(
-            label: StudioLocalizations.of(context).removeFromList,
+            label: l10n.removeFromList,
             onPressed: () => widget.store.remove(project),
           ),
         ),
       );
+      OpenPerformance.endOpen();
       return;
     }
     widget.store.touch(project);
@@ -885,6 +897,7 @@ class _HomeTabState extends State<HomeTab>
         ),
       ),
     );
+    OpenPerformance.endOpen();
   }
 
   Future<void> _deleteProject(BuildContext context, Project project) async {

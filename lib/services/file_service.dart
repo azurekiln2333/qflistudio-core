@@ -17,8 +17,17 @@ abstract final class FileService {
   }
 
   /// 列出目录内容：文件夹优先，名称不区分大小写排序。
-  static List<FileSystemEntity> listSortedSync(String dirPath) {
-    final entities = Directory(dirPath).listSync(followLinks: false);
+  ///
+  /// 同步版本，会阻塞调用它的 isolate；仅用于已经确定不在首帧路径上的地方。
+  static List<FileSystemEntity> listSortedSync(String dirPath) =>
+      _sorted(Directory(dirPath).listSync(followLinks: false));
+
+  /// 异步版本。目录很大时（版本库、构建产物）`listSync` 会卡住当前帧，
+  /// 文件树的首屏加载走这一条。
+  static Future<List<FileSystemEntity>> listSorted(String dirPath) async =>
+      _sorted(await Directory(dirPath).list(followLinks: false).toList());
+
+  static List<FileSystemEntity> _sorted(List<FileSystemEntity> entities) {
     int rank(FileSystemEntity e) => e is Directory ? 0 : 1;
     String name(FileSystemEntity e) => p.basename(e.path).toLowerCase();
     entities.sort((a, b) {
