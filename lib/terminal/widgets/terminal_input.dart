@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -27,14 +28,30 @@ import 'package:flutter/services.dart';
 /// `unspecified` is the one action that satisfies both:
 /// - Flutter: `performAction` → `_finalizeEditing(shouldUnfocus: false)`, which
 ///   invokes `onSubmitted` **without** dismissing the keyboard.
-/// - OHOS: maps to `EnterKeyType.UNSPECIFIED`, which the engine *does* handle
-///   (`handleFunctionKey` → `unspecifiedAction` → `performAction`), unlike
-///   `NONE`.
+/// - OHOS: maps to `EnterKeyType.UNSPECIFIED`. The engine's
+///   `ListenableEditingState.handleFunctionKey` has an explicit
+///   `UNSPECIFIED` branch that calls `TextInputChannel.unspecifiedAction`, which
+///   sends `TextInputClient.performAction("TextInputAction.unspecified")` — a
+///   platform message, not a key event. `NONE` has no branch and is dropped.
+///
+/// Because the act of submitting arrives as `performAction` rather than a
+/// `KeyEvent`, an enclosing `Focus.onKeyEvent` handler never sees the soft
+/// keyboard's Return. Do not try to "let it through" there; the field's
+/// `onSubmitted` is the only path and this action is what drives it.
 ///
 /// So the fields keep `onSubmitted` wired and use [action]; Return submits and
 /// the keyboard stays up.
 class TerminalInputBehavior {
   TerminalInputBehavior._();
+
+  /// Whether the app is running on the HarmonyOS (ohos) target.
+  ///
+  /// Uses [defaultTargetPlatform] rather than `Platform.isOhos` because this is
+  /// the same signal `vendor/re_editor` keys its own OHOS handling off
+  /// (`kIsOhosMobileLike`), and because it stays correct under widget tests
+  /// where `dart:io`'s platform differs from the target being built.
+  static bool get isOhosPlatform =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.ohos;
 
   /// Non-dismissing, submit-capable action; see the class doc for the full
   /// reasoning and the two actions that must not be used.
@@ -71,5 +88,30 @@ class TerminalInputBehavior {
     if (focusNode.hasFocus) return;
     if (!focusNode.canRequestFocus) return;
     focusNode.requestFocus();
+  }
+
+  /// Restores the soft keyboard for the given [focusNode], even when it is
+  /// already focused.
+  ///
+  /// Unlike [focusAndShowKeyboard], this always forces the keyboard back:
+  /// - When the field already has focus (Flutter side) but the OHOS IME
+  ///   connection was severed (e.g., another widget stole focus and the keyboard
+  ///   was dismissed), `TextInput.show` re-attaches the platform IME without
+  ///   re-triggering the focus machinery that would race the teardown.
+  /// - When the field is not focused it falls back to a plain `requestFocus`,
+  ///   which is the normal path.
+  ///
+  /// Use this when responding to an explicit user tap on the terminal area
+  /// (rather than the passive initial raise done by [focusAndShowKeyboard]).
+  static void restoreKeyboard(FocusNode focusNode) {
+    if (!focusNode.canRequestFocus) return;
+    if (focusNode.hasFocus) {
+      // Field is focused on the Flutter side but the platform IME may have
+      // been dismissed. Explicitly ask the platform to show the keyboard
+      // so tapping a focused-but-keyboard-hidden terminal reliably raises it.
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    } else {
+      focusNode.requestFocus();
+    }
   }
 }
