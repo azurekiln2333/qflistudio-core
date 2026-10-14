@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:qfli_studio_core/editor/editor_page_diag.dart';
+
 import 'package:flutter/material.dart';
 import 'editor_fonts.dart';
 import 'package:flutter/services.dart';
@@ -23,7 +25,22 @@ import '../terminal/widgets/terminal_input.dart';
 /// so they cannot drift apart.
 abstract final class TerminalPanelMetrics {
   /// Height of the collapsed header row.
-  static const double collapsedHeight = 36;
+  static const double collapsedHeight = 40;
+
+  /// Vertical breathing room above and below the session tab pills inside the
+  /// header, so the tabs are not flush against the header's edges.
+  static const double tabBarVerticalPadding = 4;
+
+  /// Height of a session tab pill. Sized so `2 * tabBarVerticalPadding +
+  /// tabHeight` together with the action buttons still fits [collapsedHeight].
+  static const double tabHeight = 30;
+
+  /// Widest a session tab pill may grow. Longer labels are ellipsised so a
+  /// handful of tabs stay reachable without scrolling the bar.
+  static const double maxTabWidth = 96;
+
+  /// Horizontal padding inside a tab pill, around its label.
+  static const double tabHorizontalPadding = 8;
 
   /// Height of the enlarged drag region above the panel content.
   static const double dragHandleHeight = 22;
@@ -58,6 +75,8 @@ class TerminalPane extends StatefulWidget {
     this.onResizeDelta,
     this.onResizeStart,
     this.onResizeEnd,
+    this.onActivated,
+    this.onInputFocusChanged,
     this.collapsed = false,
     this.compact = false,
   });
@@ -82,6 +101,19 @@ class TerminalPane extends StatefulWidget {
   final VoidCallback? onResizeStart;
   final VoidCallback? onResizeEnd;
 
+  /// Called when the user touches the terminal (its header or body).
+  ///
+  /// The editor uses it to expand a collapsed panel and to restore the user's
+  /// preferred height; focus is handled by [TerminalPaneState.requestInputFocus]
+  /// so the input is not focused before it is on screen.
+  final VoidCallback? onActivated;
+
+  /// Reports changes to the prompt input's focus state.
+  ///
+  /// The editor listens so it can avoid collapsing the panel to its header-only
+  /// layout while the user is typing into a raised keyboard.
+  final ValueChanged<bool>? onInputFocusChanged;
+
   /// Controlled collapsed state. The editor owns it; this pane only renders it
   /// and reports user intent.
   final bool collapsed;
@@ -103,6 +135,18 @@ class TerminalPaneState extends State<TerminalPane> {
   String? _onlineToken;
   int _onlineGeneration = 0;
   bool _preparing = false;
+
+  /// A discarded focus node for the per-tab close buttons.
+  ///
+  /// The buttons must not become the primary focus (a tap would otherwise leave
+  /// a detached node focused, and focus would then fall to the editor on
+  /// mobile). Giving them a node that is never focused keeps the button usable
+  /// without it joining the traversal order.
+  final FocusNode _tabCloseFocusNode = FocusNode(
+    debugLabel: 'terminal tab close',
+    skipTraversal: true,
+    canRequestFocus: false,
+  );
 
   /// Sandbox root for local sessions.
   ///
@@ -129,6 +173,25 @@ class TerminalPaneState extends State<TerminalPane> {
 
   bool get onlineSelected => _session.online;
   bool get busy => _session.running || _preparing;
+
+  /// Whether the terminal's prompt input currently holds focus.
+  ///
+  /// The editor needs this to decide whether it may collapse the panel to its
+  /// compact (header-only) layout: doing so would hide a focused input behind a
+  /// raised keyboard. See `EditorPage`'s `compactPanel` computation.
+  bool get inputHasFocus => _session.focusNode.hasFocus;
+
+  /// The prompt `FocusNode` currently being watched for focus changes.
+  FocusNode? _watchedFocusNode;
+
+  void _notifyInputFocusChanged() {
+    final focused = _watchedFocusNode?.hasFocus ?? false;
+    if (focused == _lastReportedInputFocus) return;
+    _lastReportedInputFocus = focused;
+    widget.onInputFocusChanged?.call(focused);
+  }
+
+  bool _lastReportedInputFocus = false;
 
   static const _maxLines = 500;
 
@@ -158,6 +221,9 @@ class TerminalPaneState extends State<TerminalPane> {
 
   @override
   void dispose() {
+    _tabCloseFocusNode.dispose();
+    _watchedFocusNode?.removeListener(_notifyInputFocusChanged);
+    _watchedFocusNode = null;
     unawaited(_processSupervisor.dispose());
     _onlineGeneration++;
     _api.close();
@@ -182,6 +248,7 @@ class TerminalPaneState extends State<TerminalPane> {
 
   void _newSession() {
     if (_preparing) return;
+    _keepPromptFocusAfterSwap();
     setState(() {
       _sessions.add(_createSession(_nextSessionId++));
       _selectedSessionIndex = _sessions.length - 1;
@@ -196,6 +263,22 @@ class TerminalPaneState extends State<TerminalPane> {
     return session;
   }
 
+  /// Set by the expanded header's Listener so the pane-wide Listener can tell
+  /// a header touch from a body touch.
+  bool _pointerInExpandedHeader = false;
+
+  /// Call before a tab swap that disposes or unmounts the focused prompt.
+  ///
+  /// When the focused node goes away, FocusManager falls back through the
+  /// route scope's history, which lands on the editor (and raises its IME on
+  /// OHOS). Re-focus the prompt of the session now on screen instead. Only
+  /// when the prompt was focused, so header actions never change IME state;
+  /// the "more" menu keeps focus in place (`requestFocus: false`).
+  void _keepPromptFocusAfterSwap() {
+    if (!_sessions.any((s) => s.focusNode.hasFocus)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => requestInputFocus());
+  }
+
   void _selectSession(int index) {
     if (_preparing) return;
     if (index == _selectedSessionIndex ||
@@ -204,25 +287,58 @@ class TerminalPaneState extends State<TerminalPane> {
       return;
     }
     setState(() => _selectedSessionIndex = index);
+    // Remember whether the caret was already in the transcript before the tab
+    // tap took the pointer. `TapRegion`/`InkWell` focus changes have not run
+    // yet at this point, so this reads the pre-tap state.
+    final promptHadFocus = _sessions.any((s) => s.focusNode.hasFocus);
     // Restore the newly active session's own scroll offset after the list has
     // laid out with its controller.
     final session = _session;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || session.disposed) return;
       final controller = session.listController;
-      if (!controller.hasClients) return;
-      final target = session.follow
-          ? controller.position.maxScrollExtent
-          : session.scrollOffset;
-      controller.jumpTo(
-        target.clamp(0.0, controller.position.maxScrollExtent).toDouble(),
-      );
+      if (controller.hasClients) {
+        final target = session.follow
+            ? controller.position.maxScrollExtent
+            : session.scrollOffset;
+        controller.jumpTo(
+          target.clamp(0.0, controller.position.maxScrollExtent).toDouble(),
+        );
+      }
+      // The tab is terminal chrome, so selecting one must leave the caret in the
+      // prompt of the session now on screen. This runs *after* the scroll
+      // restore on purpose: focusing the prompt scrolls the transcript to the
+      // bottom, which would otherwise overwrite the offset just restored.
+      //
+      // Focus is only moved when it already belonged to the terminal: a keyboard
+      // user tabbing through the pills owns the focus themselves and must keep
+      // it so Enter can select a tab. What this prevents is the earlier
+      // behaviour where a *pointer* tap on a pill left the terminal with no
+      // focused input, so the next touch fell through to the editor.
+      if (promptHadFocus) requestInputFocus();
     });
   }
 
   void _closeSession(int index) {
     if (_preparing) return;
-    if (_sessions.length == 1 || index < 0 || index >= _sessions.length) {
+    if (index < 0 || index >= _sessions.length) {
+      return;
+    }
+    _keepPromptFocusAfterSwap();
+    // Closing the last local tab must not leave the pane with nothing to show.
+    // Rather than refusing (which made a single tab unclosable) or leaving an
+    // empty pane, the closed session is replaced by a fresh one, so the visible
+    // result is a cleared terminal. This mirrors what the user expects from
+    // "close" when there is no other tab to fall back to.
+    if (_sessions.length == 1) {
+      final only = _sessions.first;
+      if (only.online) return;
+      final replacement = _TerminalSession(id: only.id);
+      _sessions[0] = replacement;
+      only.dispose();
+      setState(() {
+        _selectedSessionIndex = 0;
+      });
       return;
     }
     final session = _sessions.removeAt(index);
@@ -732,16 +848,32 @@ class TerminalPaneState extends State<TerminalPane> {
   /// Brings the active session's prompt into view and focuses its input, even
   /// when the lazy list has not mounted the field yet.
   ///
-  /// Raising the keyboard is a no-op when the field is already focused: tapping
-  /// a terminal whose keyboard is open must not make it pop again.
+  /// Uses [TerminalInputBehavior.restoreKeyboard] so that the soft keyboard is
+  /// raised even when the field is already focused on the Flutter side but the
+  /// platform IME connection was severed (e.g. the code editor temporarily took
+  /// focus on OHOS and the keyboard was dismissed).
   void _focusInput(_TerminalSession session) {
     if (!mounted || session.disposed) return;
     if (session.running || _preparing) return;
     session.follow = true;
     _scrollToBottom(session, true);
-    // Focus immediately: a post-frame callback is unnecessary and can be
-    // dropped when the tap is dispatched outside a build frame.
-    TerminalInputBehavior.focusAndShowKeyboard(session.focusNode);
+    // restoreKeyboard, not focusAndShowKeyboard: after the editor has ever taken
+    // focus the prompt's Flutter focusNode can still report hasFocus while the
+    // platform IME is detached. focusAndShowKeyboard returns early on hasFocus
+    // and would leave the keyboard down with a Return key that does nothing.
+    TerminalInputBehavior.restoreKeyboard(session.focusNode);
+  }
+
+  /// Focuses the active session's prompt exactly as a user tap on the terminal
+  /// does, without going through the pointer/deferred-tap machinery.
+  ///
+  /// Used by the editor after it expands a collapsed panel (focusing while the
+  /// input is off screen would be lost), and by widget tests that need to
+  /// establish "the user has focused the input".
+  void focusInput() {
+    final session = _session;
+    if (session.disposed) return;
+    _focusInput(session);
   }
 
   void _submit() {
@@ -757,8 +889,14 @@ class TerminalPaneState extends State<TerminalPane> {
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    // Hardware Return submits, so a physical keyboard behaves like the soft
-    // one.
+    // Hardware Return submits, so a physical keyboard behaves like the soft one.
+    //
+    // This handler is for physical keys only. The OHOS soft keyboard's Return
+    // does not come through here: the engine turns `EnterKeyType.UNSPECIFIED`
+    // into `TextInputClient.performAction("TextInputAction.unspecified")`, a
+    // platform message that `EditableText` routes to `onSubmitted` (see
+    // [TerminalInputBehavior]). Do not add soft-keyboard detection here; there
+    // is nothing for it to detect.
     if (event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter) {
       _submit();
@@ -948,82 +1086,183 @@ class TerminalPaneState extends State<TerminalPane> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final l10n = StudioLocalizations.of(context);
-    if (_collapsed || widget.compact) {
-      final header = GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.compact
-            ? null
-            : () {
-                _setCollapsed(false);
-                widget.onResizeEnd?.call();
-              },
-        child: Container(
-          height: widget.compact ? null : TerminalPanelMetrics.collapsedHeight,
-          color: scheme.surfaceContainerHigh,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              Icon(Icons.terminal, size: 16, color: scheme.primary),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  widget.compact ? l10n.terminal : l10n.terminalCollapsed,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
+    // `collapsed` and `compact` must not unmount the prompt's TextField.
+    //
+    // A keyboard-driven body shrink flips `compact` (EditorPage's
+    // `compactPanel`). If that swapped in a different subtree, the input's
+    // element would be destroyed, its FocusNode detached, and the platform IME
+    // closed — the "keyboard pops then immediately closes" bug.
+    //
+    // The Column therefore has the same two slots in every mode: a header and a
+    // body. Only the body's *height* changes; it collapses to zero rather than
+    // being removed, so the transcript's element path — and the prompt's
+    // FocusNode inside it — is preserved.
+    final headerOnly = _collapsed || widget.compact;
+    // A raw `Listener` observes a touch anywhere on the pane (header or body)
+    // without competing for gestures, so the transcript's own taps, selection
+    // and scrolling are untouched. It only reports "the user touched the
+    // terminal"; the editor decides what that means for the layout.
+    return Listener(
+      // Header chrome (tabs, "more", collapse) must not focus the prompt: that
+      // raised the soft keyboard on every button tap, and the popup menu then
+      // took focus and dismissed it again. The expanded header's own Listener
+      // runs first (deepest hit wins) and flags the touch.
+      onPointerDown: (_) {
+        final fromHeader = _pointerInExpandedHeader;
+        _pointerInExpandedHeader = false;
+        if (!fromHeader) widget.onActivated?.call();
+      },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!widget.compact && widget.onResizeDelta != null)
+            _buildResizeHandle(scheme),
+          if (headerOnly)
+            if (widget.compact)
+              Expanded(child: _buildCollapsedHeader(context, l10n, scheme))
+            else
+              _buildCollapsedHeader(context, l10n, scheme)
+          else
+            _buildExpandedHeader(context, l10n, scheme),
+          // Exactly one body slot with an identical widget chain in both modes,
+          // so the transcript's element path — and the prompt's FocusNode inside
+          // it — is preserved across the switch. `Flexible` plus a zero-height
+          // box collapses the slot without removing it: zero is still a bounded
+          // height, which the transcript's ListView requires, whereas an offstage
+          // or unbounded slot would assert.
+          Flexible(
+            fit: FlexFit.loose,
+            child: SizedBox(
+              width: double.infinity,
+              height: headerOnly ? 0 : null,
+              child: _buildBody(context),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Focuses the terminal input as if the user had tapped it.
+  ///
+  /// Public so the editor can move focus to the input after it expands a
+  /// collapsed panel; focusing before the input is on screen would be lost.
+  void requestInputFocus() {
+    if (!mounted) return;
+    focusInput();
+  }
+
+  /// Number of open sessions.
+  ///
+  /// Exposed for tests that assert tab open/close behaviour, which is otherwise
+  /// only observable through the rendered tab pills.
+  @visibleForTesting
+  int get sessionCount => _sessions.length;
+
+  /// Adds a local session, as the header's "new terminal" action does.
+  @visibleForTesting
+  void addSession() => _newSession();
+
+  /// The header row shown when the pane is collapsed or compact.
+  Widget _buildCollapsedHeader(
+    BuildContext context,
+    StudioLocalizations l10n,
+    ColorScheme scheme,
+  ) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.compact
+          ? null
+          : () {
+              _setCollapsed(false);
+              widget.onResizeEnd?.call();
+            },
+      child: Container(
+        height: widget.compact ? null : TerminalPanelMetrics.collapsedHeight,
+        color: scheme.surfaceContainerHigh,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            Icon(Icons.terminal, size: 16, color: scheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                widget.compact ? l10n.terminal : l10n.terminalCollapsed,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
                 ),
               ),
-              if (!widget.compact)
-                IconButton(
-                  tooltip: '展开终端',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 36,
-                    height: 36,
-                  ),
-                  padding: EdgeInsets.zero,
-                  onPressed: () {
-                    _setCollapsed(false);
-                    widget.onResizeEnd?.call();
-                  },
-                  icon: const Icon(Icons.keyboard_arrow_up, size: 20),
-                ),
+            ),
+            if (!widget.compact)
               IconButton(
-                tooltip: l10n.close,
+                tooltip: '展开终端',
                 visualDensity: VisualDensity.compact,
                 constraints: const BoxConstraints.tightFor(
                   width: 36,
                   height: 36,
                 ),
                 padding: EdgeInsets.zero,
-                onPressed: widget.onClose,
-                icon: const Icon(Icons.close, size: 18),
+                onPressed: () {
+                  _setCollapsed(false);
+                  widget.onResizeEnd?.call();
+                },
+                icon: const Icon(Icons.keyboard_arrow_up, size: 20),
               ),
-            ],
-          ),
+            IconButton(
+              tooltip: l10n.close,
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+              padding: EdgeInsets.zero,
+              onPressed: widget.onClose,
+              icon: const Icon(Icons.close, size: 18),
+            ),
+          ],
         ),
-      );
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // The drag handle stays reachable while collapsed so an upward drag
-          // can reopen the panel.
-          if (!widget.compact) _buildResizeHandle(scheme),
-          if (widget.compact) Expanded(child: header) else header,
-        ],
-      );
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (widget.onResizeDelta != null) _buildResizeHandle(scheme),
-        Container(
+      ),
+    );
+  }
+
+  /// The header row shown when the pane is expanded: session tabs and actions.
+  Widget _buildExpandedHeader(
+    BuildContext context,
+    StudioLocalizations l10n,
+    ColorScheme scheme,
+  ) {
+    return GestureDetector(
+      // The header paints an opaque colour, but a coloured `Container` does not
+      // absorb pointer events on its empty areas: a tap in the gap beside the
+      // tabs would fall through to whatever is beneath the pane (on mobile, the
+      // editor), moving focus there. An opaque detector consumes the event and
+      // keeps the touch inside the terminal.
+      behavior: HitTestBehavior.opaque,
+      // Tapping the header chrome is a statement of intent about the terminal,
+      // not the editor, so it must never collapse the panel.
+      onTap: () {},
+      // TEMP-DIAG (remove after device verification): report every pointer that
+      // reaches the header, and what the global focus is at that moment.
+      onTapDown: (details) => EditorPageDiag.diag(
+        'pane header onTapDown local=${details.localPosition} '
+        'focus=${FocusManager.instance.primaryFocus?.debugLabel}',
+      ),
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (_) {
+          _pointerInExpandedHeader = true;
+          EditorPageDiag.diag(
+            'pane header Listener.onPointerDown '
+            'focus=${FocusManager.instance.primaryFocus?.debugLabel}',
+          );
+        },
+        child: Container(
           height: TerminalPanelMetrics.collapsedHeight,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           color: scheme.surfaceContainerHigh,
           child: Row(
+            // The tab pills bring their own vertical padding; the action buttons
+            // are shorter than the header, so centre rather than stretch the row.
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Expanded(child: _buildSessionTabs(context)),
               if (_running)
@@ -1035,6 +1274,9 @@ class TerminalPaneState extends State<TerminalPane> {
               if (widget.onlineEnabled && !_session.online)
                 IconButton(
                   tooltip: '在线终端',
+                  // A header button must never become the focused control: on
+                  // mobile that closes the terminal's IME and, worse, lets the
+                  // next touch land on the editor. Focus stays with the prompt.
                   visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints.tightFor(
                     width: 36,
@@ -1061,6 +1303,8 @@ class TerminalPaneState extends State<TerminalPane> {
                 height: 36,
                 child: PopupMenuButton<String>(
                   tooltip: '终端操作',
+                  // Keep focus (and the IME) where it is while the menu shows.
+                  requestFocus: false,
                   padding: EdgeInsets.zero,
                   icon: const Icon(Icons.more_vert, size: 18),
                   onSelected: (action) {
@@ -1140,10 +1384,16 @@ class TerminalPaneState extends State<TerminalPane> {
             ],
           ),
         ),
-        Expanded(child: _buildTranscript(context)),
-      ],
+      ),
     );
   }
+
+  /// The body: the transcript list plus the interactive prompt.
+  ///
+  /// Always built from the same place in the widget tree so the prompt's
+  /// element (and its FocusNode) survives a switch between the expanded and
+  /// header-only layouts. See [build] for why that matters on OHOS.
+  Widget _buildBody(BuildContext context) => _buildTranscript(context);
 
   /// Output + prompt share one scrollable document, wrapped in an explicit
   /// right-side scrollbar. A tap on empty canvas focuses the input, but only
@@ -1306,6 +1556,14 @@ class TerminalPaneState extends State<TerminalPane> {
 
   Widget _buildPromptRow(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // Report focus changes so the host can keep the panel expanded while the
+    // user is typing (see TerminalPane.onInputFocusChanged).
+    final focusNode = _session.focusNode;
+    if (focusNode != _watchedFocusNode) {
+      _watchedFocusNode?.removeListener(_notifyInputFocusChanged);
+      focusNode.addListener(_notifyInputFocusChanged);
+      _watchedFocusNode = focusNode;
+    }
     return Focus(
       onKeyEvent: _onKey,
       child: LayoutBuilder(
@@ -1385,7 +1643,12 @@ class TerminalPaneState extends State<TerminalPane> {
   Widget _buildSessionTabs(BuildContext context) {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      // Symmetric vertical padding so the pills sit clear of the header's top
+      // and bottom edges instead of filling it edge to edge.
+      padding: const EdgeInsets.symmetric(
+        horizontal: 4,
+        vertical: TerminalPanelMetrics.tabBarVerticalPadding,
+      ),
       child: Row(
         children: [
           for (var index = 0; index < _sessions.length; index++)
@@ -1402,14 +1665,25 @@ class TerminalPaneState extends State<TerminalPane> {
     );
   }
 
+  /// Short tab label.
+  ///
+  /// A full `Terminal 1` occupies ~148 px per pill, so two or three tabs push
+  /// the bar into horizontal scrolling on a phone. The id is the only part that
+  /// distinguishes tabs, so it is the only part kept: `1` locally, `R1` for a
+  /// remote session (the online tab is otherwise indistinguishable).
+  String _sessionLabel(_TerminalSession session) =>
+      session.online ? 'R${session.id}' : '${session.id}';
+
   /// Session label with a visible outline and clear selection so multiple tabs
-  /// stay distinguishable at narrow widths. Supersedes the previous borderless
-  /// flat-label style per the user's explicit request.
+  /// stay distinguishable at narrow widths.
   Widget _buildSessionTab(BuildContext context, ColorScheme scheme, int index) {
     final session = _sessions[index];
     final selected = index == _selectedSessionIndex;
-    final label = session.online ? 'Remote' : 'Terminal ${session.id}';
-    final closable = !session.online && _sessions.length > 1 && !_preparing;
+    final label = _sessionLabel(session);
+    // A single local terminal can be closed too. Closing the last tab keeps the
+    // session list non-empty by replacing it with a fresh terminal, so the pane
+    // never ends up with nothing selected (see `_closeSession`).
+    final closable = !session.online && !_preparing;
     return Material(
       color: selected
           ? scheme.secondaryContainer
@@ -1422,62 +1696,83 @@ class TerminalPaneState extends State<TerminalPane> {
         ),
       ),
       clipBehavior: Clip.antiAlias,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Semantics(
-            button: true,
-            selected: selected,
-            enabled: !_preparing,
-            child: InkWell(
-              onTap: _preparing ? null : () => _selectSession(index),
-              canRequestFocus: !_preparing,
-              child: Padding(
-                padding: EdgeInsets.only(left: 10, right: closable ? 2 : 10),
-                child: SizedBox(
-                  height: 34,
-                  child: Center(
-                    child: Text(
-                      label,
-                      style: TextStyle(
-                        fontFamily: EditorFonts.bundledFamily,
-                        fontFamilyFallback: EditorFonts.fallbacks,
-                        fontSize: 12.5,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.w500,
-                        color: selected
-                            ? scheme.onSecondaryContainer
-                            : scheme.onSurfaceVariant,
+      child: ConstrainedBox(
+        // Cap the pill so long labels cannot push the action buttons off screen.
+        constraints: const BoxConstraints(
+          maxWidth: TerminalPanelMetrics.maxTabWidth,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Semantics(
+                button: true,
+                selected: selected,
+                enabled: !_preparing,
+                label: label,
+                child: InkWell(
+                  onTap: _preparing ? null : () => _selectSession(index),
+                  canRequestFocus: !_preparing,
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      left: TerminalPanelMetrics.tabHorizontalPadding,
+                      right: closable
+                          ? 2
+                          : TerminalPanelMetrics.tabHorizontalPadding,
+                    ),
+                    child: SizedBox(
+                      height: TerminalPanelMetrics.tabHeight,
+                      child: Center(
+                        widthFactor: 1,
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          softWrap: false,
+                          style: TextStyle(
+                            fontFamily: EditorFonts.bundledFamily,
+                            fontFamilyFallback: EditorFonts.fallbacks,
+                            fontSize: 12.5,
+                            fontWeight: selected
+                                ? FontWeight.w600
+                                : FontWeight.w500,
+                            color: selected
+                                ? scheme.onSecondaryContainer
+                                : scheme.onSurfaceVariant,
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
-          if (closable)
-            SizedBox(
-              width: 36,
-              height: 36,
-              child: IconButton(
-                tooltip: 'Close $label',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints.tightFor(
-                  width: 36,
-                  height: 36,
-                ),
-                onPressed: () => _closeSession(index),
-                icon: Icon(
-                  Icons.close,
-                  size: 14,
-                  color: selected
-                      ? scheme.onSecondaryContainer
-                      : scheme.onSurfaceVariant,
+            if (closable)
+              SizedBox(
+                width: 28,
+                height: TerminalPanelMetrics.tabHeight,
+                child: IconButton(
+                  tooltip: 'Close terminal $label',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 28,
+                    height: TerminalPanelMetrics.tabHeight,
+                  ),
+                  iconSize: 14,
+                  // Closing a tab must not leave focus on the removed button.
+                  focusNode: _tabCloseFocusNode,
+                  onPressed: () => _closeSession(index),
+                  icon: Icon(
+                    Icons.close,
+                    size: 14,
+                    color: selected
+                        ? scheme.onSecondaryContainer
+                        : scheme.onSurfaceVariant,
+                  ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
