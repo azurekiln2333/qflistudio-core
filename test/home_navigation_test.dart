@@ -5,6 +5,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:qfli_studio_core/config/compliance_config.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/pages/home_page.dart';
 import 'package:qfli_studio_core/pages/profile_page.dart';
@@ -170,10 +171,11 @@ void main() {
     final stores = _Stores();
     addTearDown(stores.dispose);
 
+    await _resize(tester, const Size(1000, 4000));
     await tester.pumpWidget(
       _app(stores, home: _profileHost(stores)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     // No account surface at all: header, login prompt, statistics, sign-out and
     // the networked check-in sections.
@@ -187,7 +189,19 @@ void main() {
     expect(find.text('管理'), findsNothing);
     expect(find.text('任务配置'), findsNothing);
     expect(find.text('操作审计'), findsNothing);
-    expect(find.text('备案查询'), findsNothing);
+
+    // The ICP record must not exist anywhere on the page, not merely be scrolled
+    // out of view. The tall window above makes the lazy list build every child,
+    // so this is a real absence check: with the footer rendered it is found.
+    expect(find.textContaining(ComplianceConfig.icpRecord), findsNothing);
+    expect(
+      find.textContaining(ComplianceConfig.icpRecord, skipOffstage: false),
+      findsNothing,
+    );
+    expect(
+      find.textContaining('备案查询', skipOffstage: false),
+      findsNothing,
+    );
 
     // The local-only sections must survive.
     expect(find.text('数据管理'), findsOneWidget);
@@ -249,14 +263,20 @@ void main() {
     final stores = _Stores();
     addTearDown(stores.dispose);
 
+    await _resize(tester, const Size(1000, 4000));
     await tester.pumpWidget(
       _app(stores, home: _profileHost(stores)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     // The default keeps the previous behaviour, so other products are untouched.
     expect(find.text('未登录'), findsOneWidget);
     expect(find.text('签到与积分'), findsOneWidget);
+    // A networked product still renders the ICP record.
+    expect(
+      find.textContaining(ComplianceConfig.icpRecord, skipOffstage: false),
+      findsOneWidget,
+    );
   });
 }
 
@@ -287,6 +307,31 @@ Widget _app(_Stores stores, {Widget? home}) => MaterialApp(
         settings: stores.settings,
       ),
 );
+
+/// Rewrites the logical screen size so the whole page can lay out at once.
+///
+/// The profile page is a lazy `ListView`: in the default 800x600 test window
+/// only the first screenful is ever built, so an assertion about a
+/// bottom-of-page entry would be testing "not built" rather than "not shown".
+Future<void> _resize(WidgetTester tester, Size size) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+}
+
+/// Advances a bounded number of frames instead of `pumpAndSettle`.
+///
+/// The profile page keeps timers and animations alive (activity loading, the
+/// avatar refresh, scroll physics), so `pumpAndSettle` can spin forever. Two
+/// pumps are enough for the first layout plus a trailing rebuild, and they can
+/// never hang the test.
+Future<void> _settle(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+}
 
 Future<void> _selectTab(WidgetTester tester, int index) async {
   // The rendered destination controls are private `InkResponse` subclasses in
