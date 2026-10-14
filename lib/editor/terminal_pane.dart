@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:qfli_studio_core/editor/editor_page_diag.dart';
+import '../services/local_audit_service.dart';
+import '../services/local_stats_service.dart';
 
 import 'package:flutter/material.dart';
 import 'editor_fonts.dart';
@@ -365,6 +367,17 @@ class TerminalPaneState extends State<TerminalPane> {
     final trimmed = command.trim();
     final session = _session;
     if (trimmed.isEmpty || session.running) return;
+    // Local-only counters: no server report, because an offline product must
+    // not upload and qflistudio tracks terminal usage through its own pages.
+    unawaited(LocalStatsService.instance.recordTerminalCommand());
+    unawaited(
+      LocalAuditService.instance.record(
+        kind: LocalAuditKind.terminal,
+        action: '执行 $trimmed',
+        project: p.basename(widget.workingDirectory),
+        detail: session.online ? '在线会话' : '本地会话',
+      ),
+    );
     final backend = await _backendFor(session);
     _history.add(trimmed);
     _historyIndex = _history.length;

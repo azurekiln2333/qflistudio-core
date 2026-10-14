@@ -40,6 +40,8 @@ import 'terminal_pane.dart';
 import '../terminal/widgets/terminal_input.dart';
 import '../pages/settings_page.dart';
 import '../pages/content_tools_pages.dart';
+import '../services/local_audit_service.dart';
+import '../services/local_stats_service.dart';
 import 'ai_panel.dart';
 
 enum _BottomPanel { none, terminal, ai }
@@ -358,6 +360,45 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     );
   }
 
+  /// Previous line count per path, so a save can report a line delta.
+  /// Updated on every recorded save.
+  final Map<String, int> _localLineCounts = {};
+
+  /// Records a save into the local stats and audit stores.
+  ///
+  /// The line delta comes from the difference against the last recorded count
+  /// for this path, which is the cheapest honest source: the editor does not
+  /// hand out its previous buffer here, and keeping one integer per open file
+  /// is far less work than the estimate is worth. The UI labels the figure as an
+  /// estimate for that reason.
+  Future<void> _recordLocalSave(String path, List<int> bytes) async {
+    final name = p.basename(path);
+    final lines = _lineCount(bytes);
+    final previous = _localLineCounts[path];
+    _localLineCounts[path] = lines;
+    await LocalStatsService.instance.recordSave(
+      project: widget.project.name,
+      path: path,
+      previousLineCount: previous,
+      newLineCount: previous == null ? null : lines,
+    );
+    await LocalAuditService.instance.record(
+      kind: LocalAuditKind.save,
+      action: '保存 $name',
+      project: widget.project.name,
+      path: path,
+    );
+  }
+
+  static int _lineCount(List<int> bytes) {
+    if (bytes.isEmpty) return 0;
+    var lines = 1;
+    for (final byte in bytes) {
+      if (byte == 0x0A) lines++;
+    }
+    return lines;
+  }
+
   Future<void> _finishAutoSave(
     String path,
     List<int> bytes,
@@ -373,6 +414,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
     if ((_manualSaveGeneration[path] ?? 0) == manualGeneration &&
         _autoEditGeneration[path] == editGeneration) {
+      // Local stats/audit alongside the server-side activity report. The two
+      // are independent: the server one queues a reward event, this one only
+      // writes to the local JSON file.
+      unawaited(_recordLocalSave(path, bytes));
       if (_leaving) {
         TaskActivityService.report(widget.auth, 'save_file');
       } else {
@@ -954,6 +999,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           pane.appendSystem('本地运行时不可用，转入在线运行');
           await pane.runOnlineProject(widget.project.path, entry);
         }
+        unawaited(
+          LocalStatsService.instance.recordRun(
+            succeeded: code == 0,
+            project: widget.project.name,
+          ),
+        );
+        unawaited(
+          LocalAuditService.instance.record(
+            kind: LocalAuditKind.run,
+            action: '运行 ${p.basename(entry)}',
+            project: widget.project.name,
+            path: entry,
+            detail: '退出码 $code',
+          ),
+        );
         return;
       }
       final managedProcess = result?.managedProcess;
