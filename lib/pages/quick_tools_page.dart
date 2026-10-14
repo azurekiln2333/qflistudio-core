@@ -21,7 +21,7 @@ class FunctionsTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(l10n.functions)),
+      appBar: AppBar(title: Text(l10n.tools)),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
         children: [
@@ -79,7 +79,7 @@ class ContentToolsPage extends StatelessWidget {
       StudioProductCatalog.noteKey => const MarkdownToolPage(),
       StudioProductCatalog.sqlabKey => SqlToolPage(projectPath: _projectPath),
       _ => Scaffold(
-        appBar: AppBar(title: Text(StudioLocalizations.of(context).functions)),
+        appBar: AppBar(title: Text(StudioLocalizations.of(context).tools)),
         body: const SizedBox.shrink(),
       ),
     };
