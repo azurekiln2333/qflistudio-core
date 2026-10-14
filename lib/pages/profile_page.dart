@@ -194,7 +194,9 @@ class _ProfileTabState extends State<ProfileTab> {
                         ),
                       ),
                     const SizedBox(height: 16),
-                    _icpFooter(),
+                    // The ICP notice links to an external compliance site, so an
+                    // offline-only product has no reason to show it.
+                    if (!offlineOnly) _icpFooter(),
                   ],
                 ),
               ),

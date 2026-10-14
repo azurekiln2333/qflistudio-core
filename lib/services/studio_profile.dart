@@ -101,13 +101,13 @@ class StudioProfile {
     this.editorFileTools = const [],
     this.entryFileNames = const [],
     this.isOffline = false,
-    this.offlineOnly = false,
+    bool? offlineOnly,
     this.productKey = StudioProductCatalog.qfliStudioKey,
     this.showHomeTabs = true,
     this.runtimeKind = 'unavailable',
     this.runtimeStatus = 'unavailable',
     this.supportedFileExtensions = const [],
-  });
+  }) : offlineOnly = offlineOnly ?? isOffline;
 
   /// 档位标识，同时用于项目元数据里记录「由哪个 App 创建」。
   final String id;
@@ -159,14 +159,16 @@ class StudioProfile {
   /// Whether homepage project-scope and language tabs are shown.
   final bool showHomeTabs;
 
-  /// Whether this product is purely offline, so the profile page must hide every
-  /// part that needs the network: the login entry, the account summary and the
-  /// sync/community actions.
+  /// Whether this product must hide every entry that needs the network: the
+  /// login/register/account surfaces, the community and check-in sections, the
+  /// cloud project scope, the online terminal and the server-side admin pages.
   ///
-  /// Distinct from [isOffline], which also swaps the tutorial and example tabs
-  /// to their local variants. A product can keep the local content tabs while
-  /// still offering an account page, so the two are separate switches. Defaults
-  /// to false, which leaves other products' behaviour unchanged.
+  /// Defaults to [isOffline] when not given, so every offline language App gets
+  /// the offline-only treatment automatically; pass it explicitly only to opt a
+  /// networked product in or an offline one out.
+  ///
+  /// Kept separate from [isOffline], which additionally swaps the tutorial and
+  /// example tabs to their local variants.
   final bool offlineOnly;
 
   /// Concrete execution or preview boundary advertised by this product.

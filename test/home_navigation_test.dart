@@ -65,6 +65,42 @@ void main() {
     productKey: StudioProductCatalog.jvmxKey,
   );
 
+  testWidgets('offlineOnly follows isOffline when not given', (tester) async {
+    // The 11 offline language apps rely on this default: they only set
+    // `isOffline` and must still get the offline-only treatment.
+    final derived = StudioProfile(
+      id: 'java',
+      appTitle: 'QFLIJVMX',
+      templates: const [ProjectTemplate.empty],
+      isOffline: true,
+    );
+    expect(derived.offlineOnly, isTrue);
+
+    final networked = StudioProfile(
+      id: 'studio',
+      appTitle: 'QFLIStudio+',
+      templates: const [ProjectTemplate.empty],
+    );
+    expect(networked.offlineOnly, isFalse);
+
+    // An explicit value still wins.
+    final optedIn = StudioProfile(
+      id: 'studio',
+      appTitle: 'QFLIStudio+',
+      templates: const [ProjectTemplate.empty],
+      offlineOnly: true,
+    );
+    final optedOut = StudioProfile(
+      id: 'java',
+      appTitle: 'QFLIJVMX',
+      templates: const [ProjectTemplate.empty],
+      isOffline: true,
+      offlineOnly: false,
+    );
+    expect(optedIn.offlineOnly, isTrue);
+    expect(optedOut.offlineOnly, isFalse);
+  });
+
   testWidgets('only the home tab shows the product name', (tester) async {
     StudioProfile.current = profileFor();
     final stores = _Stores();
@@ -145,11 +181,67 @@ void main() {
     expect(find.text('签到与积分'), findsNothing);
     expect(find.text('每日任务'), findsNothing);
     expect(find.text('积分兑换'), findsNothing);
+    expect(find.text('统计'), findsNothing);
     expect(find.text('退出登录'), findsNothing);
+    // The server-side admin section and the external ICP notice go too.
+    expect(find.text('管理'), findsNothing);
+    expect(find.text('任务配置'), findsNothing);
+    expect(find.text('操作审计'), findsNothing);
+    expect(find.text('备案查询'), findsNothing);
 
     // The local-only sections must survive.
     expect(find.text('数据管理'), findsOneWidget);
     expect(find.text('设置'), findsWidgets);
+  });
+
+  testWidgets('an offline-only home hides the cloud project scope', (
+    tester,
+  ) async {
+    StudioProfile.current = profileFor();
+    final stores = _Stores();
+    addTearDown(stores.dispose);
+
+    // The default profile has showHomeTabs true, so the scope tabs render and
+    // the absence of the cloud one is a real assertion.
+    await tester.pumpWidget(
+      _app(
+        stores,
+        home: HomePage(
+          store: stores.projects,
+          auth: stores.auth,
+          settings: stores.settings,
+        ),
+      ),
+    );
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    // Only the local scopes remain; the cloud scope is a server feature.
+    expect(find.text('云端项目'), findsNothing);
+    expect(find.text('全部项目'), findsWidgets);
+  });
+
+  testWidgets('a networked home keeps the cloud project scope', (tester) async {
+    StudioProfile.current = profileFor(offlineOnly: false);
+    final stores = _Stores();
+    addTearDown(stores.dispose);
+
+    await tester.pumpWidget(
+      _app(
+        stores,
+        home: HomePage(
+          store: stores.projects,
+          auth: stores.auth,
+          settings: stores.settings,
+        ),
+      ),
+    );
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    expect(find.text('云端项目'), findsWidgets);
   });
 
   testWidgets('a networked profile page keeps the login entry', (tester) async {
