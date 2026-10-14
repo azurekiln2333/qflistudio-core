@@ -24,6 +24,8 @@ import '../widgets/project_card.dart';
 import '../widgets/project_dialogs.dart';
 import '../widgets/retained_page.dart';
 import 'profile_page.dart';
+import '../services/local_audit_service.dart';
+import '../services/local_stats_service.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
 class HomePage extends StatefulWidget {
@@ -819,6 +821,19 @@ class _HomeTabState extends State<HomeTab>
     final result = await showCreateProjectDialog(context, widget.store);
     if (result != null && context.mounted) {
       TaskActivityService.report(widget.auth, 'create_project');
+      unawaited(
+        LocalStatsService.instance.recordFileCreated(
+          project: result.project.name,
+        ),
+      );
+      unawaited(
+        LocalAuditService.instance.record(
+          kind: LocalAuditKind.create,
+          action: '创建项目 ${result.project.name}',
+          project: result.project.name,
+          path: result.project.path,
+        ),
+      );
       await _openProject(
         context,
         result.project,
@@ -848,6 +863,16 @@ class _HomeTabState extends State<HomeTab>
     }
     widget.store.touch(project);
     TaskActivityService.report(widget.auth, 'open_project');
+    unawaited(
+      LocalStatsService.instance.recordProjectOpened(project: project.name),
+    );
+    unawaited(
+      LocalAuditService.instance.record(
+        kind: LocalAuditKind.open,
+        action: '打开项目 ${project.name}',
+        project: project.name,
+        path: project.path,
+      ),    );
     if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -883,6 +908,22 @@ class _HomeTabState extends State<HomeTab>
       },
     );
     final error = await widget.store.deleteProject(project);
+    if (error == null) {
+      unawaited(
+        LocalStatsService.instance.recordFileDeleted(
+          project: project.name,
+          path: project.path,
+        ),
+      );
+      unawaited(
+        LocalAuditService.instance.record(
+          kind: LocalAuditKind.delete,
+          action: '删除项目 ${project.name}',
+          project: project.name,
+          path: project.path,
+        ),
+      );
+    }
     if (!context.mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
     ScaffoldMessenger.of(context).showSnackBar(

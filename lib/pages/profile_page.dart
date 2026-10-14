@@ -13,6 +13,7 @@ import 'audit_page.dart';
 import 'auth/login_page.dart';
 import 'auth/agreement_page.dart';
 import 'recovery_page.dart';
+import 'local_stats_audit_pages.dart';
 import 'settings_page.dart';
 import 'tasks_page.dart';
 import 'points_page.dart';
@@ -145,6 +146,34 @@ class _ProfileTabState extends State<ProfileTab> {
                               ),
                             ),
                           ),
+                      ],
+                    ),
+                    // Local, offline-only records. Unlike every section above,
+                    // these render for an offline product too, because they are
+                    // purely local and are the only stats/audit an offline app
+                    // has. qflistudio shows both these and its server pages.
+                    SettingsSection(
+                      title: '本机记录',
+                      cardShape: _cardShape,
+                      children: [
+                        _entry(
+                          icon: Icons.insights_outlined,
+                          title: '本地统计',
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const LocalStatsPage(),
+                            ),
+                          ),
+                        ),
+                        _entry(
+                          icon: Icons.history_edu_outlined,
+                          title: '本地审计',
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => const LocalAuditPage(),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                     SettingsSection(
