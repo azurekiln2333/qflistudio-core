@@ -111,7 +111,7 @@ class _AboutAppIcon extends StatelessWidget {
 
 /// Opens the product About page as a normal secondary route.
 ///
-/// This is the single entry point used by Profile and Settings. It preserves
+/// This is the entry point used by Profile. It preserves
 /// the original helper signature so existing callers keep working, but it now
 /// pushes a full page (with platform Back) instead of an [AboutDialog].
 ///
