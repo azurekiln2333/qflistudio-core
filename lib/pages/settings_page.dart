@@ -14,7 +14,6 @@ import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
 import '../widgets/settings_section.dart';
-import 'about_page.dart' show showQfliAbout;
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
 import '../editor/editor_fonts.dart';
@@ -216,19 +215,6 @@ class _SettingsPageState extends State<SettingsPage> {
                         title: Text(_busyLabel!),
                         subtitle: const LinearProgressIndicator(minHeight: 3),
                       ),
-                  ],
-                ),
-                SettingsSection(
-                  title: '关于',
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.info_outline),
-                      title: Text(
-                        '关于 ${StudioProfile.current?.appTitle ?? 'QFLIStudio+'}',
-                      ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => showQfliAbout(context),
-                    ),
                   ],
                 ),
               ],

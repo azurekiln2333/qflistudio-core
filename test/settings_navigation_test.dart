@@ -24,11 +24,10 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 
 /// Navigation and data-labelling contract for the real Settings/Profile UI:
 ///
-///   * Both the `ProfileTab` “关于” entry and the `SettingsPage` “关于” entry
-///     must open the shared `AboutPage` through their real `onTap` handlers —
-///     not by importing the helper directly in the test — so a regression in
-///     the page wiring (a raw `AboutDialog`, a dead button, a missing export)
-///     fails here.
+///   * `ProfileTab` is the only place with an “关于” entry; `SettingsPage` must
+///     not duplicate it. The profile entry opens the shared `AboutPage` through
+///     its real `onTap` handler so a regression in the page wiring (a raw
+///     `AboutDialog`, a dead button, a missing export) fails here.
 ///   * The backup/restore section must describe the full-data `.qfliz` archive
 ///     and must no longer offer the old single-project JSON export/import.
 ///
@@ -74,28 +73,24 @@ void main() {
     stores.dispose();
   });
 
-  group('SettingsPage About entry', () {
-    testWidgets('taps through to the shared AboutPage and Back returns', (
+  group('SettingsPage UI', () {
+    testWidgets('keeps settings without a duplicate About entry', (
       tester,
     ) async {
       await _pumpSettingsPage(tester, stores);
 
       expect(find.byType(SettingsPage), findsOneWidget);
-      final entry = find.text('关于 NavStudio');
-      await tester.ensureVisible(entry);
-      await tester.tap(entry);
+      expect(find.text('外观与体验'), findsOneWidget);
+      expect(find.text('编辑器'), findsOneWidget);
+      expect(find.textContaining('关于'), findsNothing);
+
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -2000));
       await tester.pumpAndSettle();
 
-      expect(find.byType(AboutPage), findsOneWidget);
-      expect(find.text('NavStudio'), findsOneWidget);
-      expect(find.text('版本 $kQfliAboutVersion'), findsOneWidget);
-
-      // The AppBar's leading BackButton returns to Settings.
-      await tester.tap(find.byType(BackButton));
-      await tester.pumpAndSettle();
-
+      expect(find.text('数据与存储'), findsOneWidget);
+      expect(find.text('导入全部数据'), findsOneWidget);
+      expect(find.textContaining('关于'), findsNothing);
       expect(find.byType(AboutPage), findsNothing);
-      expect(find.byType(SettingsPage), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 
@@ -280,12 +275,14 @@ void main() {
 
       expect(find.byType(ProfileTab), findsOneWidget);
       final entry = find.text('关于 NavStudio');
+      expect(entry, findsOneWidget);
       await tester.ensureVisible(entry);
       await tester.tap(entry);
       await tester.pumpAndSettle();
 
       expect(find.byType(AboutPage), findsOneWidget);
       expect(find.text('NavStudio'), findsOneWidget);
+      expect(find.text('版本 $kQfliAboutVersion'), findsOneWidget);
 
       await tester.tap(find.byType(BackButton));
       await tester.pumpAndSettle();
