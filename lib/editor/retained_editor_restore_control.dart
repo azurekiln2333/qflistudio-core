@@ -117,6 +117,11 @@ class RetainedEditorRestoreControlState
   /// as reported by the layout delegate.
   Rect _paintedBounds = Rect.zero;
 
+  /// Keeps a mode change attached to the control's right edge. The next
+  /// visible layout resolves this against the new child's actual size, then
+  /// returns to storing its top-left position as usual.
+  Offset? _modeAnchor;
+
   /// Reachable top-left coordinates, measured by the layout delegate.
   Rect _movementBounds = Rect.zero;
 
@@ -138,13 +143,20 @@ class RetainedEditorRestoreControlState
   }
 
   void collapse() {
-    if (_mode == RestoreControlMode.collapsed) return;
-    setState(() => _mode = RestoreControlMode.collapsed);
+    _changeMode(RestoreControlMode.collapsed);
   }
 
   void expand() {
-    if (_mode == RestoreControlMode.expanded) return;
-    setState(() => _mode = RestoreControlMode.expanded);
+    _changeMode(RestoreControlMode.expanded);
+  }
+
+  void _changeMode(RestoreControlMode mode) {
+    if (_mode == mode) return;
+    setState(() {
+      _modeAnchor = _paintedBounds.isEmpty ? null : _paintedBounds.centerRight;
+      _dragPosition = null;
+      _mode = mode;
+    });
   }
 
   void _onDragStart() {
@@ -186,7 +198,9 @@ class RetainedEditorRestoreControlState
   /// coordinate would otherwise stay behind the keyboard while the paint moved
   /// above it. Rebuild once after the frame only when the value really changed.
   void _adoptResolved(RestoreControlPosition resolved) {
-    if (_position == resolved) return;
+    final hadModeAnchor = _modeAnchor != null;
+    _modeAnchor = null;
+    if (_position == resolved && !hadModeAnchor) return;
     final first = _position == null;
     _position = resolved;
     if (first || _adopting) return;
@@ -222,6 +236,7 @@ class RetainedEditorRestoreControlState
               child: CustomSingleChildLayout(
                 delegate: _RestoreControlLayout(
                   position: _position,
+                  modeAnchor: _modeAnchor,
                   reserveBottom: widget.reserveBottom,
                   measure: restorable,
                   onLaidOut: (bounds, movementBounds) {
@@ -278,6 +293,7 @@ class RetainedEditorRestoreControlState
 class _RestoreControlLayout extends SingleChildLayoutDelegate {
   _RestoreControlLayout({
     required this.position,
+    required this.modeAnchor,
     required this.reserveBottom,
     required this.measure,
     required this.onLaidOut,
@@ -285,6 +301,7 @@ class _RestoreControlLayout extends SingleChildLayoutDelegate {
   });
 
   final RestoreControlPosition? position;
+  final Offset? modeAnchor;
   final double? reserveBottom;
 
   /// False while the control shows its placeholder (no session / hidden). The
@@ -329,11 +346,16 @@ class _RestoreControlLayout extends SingleChildLayoutDelegate {
       return Offset(_margin, _margin);
     }
 
-    final chosen =
-        position ??
-        // Default resting place: the bottom-right corner, exactly where the
-        // control used to sit before it became draggable.
-        RestoreControlPosition(upperX, upperY);
+    final anchor = modeAnchor;
+    final chosen = anchor != null
+        ? RestoreControlPosition(
+            anchor.dx - childSize.width,
+            anchor.dy - childSize.height / 2,
+          )
+        : position ??
+              // Default resting place: the bottom-right corner, exactly where the
+              // control used to sit before it became draggable.
+              RestoreControlPosition(upperX, upperY);
     final clamped = RestoreControlPosition(
       chosen.dx.clamp(_margin, upperX).toDouble(),
       chosen.dy.clamp(_margin, upperY).toDouble(),
@@ -354,6 +376,7 @@ class _RestoreControlLayout extends SingleChildLayoutDelegate {
   @override
   bool shouldRelayout(_RestoreControlLayout oldDelegate) =>
       position != oldDelegate.position ||
+      modeAnchor != oldDelegate.modeAnchor ||
       reserveBottom != oldDelegate.reserveBottom ||
       measure != oldDelegate.measure;
 }
@@ -406,7 +429,10 @@ class _CollapsedCircle extends StatelessWidget {
               child: SizedBox(
                 width: circleDiameter,
                 height: circleDiameter,
-                child: Icon(Icons.code, color: scheme.onSecondaryContainer),
+                child: Icon(
+                  Icons.chevron_left_rounded,
+                  color: scheme.onSecondaryContainer,
+                ),
               ),
             ),
           ),
@@ -481,7 +507,7 @@ class _ExpandedBar extends StatelessWidget {
               ),
             IconButton(
               tooltip: '收起为圆形按钮',
-              icon: const Icon(Icons.close_fullscreen),
+              icon: const Icon(Icons.chevron_right_rounded),
               onPressed: onCollapse,
             ),
           ],
