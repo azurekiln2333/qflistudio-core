@@ -136,7 +136,7 @@ class ToolsGrid extends StatelessWidget {
               ),
               SliverPadding(
                 padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, 8),
-                sliver: _grid(section.tools),
+                sliver: _grid(context, section.tools),
               ),
             ],
             SliverPadding(
@@ -149,27 +149,42 @@ class ToolsGrid extends StatelessWidget {
     );
   }
 
-  Widget _grid(List<ToolDefinition> tools) => SliverGrid(
-    delegate: SliverChildBuilderDelegate((context, index) {
-      final tool = tools[index];
-      return ToolCard(
-        icon: tool.icon,
-        title: tool.title,
-        description: tool.description,
-        onTap:
-            tool.onTap ??
-            () => Navigator.of(
-              context,
-            ).push(MaterialPageRoute<void>(builder: tool.builder!)),
-      );
-    }, childCount: tools.length),
-    gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-      maxCrossAxisExtent: ToolsTheme.cardMaxWidth,
-      mainAxisExtent: ToolsTheme.cardHeight,
-      crossAxisSpacing: ToolsTheme.cardSpacing,
-      mainAxisSpacing: ToolsTheme.cardSpacing,
-    ),
-  );
+  Widget _grid(BuildContext context, List<ToolDefinition> tools) {
+    final textTheme = Theme.of(context).textTheme;
+    final scaler = MediaQuery.textScalerOf(context);
+    double extraLineHeight(TextStyle? style, double fallbackSize) {
+      final size = style?.fontSize ?? fallbackSize;
+      return (scaler.scale(size) - size).clamp(0.0, double.infinity) *
+          (style?.height ?? 1.5);
+    }
+
+    // Each card has one title line and up to two description lines. Preserve
+    // normal geometry and reserve the extra line height requested by the user.
+    final extraTextHeight =
+        extraLineHeight(textTheme.titleSmall, 14) +
+        2 * extraLineHeight(textTheme.bodySmall, 12);
+    return SliverGrid(
+      delegate: SliverChildBuilderDelegate((context, index) {
+        final tool = tools[index];
+        return ToolCard(
+          icon: tool.icon,
+          title: tool.title,
+          description: tool.description,
+          onTap:
+              tool.onTap ??
+              () => Navigator.of(
+                context,
+              ).push(MaterialPageRoute<void>(builder: tool.builder!)),
+        );
+      }, childCount: tools.length),
+      gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: ToolsTheme.cardMaxWidth,
+        mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
+        crossAxisSpacing: ToolsTheme.cardSpacing,
+        mainAxisSpacing: ToolsTheme.cardSpacing,
+      ),
+    );
+  }
 }
 
 class _OfflineNote extends StatelessWidget {

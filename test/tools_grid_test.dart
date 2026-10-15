@@ -34,6 +34,7 @@ Future<void> _mount(
   WidgetTester tester, {
   Size size = const Size(420, 900),
   Brightness brightness = Brightness.light,
+  TextScaler textScaler = TextScaler.noScaling,
   Widget? home,
 }) async {
   tester.view.physicalSize = size;
@@ -56,6 +57,10 @@ Future<void> _mount(
         useMaterial3: true,
         brightness: brightness,
         colorSchemeSeed: const Color(0xFF0B63CE),
+      ),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+        child: child!,
       ),
       home: home ?? FunctionsTab(onOpenTerminal: () {}),
     ),
@@ -132,6 +137,30 @@ void main() {
       }
     },
   );
+
+  for (final brightness in Brightness.values) {
+    testWidgets('large text keeps all cards reachable in $brightness', (
+      tester,
+    ) async {
+      var terminalTaps = 0;
+      await _mount(
+        tester,
+        size: const Size(320, 640),
+        brightness: brightness,
+        textScaler: const TextScaler.linear(2),
+        home: FunctionsTab(onOpenTerminal: () => terminalTaps++),
+      );
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(_card('终端')).height, greaterThan(132));
+      await tester.tap(_card('终端'));
+      expect(terminalTaps, 1);
+      for (final (title, _) in _sharedPages) {
+        await _revealCard(tester, title);
+        expect(_card(title).hitTestable(), findsOneWidget, reason: title);
+        expect(tester.takeException(), isNull, reason: title);
+      }
+    });
+  }
 
   const products = [
     (
