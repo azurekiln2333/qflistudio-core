@@ -4,6 +4,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'i18n/studio_localizations.dart';
 import 'editor/editor_fonts.dart';
+import 'editor/retained_editor_host.dart';
 import 'pages/home_page.dart';
 import 'services/studio_profile.dart';
 import 'splash_screen.dart';
@@ -38,6 +39,7 @@ class QfliApp extends StatefulWidget {
 }
 
 class _QfliAppState extends State<QfliApp> {
+  final _editors = RetainedEditorController();
   late final SettingsStore _fallbackSettings = SettingsStore();
   late final ValueNotifier<({ThemeMode theme, bool ready})> _appearance;
 
@@ -83,6 +85,7 @@ class _QfliAppState extends State<QfliApp> {
     _settings.removeListener(_updateAppearance);
     widget.ready?.removeListener(_updateAppearance);
     _appearance.dispose();
+    _editors.dispose();
     _fallbackSettings.dispose();
     super.dispose();
   }
@@ -94,6 +97,9 @@ class _QfliAppState extends State<QfliApp> {
       valueListenable: _appearance,
       builder: (context, appearance, _) => MaterialApp(
         navigatorKey: widget.navigatorKey,
+        navigatorObservers: [_editors.navigatorObserver],
+        builder: (context, child) =>
+            RetainedEditorHost(controller: _editors, child: child!),
         title:
             StudioProfile.current?.appTitle ?? StudioProductCatalog.qfliStudio,
         debugShowCheckedModeBanner: false,

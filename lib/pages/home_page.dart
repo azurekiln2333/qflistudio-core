@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
-import '../editor/editor_page.dart';
+import '../editor/retained_editor_host.dart';
 import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/api_client.dart';
@@ -897,16 +897,13 @@ class _HomeTabState extends State<HomeTab>
       ),
     );
     if (!context.mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => EditorPage(
-          project: project,
-          auth: widget.auth,
-          store: widget.store,
-          settings: widget.settings,
-          initialOpenPath: initialOpenFile,
-        ),
-      ),
+    await openEditorPage(
+      context,
+      project: project,
+      auth: widget.auth,
+      store: widget.store,
+      settings: widget.settings,
+      initialOpenPath: initialOpenFile,
     );
     OpenPerformance.endOpen();
   }
