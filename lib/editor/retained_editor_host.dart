@@ -9,6 +9,7 @@ import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import 'editor_page.dart';
+import 'retained_editor_restore_control.dart';
 
 /// Opens a live project, or resumes its existing editor. Hosted opens finish
 /// immediately; standalone callers keep the ordinary Navigator route lifetime.
@@ -348,67 +349,52 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
                 motion: _motions[entry.key]!,
                 child: _editorChildren[entry.key]!,
               ),
-            if (!controller.isVisible &&
-                !_motions.values.any((motion) => motion.isAnimating) &&
-                !controller._selectingProject &&
-                !controller._rootObserver.hasPopupRoute &&
-                controller._sessions.isNotEmpty)
-              SafeArea(
-                child: Align(
-                  alignment: Alignment.bottomRight,
-                  child: Padding(
-                    padding: _restoreControlPadding(context),
-                    child: Material(
-                      elevation: 4,
-                      borderRadius: BorderRadius.circular(24),
-                      color: Theme.of(context).colorScheme.secondaryContainer,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: TextButton.icon(
-                              onPressed: () =>
-                                  controller._activate(controller._lastActive!),
-                              icon: const Icon(Icons.code),
-                              label: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth: 180,
-                                ),
-                                child: Text(
-                                  '返回编辑器 · ${controller._sessions[controller._lastActive]!.project.name}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ),
-                          ),
-                          if (controller._sessions.length > 1)
-                            Builder(
-                              builder: (context) => IconButton(
-                                tooltip: '切换编辑器',
-                                icon: const Icon(Icons.expand_less),
-                                onPressed: () =>
-                                    unawaited(_showSessionMenu(context)),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+            // Always mounted in a fixed keyed slot, even with no session and
+            // while a root modal is open: visibility is a property of the
+            // control, not of whether its slot exists. Unmounting it here is
+            // what used to discard the dragged position and collapsed mode.
+            SafeArea(
+              child: RetainedEditorRestoreControl(
+                key: const ValueKey('retained-editor-restore-control'),
+                visible:
+                    !controller.isVisible &&
+                    !_motions.values.any((motion) => motion.isAnimating) &&
+                    !controller._rootObserver.hasPopupRoute &&
+                    controller._sessions.isNotEmpty,
+                // A root popup already covers the control; freezing input (but
+                // keeping the widget mounted) prevents barrier interception
+                // while preserving state across the modal.
+                interactive: !controller._selectingProject,
+                projectName: controller._lastActive == null
+                    ? null
+                    : controller
+                          ._sessions[controller._lastActive!]
+                          ?.project
+                          .name,
+                hasMultipleSessions: controller._sessions.length > 1,
+                reserveBottom: _restoreControlBottomReservation(context),
+                onRestore: () => controller._activate(controller._lastActive!),
+                onSelect: (anchorContext) =>
+                    unawaited(_showSessionMenu(anchorContext)),
               ),
+            ),
           ],
         ),
       ),
     ),
   );
 
-  EdgeInsets _restoreControlPadding(BuildContext context) {
+  /// Space Home reserves below the control: navigation bar (below 900dp),
+  /// then the Scaffold FAB margin and FAB height, plus a visible gap, and the
+  /// on-screen keyboard when it is open.
+  ///
+  /// `SafeArea` above this only applies `padding` (system bars/cutouts); it
+  /// ignores `viewInsets`, so the keyboard height has to be reserved here or
+  /// the restore control would sit behind the keyboard with no way to reach it.
+  /// The keyboard replaces the bottom bar visually, so only the larger of the
+  /// two is reserved rather than summing them.
+  double _restoreControlBottomReservation(BuildContext context) {
     final theme = Theme.of(context);
-    // Home uses a NavigationBar below 900dp and a rail on wider windows.
-    // Reserve its themed height (Material defaults to 80dp), then the normal
-    // Scaffold FAB margin and extended FAB height, with a gap above that FAB.
-    // The surrounding SafeArea already accounts for the system bottom inset.
     final navigationHeight = MediaQuery.sizeOf(context).width < 900
         ? NavigationBarTheme.of(context).height ?? 80.0
         : 0.0;
@@ -418,12 +404,10 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
             ?.constrainHeight(defaultFabHeight) ??
         defaultFabHeight;
     const gap = 12.0;
-    return EdgeInsets.fromLTRB(
-      gap,
-      gap,
-      gap,
-      navigationHeight + kFloatingActionButtonMargin + fabHeight + gap,
-    );
+    final homeTier =
+        navigationHeight + kFloatingActionButtonMargin + fabHeight + gap;
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+    return keyboard > homeTier ? keyboard + gap : homeTier;
   }
 
   Future<void> _showSessionMenu(BuildContext anchorContext) async {
@@ -432,8 +416,10 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
     final navigator = controller.navigatorObserver.navigator;
     final overlay = navigator?.overlay;
     if (navigator == null || overlay == null) return;
-    final anchor = anchorContext.findRenderObject()! as RenderBox;
-    final overlayBox = overlay.context.findRenderObject()! as RenderBox;
+    final anchor = anchorContext.findRenderObject();
+    final overlayBox = overlay.context.findRenderObject();
+    if (anchor is! RenderBox || overlayBox is! RenderBox) return;
+    if (!anchor.hasSize || !overlayBox.hasSize) return;
     // These render boxes are siblings. Convert through global coordinates;
     // passing overlayBox as localToGlobal's ancestor would be invalid.
     final rect = Rect.fromPoints(
