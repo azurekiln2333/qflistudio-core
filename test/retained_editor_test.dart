@@ -361,6 +361,73 @@ void main() {
   );
 
   testWidgets(
+    'cancelling Explorer new file keeps the live editor and dirty buffer',
+    (tester) async {
+      final fixture = _Fixture(root);
+      await fixture.mount(tester);
+      await fixture.open(tester, 'Alpha');
+      final state = tester.state(find.byType(EditorPage));
+      final controller = _editor(tester);
+      final host = RetainedEditorScope.maybeOf(
+        tester.element(find.byType(EditorPage)),
+      )!;
+      final buffer = controller.current!;
+      const dirtyText = '// keep this unsaved buffer after cancelling';
+      buffer.controller.text = dirtyText;
+      await tester.pump();
+      expect(buffer.dirty, isTrue);
+
+      await tester.tap(find.byTooltip('打开文件树'));
+      await _pumpFrames(tester);
+      final projectDirectory = Directory(
+        p.join(fixture.directory.path, 'Alpha'),
+      );
+      final filesBefore = projectDirectory
+          .listSync(recursive: true)
+          .whereType<File>()
+          .map((file) => p.relative(file.path, from: projectDirectory.path))
+          .toSet();
+
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.tap(find.byTooltip('新建文件'));
+        await _pumpFrames(tester);
+        final dialog = find.byType(AlertDialog);
+        expect(dialog, findsOneWidget);
+        await tester.enterText(
+          find.descendant(of: dialog, matching: find.byType(TextField)),
+          'CancelledDraft$attempt',
+        );
+        await tester.tap(
+          find.descendant(of: dialog, matching: find.text('取消')),
+        );
+        // Pop completes before the route's reverse animation. Keep pumping
+        // the outgoing TextField so an early controller disposal is observed.
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await _pumpFrames(tester);
+        expect(tester.takeException(), isNull);
+
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(tester.state(find.byType(EditorPage)), same(state));
+        expect(_editor(tester), same(controller));
+        expect(host.isVisible, isTrue);
+        expect(controller.current, same(buffer));
+        expect(buffer.controller.text, dirtyText);
+        expect(buffer.dirty, isTrue);
+        expect(
+          projectDirectory
+              .listSync(recursive: true)
+              .whereType<File>()
+              .map(
+                (file) => p.relative(file.path, from: projectDirectory.path),
+              ),
+          unorderedEquals(filesBefore),
+        );
+      }
+    },
+  );
+
+  testWidgets(
     'editor dialogs and child routes consume Back before the editor hides',
     (tester) async {
       final fixture = _Fixture(root);
