@@ -350,11 +350,18 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 void showQfliAbout(BuildContext context) {
+  final profile = StudioProfile.current;
   showAboutDialog(
     context: context,
-    applicationName: 'QFLIStudio+',
+    applicationName: profile?.appTitle ?? StudioProductCatalog.qfliStudio,
     applicationVersion: '1.0.0',
     applicationIcon: const Icon(Icons.code_rounded, size: 40),
-    children: [const Text('轻量代码编辑器与开发者社区。管理项目，编写代码，分享你的经验。')],
+    children: [
+      Text(
+        profile?.offlineOnly == true
+            ? '离线代码编辑器。管理本地项目，编写代码，学习教程与示例。'
+            : '轻量代码编辑器与开发者社区。管理项目，编写代码，分享你的经验。',
+      ),
+    ],
   );
 }
