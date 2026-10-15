@@ -216,6 +216,8 @@ class _HomePageState extends State<HomePage> {
         settings: widget.settings,
       ),
       1 => FunctionsTab(
+        store: widget.store,
+        toolsTabBuilder: profile?.toolsTabBuilder,
         onOpenTerminal: () => Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => TerminaxTerminalPage(store: widget.store),

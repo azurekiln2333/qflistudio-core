@@ -10,56 +10,73 @@ import 'terminax_terminal_page.dart';
 class FunctionsTab extends StatelessWidget {
   const FunctionsTab({
     super.key,
+    this.store,
     required this.onOpenTerminal,
     this.onOpenContentTool,
+    this.toolsTabBuilder,
   });
 
+  /// Required only when rendering inline product tools. Legacy callers may omit it.
+  final ProjectStore? store;
   final VoidCallback onOpenTerminal;
   final VoidCallback? onOpenContentTool;
+
+  /// Product-owned tools content. When set, it becomes the tab body and the
+  /// 功能 entry is not rendered (see [StudioProfile.toolsTabBuilder]).
+  final Widget Function(ProjectStore store, VoidCallback onOpenTerminal)?
+  toolsTabBuilder;
 
   @override
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
+    final inlineTools =
+        toolsTabBuilder ?? StudioProfile.current?.toolsTabBuilder;
+    assert(
+      inlineTools == null || store != null,
+      'FunctionsTab requires a ProjectStore when toolsTabBuilder is provided.',
+    );
     return Scaffold(
       appBar: AppBar(title: Text(l10n.tools)),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-        children: [
-          _QuickToolTile(
-            icon: Icons.terminal,
-            title: l10n.terminal,
-            subtitle: l10n.terminalSubtitle,
-            onTap: onOpenTerminal,
-          ),
-          if (onOpenContentTool != null) ...[
-            const SizedBox(height: 8),
-            _QuickToolTile(
-              icon: switch (StudioProfile.current?.productKey) {
-                StudioProductCatalog.webForgeKey => Icons.language,
-                StudioProductCatalog.jsonKey => Icons.data_object,
-                StudioProductCatalog.noteKey => Icons.article_outlined,
-                StudioProductCatalog.sqlabKey => Icons.storage_outlined,
-                _ => Icons.build_outlined,
-              },
-              title: switch (StudioProfile.current?.productKey) {
-                StudioProductCatalog.webForgeKey => 'Web 工具',
-                StudioProductCatalog.jsonKey => l10n.jsonTools,
-                StudioProductCatalog.noteKey => l10n.markdownTools,
-                StudioProductCatalog.sqlabKey => l10n.sqlTools,
-                _ => l10n.functions,
-              },
-              subtitle: switch (StudioProfile.current?.productKey) {
-                StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
-                StudioProductCatalog.jsonKey => l10n.jsonStructure,
-                StudioProductCatalog.noteKey => l10n.markdownPreview,
-                StudioProductCatalog.sqlabKey => l10n.executeQuery,
-                _ => l10n.functions,
-              },
-              onTap: onOpenContentTool!,
+      body: inlineTools != null
+          ? inlineTools(store!, onOpenTerminal)
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+              children: [
+                _QuickToolTile(
+                  icon: Icons.terminal,
+                  title: l10n.terminal,
+                  subtitle: l10n.terminalSubtitle,
+                  onTap: onOpenTerminal,
+                ),
+                if (onOpenContentTool != null) ...[
+                  const SizedBox(height: 8),
+                  _QuickToolTile(
+                    icon: switch (StudioProfile.current?.productKey) {
+                      StudioProductCatalog.webForgeKey => Icons.language,
+                      StudioProductCatalog.jsonKey => Icons.data_object,
+                      StudioProductCatalog.noteKey => Icons.article_outlined,
+                      StudioProductCatalog.sqlabKey => Icons.storage_outlined,
+                      _ => Icons.build_outlined,
+                    },
+                    title: switch (StudioProfile.current?.productKey) {
+                      StudioProductCatalog.webForgeKey => 'Web 工具',
+                      StudioProductCatalog.jsonKey => l10n.jsonTools,
+                      StudioProductCatalog.noteKey => l10n.markdownTools,
+                      StudioProductCatalog.sqlabKey => l10n.sqlTools,
+                      _ => l10n.functions,
+                    },
+                    subtitle: switch (StudioProfile.current?.productKey) {
+                      StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
+                      StudioProductCatalog.jsonKey => l10n.jsonStructure,
+                      StudioProductCatalog.noteKey => l10n.markdownPreview,
+                      StudioProductCatalog.sqlabKey => l10n.executeQuery,
+                      _ => l10n.functions,
+                    },
+                    onTap: onOpenContentTool!,
+                  ),
+                ],
+              ],
             ),
-          ],
-        ],
-      ),
     );
   }
 }
