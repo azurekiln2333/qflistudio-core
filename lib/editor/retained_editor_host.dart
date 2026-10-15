@@ -69,6 +69,8 @@ class RetainedEditorController extends ChangeNotifier {
   String? _lastActive;
   bool _handlingBack = false;
   bool _selectingProject = false;
+  bool _rootRouteUpdateScheduled = false;
+  bool _disposed = false;
 
   bool get isVisible => _active != null;
   Project? get activeProject => _sessions[_active]?.project;
@@ -128,6 +130,18 @@ class RetainedEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _rootRouteChanged() {
+    if (_disposed || _rootRouteUpdateScheduled) return;
+    _rootRouteUpdateScheduled = true;
+    // Navigator can report its top route while its overlay is building.
+    // Rebuild the sibling host after that frame, coalescing nested popups.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _rootRouteUpdateScheduled = false;
+      if (!_disposed) notifyListeners();
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
   // Only EditorPage's explicit close action calls this, after dirty-file
   // confirmation. Minimize and project switching never remove a session.
   void _close(String key) {
@@ -156,6 +170,7 @@ class RetainedEditorController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _rootObserver.detach();
     for (final session in _sessions.values) {
       session.visible.dispose();
@@ -336,12 +351,13 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
             if (!controller.isVisible &&
                 !_motions.values.any((motion) => motion.isAnimating) &&
                 !controller._selectingProject &&
+                !controller._rootObserver.hasPopupRoute &&
                 controller._sessions.isNotEmpty)
               SafeArea(
                 child: Align(
                   alignment: Alignment.bottomRight,
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 92),
+                    padding: _restoreControlPadding(context),
                     child: Material(
                       elevation: 4,
                       borderRadius: BorderRadius.circular(24),
@@ -349,16 +365,20 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          TextButton.icon(
-                            onPressed: () =>
-                                controller._activate(controller._lastActive!),
-                            icon: const Icon(Icons.code),
-                            label: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 180),
-                              child: Text(
-                                '返回编辑器 · ${controller._sessions[controller._lastActive]!.project.name}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                          Flexible(
+                            child: TextButton.icon(
+                              onPressed: () =>
+                                  controller._activate(controller._lastActive!),
+                              icon: const Icon(Icons.code),
+                              label: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 180,
+                                ),
+                                child: Text(
+                                  '返回编辑器 · ${controller._sessions[controller._lastActive]!.project.name}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               ),
                             ),
                           ),
@@ -382,6 +402,29 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
       ),
     ),
   );
+
+  EdgeInsets _restoreControlPadding(BuildContext context) {
+    final theme = Theme.of(context);
+    // Home uses a NavigationBar below 900dp and a rail on wider windows.
+    // Reserve its themed height (Material defaults to 80dp), then the normal
+    // Scaffold FAB margin and extended FAB height, with a gap above that FAB.
+    // The surrounding SafeArea already accounts for the system bottom inset.
+    final navigationHeight = MediaQuery.sizeOf(context).width < 900
+        ? NavigationBarTheme.of(context).height ?? 80.0
+        : 0.0;
+    final defaultFabHeight = theme.useMaterial3 ? 56.0 : 48.0;
+    final fabHeight =
+        theme.floatingActionButtonTheme.extendedSizeConstraints
+            ?.constrainHeight(defaultFabHeight) ??
+        defaultFabHeight;
+    const gap = 12.0;
+    return EdgeInsets.fromLTRB(
+      gap,
+      gap,
+      gap,
+      navigationHeight + kFloatingActionButtonMargin + fabHeight + gap,
+    );
+  }
 
   Future<void> _showSessionMenu(BuildContext anchorContext) async {
     // The restore control is a sibling of the root Navigator, so its context
@@ -516,10 +559,16 @@ class _EditorPopEntry extends PopEntry<Object?> {
 // before that Navigator can pop a route hidden behind the active editor.
 class _RootEditorObserver extends NavigatorObserver {
   _RootEditorObserver(RetainedEditorController controller)
-    : _entry = _EditorPopEntry(controller);
+    : _controller = controller,
+      _entry = _EditorPopEntry(controller);
 
+  final RetainedEditorController _controller;
   final _EditorPopEntry _entry;
+  final _popupRoutes = <PopupRoute<dynamic>>{};
   ModalRoute<dynamic>? _route;
+  bool _detached = false;
+
+  bool get hasPopupRoute => _popupRoutes.isNotEmpty;
 
   void setEditorVisible(bool visible) {
     _entry.canPopNotifier.value = !visible;
@@ -527,14 +576,30 @@ class _RootEditorObserver extends NavigatorObserver {
 
   @override
   void didChangeTop(Route<dynamic> topRoute, Route<dynamic>? previousTopRoute) {
+    if (_detached) return;
     _route?.unregisterPopEntry(_entry);
     _route = topRoute is ModalRoute<dynamic> ? topRoute : null;
     _route?.registerPopEntry(_entry);
+    if (topRoute is PopupRoute<dynamic> && _popupRoutes.add(topRoute)) {
+      if (_popupRoutes.length == 1) _controller._rootRouteChanged();
+      // A popped dialog/menu still paints and intercepts input during its exit.
+      // Restore the control only after its overlay entries have been removed.
+      unawaited(
+        topRoute.completed.then((_) {
+          if (_detached) return;
+          if (_popupRoutes.remove(topRoute) && _popupRoutes.isEmpty) {
+            _controller._rootRouteChanged();
+          }
+        }),
+      );
+    }
   }
 
   void detach() {
+    _detached = true;
     _route?.unregisterPopEntry(_entry);
     _route = null;
+    _popupRoutes.clear();
     _entry.canPopNotifier.dispose();
   }
 }
