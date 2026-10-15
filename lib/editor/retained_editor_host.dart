@@ -179,7 +179,7 @@ class _EditorSession {
 
 /// Place in MaterialApp.builder, above and alongside the root Navigator.
 /// Each editor's Navigator is therefore its own root for dialogs and menus.
-class RetainedEditorHost extends StatelessWidget {
+class RetainedEditorHost extends StatefulWidget {
   const RetainedEditorHost({
     super.key,
     required this.controller,
@@ -190,38 +190,151 @@ class RetainedEditorHost extends StatelessWidget {
   final Widget child;
 
   @override
+  State<RetainedEditorHost> createState() => _RetainedEditorHostState();
+}
+
+class _RetainedEditorHostState extends State<RetainedEditorHost>
+    with TickerProviderStateMixin {
+  final _motions = <String, AnimationController>{};
+  final _targets = <String, bool>{};
+  final _editorChildren = <String, Widget>{};
+  bool _reduceMotion = false;
+
+  RetainedEditorController get controller => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    controller.addListener(_syncSessions);
+    _syncSessions();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    if (_reduceMotion) {
+      for (final entry in _motions.entries) {
+        entry.value.value = _targets[entry.key] == true ? 1 : 0;
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant RetainedEditorHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != controller) {
+      oldWidget.controller.removeListener(_syncSessions);
+      _disposeMotions();
+      controller.addListener(_syncSessions);
+      _syncSessions();
+    }
+  }
+
+  void _syncSessions() {
+    for (final key in _motions.keys.toList()) {
+      if (controller._sessions.containsKey(key)) continue;
+      _motions.remove(key)!.dispose();
+      _targets.remove(key);
+      _editorChildren.remove(key);
+    }
+    for (final entry in controller._sessions.entries) {
+      final motion = _motions.putIfAbsent(
+        entry.key,
+        () => AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 180),
+          reverseDuration: const Duration(milliseconds: 140),
+        ),
+      );
+      _editorChildren.putIfAbsent(
+        entry.key,
+        () => _editorChild(entry.key, entry.value),
+      );
+      final visible = controller._active == entry.key;
+      if (_targets[entry.key] == visible) continue;
+      _targets[entry.key] = visible;
+      if (_reduceMotion) {
+        motion.value = visible ? 1 : 0;
+      } else if (visible) {
+        motion.forward();
+      } else {
+        motion.reverse();
+      }
+    }
+    setState(() {});
+  }
+
+  Widget _editorChild(String key, _EditorSession session) =>
+      HeroControllerScope.none(
+        child: NotificationListener<NavigationNotification>(
+          onNotification: (_) => true,
+          child: ScaffoldMessenger(
+            child: Navigator(
+              key: session.navigatorKey,
+              onGenerateRoute: (_) => MaterialPageRoute<void>(
+                builder: (_) => _SessionEditor(
+                  controller: controller,
+                  sessionKey: key,
+                  session: session,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+  void _disposeMotions() {
+    for (final motion in _motions.values) {
+      motion.dispose();
+    }
+    _motions.clear();
+    _targets.clear();
+    _editorChildren.clear();
+  }
+
+  @override
+  void dispose() {
+    controller.removeListener(_syncSessions);
+    _disposeMotions();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) => RetainedEditorScope(
     controller: controller,
-    child: ListenableBuilder(
-      listenable: controller,
+    child: AnimatedBuilder(
+      animation: Listenable.merge(_motions.values.toList()),
       builder: (context, _) => Overlay.wrap(
         child: Stack(
           fit: StackFit.expand,
           children: [
-            _retained(visible: !controller.isVisible, child: child),
-            for (final entry in controller._sessions.entries)
-              _retained(
+            _retained(
+              visible:
+                  !controller.isVisible ||
+                  _motions.values.any((motion) => motion.isAnimating),
+              interactive: !controller.isVisible,
+              child: widget.child,
+            ),
+            // Keep the active editor above an exiting project. The keyed
+            // layers and cached Navigator children keep their live identity
+            // when the paint order changes.
+            for (final entry in [
+              ...controller._sessions.entries.where(
+                (entry) => entry.key != controller._active,
+              ),
+              ...controller._sessions.entries.where(
+                (entry) => entry.key == controller._active,
+              ),
+            ])
+              _animatedEditor(
                 key: ValueKey(entry.key),
                 visible: controller._active == entry.key,
-                child: HeroControllerScope.none(
-                  child: NotificationListener<NavigationNotification>(
-                    onNotification: (_) => true,
-                    child: ScaffoldMessenger(
-                      child: Navigator(
-                        key: entry.value.navigatorKey,
-                        onGenerateRoute: (_) => MaterialPageRoute<void>(
-                          builder: (_) => _SessionEditor(
-                            controller: controller,
-                            sessionKey: entry.key,
-                            session: entry.value,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                motion: _motions[entry.key]!,
+                child: _editorChildren[entry.key]!,
               ),
             if (!controller.isVisible &&
+                !_motions.values.any((motion) => motion.isAnimating) &&
                 !controller._selectingProject &&
                 controller._sessions.isNotEmpty)
               SafeArea(
@@ -312,15 +425,48 @@ class RetainedEditorHost extends StatelessWidget {
     }
   }
 
-  Widget _retained({Key? key, required bool visible, required Widget child}) =>
-      Offstage(
-        key: key,
-        offstage: !visible,
-        child: TickerMode(
-          enabled: visible,
-          child: ExcludeFocus(excluding: !visible, child: child),
+  Widget _animatedEditor({
+    required Key key,
+    required bool visible,
+    required AnimationController motion,
+    required Widget child,
+  }) {
+    final eased = motion.drive(CurveTween(curve: Curves.easeOutCubic));
+    return _retained(
+      key: key,
+      visible: visible || !motion.isDismissed,
+      interactive: visible,
+      child: FadeTransition(
+        opacity: eased,
+        child: SlideTransition(
+          position: eased.drive(
+            Tween<Offset>(begin: const Offset(0, 0.035), end: Offset.zero),
+          ),
+          child: child,
         ),
-      );
+      ),
+    );
+  }
+
+  Widget _retained({
+    Key? key,
+    required bool visible,
+    required bool interactive,
+    required Widget child,
+  }) => Offstage(
+    key: key,
+    offstage: !visible,
+    child: TickerMode(
+      enabled: interactive,
+      child: ExcludeFocus(
+        excluding: !interactive,
+        child: ExcludeSemantics(
+          excluding: !interactive,
+          child: IgnorePointer(ignoring: !interactive, child: child),
+        ),
+      ),
+    ),
+  );
 }
 
 // The route's builder keeps the same EditorPage state while requests change.
