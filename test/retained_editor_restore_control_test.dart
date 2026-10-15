@@ -80,14 +80,16 @@ void main() {
   /// Returns the position after the gesture.
   Future<RestoreControlPosition> panBy(
     WidgetTester tester,
-    Offset travel,
-  ) async {
-    final gesture = await tester.startGesture(tester.getCenter(expandedBar()));
+    Offset travel, {
+    Finder? target,
+  }) async {
+    final control = target ?? expandedBar();
+    final gesture = await tester.startGesture(tester.getCenter(control));
     // Consume the recognizer's slop first so it does not eat the travel below.
     const slopStep = Offset(-24, -24);
     await gesture.moveBy(slopStep);
     await tester.pump();
-    final start = tester.getRect(expandedBar()).topLeft;
+    final start = tester.getRect(control).topLeft;
 
     const steps = 8;
     final step = Offset(travel.dx / steps, travel.dy / steps);
@@ -147,10 +149,19 @@ void main() {
     tester,
   ) async {
     final state = await mount(tester, hostSize: const Size(400, 600));
+    final expanded = tester.getRect(expandedBar());
     await tester.tap(find.byTooltip('收起为圆形按钮'));
     await tester.pump();
     expect(state.mode, RestoreControlMode.collapsed);
     expect(collapsedCircle(), findsOneWidget);
+    final collapsed = tester.getRect(collapsedCircle());
+    expect(collapsed.right, closeTo(expanded.right, 0.01));
+    expect(collapsed.center.dy, closeTo(expanded.center.dy, 0.01));
+
+    await tester.tap(collapsedCircle());
+    await tester.pump();
+    expect(tester.getRect(expandedBar()), expanded);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('mode survives hide/show and interactive toggles', (
@@ -324,13 +335,56 @@ void main() {
     await tester.pump();
     expect(key.currentState!.position, dragged);
 
-    // Mode changes must not reset the position either.
+    // Mode changes share the right edge, and a round trip restores the bar.
+    final expanded = tester.getRect(expandedBar());
     await tester.tap(find.byTooltip('收起为圆形按钮'));
     await tester.pump();
-    expect(key.currentState!.position, dragged);
+    final collapsed = tester.getRect(collapsedCircle());
+    expect(collapsed.right, closeTo(expanded.right, 0.01));
+    expect(collapsed.center.dy, closeTo(expanded.center.dy, 0.01));
     await tester.tap(collapsedCircle());
     await tester.pump();
     expect(key.currentState!.position, dragged);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('expanding a dragged circle uses its right edge then clamps', (
+    tester,
+  ) async {
+    final state = await mount(
+      tester,
+      hostSize: const Size(400, 600),
+      initialMode: RestoreControlMode.collapsed,
+    );
+    await panBy(tester, const Offset(-20, -80), target: collapsedCircle());
+    final draggedCircle = tester.getRect(collapsedCircle());
+    await tester.tap(collapsedCircle());
+    await tester.pump();
+    final expanded = tester.getRect(expandedBar());
+    expect(expanded.right, closeTo(draggedCircle.right, 0.01));
+    expect(expanded.center.dy, closeTo(draggedCircle.center.dy, 0.01));
+
+    await tester.tap(find.byTooltip('收起为圆形按钮'));
+    await tester.pump();
+    await panBy(tester, const Offset(-500, 0), target: collapsedCircle());
+    final edgeCircle = tester.getRect(collapsedCircle());
+    await tester.tap(collapsedCircle());
+    await tester.pump();
+    final edgeBar = tester.getRect(expandedBar());
+    expect(edgeBar.left, closeTo(edgeCircle.left, 0.01));
+    expect(edgeBar.right, lessThanOrEqualTo(400));
+    expect(edgeBar.center.dy, closeTo(edgeCircle.center.dy, 0.01));
+    expect(state.position, RestoreControlPosition(edgeBar.left, edgeBar.top));
+
+    await tester.tap(find.byTooltip('收起为圆形按钮'));
+    await tester.pump();
+    expect(
+      tester.getRect(collapsedCircle()).right,
+      closeTo(edgeBar.right, 0.01),
+    );
+    await tester.tap(collapsedCircle());
+    await tester.pump();
+    expect(tester.getRect(expandedBar()), edgeBar);
     expect(tester.takeException(), isNull);
   });
 
@@ -453,6 +507,15 @@ void main() {
     expect(rect.bottom, lessThanOrEqualTo(420));
     // The reserved bottom band must remain free for Home's FAB.
     expect(rect.bottom, lessThanOrEqualTo(420 - 120));
+
+    await tester.tap(find.byTooltip('收起为圆形按钮'));
+    await tester.pump();
+    final collapsed = tester.getRect(collapsedCircle());
+    expect(collapsed.right, closeTo(rect.right, 0.01));
+    expect(collapsed.center.dy, closeTo(rect.center.dy, 0.01));
+    await tester.tap(collapsedCircle());
+    await tester.pump();
+    expect(tester.getRect(expandedBar()), rect);
     expect(tester.takeException(), isNull);
   });
 

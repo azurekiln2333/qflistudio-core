@@ -79,8 +79,8 @@ void main() {
     final collapsedRect = tester.getRect(
       find.byKey(const ValueKey('restore-control-collapsed')),
     );
-    expect(collapsedRect.left, closeTo(draggedPosition.dx, 1));
-    expect(collapsedRect.top, closeTo(draggedPosition.dy, 1));
+    expect(collapsedRect.right, closeTo(afterDrag.right, 1));
+    expect(collapsedRect.center.dy, closeTo(afterDrag.center.dy, 1));
 
     // Expand again by tapping the circle (not restoring).
     await tester.tap(find.byKey(const ValueKey('restore-control-collapsed')));
