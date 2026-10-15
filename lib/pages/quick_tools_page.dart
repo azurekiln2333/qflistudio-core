@@ -5,6 +5,7 @@ import '../services/studio_profile.dart';
 import '../store/project_store.dart';
 import 'content_tools_pages.dart';
 import 'terminax_terminal_page.dart';
+import 'tools_grid.dart';
 
 /// 主页的功能页。
 class FunctionsTab extends StatelessWidget {
@@ -39,42 +40,45 @@ class FunctionsTab extends StatelessWidget {
       appBar: AppBar(title: Text(l10n.tools)),
       body: inlineTools != null
           ? inlineTools(store!, onOpenTerminal)
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-              children: [
-                _QuickToolTile(
-                  icon: Icons.terminal,
-                  title: l10n.terminal,
-                  subtitle: l10n.terminalSubtitle,
-                  onTap: onOpenTerminal,
-                ),
-                if (onOpenContentTool != null) ...[
-                  const SizedBox(height: 8),
-                  _QuickToolTile(
-                    icon: switch (StudioProfile.current?.productKey) {
-                      StudioProductCatalog.webForgeKey => Icons.language,
-                      StudioProductCatalog.jsonKey => Icons.data_object,
-                      StudioProductCatalog.noteKey => Icons.article_outlined,
-                      StudioProductCatalog.sqlabKey => Icons.storage_outlined,
-                      _ => Icons.build_outlined,
-                    },
-                    title: switch (StudioProfile.current?.productKey) {
-                      StudioProductCatalog.webForgeKey => 'Web 工具',
-                      StudioProductCatalog.jsonKey => l10n.jsonTools,
-                      StudioProductCatalog.noteKey => l10n.markdownTools,
-                      StudioProductCatalog.sqlabKey => l10n.sqlTools,
-                      _ => l10n.functions,
-                    },
-                    subtitle: switch (StudioProfile.current?.productKey) {
-                      StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
-                      StudioProductCatalog.jsonKey => l10n.jsonStructure,
-                      StudioProductCatalog.noteKey => l10n.markdownPreview,
-                      StudioProductCatalog.sqlabKey => l10n.executeQuery,
-                      _ => l10n.functions,
-                    },
-                    onTap: onOpenContentTool!,
+          : ToolsGrid(
+              onOpenTerminal: onOpenTerminal,
+              sections: [
+                if (onOpenContentTool != null)
+                  ToolSection(
+                    title: '专用',
+                    icon: Icons.build_outlined,
+                    tools: [
+                      ToolDefinition(
+                        icon: switch (StudioProfile.current?.productKey) {
+                          StudioProductCatalog.webForgeKey => Icons.language,
+                          StudioProductCatalog.jsonKey => Icons.data_object,
+                          StudioProductCatalog.noteKey =>
+                            Icons.article_outlined,
+                          StudioProductCatalog.sqlabKey =>
+                            Icons.storage_outlined,
+                          _ => Icons.build_outlined,
+                        },
+                        title: switch (StudioProfile.current?.productKey) {
+                          StudioProductCatalog.webForgeKey => 'Web 工具',
+                          StudioProductCatalog.jsonKey => l10n.jsonTools,
+                          StudioProductCatalog.noteKey => l10n.markdownTools,
+                          StudioProductCatalog.sqlabKey => l10n.sqlTools,
+                          _ => l10n.functions,
+                        },
+                        description: switch (StudioProfile
+                            .current
+                            ?.productKey) {
+                          StudioProductCatalog.webForgeKey =>
+                            '本地服务、HTTP 请求与编解码',
+                          StudioProductCatalog.jsonKey => l10n.jsonStructure,
+                          StudioProductCatalog.noteKey => l10n.markdownPreview,
+                          StudioProductCatalog.sqlabKey => l10n.executeQuery,
+                          _ => l10n.functions,
+                        },
+                        onTap: onOpenContentTool!,
+                      ),
+                    ],
                   ),
-                ],
               ],
             ),
     );
@@ -112,34 +116,6 @@ class ContentToolsPage extends StatelessWidget {
 
 @Deprecated('Use FunctionsTab')
 typedef QuickToolsTab = FunctionsTab;
-
-class _QuickToolTile extends StatelessWidget {
-  const _QuickToolTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-        leading: Icon(icon),
-        title: Text(title),
-        subtitle: Text(subtitle),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: onTap,
-      ),
-    );
-  }
-}
 
 /// 全屏本地终端页。
 ///

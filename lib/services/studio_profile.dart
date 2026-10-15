@@ -138,9 +138,10 @@ class StudioProfile {
   /// Unlike [toolsPageBuilder], which is a full page the shell pushes onto the
   /// navigation stack, this builder renders *inside* `FunctionsTab`'s own
   /// Scaffold. The product owns the whole scroll body, so it must not nest
-  /// another Scaffold/AppBar, and every tool card — including 终端 — is the
-  /// product's responsibility. When null, the tab keeps its legacy terminal
-  /// tile plus the 功能 entry, so other products are unaffected.
+  /// another Scaffold/AppBar. Return a ToolsGrid with product sections and the
+  /// supplied terminal callback to include the shared offline tools automatically.
+  /// When null, the shell shows the terminal card, an optional entry to the
+  /// existing product tools page, and the common tools group.
   ///
   /// [onOpenTerminal] is the shell's existing full-screen terminal route, so
   /// the product's 终端 card can reuse it instead of rebuilding one.

@@ -141,7 +141,7 @@ void main() {
       expect(terminalTaps, 1);
     });
 
-    testWidgets('档位没有 toolsTabBuilder 时保留终端卡片与「功能」入口', (tester) async {
+    testWidgets('档位没有 toolsTabBuilder 时保留终端和产品入口并提供通用工具', (tester) async {
       var opened = 0;
       await tester.pumpWidget(
         host(
@@ -160,6 +160,12 @@ void main() {
         tester.element(find.byType(Scaffold)),
       );
       expect(find.byIcon(Icons.terminal), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text(l10n.functions).first,
+        200,
+        scrollable: find.byType(Scrollable),
+      );
+      await tester.pump();
       expect(find.text(l10n.functions), findsWidgets);
 
       await tester.tap(find.text(l10n.functions).first);
@@ -192,12 +198,17 @@ void main() {
         tester.element(find.byType(Scaffold)),
       );
       expect(find.byIcon(Icons.terminal), findsOneWidget);
-      expect(find.text(l10n.functions), findsWidgets);
-
       await tester.tap(find.byIcon(Icons.terminal));
       await tester.pump();
       expect(terminalTaps, 1);
 
+      await tester.scrollUntilVisible(
+        find.text(l10n.functions).first,
+        200,
+        scrollable: find.byType(Scrollable),
+      );
+      await tester.pump();
+      expect(find.text(l10n.functions), findsWidgets);
       await tester.tap(find.text(l10n.functions).first);
       await tester.pump();
       expect(contentTaps, 1);
