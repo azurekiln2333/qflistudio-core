@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:qfli_studio_core/editor/editor_page_diag.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
@@ -75,6 +76,10 @@ class EditorPage extends StatefulWidget {
     required this.store,
     required this.settings,
     this.initialOpenPath,
+    this.openRequest = 0,
+    this.onMinimize,
+    this.onClose,
+    this.retainedVisibility,
   });
 
   final Project project;
@@ -84,6 +89,13 @@ class EditorPage extends StatefulWidget {
 
   /// 进入编辑器后自动打开的文件（新建项目模板的主文件）。
   final String? initialOpenPath;
+
+  /// A new request also opens a file when this page is already mounted. Existing
+  /// open files are selected through EditorController without replacing text.
+  final int openRequest;
+  final VoidCallback? onMinimize;
+  final VoidCallback? onClose;
+  final ValueListenable<bool>? retainedVisibility;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -95,6 +107,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   static const double _wideBreakpoint = 720;
 
   late final EditorController _editor;
+  final _sessionRestored = Completer<void>();
+  Future<void> _pendingOpen = Future<void>.value();
+  final _hiddenViews =
+      <
+        OpenFile,
+        ({CodeLineSelection selection, double? vertical, double? horizontal})
+      >{};
+  int _visibilityGeneration = 0;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final GlobalKey<TerminalPaneState> _terminalKey =
       GlobalKey<TerminalPaneState>();
@@ -175,6 +195,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       project: widget.project,
       onContentChanged: _onFileContentChanged,
     );
+    widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
     OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
@@ -202,10 +223,87 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       OpenPerformance.mark('EditorPage first frame');
       SchedulerBinding.instance.scheduleTask(
-        () => _restoreSession(),
+        () => _restoreSession().whenComplete(() {
+          if (!_sessionRestored.isCompleted) _sessionRestored.complete();
+        }),
         Priority.animation,
         debugLabel: 'restoreSession',
       );
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant EditorPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.retainedVisibility != widget.retainedVisibility) {
+      oldWidget.retainedVisibility?.removeListener(
+        _onRetainedVisibilityChanged,
+      );
+      widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
+    }
+    final path = widget.initialOpenPath;
+    if (path != null &&
+        (oldWidget.openRequest != widget.openRequest ||
+            oldWidget.initialOpenPath != path)) {
+      _pendingOpen = _pendingOpen.then((_) async {
+        await _sessionRestored.future;
+        if (mounted) await _openInitialFile(path);
+      });
+    }
+  }
+
+  Future<void> _closeEditor() async {
+    if (await _confirmDiscardDirty() && mounted) widget.onClose?.call();
+  }
+
+  void _onRetainedVisibilityChanged() {
+    final generation = ++_visibilityGeneration;
+    if (widget.retainedVisibility?.value != true) {
+      if (_hiddenViews.isNotEmpty) return;
+      for (final file in _editor.files) {
+        final scroll = file.scrollController;
+        _hiddenViews[file] = (
+          selection: file.controller.selection,
+          vertical: scroll.verticalScroller.hasClients
+              ? scroll.verticalScroller.offset
+              : null,
+          horizontal: scroll.horizontalScroller.hasClients
+              ? scroll.horizontalScroller.offset
+              : null,
+        );
+      }
+      return;
+    }
+    // Focus notifications run asynchronously, and mobile re_editor cancels
+    // non-collapsed selections when losing focus. Restore only after the live
+    // view has laid out again, without requesting editor or terminal focus.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _visibilityGeneration ||
+          widget.retainedVisibility?.value != true) {
+        return;
+      }
+      for (final entry in _hiddenViews.entries) {
+        final file = entry.key;
+        if (!_editor.files.contains(file)) continue;
+        file.controller.selection = entry.value.selection;
+        final scroll = file.scrollController;
+        void restoreScroll(ScrollController controller, double? offset) {
+          if (offset == null || !controller.hasClients) return;
+          controller.jumpTo(
+            offset
+                .clamp(
+                  controller.position.minScrollExtent,
+                  controller.position.maxScrollExtent,
+                )
+                .toDouble(),
+          );
+        }
+
+        restoreScroll(scroll.verticalScroller, entry.value.vertical);
+        restoreScroll(scroll.horizontalScroller, entry.value.horizontal);
+      }
+      _hiddenViews.clear();
     });
   }
 
@@ -281,6 +379,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    widget.retainedVisibility?.removeListener(_onRetainedVisibilityChanged);
+    _hiddenViews.clear();
     // TEMP-DIAG (remove after device verification).
     FocusManager.instance.removeListener(_diagFocus);
     _leaving = true;
@@ -1216,6 +1316,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                if (widget.onMinimize != null)
+                                  IconButton(
+                                    tooltip: '暂时收起编辑器',
+                                    onPressed: widget.onMinimize,
+                                    icon: const Icon(Icons.minimize),
+                                  ),
                                 IconButton(
                                   tooltip: '撤销 (Ctrl+Z)',
                                   onPressed: _editor.current == null
@@ -1276,6 +1382,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     switch (value) {
                                       case 'save':
                                         _saveCurrent();
+                                      case 'close_editor':
+                                        unawaited(_closeEditor());
                                       case 'find':
                                         _openFind();
                                       case 'goto':
@@ -1328,6 +1436,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     }
                                   },
                                   itemBuilder: (context) => [
+                                    if (widget.onClose != null)
+                                      const PopupMenuItem(
+                                        value: 'close_editor',
+                                        child: Row(
+                                          children: [
+                                            Icon(Icons.close, size: 20),
+                                            SizedBox(width: 12),
+                                            Text('关闭编辑器'),
+                                          ],
+                                        ),
+                                      ),
                                     for (final tool
                                         in StudioProfile
                                                 .current
@@ -2000,7 +2119,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             enabled: identical(file, open),
                             child: _codeViews.putIfAbsent(
                               file,
-                              () => RetainedPage(child: _buildCodeView(context, file)),
+                              () => RetainedPage(
+                                child: _buildCodeView(context, file),
+                              ),
                             ),
                           ),
                       ],
@@ -2146,7 +2267,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('有未保存的更改'),
-        content: Text('\${dirty.length} 个文件未保存，丢弃并继续吗？'),
+        content: Text('${dirty.length} 个文件未保存，丢弃并继续吗？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),

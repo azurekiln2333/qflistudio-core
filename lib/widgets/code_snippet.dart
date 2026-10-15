@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../editor/editor_fonts.dart';
-import '../editor/editor_page.dart';
+import '../editor/retained_editor_host.dart';
 import '../i18n/studio_localizations.dart';
 import '../models/tutorial.dart';
 import '../services/code_import_service.dart';
@@ -207,16 +207,13 @@ class _CodeSnippetState extends State<CodeSnippet> {
       widget.store!.touch(result.project);
       TaskActivityService.report(widget.auth!, 'open_project');
       widget.store!.setBrowsedProject(result.project);
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          builder: (_) => EditorPage(
-            project: result.project,
-            auth: widget.auth!,
-            store: widget.store!,
-            settings: widget.settings!,
-            initialOpenPath: result.path,
-          ),
-        ),
+      await openEditorPage(
+        context,
+        project: result.project,
+        auth: widget.auth!,
+        store: widget.store!,
+        settings: widget.settings!,
+        initialOpenPath: result.path,
       );
     } finally {
       if (mounted) setState(() => _importing = false);
@@ -767,9 +764,7 @@ class _InlineRunPanelState extends State<_InlineRunPanel> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  controller.title.isEmpty
-                      ? l10n.runExample
-                      : controller.title,
+                  controller.title.isEmpty ? l10n.runExample : controller.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.labelLarge,
