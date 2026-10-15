@@ -95,6 +95,7 @@ class StudioProfile {
     this.runner,
     this.webPreviewFactory,
     this.toolsPageBuilder,
+    this.toolsTabBuilder,
     this.documentToolBuilder,
     this.terminalCommandDelegate,
     this.contentRepositoryFactory,
@@ -131,6 +132,20 @@ class StudioProfile {
 
   /// Product-owned tools screen in the existing Functions navigation.
   final Widget Function(ProjectStore store)? toolsPageBuilder;
+
+  /// Product-owned tools content embedded directly in the shell's tools tab.
+  ///
+  /// Unlike [toolsPageBuilder], which is a full page the shell pushes onto the
+  /// navigation stack, this builder renders *inside* `FunctionsTab`'s own
+  /// Scaffold. The product owns the whole scroll body, so it must not nest
+  /// another Scaffold/AppBar, and every tool card — including 终端 — is the
+  /// product's responsibility. When null, the tab keeps its legacy terminal
+  /// tile plus the 功能 entry, so other products are unaffected.
+  ///
+  /// [onOpenTerminal] is the shell's existing full-screen terminal route, so
+  /// the product's 终端 card can reuse it instead of rebuilding one.
+  final Widget Function(ProjectStore store, VoidCallback onOpenTerminal)?
+  toolsTabBuilder;
 
   /// Optional terminal command hook.
   ///
