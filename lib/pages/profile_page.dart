@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../community/community_widgets.dart';
 import '../config/compliance_config.dart';
+import '../i18n/studio_localizations.dart';
 import '../services/api_client.dart';
 import '../services/recovery_service.dart';
 import '../services/studio_profile.dart';
@@ -84,6 +85,14 @@ class _ProfileTabState extends State<ProfileTab> {
     // sign-out button. The local-only sections (recovery, settings, about) stay.
     final offlineOnly = StudioProfile.current?.offlineOnly == true;
     return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          StudioLocalizations.of(context).profile,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      ),
       body: SafeArea(
         bottom: false,
         child: ListenableBuilder(

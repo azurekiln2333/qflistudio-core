@@ -37,6 +37,12 @@ dev_dependencies:
 flutter:
   uses-material-design: true
 
+  plugin:
+    platforms:
+      android:
+        package: com.azurekiln.qfli.core
+        pluginClass: QfliPickerPlugin
+
   # 各语言的入门教程，由 TutorialService 读取。
   # 用目录形式声明，新增语言时不必改这里。
   assets:

@@ -12,10 +12,29 @@ import '../services/code_import_service.dart';
 import '../services/file_service.dart';
 import '../services/project_config.dart';
 import '../services/project_templates.dart';
+import '../services/project_zip_service.dart';
 import '../services/recycle_bin.dart';
 
 /// 创建/添加项目的结果：成功时 [error] 为 null。
 typedef ProjectResult = ({String? error, Project? project});
+
+Future<({String name, String language, String type})> _prepareImportedProject(
+  String directory,
+) async {
+  final metadata = ProjectConfig.readMetadata(directory);
+  final name = metadata.name ?? '导入项目';
+  final language = metadata.language ?? ProjectStore.detectLanguage(directory);
+  final type =
+      metadata.type ?? ProjectTemplate.fromLanguage(language)?.type ?? '';
+  await ProjectConfig.write(
+    projectRoot: directory,
+    name: name,
+    language: language,
+    type: type,
+    strict: true,
+  );
+  return (name: name, language: language, type: type);
+}
 
 ({List<Project> projects, String? browsedId}) _readProjectRegistry(
   String path,
@@ -365,6 +384,46 @@ class ProjectStore extends ChangeNotifier {
     final result = await _registerLocalProject(project);
     if (result.error != null) await discardExampleDirectory();
     return result;
+  }
+
+  /// Import a .qsz ZIP into its own private directory and register a fresh local
+  /// identity. Existing projects and their files are never replaced.
+  Future<ProjectResult> importProjectArchive(Uint8List bytes) async {
+    String? createdPath;
+    try {
+      _storage ??= _storageOverride ?? await _resolveStorageFile();
+      final root = await AppPaths.projectsRoot(create: true);
+      if (root == null) {
+        return (error: '未找到可写的项目目录', project: null);
+      }
+      createdPath = await ProjectZipService.restoreProject(
+        bytes,
+        projectsRoot: root,
+      );
+      final metadata = await compute(_prepareImportedProject, createdPath);
+      final project = Project.create(
+        name: metadata.name,
+        path: createdPath,
+        language: metadata.language,
+        type: metadata.type,
+      );
+      final result = await _registerLocalProject(project);
+      if (result.error == null) return result;
+      await Directory(createdPath).delete(recursive: true);
+      return result;
+    } catch (error) {
+      if (createdPath != null) {
+        try {
+          await Directory(createdPath).delete(recursive: true);
+        } on FileSystemException {
+          // Keep the import/registry error if cleaning up also fails.
+        }
+      }
+      return (
+        error: error is FileSystemException ? error.message : '$error',
+        project: null,
+      );
+    }
   }
 
   /// 注册一个磁盘上已存在的文件夹。

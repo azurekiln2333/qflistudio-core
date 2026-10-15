@@ -220,7 +220,14 @@ class PostListPageState extends State<PostListPage> {
                 ),
                 onSubmitted: _setKeyword,
               )
-            : Text(isTutorial ? '教程' : '讨论'),
+            : Text(
+                isTutorial ? '教程' : '讨论',
+                style: isTutorial
+                    ? Theme.of(
+                        context,
+                      ).textTheme.titleLarge?.copyWith(color: scheme.primary)
+                    : null,
+              ),
         actions: [
           if (!_searchOpen)
             IconButton(

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -6,7 +7,7 @@ import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
 
-enum ProjectCardAction { open, reveal, remove, favorite }
+enum ProjectCardAction { open, reveal, remove, favorite, export }
 
 /// 主页的项目卡片 — MD3 outlined 风格。
 class ProjectCard extends StatefulWidget {
@@ -16,11 +17,15 @@ class ProjectCard extends StatefulWidget {
     required this.onOpen,
     required this.onRemove,
     this.onToggleFavorite,
+    this.onExport,
   });
 
   final Project project;
   final VoidCallback onOpen;
   final VoidCallback onRemove;
+
+  /// 本地项目压缩导出；仅在项目目录存在时显示。
+  final VoidCallback? onExport;
 
   /// 收藏切换回调（null 时隐藏收藏菜单项）。
   final ValueChanged<bool>? onToggleFavorite;
@@ -31,6 +36,32 @@ class ProjectCard extends StatefulWidget {
 
 class _ProjectCardState extends State<ProjectCard> {
   bool _hovering = false;
+  bool _canExport = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refreshExportAvailability());
+  }
+
+  @override
+  void didUpdateWidget(covariant ProjectCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.project.path != widget.project.path ||
+        oldWidget.project.isCloud != widget.project.isCloud ||
+        (oldWidget.onExport == null) != (widget.onExport == null)) {
+      _canExport = false;
+      unawaited(_refreshExportAvailability());
+    }
+  }
+
+  Future<void> _refreshExportAvailability() async {
+    if (widget.onExport == null || widget.project.isCloud) return;
+    final path = widget.project.path;
+    final exists = await Directory(path).exists();
+    if (!mounted || widget.project.path != path) return;
+    setState(() => _canExport = exists);
+  }
 
   /// 友好的时间距离文本。
   String _timeAgo(DateTime dt) {
@@ -233,6 +264,8 @@ class _ProjectCardState extends State<ProjectCard> {
                         widget.onRemove();
                       case ProjectCardAction.favorite:
                         widget.onToggleFavorite?.call(!project.favorite);
+                      case ProjectCardAction.export:
+                        widget.onExport?.call();
                     }
                   },
                   itemBuilder: (context) => [
@@ -269,6 +302,19 @@ class _ProjectCardState extends State<ProjectCard> {
                             Icon(Icons.launch_outlined, size: 20),
                             SizedBox(width: 12),
                             Text('在资源管理器中显示'),
+                          ],
+                        ),
+                      ),
+                    if (_canExport &&
+                        widget.onExport != null &&
+                        !project.isCloud)
+                      const PopupMenuItem(
+                        value: ProjectCardAction.export,
+                        child: Row(
+                          children: [
+                            Icon(Icons.archive_outlined, size: 20),
+                            SizedBox(width: 12),
+                            Text('压缩导出项目'),
                           ],
                         ),
                       ),

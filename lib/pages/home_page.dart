@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
@@ -12,6 +13,8 @@ import '../services/api_client.dart';
 import '../services/cloud_sync_service.dart';
 import '../services/example_code_store.dart';
 import '../services/project_templates.dart';
+import '../services/picker_service.dart';
+import '../services/project_zip_service.dart';
 import '../services/studio_profile.dart';
 import '../services/task_activity_service.dart';
 import '../store/auth_store.dart';
@@ -302,6 +305,7 @@ class _HomeTabState extends State<HomeTab>
   bool _searchOpen = false;
   String _query = '';
   String _languageFilter = '';
+  String? _archiveBusyLabel;
   late bool _loggedIn;
   Future<void>? _refreshRequest;
   late final List<_ProjectScope> _scopes =
@@ -375,8 +379,18 @@ class _HomeTabState extends State<HomeTab>
   Widget build(BuildContext context) {
     super.build(context);
     final l10n = StudioLocalizations.of(context);
+    final searchStyle = Theme.of(context).textTheme.bodyLarge;
     return Scaffold(
       appBar: AppBar(
+        toolbarHeight: _searchOpen
+            ? (MediaQuery.textScalerOf(
+                            context,
+                          ).scale(searchStyle?.fontSize ?? 16) *
+                          (searchStyle?.height ?? 1.5) +
+                      28)
+                  .clamp(kToolbarHeight, double.infinity)
+                  .toDouble()
+            : null,
         leading: _searchOpen
             ? IconButton(
                 tooltip: l10n.exitSearch,
@@ -413,9 +427,22 @@ class _HomeTabState extends State<HomeTab>
                         _removeMissingProjects(context);
                       case 'new_cloud':
                         _createCloudProject(context);
+                      case 'import_project':
+                        unawaited(_importProjectArchive());
                     }
                   },
                   itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'import_project',
+                      enabled: _archiveBusyLabel == null,
+                      child: const Row(
+                        children: [
+                          Icon(Icons.unarchive_outlined, size: 20),
+                          SizedBox(width: 12),
+                          Text('导入项目（.qsz）'),
+                        ],
+                      ),
+                    ),
                     if (AppPaths.isDesktop)
                       PopupMenuItem(
                         value: 'add_existing',
@@ -461,53 +488,81 @@ class _HomeTabState extends State<HomeTab>
               icon: const Icon(Icons.create_new_folder_outlined),
               label: Text(l10n.createProject),
             ),
-      body: ListenableBuilder(
-        listenable: widget.store,
-        builder: (context, _) {
-          if (_searchOpen) {
-            return _buildProjectList(
-              context,
-              scope: _ProjectScope.all,
-              keyword: _query,
-            );
-          }
-          return Column(
-            children: [
-              TabBar(
-                controller: _projectTabs,
-                isScrollable: true,
-                tabAlignment: TabAlignment.start,
-                dividerColor: Colors.transparent,
-                labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                tabs: [
-                  Tab(height: 36, child: Center(child: Text(l10n.allProjects))),
-                  Tab(
-                    height: 36,
-                    child: Center(child: Text(l10n.historyProjects)),
+      body: Column(
+        children: [
+          if (_archiveBusyLabel != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-                  Tab(
-                    height: 36,
-                    child: Center(child: Text(l10n.favoriteProjects)),
-                  ),
-                  if (_scopes.contains(_ProjectScope.cloud))
-                    Tab(
-                      height: 36,
-                      child: Center(child: Text(l10n.cloudProjects)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _archiveBusyLabel!,
+                      key: const ValueKey('project-archive-progress'),
                     ),
+                  ),
                 ],
               ),
-              Expanded(
-                child: TabBarView(
-                  controller: _projectTabs,
+            ),
+          Expanded(
+            child: ListenableBuilder(
+              listenable: widget.store,
+              builder: (context, _) {
+                if (_searchOpen) {
+                  return _buildProjectList(
+                    context,
+                    scope: _ProjectScope.all,
+                    keyword: _query,
+                  );
+                }
+                return Column(
                   children: [
-                    for (final scope in _scopes)
-                      _buildProjectList(context, scope: scope),
+                    TabBar(
+                      controller: _projectTabs,
+                      isScrollable: true,
+                      tabAlignment: TabAlignment.start,
+                      dividerColor: Colors.transparent,
+                      labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+                      tabs: [
+                        Tab(
+                          height: 36,
+                          child: Center(child: Text(l10n.allProjects)),
+                        ),
+                        Tab(
+                          height: 36,
+                          child: Center(child: Text(l10n.historyProjects)),
+                        ),
+                        Tab(
+                          height: 36,
+                          child: Center(child: Text(l10n.favoriteProjects)),
+                        ),
+                        if (_scopes.contains(_ProjectScope.cloud))
+                          Tab(
+                            height: 36,
+                            child: Center(child: Text(l10n.cloudProjects)),
+                          ),
+                      ],
+                    ),
+                    Expanded(
+                      child: TabBarView(
+                        controller: _projectTabs,
+                        children: [
+                          for (final scope in _scopes)
+                            _buildProjectList(context, scope: scope),
+                        ],
+                      ),
+                    ),
                   ],
-                ),
-              ),
-            ],
-          );
-        },
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -516,13 +571,21 @@ class _HomeTabState extends State<HomeTab>
     final scheme = Theme.of(context).colorScheme;
     final l10n = StudioLocalizations.of(context);
     return TextField(
+      key: const ValueKey('home-project-search-field'),
       controller: _searchController,
       autofocus: true,
-      textAlign: TextAlign.center,
+      textAlign: TextAlign.start,
+      textAlignVertical: TextAlignVertical.center,
+      textInputAction: TextInputAction.search,
+      maxLines: 1,
       onChanged: (value) => setState(() => _query = value),
       style: Theme.of(context).textTheme.bodyLarge,
       decoration: InputDecoration(
         hintText: l10n.searchProjectHint,
+        hintMaxLines: 1,
+        isDense: true,
+        filled: true,
+        fillColor: scheme.surfaceContainerHighest,
         suffixIcon: _query.isEmpty
             ? null
             : IconButton(
@@ -533,10 +596,22 @@ class _HomeTabState extends State<HomeTab>
                   setState(() => _query = '');
                 },
               ),
-        border: InputBorder.none,
-        enabledBorder: InputBorder.none,
-        focusedBorder: InputBorder.none,
-        contentPadding: EdgeInsets.zero,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 12,
+        ),
         hintStyle: TextStyle(color: scheme.onSurfaceVariant),
       ),
     );
@@ -819,7 +894,100 @@ class _HomeTabState extends State<HomeTab>
       onOpen: () => _openProject(context, project),
       onRemove: () => _deleteProject(context, project),
       onToggleFavorite: (value) => widget.store.setFavorite(project, value),
+      onExport: project.isCloud
+          ? null
+          : () => unawaited(_exportProjectArchive(project)),
     );
+  }
+
+  Future<void> _exportProjectArchive(Project project) async {
+    if (_archiveBusyLabel != null) return;
+    setState(() => _archiveBusyLabel = '正在选择导出位置…');
+    try {
+      var name = project.name
+          .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
+          .trim()
+          .replaceAll(RegExp(r'[. ]+$'), '');
+      if (name.isEmpty) name = 'project';
+      final location = await PickerService.saveDocument(
+        suggestedName: '$name.qsz',
+      );
+      if (!mounted || location == null) return;
+      final path = location.path;
+      final uri = location.uri;
+      if ((path == null || path.isEmpty) && (uri == null || uri.isEmpty)) {
+        throw const FileSystemException('系统未返回可写位置');
+      }
+      setState(() => _archiveBusyLabel = '正在压缩并导出项目…');
+      if (path != null && path.isNotEmpty) {
+        final needsExtension = !path.toLowerCase().endsWith('.qsz');
+        final destination = needsExtension ? '$path.qsz' : path;
+        // The picker confirms overwriting only the path the user selected.
+        // An extension added here must not silently overwrite another file.
+        if (needsExtension && await File(destination).exists()) {
+          throw const FileSystemException('目标文件已存在，请直接选择 .qsz 文件并确认覆盖，或更换名称');
+        }
+        if (!mounted) return;
+        await ProjectZipService.exportToFile(project, destination);
+      } else {
+        final bytes = await ProjectZipService.exportProject(project);
+        if (!mounted) return;
+        await PickerService.writeUri(uri!, bytes);
+      }
+      _showArchiveMessage('已导出项目「${project.name}」');
+    } on Object catch (error) {
+      _showArchiveMessage('导出失败：$error');
+    } finally {
+      if (mounted) setState(() => _archiveBusyLabel = null);
+    }
+  }
+
+  Future<void> _importProjectArchive() async {
+    if (_archiveBusyLabel != null) return;
+    setState(() => _archiveBusyLabel = '正在选择项目压缩包…');
+    try {
+      final picked = await PickerService.pickDocument(
+        extensions: const ['qsz'],
+      );
+      if (!mounted || picked == null) return;
+      final path = picked.path;
+      final uri = picked.uri;
+      final name = picked.name ?? (path == null ? null : p.basename(path));
+      if (name != null && !name.toLowerCase().endsWith('.qsz')) {
+        throw const FormatException('请选择 .qsz 项目压缩包');
+      }
+      setState(() => _archiveBusyLabel = '正在读取并导入项目…');
+      final bytes = path != null && path.isNotEmpty
+          ? await File(path).readAsBytes()
+          : uri != null && uri.isNotEmpty
+          ? await PickerService.readUri(uri)
+          : throw const FileSystemException('系统未返回可读文件');
+      if (!mounted) return;
+      final result = await widget.store.importProjectArchive(bytes);
+      if (!mounted) return;
+      if (result.error != null || result.project == null) {
+        throw FormatException(result.error ?? '未能导入项目');
+      }
+      setState(() {
+        _languageFilter = '';
+        _query = '';
+        _searchController.clear();
+        _searchOpen = false;
+      });
+      _projectTabs.animateTo(_scopes.indexOf(_ProjectScope.all));
+      _showArchiveMessage('已导入项目「${result.project!.name}」');
+    } on Object catch (error) {
+      _showArchiveMessage('导入失败：$error');
+    } finally {
+      if (mounted) setState(() => _archiveBusyLabel = null);
+    }
+  }
+
+  void _showArchiveMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _createProject(BuildContext context) async {

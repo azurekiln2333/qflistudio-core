@@ -37,7 +37,14 @@ class FunctionsTab extends StatelessWidget {
       'FunctionsTab requires a ProjectStore when toolsTabBuilder is provided.',
     );
     return Scaffold(
-      appBar: AppBar(title: Text(l10n.tools)),
+      appBar: AppBar(
+        title: Text(
+          l10n.tools,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      ),
       body: inlineTools != null
           ? inlineTools(store!, onOpenTerminal)
           : ToolsGrid(
