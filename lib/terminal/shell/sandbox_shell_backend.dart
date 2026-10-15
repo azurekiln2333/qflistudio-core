@@ -7,7 +7,7 @@ import 'command_parser.dart';
 import 'portable_filesystem.dart';
 import 'shell_backend.dart';
 
-/// A terminal command that a host (the Java app) can execute for the terminal.
+/// A terminal command that a host app can execute for the terminal.
 ///
 /// Returns true when it handled [command] (streaming output/exit through the
 /// backend); false when unrecognised so the sandbox can report honestly.
@@ -19,7 +19,7 @@ typedef TerminalCommandDelegate =
 /// Commands run against **real** files under [sandboxRoot] using Dart file IO,
 /// so the terminal works in mobile sandboxes that forbid exec'ing a shell.
 /// Paths can never escape the root. Unknown commands are offered to
-/// [delegate] (e.g. Java's `java`/`javac` via the native bridge on mobile); when
+/// [delegate] for the host's supported language toolchain; when
 /// no delegate handles them the backend reports an honest unsupported message
 /// instead of a misleading exec error.
 class SandboxShellBackend extends BaseShellBackend {
@@ -55,7 +55,7 @@ class SandboxShellBackend extends BaseShellBackend {
   String get sandboxRoot => _sandboxRoot;
   late final String _sandboxRoot;
 
-  /// Optional host command handler (java/javac and any real tools available).
+  /// Optional command handler for the host's supported toolchain.
   TerminalCommandDelegate? delegate;
 
   /// Label shown in the prompt/UI.
@@ -105,7 +105,7 @@ $label 终端（应用内沙盒）
   clear / cls         清屏
   help                显示本帮助
 
-如果宿主应用提供了 Java 工具链，java/javac 也可用。
+语言工具链命令由宿主应用提供，支持范围取决于当前平台。
 其它系统命令在当前平台不可用，会给出明确提示。''';
 
   /// Resolves [target] under the sandbox root, rejecting escapes.
@@ -236,7 +236,7 @@ $label 终端（应用内沙盒）
     final name = CommandParser.tokenize(command).tokens.firstOrNull?.text ?? command;
     emitLine(
       '$name: 当前平台的内置终端不支持该命令（沙盒仅提供文件命令'
-      '${delegate == null ? '' : '与 Java 工具链'}）。',
+      '${delegate == null ? '' : '与宿主应用支持的工具链命令'}）。',
       OutputKind.stderr,
     );
   }
