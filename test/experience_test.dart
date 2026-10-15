@@ -9,6 +9,7 @@ import 'package:qfli_studio_core/app.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/pages/community/post_list_page.dart';
 import 'package:qfli_studio_core/pages/profile_page.dart';
+import 'package:qfli_studio_core/services/app_backup_service.dart';
 import 'package:qfli_studio_core/splash_screen.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
@@ -101,6 +102,14 @@ void main() {
   });
 
   testWidgets('启动只等待本地加载，无固定延时；单项失败仍进入主页', (tester) async {
+    final directory = await tester.runAsync(
+      () => Directory.systemTemp.createTemp('qfli_bootstrap_experience_'),
+    );
+    AppBackupService.rootOverride = directory!.path;
+    addTearDown(() async {
+      AppBackupService.rootOverride = null;
+      await directory.delete(recursive: true);
+    });
     final store = _BrokenProjects();
     final auth = _ReadyAuth();
     final settings = _ReadySettings();
@@ -114,8 +123,14 @@ void main() {
     await tester.pump();
     expect(ready.value, isFalse);
     settings.completion.complete();
-    await tester.pump();
-    // 不推进 fake clock，已完成的配置应立即放行。
+    // Drain the restore trace file checks without advancing fake clock timers.
+    for (var attempt = 0; !ready.value && attempt < 100; attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    // No artificial startup delay: completed stores unblock without fake time.
     expect(ready.value, isTrue);
     await loading;
     store.dispose();

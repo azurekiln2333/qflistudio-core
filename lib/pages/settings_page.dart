@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -6,22 +5,21 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../editor/ai_panel.dart';
+import '../services/app_backup_service.dart';
 import '../services/app_paths.dart';
 import '../services/file_backup.dart';
-import '../services/file_service.dart';
+import '../services/picker_service.dart';
+import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
-import '../models/project.dart';
-import '../services/project_archive_service.dart';
-import '../services/picker_service.dart';
-import '../services/studio_profile.dart';
 import '../widgets/settings_section.dart';
+import 'about_page.dart' show showQfliAbout;
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
 import '../editor/editor_fonts.dart';
-import 'about_page.dart' show showQfliAbout;
 
+// 保留旧入口的可用性：调用方仍可从设置页拿到 showQfliAbout。
 export 'about_page.dart' show showQfliAbout;
 
 class SettingsPage extends StatefulWidget {
@@ -45,7 +43,20 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   late final Future<String?> _backupDirectory = _backupPath();
 
+  /// Non-null while an export/import runs. Disables both entries and drives the
+  /// progress row so a second operation can never start concurrently.
+  String? _busyLabel;
+
+  /// Set in [dispose]; guards every post-await `setState` / context use.
+  bool _disposed = false;
+
   SettingsStore get settings => widget.settings;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -177,18 +188,34 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                     ListTile(
                       leading: const Icon(Icons.file_upload_outlined),
-                      title: const Text('导出项目 JSON'),
-                      subtitle: const Text('包含项目配置、源码与二进制资源'),
+                      title: const Text('导出全部数据'),
+                      subtitle: const Text(
+                        '打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
-                      onTap: widget.store == null ? null : _exportProject,
+                      enabled: _busyLabel == null,
+                      onTap: _busyLabel == null ? _exportAllData : null,
                     ),
                     ListTile(
                       leading: const Icon(Icons.file_download_outlined),
-                      title: const Text('导入项目 JSON'),
-                      subtitle: const Text('恢复项目目录与语言 type'),
+                      title: const Text('导入全部数据'),
+                      subtitle: const Text(
+                        '校验后暂存，下次启动应用时替换当前数据（不可撤销）',
+                      ),
                       trailing: const Icon(Icons.chevron_right),
-                      onTap: _importProject,
+                      enabled: _busyLabel == null,
+                      onTap: _busyLabel == null ? _importAllData : null,
                     ),
+                    if (_busyLabel != null)
+                      ListTile(
+                        leading: const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2.5),
+                        ),
+                        title: Text(_busyLabel!),
+                        subtitle: const LinearProgressIndicator(minHeight: 3),
+                      ),
                   ],
                 ),
                 SettingsSection(
@@ -237,110 +264,171 @@ class _SettingsPageState extends State<SettingsPage> {
     if (picked != null) await settings.setThemeMode(picked);
   }
 
-  Future<void> _exportProject() async {
-    if (widget.store == null) return;
-    final project = await _pickProject();
-    if (project == null) return;
+  /// 导出全部数据。
+  ///
+  /// 顺序：先让用户选定目标（便宜、可取消），再流式导出到临时目录（昂贵），
+  /// 最后 `File.copy` 到本地目标或只为 URI 目标读取压缩字节。临时文件无论
+  /// 成功、失败、取消还是页面销毁都会清理。
+  Future<void> _exportAllData() async {
+    if (_busyLabel != null) return;
+    final productKey =
+        StudioProfile.current?.productKey ?? StudioProductCatalog.qfliStudioKey;
+    final stamp = DateTime.now()
+        .toIso8601String()
+        .replaceAll(':', '-')
+        .split('.')
+        .first;
+
+    // 选定目标在昂贵导出之前；用户取消不产生任何临时文件。
+    _setBusy('正在准备导出…');
     try {
       final location = await PickerService.saveDocument(
-        suggestedName: '${project.name}.qfli.json',
+        suggestedName: 'qfli-$productKey-$stamp.qfliz',
       );
+      // Disposal can happen while the picker is open; never start compression
+      // or touch a temp dir for a page that is already gone.
+      if (_disposed || !mounted) return;
       if (location == null) return;
-      final archive = await ProjectArchiveService.exportProject(project);
       final path = location.path;
       final uri = location.uri;
-      if (path != null && path.isNotEmpty) {
-        await File(path).writeAsString(archive, flush: true);
-      } else if (uri != null && uri.isNotEmpty) {
-        await PickerService.writeUri(
-          uri,
-          Uint8List.fromList(utf8.encode(archive)),
-        );
-      } else {
+      if (!(path != null && path.isNotEmpty) &&
+          !(uri != null && uri.isNotEmpty)) {
         throw const FileSystemException('系统未返回可写位置');
       }
-      _showMessage('项目已导出');
+
+      _setBusy('正在打包并导出…');
+      final temp = await Directory.systemTemp.createTemp('qfli-export-');
+      try {
+        final tempFile = p.join(temp.path, 'backup.qfliz');
+        final info = await AppBackupService.exportToFile(tempFile);
+        // The page may be disposed during the expensive export; skip writing
+        // the user-selected destination, but still clean the temp dir below.
+        if (_disposed || !mounted) return;
+        if (path != null && path.isNotEmpty) {
+          await File(tempFile).copy(path);
+        } else {
+          final bytes = await File(tempFile).readAsBytes();
+          await PickerService.writeUri(uri!, bytes);
+        }
+        _showMessage('已导出 ${info.fileCount} 个数据文件');
+      } finally {
+        await _deleteTempQuietly(temp);
+      }
     } on Object catch (error) {
       _showMessage('导出失败：$error');
+    } finally {
+      _clearBusy();
     }
   }
 
-  Future<void> _importProject() async {
-    if (widget.store == null) return;
+  /// 导入全部数据。
+  ///
+  /// 只校验并暂存（[AppBackupService.prepareImport]），**不**触碰线上数据；
+  /// 真正的替换留给下次启动时的私有根交换。
+  Future<void> _importAllData() async {
+    if (_busyLabel != null) return;
+    _setBusy('正在读取备份…');
     try {
-      final picked = await PickerService.pickDocument();
-      if (picked == null) return;
-      final source = await _readPickedDocument(picked);
-      final metadata = ProjectArchiveService.readMetadata(source);
-      final name = metadata.name;
-      if (!FileService.isValidEntryName(name) || name.contains('\u0000')) {
-        _showMessage('归档缺少有效项目名称');
+      if (await AppBackupService.hasPendingRestore()) {
+        final pending = await AppBackupService.pendingRestoreInfo();
+        _showMessage(
+          '已有待应用的恢复（${pending?.createdAt.toLocal() ?? ''}），请先重启应用',
+        );
         return;
       }
-      final root = await AppPaths.projectsRoot(create: true);
-      if (root == null) throw const FileSystemException('没有可写项目目录');
-      final target = AppPaths.createProjectDirectory(
-        location: root,
-        name: name,
-        type: metadata.type,
-        language: metadata.language,
-      ).path;
-      await ProjectArchiveService.restoreProject(
-        source: source,
-        targetDirectory: target,
+      final picked = await PickerService.pickDocument(
+        extensions: const ['qfliz', 'zip'],
       );
-      final result = await widget.store!.addExisting(target);
-      _showMessage(result.error ?? '项目已导入');
+      if (picked == null) return;
+      final bytes = await _readPickedBytes(picked);
+      final info = await AppBackupService.readInfoAsync(bytes);
+      AppBackupService.assertCompatible(info);
+      if (_disposed || !mounted) return;
+      final confirmed = await _confirmRestore(info);
+      if (confirmed != true) return;
+      if (_disposed || !mounted) return;
+
+      _setBusy('正在校验并暂存…');
+      final prepared = await AppBackupService.prepareImport(bytes);
+      _showMessage(
+        '已暂存 ${prepared.fileCount} 个文件。全部数据将在下次启动时替换：'
+        '重启后会显示恢复完成，届时请再完全关闭并重新打开应用一次。',
+      );
     } on Object catch (error) {
       _showMessage('导入失败：$error');
+    } finally {
+      _clearBusy();
     }
   }
 
-  Future<String> _readPickedDocument(PickedDocument picked) async {
-    final path = picked.path;
-    if (path != null && path.isNotEmpty) return File(path).readAsString();
-    final uri = picked.uri;
-    if (uri != null && uri.isNotEmpty) {
-      return utf8.decode(await PickerService.readUri(uri));
-    }
-    throw const FileSystemException('系统未返回可读文件');
-  }
-
-  Future<Project?> _pickProject() async {
-    final projects = widget.store!.projects
-        .where(
-          (project) => !project.isCloud && Directory(project.path).existsSync(),
-        )
-        .toList();
-    if (projects.isEmpty) {
-      _showMessage('没有可导出的本地项目');
-      return null;
-    }
-    return showDialog<Project>(
+  /// 恢复确认对话框：可滚动、窄屏与大字体友好。
+  Future<bool?> _confirmRestore(AppBackupInfo info) {
+    final created = info.createdAt.toLocal();
+    return showDialog<bool>(
       context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('选择项目'),
-        children: [
-          for (final project in projects)
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, project),
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(project.name),
-                subtitle: Text(
-                  project.path,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('导入全部数据'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '来源：${info.appTitle.isEmpty ? info.productKey : info.appTitle}',
             ),
+            Text('创建时间：$created'),
+            Text('包含 ${info.fileCount} 个数据文件'),
+            const SizedBox(height: 12),
+            const Text(
+              '应用的全部私有数据——项目（含二进制文件）、设置、索引与本地记录'
+              '——将在下次启动时被此备份完整替换。',
+            ),
+            const SizedBox(height: 8),
+            const Text('导入不会立即生效：确认后请完全关闭并重新打开应用以完成恢复。'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('继续导入'),
+          ),
         ],
       ),
     );
   }
 
+  Future<Uint8List> _readPickedBytes(PickedDocument picked) async {
+    final path = picked.path;
+    if (path != null && path.isNotEmpty) return File(path).readAsBytes();
+    final uri = picked.uri;
+    if (uri != null && uri.isNotEmpty) return PickerService.readUri(uri);
+    throw const FileSystemException('系统未返回可读文件');
+  }
+
+  void _setBusy(String label) {
+    if (_disposed || !mounted) return;
+    setState(() => _busyLabel = label);
+  }
+
+  void _clearBusy() {
+    if (_disposed || !mounted) return;
+    setState(() => _busyLabel = null);
+  }
+
+  Future<void> _deleteTempQuietly(Directory dir) async {
+    try {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } on FileSystemException {
+      // 临时目录清理失败不影响导出结果。
+    }
+  }
+
   void _showMessage(String message) {
-    if (!mounted) return;
+    if (_disposed || !mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
