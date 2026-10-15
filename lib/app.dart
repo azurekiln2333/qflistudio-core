@@ -6,6 +6,8 @@ import 'i18n/studio_localizations.dart';
 import 'editor/editor_fonts.dart';
 import 'editor/retained_editor_host.dart';
 import 'pages/home_page.dart';
+import 'pages/restore_complete_page.dart';
+import 'services/app_restore_gate.dart';
 import 'services/studio_profile.dart';
 import 'splash_screen.dart';
 import 'store/auth_store.dart';
@@ -41,7 +43,10 @@ class QfliApp extends StatefulWidget {
 class _QfliAppState extends State<QfliApp> {
   final _editors = RetainedEditorController();
   late final SettingsStore _fallbackSettings = SettingsStore();
-  late final ValueNotifier<({ThemeMode theme, bool ready})> _appearance;
+  late final ValueNotifier<
+    ({ThemeMode theme, bool ready, AppRestoreStatus? restoreStatus})
+  >
+  _appearance;
 
   SettingsStore get _settings => widget.settings ?? _fallbackSettings;
 
@@ -52,15 +57,18 @@ class _QfliAppState extends State<QfliApp> {
     _appearance = ValueNotifier((
       theme: _settings.themeModeValue,
       ready: widget.ready?.value ?? true,
+      restoreStatus: AppRestoreGate.status.value,
     ));
     _settings.addListener(_updateAppearance);
     widget.ready?.addListener(_updateAppearance);
+    AppRestoreGate.status.addListener(_updateAppearance);
   }
 
   void _updateAppearance() {
     _appearance.value = (
       theme: _settings.themeModeValue,
       ready: widget.ready?.value ?? true,
+      restoreStatus: AppRestoreGate.status.value,
     );
   }
 
@@ -84,6 +92,7 @@ class _QfliAppState extends State<QfliApp> {
   void dispose() {
     _settings.removeListener(_updateAppearance);
     widget.ready?.removeListener(_updateAppearance);
+    AppRestoreGate.status.removeListener(_updateAppearance);
     _appearance.dispose();
     _editors.dispose();
     _fallbackSettings.dispose();
@@ -93,7 +102,9 @@ class _QfliAppState extends State<QfliApp> {
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
-    return ValueListenableBuilder<({ThemeMode theme, bool ready})>(
+    return ValueListenableBuilder<
+      ({ThemeMode theme, bool ready, AppRestoreStatus? restoreStatus})
+    >(
       valueListenable: _appearance,
       builder: (context, appearance, _) => MaterialApp(
         navigatorKey: widget.navigatorKey,
@@ -116,7 +127,9 @@ class _QfliAppState extends State<QfliApp> {
         theme: AppTheme.light,
         darkTheme: AppTheme.dark,
         themeMode: appearance.theme,
-        home: !appearance.ready
+        home: appearance.restoreStatus != null
+            ? RestoreCompletePage(status: appearance.restoreStatus!)
+            : !appearance.ready
             ? const SplashScreen()
             : HomePage(
                 store: widget.store,
