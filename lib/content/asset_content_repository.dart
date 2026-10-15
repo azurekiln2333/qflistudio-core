@@ -5,7 +5,8 @@ import 'content_repository.dart';
 
 /// Offline repository backed by the two aggregate package assets.
 class AssetContentRepository implements ContentRepository {
-  AssetContentRepository({AssetBundle? bundle}) : _bundle = bundle ?? rootBundle;
+  AssetContentRepository({AssetBundle? bundle})
+    : _bundle = bundle ?? rootBundle;
 
   static const tutorialAsset = 'assets/content/tutorials.json';
   static const exampleAsset = 'assets/content/examples.json';
@@ -39,12 +40,13 @@ class AssetContentRepository implements ContentRepository {
   }
 
   Future<ContentCatalog> _loadCatalog() async {
-    final tutorials = await _loadString(tutorialAsset);
-    final examples = await _loadString(exampleAsset);
-    return ContentCatalog.fromJson(
-      tutorialsSource: tutorials,
-      examplesSource: examples,
-    );
+    final sources = await Future.wait([
+      _loadString(tutorialAsset),
+      _loadString(exampleAsset),
+    ]);
+    // AssetBundle already decodes large UTF-8 assets off the UI isolate. Move
+    // JSON decoding and construction of every content model off it as well.
+    return compute(_parseCatalog, sources, debugLabel: 'parse-content-catalog');
   }
 
   Future<String> _loadString(String asset) async {
@@ -63,6 +65,11 @@ class AssetContentRepository implements ContentRepository {
   }
 }
 
+ContentCatalog _parseCatalog(List<String> sources) => ContentCatalog.fromJson(
+  tutorialsSource: sources[0],
+  examplesSource: sources[1],
+);
+
 class ContentAssetException implements Exception {
   const ContentAssetException(this.asset, this.failures);
 
@@ -70,5 +77,6 @@ class ContentAssetException implements Exception {
   final List<String> failures;
 
   @override
-  String toString() => 'Unable to load content asset $asset: ${failures.join(' | ')}';
+  String toString() =>
+      'Unable to load content asset $asset: ${failures.join(' | ')}';
 }
