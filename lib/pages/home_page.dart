@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../content/asset_content_repository.dart';
+import '../content/content_repository.dart';
 import '../editor/editor_page.dart';
 import '../models/project.dart';
 import '../services/app_paths.dart';
@@ -48,6 +50,12 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final _currentIndex = ValueNotifier<int>(0);
   final _examples = ExampleCodeStore();
+  ContentRepository? _contentRepository;
+
+  // Tutorial and example tabs share one lazy asset load and parse.
+  ContentRepository get _sharedContentRepository => _contentRepository ??=
+      StudioProfile.current?.contentRepositoryFactory?.call() ??
+      AssetContentRepository();
   late final PageController _pageController;
   final Map<int, Widget> _pages = {};
   late Widget _pageView;
@@ -238,7 +246,7 @@ class _HomePageState extends State<HomePage> {
                 store: widget.store,
                 auth: widget.auth,
                 settings: widget.settings,
-                repository: StudioProfile.current?.contentRepositoryFactory?.call(),
+                repository: _sharedContentRepository,
               )
             : TutorialsTab(auth: widget.auth),
       3 => ExampleCodeTab(
@@ -247,7 +255,7 @@ class _HomePageState extends State<HomePage> {
         auth: widget.auth,
         settings: widget.settings,
         examples: _examples,
-        repository: StudioProfile.current?.contentRepositoryFactory?.call(),
+        repository: _sharedContentRepository,
       ),
       4 => ProfileTab(
         auth: widget.auth,
@@ -886,7 +894,8 @@ class _HomeTabState extends State<HomeTab>
         action: '打开项目 ${project.name}',
         project: project.name,
         path: project.path,
-      ),    );
+      ),
+    );
     if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(

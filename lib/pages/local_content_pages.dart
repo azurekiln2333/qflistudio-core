@@ -205,47 +205,57 @@ class _TutorialList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return _ContentList(
+    // Only row metadata is flattened here; widgets are created on demand.
+    final rows = <({TutorialChapter chapter, TutorialLesson? lesson})>[
+      for (final chapter in tutorial.chapters) ...[
+        (chapter: chapter, lesson: null),
+        for (final lesson in chapter.lessons)
+          (chapter: chapter, lesson: lesson),
+      ],
+    ];
+    return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
-      children: [
-        for (final chapter in tutorial.chapters) ...[
-          Padding(
+      itemCount: rows.length,
+      itemBuilder: (context, index) {
+        final row = rows[index];
+        final lesson = row.lesson;
+        if (lesson == null) {
+          return Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
             child: Text(
-              chapter.title,
+              row.chapter.title,
               style: theme.textTheme.titleSmall?.copyWith(
                 color: theme.colorScheme.primary,
               ),
             ),
+          );
+        }
+        return ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          leading: const Icon(Icons.menu_book_outlined),
+          title: Text(
+            lesson.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
-          for (final lesson in chapter.lessons)
-            ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-              leading: const Icon(Icons.menu_book_outlined),
-              title: Text(
-                lesson.title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(
-                lesson.summary,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => _LessonPage(
-                    lesson: lesson,
-                    store: store,
-                    auth: auth,
-                    settings: settings,
-                  ),
-                ),
+          subtitle: Text(
+            lesson.summary,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => _LessonPage(
+                lesson: lesson,
+                store: store,
+                auth: auth,
+                settings: settings,
               ),
             ),
-        ],
-      ],
+          ),
+        );
+      },
     );
   }
 }
@@ -269,46 +279,49 @@ class _ExampleCodeList extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = StudioLocalizations.of(context);
-    return _ContentList(
+    return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-          child: Text(
-            l10n.examplesCount(items.length),
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+      itemCount: items.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: Text(
+              l10n.examplesCount(items.length),
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
+          );
+        }
+        final example = items[index - 1];
+        return ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+          leading: const Icon(Icons.code_outlined),
+          title: Text(
+            example.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
-        ),
-        for (final example in items)
-          ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            leading: const Icon(Icons.code_outlined),
-            title: Text(
-              example.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(
-              example.summary,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => ExampleDetailPage(
-                  example: example,
-                  store: store,
-                  auth: auth,
-                  settings: settings,
-                  examples: examples,
-                ),
+          subtitle: Text(
+            example.summary,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => ExampleDetailPage(
+                example: example,
+                store: store,
+                auth: auth,
+                settings: settings,
+                examples: examples,
               ),
             ),
           ),
-      ],
+        );
+      },
     );
   }
 }
@@ -458,8 +471,7 @@ class _LessonPage extends StatelessWidget {
             const SizedBox(height: 16),
             Text(l10n.prerequisites, style: theme.textTheme.titleMedium),
             const SizedBox(height: 6),
-            for (final item in lesson.prerequisites)
-              _BulletLine(text: item),
+            for (final item in lesson.prerequisites) _BulletLine(text: item),
           ],
           const SizedBox(height: 12),
           Text(lesson.explain),
@@ -542,17 +554,34 @@ class _BulletLine extends StatelessWidget {
   }
 }
 
-class _ContentList extends StatelessWidget {  const _ContentList({required this.padding, required this.children});
+class _ContentList extends StatelessWidget {
+  const _ContentList({required this.padding, required this.children})
+    : itemCount = null,
+      itemBuilder = null;
+
+  const _ContentList.builder({
+    required this.padding,
+    required this.itemCount,
+    required this.itemBuilder,
+  }) : children = null;
 
   final EdgeInsetsGeometry padding;
-  final List<Widget> children;
+  final List<Widget>? children;
+  final int? itemCount;
+  final IndexedWidgetBuilder? itemBuilder;
 
   @override
   Widget build(BuildContext context) => Align(
     alignment: Alignment.topCenter,
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 960),
-      child: ListView(padding: padding, children: children),
+      child: itemBuilder == null
+          ? ListView(padding: padding, children: children!)
+          : ListView.builder(
+              padding: padding,
+              itemCount: itemCount,
+              itemBuilder: itemBuilder!,
+            ),
     ),
   );
 }
