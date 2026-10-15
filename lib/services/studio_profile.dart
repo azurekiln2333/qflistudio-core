@@ -172,7 +172,7 @@ class StudioProfile {
   /// 根工程不设置档位，因此保持联网全能版；各语言 App 显式设置为 true。
   final bool isOffline;
 
-  /// Whether homepage project-scope and language tabs are shown.
+  /// Whether homepage language filter chips are shown. Project scopes remain available.
   final bool showHomeTabs;
 
   /// Whether this product must hide every entry that needs the network: the

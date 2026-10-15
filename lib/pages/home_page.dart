@@ -277,7 +277,7 @@ class _HomePageState extends State<HomePage> {
 }
 
 /// 主页 Tab：项目列表 + 搜索 + 更多操作。
-/// 内部 4 个子页签：最近打开 / 全部项目 / 收藏 / 云端。
+/// 项目页签：全部项目 / 历史项目 / 收藏项目，联网产品另有云端项目。
 class HomeTab extends StatefulWidget {
   const HomeTab({
     super.key,
@@ -305,9 +305,7 @@ class _HomeTabState extends State<HomeTab>
   late bool _loggedIn;
   Future<void>? _refreshRequest;
   late final List<_ProjectScope> _scopes =
-      StudioProfile.current?.showHomeTabs == false
-      ? const [_ProjectScope.all]
-      : StudioProfile.current?.offlineOnly == true
+      StudioProfile.current?.offlineOnly == true
       ? const [_ProjectScope.all, _ProjectScope.history, _ProjectScope.favorite]
       : _ProjectScope.values;
   late final TabController _projectTabs = TabController(
@@ -475,33 +473,29 @@ class _HomeTabState extends State<HomeTab>
           }
           return Column(
             children: [
-              if (StudioProfile.current?.showHomeTabs ?? true)
-                TabBar(
-                  controller: _projectTabs,
-                  isScrollable: true,
-                  tabAlignment: TabAlignment.start,
-                  dividerColor: Colors.transparent,
-                  labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                  tabs: [
+              TabBar(
+                controller: _projectTabs,
+                isScrollable: true,
+                tabAlignment: TabAlignment.start,
+                dividerColor: Colors.transparent,
+                labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+                tabs: [
+                  Tab(height: 36, child: Center(child: Text(l10n.allProjects))),
+                  Tab(
+                    height: 36,
+                    child: Center(child: Text(l10n.historyProjects)),
+                  ),
+                  Tab(
+                    height: 36,
+                    child: Center(child: Text(l10n.favoriteProjects)),
+                  ),
+                  if (_scopes.contains(_ProjectScope.cloud))
                     Tab(
                       height: 36,
-                      child: Center(child: Text(l10n.allProjects)),
+                      child: Center(child: Text(l10n.cloudProjects)),
                     ),
-                    Tab(
-                      height: 36,
-                      child: Center(child: Text(l10n.historyProjects)),
-                    ),
-                    Tab(
-                      height: 36,
-                      child: Center(child: Text(l10n.favoriteProjects)),
-                    ),
-                    if (_scopes.contains(_ProjectScope.cloud))
-                      Tab(
-                        height: 36,
-                        child: Center(child: Text(l10n.cloudProjects)),
-                      ),
-                  ],
-                ),
+                ],
+              ),
               Expanded(
                 child: TabBarView(
                   controller: _projectTabs,
@@ -635,7 +629,7 @@ class _HomeTabState extends State<HomeTab>
                   : _EmptyState(onCreate: () => _createProject(context)),
             )
           : _buildGridOrList(context, projects);
-      // The main app also has a profile; use its homepage-tab setting.
+      // Single-language products can hide language chips without losing scopes.
       final showLanguageChips =
           (StudioProfile.current?.showHomeTabs ?? true) && chipList.length > 1;
       return Column(
