@@ -62,6 +62,9 @@ class _ProfileTabState extends State<ProfileTab> {
           settings: widget.settings,
           auth: widget.auth,
           store: widget.store,
+          // An offline product must not offer a user-configured external AI
+          // endpoint. The editor route already applies the same gate.
+          showAi: StudioProfile.current?.offlineOnly != true,
         ),
       ),
     );

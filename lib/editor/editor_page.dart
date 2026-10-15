@@ -1430,9 +1430,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                       case 'online_terminal':
                                         unawaited(_openOnlineTerminal());
                                       case 'git':
-                                        _openGit();
+                                        if (StudioProfile
+                                                .current
+                                                ?.offlineOnly !=
+                                            true) {
+                                          _openGit();
+                                        }
                                       case 'cloud_pull':
-                                        _pullFromCloud();
+                                        if (StudioProfile
+                                                .current
+                                                ?.offlineOnly !=
+                                            true) {
+                                          _pullFromCloud();
+                                        }
                                     }
                                   },
                                   itemBuilder: (context) => [
@@ -1582,20 +1592,24 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         ],
                                       ),
                                     ),
-                                    const PopupMenuItem(
-                                      value: 'git',
-                                      child: Row(
-                                        children: [
-                                          Icon(
-                                            Icons.account_tree_outlined,
-                                            size: 20,
-                                          ),
-                                          SizedBox(width: 12),
-                                          Text('Git'),
-                                        ],
+                                    if (StudioProfile.current?.offlineOnly !=
+                                        true)
+                                      const PopupMenuItem(
+                                        value: 'git',
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              Icons.account_tree_outlined,
+                                              size: 20,
+                                            ),
+                                            SizedBox(width: 12),
+                                            Text('Git'),
+                                          ],
+                                        ),
                                       ),
-                                    ),
-                                    if (widget.project.isCloud)
+                                    if (widget.project.isCloud &&
+                                        StudioProfile.current?.offlineOnly !=
+                                            true)
                                       const PopupMenuItem(
                                         value: 'cloud_pull',
                                         child: Row(
