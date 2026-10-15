@@ -4,6 +4,7 @@ import '../editor/editor_fonts.dart';
 
 import '../i18n/studio_localizations.dart';
 import '../services/structured_content_service.dart';
+import '../widgets/tool_widgets.dart';
 
 class JsonToolPage extends StatefulWidget {
   const JsonToolPage({
@@ -20,8 +21,9 @@ class JsonToolPage extends StatefulWidget {
 }
 
 class _JsonToolPageState extends State<JsonToolPage> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.initialText);
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialText,
+  );
   late JsonAnalysis _analysis = JsonDocumentService.analyze(_controller.text);
 
   @override
@@ -83,6 +85,11 @@ class _JsonToolPageState extends State<JsonToolPage> {
                 icon: const Icon(Icons.check_circle_outline),
                 label: Text(l10n.jsonValidate),
               ),
+              OutlinedButton.icon(
+                onPressed: () => Copy.copy(context, _controller.text),
+                icon: const Icon(Icons.copy_all_outlined),
+                label: const Text('复制 JSON'),
+              ),
               if (widget.onApply != null)
                 OutlinedButton.icon(
                   onPressed: () => widget.onApply!(_controller.text),
@@ -100,16 +107,19 @@ class _JsonToolPageState extends State<JsonToolPage> {
                   ? Theme.of(context).colorScheme.primary
                   : Theme.of(context).colorScheme.error,
             ),
-            title: Text(
-              _analysis.valid ? l10n.jsonValid : l10n.jsonInvalid,
-            ),
+            title: Text(_analysis.valid ? l10n.jsonValid : l10n.jsonInvalid),
             subtitle: _analysis.error == null
-                ? Text('${l10n.jsonRootType}: ${JsonDocumentService.nodeLabel(_analysis.value)}')
+                ? Text(
+                    '${l10n.jsonRootType}: ${JsonDocumentService.nodeLabel(_analysis.value)}',
+                  )
                 : Text(_analysis.error!),
           ),
           if (_analysis.valid) ...[
             const SizedBox(height: 8),
-            Text(l10n.jsonStructure, style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              l10n.jsonStructure,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             _JsonTree(value: _analysis.value),
           ],
@@ -139,7 +149,9 @@ class _JsonTree extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
-                    child: Text('${entry.key}: ${JsonDocumentService.nodeLabel(entry.value)}'),
+                    child: Text(
+                      '${entry.key}: ${JsonDocumentService.nodeLabel(entry.value)}',
+                    ),
                   ),
                   if (entry.value is Map || entry.value is List)
                     _JsonTree(value: entry.value, path: '$path.${entry.key}'),
@@ -181,8 +193,9 @@ class MarkdownToolPage extends StatefulWidget {
 }
 
 class _MarkdownToolPageState extends State<MarkdownToolPage> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.initialText);
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialText,
+  );
 
   @override
   void dispose() {
@@ -249,7 +262,12 @@ class _MarkdownToolPageState extends State<MarkdownToolPage> {
     for (final line in source.split('\n')) {
       if (line.trimLeft().startsWith('```')) {
         if (inCode) {
-          widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: EditorFonts.bundledFamily)));
+          widgets.add(
+            SelectableText(
+              code.join('\n'),
+              style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
+            ),
+          );
           code.clear();
         }
         inCode = !inCode;
@@ -260,24 +278,50 @@ class _MarkdownToolPageState extends State<MarkdownToolPage> {
         continue;
       }
       if (line.startsWith('# ')) {
-        widgets.add(Padding(padding: const EdgeInsets.only(top: 12, bottom: 8), child: Text(line.substring(2), style: theme.textTheme.headlineSmall)));
+        widgets.add(
+          Padding(
+            padding: const EdgeInsets.only(top: 12, bottom: 8),
+            child: Text(
+              line.substring(2),
+              style: theme.textTheme.headlineSmall,
+            ),
+          ),
+        );
       } else if (line.startsWith('## ')) {
-        widgets.add(Padding(padding: const EdgeInsets.only(top: 10, bottom: 6), child: Text(line.substring(3), style: theme.textTheme.titleLarge)));
+        widgets.add(
+          Padding(
+            padding: const EdgeInsets.only(top: 10, bottom: 6),
+            child: Text(line.substring(3), style: theme.textTheme.titleLarge),
+          ),
+        );
       } else if (line.trimLeft().startsWith('- ')) {
         widgets.add(Text('• ${line.trimLeft().substring(2)}'));
       } else if (line.trim().isEmpty) {
         widgets.add(const SizedBox(height: 8));
       } else {
-        widgets.add(Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(line)));
+        widgets.add(
+          Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(line)),
+        );
       }
     }
-    if (code.isNotEmpty) widgets.add(SelectableText(code.join('\n'), style: const TextStyle(fontFamily: EditorFonts.bundledFamily)));
+    if (code.isNotEmpty) {
+      widgets.add(
+        SelectableText(
+          code.join('\n'),
+          style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
+        ),
+      );
+    }
     return widgets;
   }
 }
 
 class SqlToolPage extends StatefulWidget {
-  const SqlToolPage({super.key, this.projectPath, this.initialText = 'SELECT 1 AS value;'});
+  const SqlToolPage({
+    super.key,
+    this.projectPath,
+    this.initialText = 'SELECT 1 AS value;',
+  });
 
   final String? projectPath;
   final String initialText;
@@ -287,7 +331,9 @@ class SqlToolPage extends StatefulWidget {
 }
 
 class _SqlToolPageState extends State<SqlToolPage> {
-  late final TextEditingController _controller = TextEditingController(text: widget.initialText);
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialText,
+  );
   SqlExecutionResult? _result;
   bool _running = false;
 
@@ -299,7 +345,10 @@ class _SqlToolPageState extends State<SqlToolPage> {
 
   Future<void> _execute() async {
     setState(() => _running = true);
-    final result = await SqlQueryService.execute(source: _controller.text, projectPath: widget.projectPath);
+    final result = await SqlQueryService.execute(
+      source: _controller.text,
+      projectPath: widget.projectPath,
+    );
     if (!mounted) return;
     setState(() {
       _running = false;
@@ -320,17 +369,29 @@ class _SqlToolPageState extends State<SqlToolPage> {
             minLines: 8,
             maxLines: 16,
             style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
-            decoration: InputDecoration(border: const OutlineInputBorder(), labelText: l10n.sqlSource),
+            decoration: InputDecoration(
+              border: const OutlineInputBorder(),
+              labelText: l10n.sqlSource,
+            ),
           ),
           const SizedBox(height: 12),
           FilledButton.icon(
             onPressed: _running ? null : _execute,
-            icon: _running ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.play_arrow),
+            icon: _running
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.play_arrow),
             label: Text(l10n.executeQuery),
           ),
           if (_result case final result?) ...[
             const SizedBox(height: 16),
-            SelectableText(result.error ?? result.output, style: const TextStyle(fontFamily: EditorFonts.bundledFamily)),
+            SelectableText(
+              result.error ?? result.output,
+              style: const TextStyle(fontFamily: EditorFonts.bundledFamily),
+            ),
           ],
         ],
       ),

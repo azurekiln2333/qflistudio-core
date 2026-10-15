@@ -5,38 +5,87 @@ import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 
 import 'package:qfli_studio_core/app.dart';
+import 'package:qfli_studio_core/content/content_repository.dart';
 import 'package:qfli_studio_core/editor/editor_delete_fix.dart';
+import 'package:qfli_studio_core/editor/editor_page.dart';
 import 'package:qfli_studio_core/editor/highlight_themes.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/services/code_formatter.dart';
 import 'package:qfli_studio_core/editor/editor_controller.dart';
 import 'package:qfli_studio_core/models/project.dart';
+import 'package:qfli_studio_core/pages/profile_page.dart';
+import 'package:qfli_studio_core/services/app_paths.dart';
 import 'package:qfli_studio_core/services/file_backup.dart';
 import 'package:qfli_studio_core/services/project_config.dart';
 import 'package:qfli_studio_core/services/project_templates.dart';
 import 'package:qfli_studio_core/services/recycle_bin.dart';
+import 'package:qfli_studio_core/services/studio_profile.dart';
+import 'package:qfli_studio_core/services/task_activity_service.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/widgets/project_card.dart';
+import 'package:qfli_studio_core/widgets/tool_widgets.dart';
 import 'package:re_editor/re_editor.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  late Directory appRoot;
+  late PathProviderPlatform previousPaths;
+  late StudioProfile? previousProfile;
   late Directory tempDir;
   late File storage;
 
+  setUpAll(() async {
+    // AppPaths caches its first resolution. Keep one app root for this suite
+    // and resolve it before a widget's FakeAsync zone can start an IO probe.
+    appRoot = await Directory.systemTemp.createTemp('qflistudio_widget_app_');
+    previousPaths = PathProviderPlatform.instance;
+    PathProviderPlatform.instance = _TemporaryPaths(appRoot.path);
+    expect(await AppPaths.storageDirectory(), appRoot.path);
+    await TaskActivityService.instance.initialize();
+  });
+
+  tearDownAll(() async {
+    PathProviderPlatform.instance = previousPaths;
+    if (appRoot.existsSync()) await appRoot.delete(recursive: true);
+  });
+
   setUp(() async {
+    previousProfile = StudioProfile.current;
+    StudioProfile.current = StudioProfile(
+      id: 'c',
+      appTitle: 'Widget Test Studio',
+      templates: const [],
+      isOffline: true,
+      contentRepositoryFactory: () => const _EmptyContentRepository(),
+    );
     tempDir = await Directory.systemTemp.createTemp('qflistudio_test');
     storage = File(p.join(tempDir.path, 'projects.json'));
   });
 
   tearDown(() async {
+    StudioProfile.current = previousProfile;
     if (await tempDir.exists()) {
       await tempDir.delete(recursive: true);
     }
   });
+
+  Future<void> mountApp(WidgetTester tester, ProjectStore store) async {
+    final auth = AuthStore();
+    final directory = tempDir;
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      auth.dispose();
+      store.dispose();
+      await _disposeFixtureTree(tester, directory);
+    });
+    await tester.pumpWidget(QfliApp(store: store, auth: auth));
+  }
 
   test('项目创建并持久化到磁盘', () async {
     final store = ProjectStore(storageFile: storage);
@@ -50,7 +99,11 @@ void main() {
     );
     expect(result.error, isNull);
     expect(result.project, isNotNull);
-    expect(Directory(p.join(workspace.path, 'demo')).existsSync(), isTrue);
+    expect(
+      result.project!.path,
+      p.join(workspace.path, ProjectTemplate.empty.directoryName, 'demo'),
+    );
+    expect(Directory(result.project!.path).existsSync(), isTrue);
 
     // 重新加载，验证持久化。
     final reloaded = ProjectStore(storageFile: storage);
@@ -106,7 +159,7 @@ void main() {
   testWidgets('主页：空状态 -> 添加项目 -> 卡片显示名称路径 -> 进入编辑器', (tester) async {
     final store = ProjectStore(storageFile: storage);
     await tester.runAsync(() => store.load());
-    await tester.pumpWidget(QfliApp(store: store, auth: AuthStore()));
+    await mountApp(tester, store);
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -140,6 +193,10 @@ void main() {
 
     // 点击项目卡片进入编辑器（侧栏默认隐藏，顶栏副标题显示未打开文件）。
     await tester.tap(find.text('demo'));
+    await _pumpIoUntil(
+      tester,
+      () => find.byType(EditorPage).evaluate().isNotEmpty,
+    );
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -155,13 +212,14 @@ void main() {
       EnginePhase.sendSemanticsUpdate,
       const Duration(seconds: 3),
     );
+    await _pumpIoUntil(tester, () => find.text('src').evaluate().isNotEmpty);
     expect(find.text('src'), findsOneWidget);
   });
 
-  testWidgets('底部导航：主页/功能/教程/我的 四个 Tab 切换', (tester) async {
+  testWidgets('底部导航：主页/工具/教程/示例代码/我的 五个 Tab 切换', (tester) async {
     final store = ProjectStore(storageFile: storage);
     await tester.runAsync(() => store.load());
-    await tester.pumpWidget(QfliApp(store: store, auth: AuthStore()));
+    await mountApp(tester, store);
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -170,7 +228,7 @@ void main() {
 
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.byKey(const ValueKey('home-page-view')), findsOneWidget);
-    expect(find.byType(NavigationDestination), findsNWidgets(4));
+    expect(find.byType(NavigationDestination), findsNWidgets(5));
     expect(find.byIcon(Icons.forum_outlined), findsNothing);
     final l10n = StudioLocalizations.of(
       tester.element(find.byType(NavigationBar)),
@@ -183,8 +241,8 @@ void main() {
       EnginePhase.sendSemanticsUpdate,
       const Duration(seconds: 3),
     );
-    expect(find.text(l10n.functions), findsWidgets);
-    expect(find.text(l10n.terminal), findsOneWidget);
+    expect(find.text(l10n.tools), findsWidgets);
+    expect(find.widgetWithText(ToolCard, '终端'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.menu_book_outlined));
     await tester.pumpAndSettle(
@@ -194,13 +252,29 @@ void main() {
     );
     expect(find.text(l10n.tutorial), findsWidgets);
 
+    await tester.tap(find.byIcon(Icons.code_outlined));
+    // The bundled repository is in memory, but ExampleCodeStore still checks
+    // its persisted file. Give real IO time to finish before settling frames.
+    await _pumpIoUntil(
+      tester,
+      () => find.text(l10n.localExamplesMissing).evaluate().isNotEmpty,
+    );
+    await tester.pumpAndSettle(
+      const Duration(milliseconds: 100),
+      EnginePhase.sendSemanticsUpdate,
+      const Duration(seconds: 3),
+    );
+    expect(find.text(l10n.examples), findsWidgets);
+    expect(find.text(l10n.localExamplesMissing), findsOneWidget);
+
     await tester.tap(find.byIcon(Icons.person_outline));
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
       const Duration(seconds: 3),
     );
-    expect(find.text('未登录'), findsOneWidget);
+    expect(find.byType(ProfileTab), findsOneWidget);
+    expect(find.text('未登录'), findsNothing);
 
     await tester.tap(find.byIcon(Icons.home_outlined));
     await tester.pumpAndSettle(
@@ -218,7 +292,7 @@ void main() {
     Directory(p.join(projDir.path, 'src')).createSync();
     File(p.join(projDir.path, 'src', 'main.txt')).writeAsStringSync('hello');
     await tester.runAsync(() => store.addExisting(projDir.path));
-    await tester.pumpWidget(QfliApp(store: store, auth: AuthStore()));
+    await mountApp(tester, store);
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -226,6 +300,10 @@ void main() {
     );
 
     await tester.tap(find.text('demo'));
+    await _pumpIoUntil(
+      tester,
+      () => find.byType(EditorPage).evaluate().isNotEmpty,
+    );
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -245,6 +323,7 @@ void main() {
       EnginePhase.sendSemanticsUpdate,
       const Duration(seconds: 3),
     );
+    await _pumpIoUntil(tester, () => find.text('src').evaluate().isNotEmpty);
     expect(find.text('src'), findsOneWidget);
     expect(
       tester.widget<AnimatedAlign>(find.byType(AnimatedAlign)).widthFactor,
@@ -275,7 +354,7 @@ void main() {
     Directory(p.join(projDir.path, 'src')).createSync();
     File(p.join(projDir.path, 'src', 'main.txt')).writeAsStringSync('hello');
     await tester.runAsync(() => store.addExisting(projDir.path));
-    await tester.pumpWidget(QfliApp(store: store, auth: AuthStore()));
+    await mountApp(tester, store);
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -283,6 +362,10 @@ void main() {
     );
 
     await tester.tap(find.text('demo'));
+    await _pumpIoUntil(
+      tester,
+      () => find.byType(EditorPage).evaluate().isNotEmpty,
+    );
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -299,6 +382,7 @@ void main() {
       EnginePhase.sendSemanticsUpdate,
       const Duration(seconds: 3),
     );
+    await _pumpIoUntil(tester, () => find.text('src').evaluate().isNotEmpty);
     expect(find.text('src'), findsOneWidget);
 
     // 点击遮罩关闭抽屉。
@@ -322,7 +406,11 @@ void main() {
       template: ProjectTemplate.python,
     );
     expect(py.error, isNull);
-    final pyMain = File(p.join(workspace.path, 'pyproj', 'src', 'main.py'));
+    expect(
+      p.dirname(py.project!.path),
+      p.join(workspace.path, ProjectTemplate.python.directoryName),
+    );
+    final pyMain = File(p.join(py.project!.path, 'src', 'main.py'));
     expect(pyMain.existsSync(), isTrue);
     expect(pyMain.readAsStringSync(), contains('print'));
     expect(ProjectTemplate.python.mainFile, 'src/main.py');
@@ -333,7 +421,11 @@ void main() {
       template: ProjectTemplate.c,
     );
     expect(c.error, isNull);
-    final cMain = File(p.join(workspace.path, 'cproj', 'src', 'main.c'));
+    expect(
+      p.dirname(c.project!.path),
+      p.join(workspace.path, ProjectTemplate.c.directoryName),
+    );
+    final cMain = File(p.join(c.project!.path, 'src', 'main.c'));
     expect(cMain.existsSync(), isTrue);
     expect(cMain.readAsStringSync(), contains('printf'));
   });
@@ -345,7 +437,7 @@ void main() {
     final otherDir = Directory(p.join(tempDir.path, 'other'))..createSync();
     await tester.runAsync(() => store.addExisting(demoDir.path));
     await tester.runAsync(() => store.addExisting(otherDir.path));
-    await tester.pumpWidget(QfliApp(store: store, auth: AuthStore()));
+    await mountApp(tester, store);
     await tester.pumpAndSettle(
       const Duration(milliseconds: 100),
       EnginePhase.sendSemanticsUpdate,
@@ -448,9 +540,17 @@ void main() {
     final binDir = Directory(
       p.join(tempDir.path, 'recyclebin', 'projects_bin'),
     );
-    final zips = binDir.listSync().whereType<File>().toList();
+    final zips = binDir
+        .listSync()
+        .whereType<File>()
+        .where((file) => p.extension(file.path) == '.zip')
+        .toList();
     expect(zips.length, 1);
     expect(p.basename(zips.first.path), contains('delme'));
+    final metadata =
+        jsonDecode(File('${zips.first.path}.metadata.json').readAsStringSync())
+            as Map<String, dynamic>;
+    expect(metadata['originalPath'], p.normalize(p.absolute(projPath)));
 
     // 解压校验备份内容：zip 以项目文件夹为根，模板文件与配置都在。
     final archive = ZipDecoder().decodeBytes(await zips.first.readAsBytes());
@@ -475,8 +575,15 @@ void main() {
     expect(error, isNull);
 
     final binDir = Directory(p.join(tempDir.path, 'recyclebin', 'files_bin'));
-    final zips = binDir.listSync().whereType<File>().toList();
+    final zips = binDir
+        .listSync()
+        .whereType<File>()
+        .where((file) => p.extension(file.path) == '.zip')
+        .toList();
     expect(zips.length, 2);
+    for (final zip in zips) {
+      expect(File('${zip.path}.metadata.json').existsSync(), isTrue);
+    }
     final folderZip = zips.firstWhere(
       (f) => p.basename(f.path).contains('sub'),
     );
@@ -662,12 +769,21 @@ void main() {
     List<String> backupNames() => projectDir
         .listSync()
         .whereType<File>()
+        .where((file) => p.extension(file.path) == '.py')
         .map((f) => p.basename(f.path))
         .toList();
     final first = backupNames();
     expect(first.length, 1);
     expect(first.single, startsWith('main-'));
     expect(first.single, endsWith('.py'));
+    final metadata =
+        jsonDecode(
+              File(
+                p.join(projectDir.path, '${first.single}.metadata.json'),
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    expect(metadata['originalPath'], p.normalize(file.absolute.path));
     expect(
       File(p.join(projectDir.path, first.single)).readAsStringSync(),
       'v1',
@@ -689,4 +805,89 @@ void main() {
       isTrue,
     );
   });
+}
+
+Future<void> _pumpIoUntil(
+  WidgetTester tester,
+  bool Function() condition,
+) async {
+  // Project routes and saved examples probe files asynchronously. Fake frame
+  // pumping alone cannot deliver real file IO.
+  for (var attempt = 0; attempt < 200; attempt++) {
+    await tester.pump(const Duration(milliseconds: 20));
+    if (condition()) return;
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+  expect(
+    condition(),
+    isTrue,
+    reason: 'The asynchronous fixture operation did not finish.',
+  );
+}
+
+Future<void> _disposeFixtureTree(
+  WidgetTester tester,
+  Directory directory,
+) async {
+  // EditorPage.dispose starts a history.json write. Drain its FakeAsync
+  // continuations and real file IO before removing this test's directory.
+  for (var round = 0; round < 4; round++) {
+    await tester.pump(const Duration(milliseconds: 20));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+  FileSystemException? lastError;
+  for (var round = 0; round < 50; round++) {
+    final error = await tester.runAsync<FileSystemException?>(() async {
+      try {
+        if (directory.existsSync()) await directory.delete(recursive: true);
+        return null;
+      } on FileSystemException catch (error) {
+        return error;
+      }
+    });
+    if (error == null) return;
+    lastError = error;
+    await tester.pump(const Duration(milliseconds: 20));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+  }
+  throw lastError!;
+}
+
+class _TemporaryPaths extends PathProviderPlatform {
+  _TemporaryPaths(this.root);
+
+  final String root;
+
+  @override
+  Future<String?> getApplicationSupportPath() async => root;
+
+  @override
+  Future<String?> getApplicationDocumentsPath() async => root;
+
+  @override
+  Future<String?> getTemporaryPath() async => p.join(root, 'tmp');
+}
+
+class _EmptyContentRepository implements ContentRepository {
+  const _EmptyContentRepository();
+
+  @override
+  Future<ContentCatalog> load() async =>
+      const ContentCatalog(schemaVersion: 1, tutorials: [], examples: []);
+
+  @override
+  Future<List<TutorialContent>> tutorials({
+    ContentFilter filter = const ContentFilter(),
+  }) async => const [];
+
+  @override
+  Future<List<ExampleContent>> examples({
+    ContentFilter filter = const ContentFilter(),
+  }) async => const [];
 }
