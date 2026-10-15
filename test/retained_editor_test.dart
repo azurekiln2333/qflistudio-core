@@ -50,6 +50,134 @@ void main() {
     await root.delete(recursive: true);
   });
 
+  for (final layout in [
+    (
+      size: const Size(390, 844),
+      padding: const FakeViewPadding(top: 44, bottom: 34),
+      textScale: 1.0,
+      multiple: false,
+    ),
+    (
+      size: const Size(320, 844),
+      padding: const FakeViewPadding(top: 24, bottom: 24),
+      textScale: 2.0,
+      multiple: true,
+    ),
+  ]) {
+    testWidgets(
+      'phone restore avoids create project at ${layout.size.width.toInt()}dp '
+      'with ${layout.textScale}x text and ${layout.multiple ? "multiple sessions" : "safe areas"}',
+      (tester) async {
+        const longName = '这是一个用于验证窄屏恢复控件的很长很长的工程名称';
+        final fixture = _Fixture(root, projectNames: const ['Alpha', longName]);
+        await fixture.mount(
+          tester,
+          size: layout.size,
+          padding: layout.padding,
+          textScale: layout.textScale,
+        );
+        await fixture.open(tester, 'Alpha');
+        final alphaState = tester.state(find.byType(EditorPage));
+        if (layout.multiple) {
+          await _minimize(tester);
+          await tester.ensureVisible(find.text(longName));
+          await fixture.open(tester, longName);
+        }
+        final state = tester.state(find.byType(EditorPage));
+        final controller = _editor(tester);
+        final buffer = controller.current!;
+        const dirtyText = '// unsaved text survives creating another project';
+        buffer.controller.text = dirtyText;
+        await tester.pump();
+        expect(buffer.dirty, isTrue);
+        await _minimize(tester);
+
+        // Measure the whole restore surface, including the session selector,
+        // rather than its label: the host and Home FAB are sibling layers.
+        final restoreButton = find
+            .ancestor(
+              of: find.textContaining('返回编辑器 ·'),
+              matching: find.byWidgetPredicate(
+                (widget) => widget is TextButton,
+              ),
+            )
+            .first;
+        final restoreSurface = find
+            .ancestor(of: restoreButton, matching: find.byType(Material))
+            .first;
+        final createButton = find.byType(FloatingActionButton);
+        expect(createButton, findsOneWidget);
+        final restoreRect = tester.getRect(restoreSurface);
+        final createRect = tester.getRect(createButton);
+        expect(
+          restoreRect.overlaps(createRect),
+          isFalse,
+          reason:
+              'Restore $restoreRect must leave Create Project $createRect tappable.',
+        );
+        final safeRect = Rect.fromLTRB(
+          layout.padding.left,
+          layout.padding.top,
+          layout.size.width - layout.padding.right,
+          layout.size.height - layout.padding.bottom,
+        );
+        expect(restoreRect.left, greaterThanOrEqualTo(safeRect.left));
+        expect(restoreRect.top, greaterThanOrEqualTo(safeRect.top));
+        expect(restoreRect.right, lessThanOrEqualTo(safeRect.right));
+        expect(restoreRect.bottom, lessThanOrEqualTo(safeRect.bottom));
+        if (layout.multiple) {
+          expect(find.byTooltip('切换编辑器'), findsOneWidget);
+        }
+
+        // Both controls must work through their actual hit targets, while the
+        // retained editor remains mounted behind Home and this modal route.
+        await tester.tap(createButton);
+        await _pumpFrames(tester);
+        final dialog = find.byType(AlertDialog);
+        expect(dialog, findsOneWidget);
+        expect(
+          find.descendant(of: dialog, matching: find.text('新建项目')),
+          findsOneWidget,
+        );
+        expect(find.textContaining('返回编辑器 ·'), findsNothing);
+        expect(find.byTooltip('切换编辑器'), findsNothing);
+        await tester.tap(
+          find.descendant(of: dialog, matching: find.text('取消')),
+        );
+        await _pumpFrames(tester);
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(fixture.store.projects, hasLength(2));
+        expect(find.textContaining('返回编辑器 ·'), findsOneWidget);
+        if (layout.multiple) {
+          await tester.tap(find.byTooltip('切换编辑器'));
+          await _pumpFrames(tester);
+          expect(find.textContaining('返回编辑器 ·'), findsNothing);
+          expect(find.byTooltip('切换编辑器'), findsNothing);
+          expect(
+            find.widgetWithText(PopupMenuItem<String>, 'Alpha'),
+            findsOneWidget,
+          );
+          expect(
+            find.widgetWithText(PopupMenuItem<String>, longName),
+            findsOneWidget,
+          );
+          await _back(tester);
+          expect(find.byType(PopupMenuItem<String>), findsNothing);
+          expect(find.textContaining('返回编辑器 ·'), findsOneWidget);
+          expect(find.byTooltip('切换编辑器'), findsOneWidget);
+        }
+        await _restore(tester);
+        expect(tester.state(find.byType(EditorPage)), same(state));
+        expect(_editor(tester), same(controller));
+        expect(controller.current, same(buffer));
+        expect(buffer.controller.text, dirtyText);
+        expect(buffer.dirty, isTrue);
+        expect(alphaState.mounted, isTrue);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   testWidgets('live editor survives Home, tools, content and restore', (
     tester,
   ) async {
@@ -599,11 +727,12 @@ Future<void> _pumpIoUntil(WidgetTester tester, bool Function() done) async {
 }
 
 class _Fixture {
-  _Fixture(Directory root) : directory = root.createTempSync('case_') {
+  _Fixture(Directory root, {this.projectNames = const ['Alpha', 'Beta']})
+    : directory = root.createTempSync('case_') {
     store = ProjectStore(
       storageFile: File(p.join(directory.path, 'projects.json')),
     );
-    for (final name in ['Alpha', 'Beta']) {
+    for (final name in projectNames) {
       final path = Directory(p.join(directory.path, name))..createSync();
       File(p.join(path.path, 'Main.java')).writeAsStringSync('class Main {}\n');
       File(
@@ -625,16 +754,29 @@ class _Fixture {
   }
 
   final Directory directory;
+  final List<String> projectNames;
   final auth = AuthStore();
   final settings = SettingsStore();
   final runner = _LiveRunner();
   late final ProjectStore store;
 
-  Future<void> mount(WidgetTester tester, {bool standalone = false}) async {
-    tester.view.physicalSize = const Size(1100, 850);
+  Future<void> mount(
+    WidgetTester tester, {
+    bool standalone = false,
+    Size size = const Size(1100, 850),
+    FakeViewPadding padding = const FakeViewPadding(),
+    double textScale = 1,
+  }) async {
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
+    tester.view.padding = padding;
+    tester.view.viewPadding = padding;
+    tester.platformDispatcher.textScaleFactorTestValue = textScale;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPadding);
+    addTearDown(tester.view.resetViewPadding);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       await runner.finish();
@@ -670,8 +812,9 @@ class _Fixture {
     });
     await tester.runAsync(() async {
       await store.load();
-      await store.addExisting(p.join(directory.path, 'Alpha'));
-      await store.addExisting(p.join(directory.path, 'Beta'));
+      for (final name in projectNames) {
+        await store.addExisting(p.join(directory.path, name));
+      }
     });
     StudioProfile.current = StudioProfile(
       id: 'java',
