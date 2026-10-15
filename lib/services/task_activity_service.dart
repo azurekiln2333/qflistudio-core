@@ -10,6 +10,7 @@ import '../community/models.dart';
 import '../store/auth_store.dart';
 import 'api_client.dart';
 import 'app_paths.dart';
+import 'studio_profile.dart';
 
 class _PendingTaskEvent {
   const _PendingTaskEvent(this.id, this.userId, this.day, this.key);
@@ -228,7 +229,9 @@ class TaskActivityService extends ChangeNotifier {
     _dailyCounts[dailyKey] = (_dailyCounts[dailyKey] ?? 0) + 1;
     final totalKey = '$userId|$key';
     _totalCounts[totalKey] = (_totalCounts[totalKey] ?? 0) + 1;
-    if (auth.token != null && auth.user != null) {
+    if (StudioProfile.current?.offlineOnly != true &&
+        auth.token != null &&
+        auth.user != null) {
       final random = Random.secure();
       final id =
           'event_${List<int>.generate(16, (_) => random.nextInt(256)).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join()}';
@@ -240,6 +243,7 @@ class TaskActivityService extends ChangeNotifier {
       _lastError = '本地操作缓存保存失败：${error.message}';
     }
     notifyListeners();
+    if (StudioProfile.current?.offlineOnly == true) return;
     unawaited(
       syncPending(auth).catchError((Object error) {
         _lastError = '操作同步失败：$error';
@@ -250,6 +254,7 @@ class TaskActivityService extends ChangeNotifier {
 
   Future<void> syncPending(AuthStore auth, {bool force = false}) async {
     await initialize();
+    if (StudioProfile.current?.offlineOnly == true) return;
     final token = auth.token;
     final userId = auth.user?.id;
     if (token == null || userId == null) return;
@@ -257,7 +262,9 @@ class TaskActivityService extends ChangeNotifier {
       return;
     }
     _syncQueue = _syncQueue.catchError((Object _) {}).then((_) async {
-      while (auth.token == token && auth.user?.id == userId) {
+      while (StudioProfile.current?.offlineOnly != true &&
+          auth.token == token &&
+          auth.user?.id == userId) {
         final index = _pending.indexWhere((event) => event.userId == userId);
         if (index < 0) return;
         final event = _pending[index];
@@ -301,6 +308,7 @@ class TaskActivityService extends ChangeNotifier {
 
   Future<void> refreshIfDue(AuthStore auth, {bool force = false}) async {
     await initialize();
+    if (StudioProfile.current?.offlineOnly == true) return;
     final token = auth.token;
     final userId = auth.user?.id;
     if (token == null || userId == null) return;
@@ -327,9 +335,11 @@ class TaskActivityService extends ChangeNotifier {
     bool force,
   ) async {
     try {
+      if (StudioProfile.current?.offlineOnly == true) return;
       if (_pending.any((event) => event.userId == userId)) {
         await syncPending(auth, force: true);
       }
+      if (StudioProfile.current?.offlineOnly == true) return;
       if (!force && _fetchedDays[userId] == today && _snapshots[userId] != null) {
         return;
       }

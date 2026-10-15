@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../services/studio_profile.dart';
 import '../theme/app_theme.dart';
 import 'key_cap.dart';
 
@@ -221,7 +222,11 @@ class ShortcutBar extends StatelessWidget {
                   : Icons.keyboard_arrow_up_rounded,
               selected: expanded,
               onTap: () => onExpandedChanged(!expanded),
-              tooltip: expanded ? '收起扩展按键' : '展开符号、常用命令与网络工具',
+              tooltip: expanded
+                  ? '收起扩展按键'
+                  : StudioProfile.current?.offlineOnly == true
+                  ? '展开符号与常用命令'
+                  : '展开符号、常用命令与网络工具',
               minWidth: 0,
               flat: flat,
             ),
@@ -386,6 +391,7 @@ class ShortcutBar extends StatelessWidget {
 
   Widget _buildExpandedPanel(BuildContext context) {
     final showCtrlLetters = ctrlActive || altActive;
+    final offlineOnly = StudioProfile.current?.offlineOnly == true;
 
     // Shorter in flat mode: the panel rides directly above the software
     // keyboard, so it has to leave the canvas most of the screen. What the
@@ -424,30 +430,33 @@ class ShortcutBar extends StatelessWidget {
               ]),
               const SizedBox(height: 14),
             ],
-            _label(context, '网络工具'),
-            _wrap(<Widget>[
-              for (final entry in _networkCommands)
-                KeyCap(
-                  flat: flat,
-                  label: entry.command,
-                  dense: true,
-                  minWidth: 0,
-                  onTap: () => onText('${entry.command} '),
-                  tooltip: '${entry.hint}（点击填入）',
-                ),
-            ]),
-            const SizedBox(height: 14),
+            if (!offlineOnly) ...<Widget>[
+              _label(context, '网络工具'),
+              _wrap(<Widget>[
+                for (final entry in _networkCommands)
+                  KeyCap(
+                    flat: flat,
+                    label: entry.command,
+                    dense: true,
+                    minWidth: 0,
+                    onTap: () => onText('${entry.command} '),
+                    tooltip: '${entry.hint}（点击填入）',
+                  ),
+              ]),
+              const SizedBox(height: 14),
+            ],
             _label(context, '常用命令'),
             _wrap(<Widget>[
               for (final entry in _quickCommands)
-                KeyCap(
-                  flat: flat,
-                  label: entry.command,
-                  dense: true,
-                  minWidth: 0,
-                  onTap: () => onText(entry.command),
-                  tooltip: '${entry.hint}（点击填入）',
-                ),
+                if (!offlineOnly || entry.command != 'git status')
+                  KeyCap(
+                    flat: flat,
+                    label: entry.command,
+                    dense: true,
+                    minWidth: 0,
+                    onTap: () => onText(entry.command),
+                    tooltip: '${entry.hint}（点击填入）',
+                  ),
             ]),
             const SizedBox(height: 14),
             _label(context, '符号'),

@@ -45,6 +45,7 @@ class _ProfileTabState extends State<ProfileTab> {
   int _avatarRevision = 0;
 
   Future<void> _refresh() async {
+    if (StudioProfile.current?.offlineOnly == true) return;
     await widget.auth.refreshMe();
     if (mounted) setState(() => _avatarRevision++);
   }

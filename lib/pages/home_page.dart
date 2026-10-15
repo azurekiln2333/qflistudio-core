@@ -321,7 +321,7 @@ class _HomeTabState extends State<HomeTab>
     super.initState();
     _loggedIn = widget.auth.isLoggedIn;
     widget.auth.addListener(_onAuthChanged);
-    if (_loggedIn) {
+    if (_loggedIn && StudioProfile.current?.offlineOnly != true) {
       unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
     }
   }
@@ -340,7 +340,7 @@ class _HomeTabState extends State<HomeTab>
     final loggedIn = widget.auth.isLoggedIn;
     if (mounted && loggedIn != _loggedIn) {
       setState(() => _loggedIn = loggedIn);
-      if (loggedIn) {
+      if (loggedIn && StudioProfile.current?.offlineOnly != true) {
         unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
       }
     }
