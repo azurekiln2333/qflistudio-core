@@ -346,6 +346,12 @@ void main() {
       () async {
         final store = ProjectStore();
         addTearDown(store.dispose);
+        final project = Project.create(
+          name: 'Existing',
+          path: directory.path,
+          type: 'dart',
+          language: 'Dart',
+        );
         for (final name in [
           '',
           '.',
@@ -356,10 +362,39 @@ void main() {
           'bad\u0000.dart',
           'NUL.dart',
           'entry.dart.',
+          ' padded.dart',
+          'padded.dart ',
+          '\tpadded.dart',
+          'padded.dart\n',
+          '\u00a0padded.dart',
+          'padded.dart\u3000',
         ]) {
           expect(
             CodeImportService.isValidFileName(name),
             isFalse,
+            reason: name,
+          );
+          expect(
+            () => CodeImportService.resolveImport(_example, name),
+            throwsA(_importFailure(CodeImportFailure.invalidFileName)),
+            reason: name,
+          );
+          await expectLater(
+            CodeImportService.openInEditor(
+              example: _example,
+              fileName: name,
+              location: directory.path,
+            ),
+            throwsA(_importFailure(CodeImportFailure.invalidFileName)),
+            reason: name,
+          );
+          await expectLater(
+            CodeImportService.importIntoProject(
+              project: project,
+              example: _example,
+              fileName: name,
+            ),
+            throwsA(_importFailure(CodeImportFailure.invalidFileName)),
             reason: name,
           );
           await expectLater(
@@ -376,6 +411,32 @@ void main() {
         expect(directory.listSync(), isEmpty);
       },
     );
+
+    test('non-Java imports preserve valid exact filenames and code', () async {
+      const name = 'Mixed Case Entry.dart';
+      final resolved = CodeImportService.resolveImport(_example, name);
+      expect(resolved.fileName, name);
+      expect(resolved.code, _exampleCode);
+      final snippet = await CodeImportService.openInEditor(
+        example: _example,
+        fileName: name,
+        location: directory.path,
+      );
+      expect(p.basename(snippet.path), name);
+      expect(await File(snippet.path).readAsString(), _exampleCode);
+      final imported = await CodeImportService.importIntoProject(
+        project: Project.create(
+          name: 'Existing',
+          path: directory.path,
+          type: 'dart',
+          language: 'Dart',
+        ),
+        example: _example,
+        fileName: name,
+      );
+      expect(imported.path, p.join(directory.path, 'src', name));
+      expect(await File(imported.path).readAsString(), _exampleCode);
+    });
 
     test(
       'conflicts preserve files and explicit replacement changes only the target',

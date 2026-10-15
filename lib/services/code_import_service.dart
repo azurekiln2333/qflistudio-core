@@ -128,8 +128,8 @@ abstract final class CodeImportService {
     String rawName,
   ) {
     if (!isJavaType(example.type)) {
-      _validateFileName(rawName.trim());
-      return (fileName: rawName.trim(), code: example.code);
+      _validateFileName(rawName);
+      return (fileName: rawName, code: example.code);
     }
     final className = normalizeClassNameInput(rawName);
     final fileName = javaFileNameForClass(className);
