@@ -20,6 +20,9 @@ import '../widgets/settings_section.dart';
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
 import '../editor/editor_fonts.dart';
+import 'about_page.dart' show showQfliAbout;
+
+export 'about_page.dart' show showQfliAbout;
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -347,21 +350,4 @@ class _SettingsPageState extends State<SettingsPage> {
     final base = await AppPaths.storageDirectory();
     return base == null ? null : p.join(base, FileBackup.dirName);
   }
-}
-
-void showQfliAbout(BuildContext context) {
-  final profile = StudioProfile.current;
-  showAboutDialog(
-    context: context,
-    applicationName: profile?.appTitle ?? StudioProductCatalog.qfliStudio,
-    applicationVersion: '1.0.0',
-    applicationIcon: const Icon(Icons.code_rounded, size: 40),
-    children: [
-      Text(
-        profile?.offlineOnly == true
-            ? '离线代码编辑器。管理本地项目，编写代码，学习教程与示例。'
-            : '轻量代码编辑器与开发者社区。管理项目，编写代码，分享你的经验。',
-      ),
-    ],
-  );
 }
