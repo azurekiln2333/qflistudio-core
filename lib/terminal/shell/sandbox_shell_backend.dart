@@ -337,6 +337,9 @@ $label 终端（应用内沙盒）
         (line) => emitLine(line, OutputKind.stderr),
         onError: (Object error) => emitLine('$error', OutputKind.stderr),
       ).asFuture<void>();
+      // A toolchain can prepare asynchronously before handing over its streams.
+      // Preserve an interrupt received while no active cancel callback existed.
+      if (cancelRequested && cancel != null) await cancel();
       await Future.wait<void>([outDone, errDone]);
       final code = await exitCode;
       if (!cancelRequested) lastExitCode = code;

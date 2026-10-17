@@ -194,6 +194,56 @@ void main() {
       expect(h.backend.lastExitCode, 3);
     });
 
+    test('interrupt during delegate preparation cancels the later run', () async {
+      final preparing = Completer<void>();
+      final prepared = Completer<void>();
+      final exitCode = Completer<int>();
+      var cancelCalls = 0;
+      final h = _Harness(
+        appData.path,
+        start: appData.path,
+        delegate: (backend, command) async {
+          if (command != 'java Main') return false;
+          preparing.complete();
+          await prepared.future;
+          await backend.runStreams(
+            title: 'java Main',
+            stdout: Stream<String>.value('started'),
+            stderr: const Stream<String>.empty(),
+            exitCode: exitCode.future,
+            cancel: () async {
+              cancelCalls++;
+              exitCode.complete(130);
+            },
+          );
+          return true;
+        },
+      );
+      addTearDown(h.dispose);
+      final running = h.backend.execute('java Main');
+      try {
+        await preparing.future.timeout(const Duration(seconds: 2));
+        expect(h.backend.busy, isTrue);
+        await h.backend.interrupt();
+        expect(cancelCalls, 0, reason: 'the process is not attached yet');
+
+        prepared.complete();
+        await running.timeout(const Duration(seconds: 2));
+        expect(cancelCalls, 1);
+        expect(h.out, contains('started'));
+        expect(h.err, isEmpty);
+        expect(h.backend.busy, isFalse);
+        expect(h.backend.lastExitCode, isNull);
+        await h.run('echo ready-after-stop');
+        expect(h.out, contains('ready-after-stop'));
+      } finally {
+        // Release the fake process even when a regression leaves it uncancelled.
+        if (!prepared.isCompleted) prepared.complete();
+        if (!exitCode.isCompleted) exitCode.complete(0);
+        await running;
+      }
+    });
+
     test('unknown system command without a delegate reports honestly', () async {
       final h = _Harness(appData.path, start: appData.path);
       addTearDown(h.dispose);
