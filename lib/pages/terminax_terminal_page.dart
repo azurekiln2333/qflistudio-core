@@ -343,11 +343,6 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
             onPressed: _newSession,
             icon: const Icon(Icons.add),
           ),
-          IconButton(
-            tooltip: l10n.close,
-            onPressed: () => Navigator.of(context).maybePop(),
-            icon: const Icon(Icons.close),
-          ),
         ],
       ),
       body: FutureBuilder<String?>(

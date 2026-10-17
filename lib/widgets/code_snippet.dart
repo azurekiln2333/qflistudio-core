@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../editor/editor_fonts.dart';
@@ -38,6 +39,10 @@ class CodeSnippet extends StatefulWidget {
 }
 
 class _CodeSnippetState extends State<CodeSnippet> {
+  final _codeFocusNode = FocusNode();
+  final _codeFieldKey = GlobalKey();
+  ScrollPosition? _ancestorScrollPosition;
+  bool _visibilityCheckScheduled = false;
   bool _importing = false;
 
   /// Per-block run controller. Null when the run panel has never been opened.
@@ -47,7 +52,41 @@ class _CodeSnippetState extends State<CodeSnippet> {
       widget.store != null && widget.auth != null && widget.settings != null;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final position = Scrollable.maybeOf(context)?.position;
+    if (identical(position, _ancestorScrollPosition)) return;
+    _ancestorScrollPosition?.removeListener(_scheduleVisibilityCheck);
+    _ancestorScrollPosition = position;
+    position?.addListener(_scheduleVisibilityCheck);
+  }
+
+  void _scheduleVisibilityCheck() {
+    if (!_codeFocusNode.hasFocus || _visibilityCheckScheduled) return;
+    _visibilityCheckScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _visibilityCheckScheduled = false;
+      if (!mounted || !_codeFocusNode.hasFocus) return;
+      final field = _codeFieldKey.currentContext?.findRenderObject();
+      if (field is! RenderBox || !field.attached || !field.hasSize) return;
+      final viewport = RenderAbstractViewport.maybeOf(field);
+      if (viewport == null) return;
+      final bounds = MatrixUtils.transformRect(
+        field.getTransformTo(viewport),
+        Offset.zero & field.size,
+      );
+      // A retained, unpainted ListView child has a zero paint transform, which
+      // produces non-finite bounds instead of an ordinary offscreen rectangle.
+      if (!bounds.isFinite || !bounds.overlaps(viewport.paintBounds)) {
+        _codeFocusNode.unfocus();
+      }
+    });
+  }
+
+  @override
   void dispose() {
+    _ancestorScrollPosition?.removeListener(_scheduleVisibilityCheck);
+    _codeFocusNode.dispose();
     _runController?.removeListener(_onRunChanged);
     unawaited(_runController?._disposeAsync() ?? Future<void>.value());
     super.dispose();
@@ -144,7 +183,10 @@ class _CodeSnippetState extends State<CodeSnippet> {
             SizedBox(
               height: 360,
               child: TextField(
+                key: _codeFieldKey,
                 controller: widget.controller,
+                focusNode: _codeFocusNode,
+                onTapOutside: (_) => _codeFocusNode.unfocus(),
                 expands: true,
                 minLines: null,
                 maxLines: null,
@@ -181,6 +223,7 @@ class _CodeSnippetState extends State<CodeSnippet> {
   }
 
   Future<void> _copy() async {
+    _codeFocusNode.unfocus();
     await Clipboard.setData(ClipboardData(text: _code));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
