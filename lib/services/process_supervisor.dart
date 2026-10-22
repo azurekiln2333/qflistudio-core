@@ -1,6 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'process_identity_stub.dart'
+    if (dart.library.ffi) 'process_identity_ffi.dart'
+    as process_identity;
+
 /// Starts a process for [ProcessSupervisor].
 ///
 /// Keeping process creation behind this callback lets tests provide a fake
@@ -32,11 +36,13 @@ class ProcessSupervisor {
   }) : _processStarter = processStarter ?? _startProcess,
        _windowsProcessTreeTerminator =
            windowsProcessTreeTerminator ?? _terminateWindowsProcessTree,
-       _isWindows = isWindows ?? Platform.isWindows;
+       _isWindows = isWindows ?? Platform.isWindows,
+       _captureLinuxTree = processStarter == null && Platform.isLinux;
 
   final ProcessStarter _processStarter;
   final WindowsProcessTreeTerminator _windowsProcessTreeTerminator;
   final bool _isWindows;
+  final bool _captureLinuxTree;
   final Set<ManagedProcess> _processes = <ManagedProcess>{};
   bool _disposed = false;
 
@@ -65,6 +71,7 @@ class ProcessSupervisor {
     late final ManagedProcess managedProcess;
     managedProcess = ManagedProcess._(
       windows: _isWindows,
+      captureLinuxTree: _captureLinuxTree,
       windowsProcessTreeTerminator: _windowsProcessTreeTerminator,
       onCleanup: () => _processes.remove(managedProcess),
     );
@@ -133,13 +140,16 @@ class ProcessSupervisor {
 class ManagedProcess {
   ManagedProcess._({
     required bool windows,
+    required bool captureLinuxTree,
     required WindowsProcessTreeTerminator windowsProcessTreeTerminator,
     required void Function() onCleanup,
   }) : _windows = windows,
+       _captureLinuxTree = captureLinuxTree,
        _windowsProcessTreeTerminator = windowsProcessTreeTerminator,
        _onCleanup = onCleanup;
 
   final bool _windows;
+  final bool _captureLinuxTree;
   final WindowsProcessTreeTerminator _windowsProcessTreeTerminator;
   final void Function() _onCleanup;
   final Completer<Process> _processReady = Completer<Process>();
@@ -152,6 +162,7 @@ class ManagedProcess {
       StreamController<List<int>>.broadcast();
 
   Process? _process;
+  _LinuxProcessTree? _linuxTree;
   StreamSubscription<List<int>>? _stdoutSubscription;
   StreamSubscription<List<int>>? _stderrSubscription;
   Future<void>? _cancelFuture;
@@ -185,6 +196,9 @@ class ManagedProcess {
       throw StateError('ManagedProcess is already attached');
     }
     _process = process;
+    if (!_windows && _captureLinuxTree) {
+      _linuxTree = _LinuxProcessTree.capture(process.pid);
+    }
     _processReady.complete(process);
 
     _stdoutSubscription = process.stdout.listen(
@@ -248,9 +262,19 @@ class ManagedProcess {
     }
 
     try {
-      await process.stdin.close();
+      final closed = process.stdin.close();
+      if (_windows) {
+        await closed;
+      } else {
+        await closed.timeout(_terminationGrace);
+      }
     } catch (_) {
       // A process can close stdin concurrently while it is being cancelled.
+    }
+
+    if (!_windows) {
+      await _cancelPosix(process);
+      return;
     }
 
     var treeTerminated = false;
@@ -275,16 +299,107 @@ class ManagedProcess {
     }
   }
 
+  static const _terminationGrace = Duration(milliseconds: 500);
+  static const _forcedExitTimeout = Duration(seconds: 2);
+
+  Future<void> _cancelPosix(Process process) async {
+    final tree = _linuxTree;
+    if (tree != null) {
+      // Stop known parents while discovering children, so they cannot fork a
+      // new child between enumeration and acquisition of its identity handle.
+      try {
+        await tree.freezeAndCollect();
+        tree.signalDescendants(ProcessSignal.sigterm);
+      } finally {
+        tree.resumeAll();
+      }
+      // Let a waiting shell reap terminated children and flush its final output
+      // before terminating that shell. Retain handles to children that ignore
+      // TERM, even if their parent exits and they are reparented.
+      await _waitUntil(() => !tree.hasLiveDescendants, _terminationGrace);
+      if (tree.hasLiveDescendants) {
+        try {
+          await tree.freezeAndCollect();
+          tree.signalDescendants(ProcessSignal.sigkill);
+        } finally {
+          tree.resumeAll();
+        }
+        await _waitUntil(() => !tree.hasLiveDescendants, _forcedExitTimeout);
+        // Give a waiting parent a chance to reap a stubborn child before TERM
+        // reaches the parent; its normal wait/exit path also drains final text.
+        await _waitForExitWithin(process, const Duration(milliseconds: 200));
+      }
+      try {
+        await tree.freezeAndCollect();
+        tree.signalDescendants(ProcessSignal.sigterm);
+        tree.signalRoot(ProcessSignal.sigterm);
+      } finally {
+        tree.resumeAll();
+      }
+    } else {
+      process.kill(ProcessSignal.sigterm);
+    }
+
+    final exited = await _waitForExitWithin(process, _terminationGrace);
+    if (!exited || (tree?.hasLiveDescendants ?? false)) {
+      if (tree != null) {
+        try {
+          await tree.freezeAndCollect();
+          tree.signalDescendants(ProcessSignal.sigkill);
+          tree.signalRoot(ProcessSignal.sigkill);
+        } finally {
+          tree.resumeAll();
+        }
+      } else {
+        process.kill(ProcessSignal.sigkill);
+      }
+    }
+
+    final code = await process.exitCode.timeout(_forcedExitTimeout);
+    if (tree != null &&
+        !await _waitUntil(() => !tree.hasLiveDescendants, _forcedExitTimeout)) {
+      throw TimeoutException('Owned process descendants did not exit');
+    }
+    // Killing only the parent used to either leave inherited pipes open forever
+    // or cancel the subscriptions before buffered final output was delivered.
+    await _waitForStreams().timeout(_forcedExitTimeout);
+    await _cleanup();
+    if (!_exitCode.isCompleted) _exitCode.complete(code);
+  }
+
+  static Future<bool> _waitForExitWithin(
+    Process process,
+    Duration timeout,
+  ) async {
+    try {
+      await process.exitCode.timeout(timeout);
+      return true;
+    } on TimeoutException {
+      return false;
+    }
+  }
+
   Future<void> _observeExit(Process process) async {
     try {
       final code = await process.exitCode;
+      if (!_cancelling) await _waitForStreams();
+      // Cancellation can begin while natural exit is waiting for inherited
+      // pipes. Recheck after that await before releasing any identity handles.
       if (_cancelling) {
-        await (_cancelFuture ?? Future<void>.value());
-      } else {
-        await _waitForStreams();
-        await _cleanup();
-        if (!_exitCode.isCompleted) _exitCode.complete(code);
+        try {
+          await (_cancelFuture ?? Future<void>.value());
+          return;
+        } catch (_) {
+          // A bounded cancellation failure is not proof of cleanup. Keep
+          // observing the owned descendants and pipes until they really close.
+          while (_linuxTree?.hasLiveDescendants ?? false) {
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+          }
+          await _waitForStreams();
+        }
       }
+      await _cleanup();
+      if (!_exitCode.isCompleted) _exitCode.complete(code);
     } catch (error, stackTrace) {
       if (!_cancelling) await _waitForStreams();
       await _cleanup();
@@ -309,6 +424,7 @@ class ManagedProcess {
       _closeController(_stdoutController),
       _closeController(_stderrController),
     ]);
+    _linuxTree?.close();
     _onCleanup();
   }
 
@@ -344,6 +460,177 @@ class ManagedProcess {
   static Future<void> _closeController(
     StreamController<List<int>> controller,
   ) => controller.close();
+}
+
+Future<bool> _waitUntil(bool Function() condition, Duration timeout) async {
+  final elapsed = Stopwatch()..start();
+  while (!condition()) {
+    if (elapsed.elapsed >= timeout) return false;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  return true;
+}
+
+class _LinuxProcIdentity {
+  _LinuxProcIdentity(this.parentPid, this.startTime, this.state);
+
+  final int parentPid;
+  final String startTime;
+  final String state;
+
+  static _LinuxProcIdentity? read(int pid) {
+    try {
+      final stat = File('/proc/$pid/stat').readAsStringSync();
+      // comm may contain spaces and parentheses; fields after its final ')'
+      // start at field 3 (state). starttime is field 22, not a wall clock.
+      final end = stat.lastIndexOf(')');
+      if (end < 0) return null;
+      final fields = stat.substring(end + 1).trim().split(RegExp(r'\s+'));
+      if (fields.length < 20) return null;
+      final parentPid = int.tryParse(fields[1]);
+      if (parentPid == null) return null;
+      return _LinuxProcIdentity(parentPid, fields[19], fields[0]);
+    } on FileSystemException {
+      return null;
+    }
+  }
+}
+
+class _LinuxOwnedProcess {
+  _LinuxOwnedProcess(this.pid, this.handle, this.startTime);
+
+  final int pid;
+  final process_identity.ProcessIdentityHandle handle;
+  final String startTime;
+  bool frozen = false;
+
+  static _LinuxOwnedProcess? capture(int pid, {int? parentPid}) {
+    final before = _LinuxProcIdentity.read(pid);
+    if (before == null ||
+        (parentPid != null && before.parentPid != parentPid)) {
+      return null;
+    }
+    final handle = process_identity.ProcessIdentityHandle.tryOpen(pid);
+    if (handle == null) return null;
+    final after = _LinuxProcIdentity.read(pid);
+    if (after == null ||
+        after.startTime != before.startTime ||
+        (parentPid != null && after.parentPid != parentPid)) {
+      handle.close();
+      return null;
+    }
+    return _LinuxOwnedProcess(pid, handle, before.startTime);
+  }
+
+  _LinuxProcIdentity? get identity {
+    // The pinned task must still exist: a recycled numeric PID can never make
+    // an exited pidfd look like a new live parent during later discovery.
+    if (!handle.sendSignal(0)) return null;
+    final current = _LinuxProcIdentity.read(pid);
+    return current?.startTime == startTime ? current : null;
+  }
+
+  bool get isAlive {
+    final current = identity;
+    return current != null && current.state != 'Z' && current.state != 'X';
+  }
+
+  bool send(ProcessSignal signal) => handle.sendSignal(signal.signalNumber);
+
+  Future<void> freeze() async {
+    if (!isAlive) return;
+    if (!send(ProcessSignal.sigstop)) {
+      if (isAlive) throw StateError('Cannot stop owned process for inspection');
+      return;
+    }
+    frozen = true;
+    if (!await _waitUntil(() {
+      final current = identity;
+      return !isAlive || current?.state == 'T' || current?.state == 't';
+    }, const Duration(milliseconds: 200))) {
+      throw TimeoutException('Owned process did not stop for tree inspection');
+    }
+  }
+}
+
+class _LinuxProcessTree {
+  _LinuxProcessTree(this.root) : owned = {root.pid: root};
+
+  final _LinuxOwnedProcess root;
+  final Map<int, _LinuxOwnedProcess> owned;
+
+  static _LinuxProcessTree? capture(int rootPid) {
+    final root = _LinuxOwnedProcess.capture(rootPid, parentPid: pid);
+    return root == null ? null : _LinuxProcessTree(root);
+  }
+
+  bool get hasLiveDescendants =>
+      owned.values.any((process) => process != root && process.isAlive);
+
+  Future<void> freezeAndCollect() async {
+    final queue = owned.values.toList();
+    for (var index = 0; index < queue.length; index++) {
+      final parent = queue[index];
+      await parent.freeze();
+      if (!parent.isAlive) continue;
+      // SIGSTOP suspends the process's entire thread group. Read every task's
+      // children list: a fork need not originate from the main thread.
+      final tasks = Directory('/proc/${parent.pid}/task');
+      try {
+        for (final task in tasks.listSync(followLinks: false)) {
+          final children = File('${task.path}/children').readAsStringSync();
+          for (final value in children.trim().split(RegExp(r'\s+'))) {
+            final pid = int.tryParse(value);
+            if (pid == null || pid <= 0 || owned.containsKey(pid)) continue;
+            if (owned.length >= 512) {
+              throw StateError('Owned process tree exceeds 512 processes');
+            }
+            final child = _LinuxOwnedProcess.capture(
+              pid,
+              parentPid: parent.pid,
+            );
+            if (child != null) {
+              owned[pid] = child;
+              queue.add(child);
+            } else {
+              final current = _LinuxProcIdentity.read(pid);
+              if (current?.parentPid == parent.pid &&
+                  current?.state != 'Z' &&
+                  current?.state != 'X') {
+                throw StateError('Cannot acquire owned descendant identity');
+              }
+            }
+          }
+        }
+      } on FileSystemException {
+        if (parent.isAlive) rethrow;
+      }
+    }
+  }
+
+  void signalDescendants(ProcessSignal signal) {
+    for (final process in owned.values.toList().reversed) {
+      if (process != root) process.send(signal);
+    }
+  }
+
+  void signalRoot(ProcessSignal signal) => root.send(signal);
+
+  void resumeAll() {
+    for (final process in owned.values.toList().reversed) {
+      if (process.frozen) {
+        process.send(ProcessSignal.sigcont);
+        process.frozen = false;
+      }
+    }
+  }
+
+  void close() {
+    for (final process in owned.values) {
+      process.handle.close();
+    }
+    owned.clear();
+  }
 }
 
 Future<Process> _startProcess(
