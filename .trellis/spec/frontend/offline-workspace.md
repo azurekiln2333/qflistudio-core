@@ -57,6 +57,9 @@ by the existing live editor host, not by history.json.
 | File creation/deletion under a secondary root | Use that root; deletion first creates its correctly attributed recycle-bin backup. |
 | Create inside a collapsed directory | After restoration, expand and persist the parent before showing the new entry. |
 | Editor closes during backed-up deletion | Finish the authorized filesystem operation; skip disposed editor/UI callbacks. |
+| Run with a secondary-root tab active | Capture that owner before awaiting saves; use its configured entry, working directory, preview root and audit identity. |
+| Another workspace root has dirty or unsaveable files | Run saves only the selected owner's buffers; unrelated roots do not block execution. |
+| Long-press Run | Validate the selected file against its lexical and physical owner root before saving; never fall back to another entry. |
 
 ## 5. Good, base and bad cases
 
@@ -77,6 +80,9 @@ directory links are supported. Scope tree finders to the explorer: a dialog's
 editable text can otherwise falsely satisfy a newly-created entry check. Drain
 queued fake-time history continuations by pumping while allowing real IO to run;
 do not await those continuations inside `tester.runAsync`.
+`editor_run_test.dart` additionally exercises secondary-root tap/long-press,
+switching back to the primary root, owner capture across asynchronous saves and
+tab switches, unrelated save failures and HTML preview factory dispatch.
 
 ## 7. Wrong versus correct
 

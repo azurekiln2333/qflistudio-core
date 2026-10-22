@@ -8,10 +8,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/editor/editor_page.dart';
+import 'package:qfli_studio_core/editor/editor_controller.dart';
+import 'package:qfli_studio_core/editor/editor_problems_bar.dart';
 import 'package:qfli_studio_core/editor/terminal_pane.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/services/project_config.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
+import 'package:qfli_studio_core/services/web_preview_file.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
@@ -87,6 +90,110 @@ void main() {
     expect(fixture.source('Main2.java').readAsStringSync(), secondEdit);
   });
 
+  testWidgets(
+    'secondary-root tap and long press use its entry and working directory',
+    (tester) async {
+      await fixture.mount(tester);
+      final editor = fixture.editor(tester);
+      final secondary = await fixture.openSecondary(tester);
+      const edited = 'class Main2 { /* secondary unsaved source */ }\r\n';
+      editor.current!.controller.text = edited;
+      await tester.pump();
+
+      await tester.tap(find.byTooltip(_runTooltip));
+      await _waitForRun(tester, fixture.runner, 1);
+      await tester.longPress(find.byTooltip(_runTooltip));
+      await _waitForRun(tester, fixture.runner, 2);
+      expect(fixture.runner.roots, [secondary.path, secondary.path]);
+      expect(fixture.runner.entries, [
+        p.join(secondary.path, 'Main.java'),
+        p.join(secondary.path, 'Main2.java'),
+      ]);
+      expect(fixture.runner.savedSources.first['Main2.java'], edited);
+
+      editor.select(0);
+      await tester.pump();
+      await tester.tap(find.byTooltip(_runTooltip));
+      await _waitForRun(tester, fixture.runner, 3);
+      expect(fixture.runner.roots.last, fixture.project.path);
+      expect(fixture.runner.entries.last, fixture.source('Main.java').path);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('running secondary root does not save or fail on another root', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final primary = fixture.editor(tester).current!;
+    primary.controller.text = 'class Main2 { /* leave primary dirty */ }';
+    fixture.source('Main2.java').deleteSync();
+    Directory(primary.path).createSync();
+    final secondary = await fixture.openSecondary(tester);
+
+    await tester.tap(find.byTooltip(_runTooltip));
+    await _waitForRun(tester, fixture.runner, 1);
+    expect(fixture.runner.roots.single, secondary.path);
+    expect(primary.dirty, isTrue);
+    expect(Directory(primary.path).existsSync(), isTrue);
+  });
+
+  testWidgets(
+    'run captures secondary owner before an asynchronous save and tab switch',
+    (tester) async {
+      await fixture.mount(tester);
+      final secondary = await fixture.openSecondary(tester);
+      final editor = fixture.editor(tester);
+      final saving = Completer<String?>();
+      editor.current!.pendingSave = saving.future;
+      await tester.tap(find.byTooltip(_runTooltip));
+      await tester.pump();
+      editor.select(0);
+      await tester.pump();
+      saving.complete(null);
+
+      await _waitForRun(tester, fixture.runner, 1);
+      expect(fixture.runner.roots.single, secondary.path);
+      expect(
+        fixture.runner.entries.single,
+        p.join(secondary.path, 'Main.java'),
+      );
+    },
+  );
+
+  testWidgets('secondary HTML preview factory receives the active owner root', (
+    tester,
+  ) async {
+    final previewRoots = <String>[];
+    final previewEntries = <String>[];
+    StudioProfile.current = StudioProfile(
+      id: 'preview-owner-test',
+      appTitle: 'Preview owner',
+      templates: const [],
+      offlineOnly: true,
+      entryFileNames: const ['index.html'],
+      supportedFileExtensions: const ['.html'],
+      webPreviewFactory: (root) async {
+        previewRoots.add(root);
+        return _RecordingPreview(previewEntries);
+      },
+    );
+    await fixture.mount(tester);
+    final secondary = await fixture.openSecondary(tester, html: true);
+    await tester.tap(find.byTooltip(_runTooltip));
+    await _pumpIoUntil(tester, () => previewEntries.length == 1);
+    await tester.pump();
+    await tester.longPress(find.byTooltip(_runTooltip));
+    await _pumpIoUntil(tester, () => previewEntries.length == 2);
+    expect(previewRoots, [secondary.path, secondary.path]);
+    expect(previewEntries, [
+      p.join(secondary.path, 'custom.html'),
+      p.join(secondary.path, 'other.html'),
+    ]);
+    expect(fixture.runner.entries, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('deleted active file is rejected before save can recreate it', (
     tester,
   ) async {
@@ -159,6 +266,56 @@ void main() {
     );
 
     expect(fixture.runner.entries, isEmpty);
+  });
+
+  testWidgets('tap without an active tab uses the primary project entry', (
+    tester,
+  ) async {
+    await fixture.mount(tester, initialOpenPath: null);
+    await tester.tap(find.byTooltip(_runTooltip));
+    await _waitForRun(tester, fixture.runner, 1);
+    expect(fixture.runner.roots.single, fixture.project.path);
+    expect(fixture.runner.entries.single, fixture.source('Main.java').path);
+  });
+
+  testWidgets('tap rejects foreign owner metadata before saving any source', (
+    tester,
+  ) async {
+    final outside = File(p.join(fixture.directory.path, 'Outside.java'))
+      ..writeAsStringSync('class Outside {}');
+    await fixture.mount(tester, initialOpenPath: outside.path);
+    fixture.editor(tester).current!.controller.text = 'unsaved foreign edit';
+    await tester.tap(find.byTooltip(_runTooltip));
+    await _pumpIoUntil(
+      tester,
+      () => find.text('file is outside its project').evaluate().isNotEmpty,
+    );
+    expect(fixture.runner.entries, isEmpty);
+    expect(outside.readAsStringSync(), 'class Outside {}');
+  });
+
+  testWidgets('tap and long press reject a physically escaping source link', (
+    tester,
+  ) async {
+    final outside = File(p.join(fixture.directory.path, 'Outside.java'))
+      ..writeAsStringSync('class Outside {}');
+    final link = Link(fixture.source('Linked.java').path);
+    link.createSync(outside.path);
+    await fixture.mount(tester, initialOpenPath: 'Linked.java');
+    fixture.editor(tester).current!.controller.text = 'unsaved linked edit';
+    await tester.tap(find.byTooltip(_runTooltip));
+    await _pumpIoUntil(
+      tester,
+      () => find.text('file is outside its project').evaluate().isNotEmpty,
+    );
+    await tester.longPress(find.byTooltip(_runTooltip));
+    await _pumpIoUntil(
+      tester,
+      () =>
+          find.text('active file is outside the project').evaluate().isNotEmpty,
+    );
+    expect(fixture.runner.entries, isEmpty);
+    expect(outside.readAsStringSync(), 'class Outside {}');
   });
 
   testWidgets('an empty extension list delegates to the profile runner', (
@@ -448,8 +605,25 @@ Future<void> _openTerminal(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 200));
 }
 
+class _RecordingPreview implements WebFilePreviewSession {
+  _RecordingPreview(this.entries);
+  final List<String> entries;
+  @override
+  String get url => 'http://127.0.0.1:8080/index.html';
+  @override
+  Stream<String> get debugStream => const Stream.empty();
+  @override
+  Future<void> stop() async {}
+  @override
+  String urlForFile(String absolutePath) {
+    entries.add(absolutePath);
+    throw StateError('preview entry recorded before browser launch');
+  }
+}
+
 class _RecordingRunner implements ProgramRunner {
   final entries = <String>[];
+  final roots = <String>[];
   final savedSources = <Map<String, String>>[];
   Future<int>? exitCode;
 
@@ -459,6 +633,7 @@ class _RecordingRunner implements ProgramRunner {
     required String entryFile,
   }) async {
     entries.add(entryFile);
+    roots.add(projectPath);
     savedSources.add({
       for (final file in Directory(projectPath).listSync().whereType<File>())
         p.basename(file.path): file.readAsStringSync(),
@@ -495,6 +670,39 @@ class _EditorFixture {
   late final Project project;
 
   File source(String name) => File(p.join(project.path, name));
+
+  EditorController editor(WidgetTester tester) => tester
+      .widget<EditorProblemsBar>(find.byType(EditorProblemsBar))
+      .analysis
+      .editor;
+
+  Future<Directory> openSecondary(
+    WidgetTester tester, {
+    bool html = false,
+  }) async {
+    final root = Directory(p.join(directory.path, 'secondary'))..createSync();
+    final entry = html ? 'custom.html' : 'Main.java';
+    final active = html ? 'other.html' : 'Main2.java';
+    File(
+      p.join(root.path, entry),
+    ).writeAsStringSync(html ? '<p>entry</p>' : 'class Main {}');
+    File(
+      p.join(root.path, active),
+    ).writeAsStringSync(html ? '<p>other</p>' : 'class Main2 {}\r\n');
+    final config = File(ProjectConfig.configPath(root.path));
+    config.parent.createSync(recursive: true);
+    config.writeAsStringSync(jsonEncode({'version': 1, 'entryFile': entry}));
+    await tester.runAsync(
+      () => editor(tester).openPath(
+        p.join(root.path, active),
+        ownerProjectName: 'secondary owner',
+        ownerProjectPath: root.path,
+        ownerProjectType: html ? 'web' : 'java',
+      ),
+    );
+    await tester.pump();
+    return root;
+  }
 
   void installProfile({
     List<String> supportedExtensions = const ['.java'],
