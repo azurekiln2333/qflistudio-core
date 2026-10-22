@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -7,6 +8,7 @@ import '../models/tutorial.dart';
 import 'app_paths.dart';
 import 'file_backup.dart';
 import 'file_service.dart';
+import 'example_input_fixtures.dart';
 import 'java_source_renamer.dart';
 import 'project_config.dart';
 import 'project_templates.dart';
@@ -31,6 +33,175 @@ class CodeImportException implements Exception {
 }
 
 abstract final class CodeImportService {
+  static final _projectWrites = <String, Future<void>>{};
+
+  /// Source plus validated fixtures, relative to the actual project root.
+  static Map<String, String> projectFiles({
+    required ExampleCode example,
+    required String entryFile,
+    String? code,
+  }) {
+    final source = entryFile.replaceAll('\\', '/');
+    try {
+      final fixtures = ExampleInputFixtures.files(example.inputFixtures);
+      final files = ExampleInputFixtures.files({source: code ?? example.code});
+      final identity = source.toLowerCase();
+      if (fixtures.keys.any(
+        (name) =>
+            name.toLowerCase() == identity ||
+            name.toLowerCase().startsWith('$identity/') ||
+            identity.startsWith('${name.toLowerCase()}/'),
+      )) {
+        throw const FormatException('Fixture conflicts with source');
+      }
+      return {...files, ...fixtures};
+    } on FormatException catch (error) {
+      throw CodeImportException(CodeImportFailure.invalidFileName, '$error');
+    }
+  }
+
+  /// All affected files, so a single replacement prompt includes stdin/data.
+  static List<String> destinationPaths({
+    required Project project,
+    required ExampleCode example,
+    required String fileName,
+  }) {
+    final resolved = resolveImport(example, fileName);
+    final source = destinationPath(
+      project: project,
+      example: example,
+      fileName: resolved.fileName,
+    );
+    return [
+      for (final name in projectFiles(
+        example: example,
+        entryFile: p.relative(source, from: project.path),
+        code: resolved.code,
+      ).keys)
+        p.join(project.path, name),
+    ];
+  }
+
+  static Future<T> _serialized<T>(
+    String root,
+    Future<T> Function() write,
+  ) async {
+    final key = p.normalize(p.absolute(root));
+    final previous = _projectWrites[key];
+    final done = Completer<void>();
+    _projectWrites[key] = done.future;
+    try {
+      if (previous != null) await previous;
+      return await write();
+    } finally {
+      done.complete();
+      if (identical(_projectWrites[key], done.future)) {
+        _projectWrites.remove(key);
+      }
+    }
+  }
+
+  static Future<void> _writeProjectFiles({
+    required String root,
+    required Map<String, String> files,
+    required String projectName,
+    bool overwrite = false,
+  }) => _serialized(root, () async {
+    final absoluteRoot = p.normalize(Directory(root).absolute.path);
+      if (!Directory(absoluteRoot).existsSync()) {
+        throw const CodeImportException(CodeImportFailure.projectUnavailable);
+      }
+    final originals = <String, List<int>?>{};
+    // Preflight the complete set before creating any source/data file or folder.
+    for (final name in files.keys) {
+      final path = p.normalize(p.join(absoluteRoot, name));
+      if (!p.isWithin(absoluteRoot, path)) {
+        throw const CodeImportException(CodeImportFailure.projectUnavailable);
+      }
+      var parent = p.dirname(path);
+      while (!p.equals(parent, absoluteRoot)) {
+        final type = FileSystemEntity.typeSync(parent, followLinks: false);
+        if (type == FileSystemEntityType.file) {
+          throw FileSystemException('Import parent is a file', parent);
+        }
+        if (type != FileSystemEntityType.notFound &&
+            type != FileSystemEntityType.directory) {
+          throw CodeImportException(
+            CodeImportFailure.projectUnavailable,
+            parent,
+          );
+        }
+        parent = p.dirname(parent);
+      }
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (type != FileSystemEntityType.notFound &&
+          (type != FileSystemEntityType.file || !overwrite)) {
+        throw CodeImportException(CodeImportFailure.fileExists, path);
+      }
+      originals[path] = type == FileSystemEntityType.file
+          ? await File(path).readAsBytes()
+          : null;
+    }
+    final written = <String>[];
+    final createdDirectories = <String>[];
+    try {
+      for (final entry in files.entries) {
+          final file = File(p.normalize(p.join(absoluteRoot, entry.key)));
+        final missing = <String>[];
+        var parent = file.parent.path;
+        while (!Directory(parent).existsSync()) {
+          missing.add(parent);
+          parent = p.dirname(parent);
+        }
+        for (final path in missing.reversed) {
+          await Directory(path).create();
+          createdDirectories.add(path);
+        }
+        // Check again after await; an import must never follow a new link.
+        final resolvedParent = file.parent.resolveSymbolicLinksSync();
+        final resolvedRoot = Directory(absoluteRoot).resolveSymbolicLinksSync();
+        if (!p.equals(resolvedRoot, resolvedParent) &&
+            !p.isWithin(resolvedRoot, resolvedParent)) {
+          throw const CodeImportException(CodeImportFailure.projectUnavailable);
+        }
+        await _writeFile(
+          file,
+          entry.value,
+          projectName: projectName,
+          overwrite: overwrite,
+        );
+        written.add(file.path);
+      }
+    } catch (error, stack) {
+      Object? rollbackError;
+      for (final path in written.reversed) {
+        try {
+          final bytes = originals[path];
+          if (bytes == null) {
+            await File(path).delete();
+          } else {
+            await File(path).writeAsBytes(bytes, flush: true);
+          }
+        } on Object catch (failure) {
+          rollbackError ??= failure;
+        }
+      }
+      for (final path in createdDirectories.reversed) {
+        try {
+          await Directory(path).delete();
+        } on FileSystemException {
+          // Only remove empty directories created by this import.
+        }
+      }
+      if (rollbackError != null) {
+        throw FileSystemException(
+          'Import failed ($error); rollback failed ($rollbackError)',
+          root,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+  });
   static final RegExp _controlCharacters = RegExp(r'[\x00-\x1f\x7f-\x9f]');
   static final RegExp _reservedWindowsName = RegExp(
     r'^(CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]|CONIN\$|CONOUT\$)(\.|$)',
@@ -39,14 +210,64 @@ abstract final class CodeImportService {
 
   /// Java reserved words that cannot be a class name.
   static const Set<String> _javaKeywords = {
-    'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char',
-    'class', 'const', 'continue', 'default', 'do', 'double', 'else', 'enum',
-    'extends', 'final', 'finally', 'float', 'for', 'goto', 'if', 'implements',
-    'import', 'instanceof', 'int', 'interface', 'long', 'native', 'new', 'package',
-    'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp',
-    'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient',
-    'try', 'void', 'volatile', 'while', 'true', 'false', 'null', 'var', 'record',
-    'sealed', 'permits', 'yield',
+    'abstract',
+    'assert',
+    'boolean',
+    'break',
+    'byte',
+    'case',
+    'catch',
+    'char',
+    'class',
+    'const',
+    'continue',
+    'default',
+    'do',
+    'double',
+    'else',
+    'enum',
+    'extends',
+    'final',
+    'finally',
+    'float',
+    'for',
+    'goto',
+    'if',
+    'implements',
+    'import',
+    'instanceof',
+    'int',
+    'interface',
+    'long',
+    'native',
+    'new',
+    'package',
+    'private',
+    'protected',
+    'public',
+    'return',
+    'short',
+    'static',
+    'strictfp',
+    'super',
+    'switch',
+    'synchronized',
+    'this',
+    'throw',
+    'throws',
+    'transient',
+    'try',
+    'void',
+    'volatile',
+    'while',
+    'true',
+    'false',
+    'null',
+    'var',
+    'record',
+    'sealed',
+    'permits',
+    'yield',
   };
 
   static final RegExp _javaIdentifier = RegExp(r'^[A-Za-z_$][A-Za-z0-9_$]*$');
@@ -262,8 +483,15 @@ abstract final class CodeImportService {
     );
     final file = File(p.join(directory.path, entryFile));
     try {
-      await file.parent.create(recursive: true);
-      await _writeFile(file, resolved.code, projectName: example.title);
+      await _writeProjectFiles(
+        root: directory.path,
+        files: projectFiles(
+          example: example,
+          entryFile: entryFile,
+          code: resolved.code,
+        ),
+        projectName: example.title,
+      );
       final project = Project.create(
         name: example.title.trim().isEmpty
             ? p.basenameWithoutExtension(resolved.fileName)
@@ -325,17 +553,13 @@ abstract final class CodeImportService {
         fileName: resolved.fileName,
       ),
     );
-    final directory = Directory(project.path);
-    await file.parent.create(recursive: true);
-    final projectRoot = directory.resolveSymbolicLinksSync();
-    final parentPath = file.parent.resolveSymbolicLinksSync();
-    if (!p.equals(projectRoot, parentPath) &&
-        !p.isWithin(projectRoot, parentPath)) {
-      throw const CodeImportException(CodeImportFailure.projectUnavailable);
-    }
-    await _writeFile(
-      file,
-      resolved.code,
+    await _writeProjectFiles(
+      root: project.path,
+      files: projectFiles(
+        example: example,
+        entryFile: p.relative(file.path, from: project.path),
+        code: resolved.code,
+      ),
       projectName: project.name,
       overwrite: overwrite,
     );

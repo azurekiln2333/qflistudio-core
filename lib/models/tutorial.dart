@@ -50,8 +50,9 @@ class Tutorial {
       chapters.fold(0, (sum, chapter) => sum + chapter.lessons.length);
 
   /// 按顺序摊平的全部课时，便于「下一课」之类的线性导航。
-  List<TutorialLesson> get allLessons =>
-      [for (final chapter in chapters) ...chapter.lessons];
+  List<TutorialLesson> get allLessons => [
+    for (final chapter in chapters) ...chapter.lessons,
+  ];
 
   /// 该语言当前是否已经能在设备上直接运行。
   bool get isRunnable => runtime.isAvailable;
@@ -125,6 +126,9 @@ class TutorialLesson {
     this.objective = '',
     this.prerequisites = const [],
     this.pitfalls = const [],
+    this.language = '',
+    this.level = '',
+    this.inputFixtures = const {},
   });
 
   final String id;
@@ -157,6 +161,11 @@ class TutorialLesson {
 
   /// 常见易错点与注意事项。
   final List<String> pitfalls;
+
+  /// Optional catalog metadata; legacy lessons fall back to [type].
+  final String language;
+  final String level;
+  final Map<String, String> inputFixtures;
 }
 
 /// A first-class example entry. It is intentionally separate from lessons so
@@ -170,6 +179,10 @@ class ExampleCode {
     required this.code,
     required this.output,
     this.sourceLessonId,
+    this.concepts = const [],
+    this.language = '',
+    this.level = '',
+    this.inputFixtures = const {},
   });
 
   final String id;
@@ -179,6 +192,10 @@ class ExampleCode {
   final String code;
   final String output;
   final String? sourceLessonId;
+  final List<String> concepts;
+  final String language;
+  final String level;
+  final Map<String, String> inputFixtures;
 
   ExampleCode copyWith({String? code, String? summary}) => ExampleCode(
     id: id,
@@ -188,6 +205,27 @@ class ExampleCode {
     code: code ?? this.code,
     output: output,
     sourceLessonId: sourceLessonId,
+    concepts: concepts,
+    language: language,
+    level: level,
+    inputFixtures: inputFixtures,
+  );
+
+  /// Old saved code overrides inherit metadata added to the bundled catalog.
+  ExampleCode withCatalogMetadata(ExampleCode? bundled) => ExampleCode(
+    id: id,
+    type: type,
+    title: title,
+    summary: summary,
+    code: code,
+    output: output,
+    sourceLessonId: sourceLessonId ?? bundled?.sourceLessonId,
+    concepts: concepts.isEmpty ? bundled?.concepts ?? const [] : concepts,
+    language: language.isEmpty ? bundled?.language ?? '' : language,
+    level: level.isEmpty ? bundled?.level ?? '' : level,
+    inputFixtures: inputFixtures.isEmpty
+        ? bundled?.inputFixtures ?? const {}
+        : inputFixtures,
   );
 }
 

@@ -211,6 +211,206 @@ void main() {
     );
   });
 
+  testWidgets(
+    'offline language grammars tokenize keywords and preserve source',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: SizedBox())),
+      );
+      final context = tester.element(find.byType(Scaffold));
+      const samples =
+          <String, ({String language, String source, String keyword})>{
+            'main.dart': (
+              language: 'dart',
+              source: 'void main() { return; }',
+              keyword: 'return',
+            ),
+            'Main.java': (
+              language: 'java',
+              source: 'class Main { void run() { return; } }',
+              keyword: 'return',
+            ),
+            'main.py': (
+              language: 'python',
+              source: 'def run():\n    return 42',
+              keyword: 'return',
+            ),
+            'main.c': (
+              language: 'c',
+              source: 'int main(void) { return 0; }',
+              keyword: 'return',
+            ),
+            'local.h': (
+              language: 'c',
+              source: 'int run(void) { return 0; }',
+              keyword: 'return',
+            ),
+            'main.cpp': (
+              language: 'cpp',
+              source: 'template<class T> struct Box {};',
+              keyword: 'template',
+            ),
+            'main.kt': (
+              language: 'kotlin',
+              source: 'fun main() { return }',
+              keyword: 'return',
+            ),
+            'main.js': (
+              language: 'javascript',
+              source: 'function run() { return 42; }',
+              keyword: 'return',
+            ),
+            'style.css': (
+              language: 'css',
+              source: '.item { color: red; }',
+              keyword: 'color',
+            ),
+            'index.html': (
+              language: 'xml',
+              source: '<div id="app">Hello</div>',
+              keyword: 'div',
+            ),
+            'data.json': (
+              language: 'json',
+              source: '{"enabled": true}',
+              keyword: '"enabled"',
+            ),
+            'readme.md': (
+              language: 'markdown',
+              source: '# Heading\n',
+              keyword: '# Heading',
+            ),
+            'main.rs': (
+              language: 'rust',
+              source: 'fn main() { let n = 42; }',
+              keyword: 'fn',
+            ),
+            'main.go': (
+              language: 'go',
+              source: 'package main\nfunc main() {}',
+              keyword: 'func',
+            ),
+            'main.lua': (
+              language: 'lua',
+              source: 'local n = 42\nreturn n',
+              keyword: 'local',
+            ),
+            'main.sh': (
+              language: 'bash',
+              source: 'if true; then echo "hello"; fi',
+              keyword: 'if',
+            ),
+            'main.sql': (
+              language: 'sql',
+              source: 'SELECT name FROM users WHERE id = 42;',
+              keyword: 'SELECT',
+            ),
+            'main.ts': (
+              language: 'typescript',
+              source: 'interface User { id: number; }',
+              keyword: 'interface',
+            ),
+            'view.tsx': (
+              language: 'typescript',
+              source: 'interface User { id: number; }',
+              keyword: 'interface',
+            ),
+            'local.hh': (
+              language: 'cpp',
+              source: 'template<class T> struct Box {};',
+              keyword: 'template',
+            ),
+            'local.hxx': (
+              language: 'cpp',
+              source: 'template<class T> struct Box {};',
+              keyword: 'template',
+            ),
+            'local.inl': (
+              language: 'cpp',
+              source: 'template<class T> struct Box {};',
+              keyword: 'template',
+            ),
+          };
+      for (final entry in samples.entries) {
+        final sample = entry.value;
+        final theme = HighlightThemes.themeFor(
+          context,
+          entry.key,
+          sample.source,
+        )!;
+        expect(theme.language, sample.language, reason: entry.key);
+        final highlighter = Highlight()
+          ..debugMode()
+          ..registerLanguages(
+            theme.languages.map((key, value) => MapEntry(key, value.mode)),
+          );
+        final renderer = _Tokens();
+        highlighter
+            .highlight(code: sample.source, language: theme.language!)
+            .render(renderer);
+        expect(
+          renderer.parts.map((part) => part.text).join(),
+          sample.source,
+          reason: '${entry.key}: ${renderer.parts}',
+        );
+        expect(
+          renderer.parts.any(
+            (part) =>
+                part.text == sample.keyword &&
+                part.scope ==
+                    switch (entry.key) {
+                      'style.css' => 'attribute',
+                      'index.html' => 'name',
+                      'data.json' => 'attr',
+                      'readme.md' => 'section',
+                      _ => 'keyword',
+                    },
+          ),
+          isTrue,
+          reason: '${entry.key}: ${renderer.parts}',
+        );
+      }
+    },
+  );
+
+  testWidgets('JSX and tagged CSS use their registered embedded grammars', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: Scaffold(body: SizedBox())),
+    );
+    final context = tester.element(find.byType(Scaffold));
+    for (final extension in ['jsx', 'tsx']) {
+      final theme = HighlightThemes.themeFor(context, 'view.$extension', null)!;
+      final highlighter = Highlight()
+        ..debugMode()
+        ..registerLanguages(
+          theme.languages.map((key, value) => MapEntry(key, value.mode)),
+        );
+      const source =
+          'const view = <div id="app">Hello</div>; const sheet = css`p { color: red; }`;';
+      final renderer = _Tokens();
+      highlighter
+          .highlight(code: source, language: theme.language!)
+          .render(renderer);
+      expect(renderer.parts.map((part) => part.text).join(), source);
+      expect(
+        renderer.parts.any(
+          (part) => part.text == 'div' && part.scope == 'name',
+        ),
+        isTrue,
+        reason: extension,
+      );
+      expect(
+        renderer.parts.any(
+          (part) => part.text == 'color' && part.scope == 'attribute',
+        ),
+        isTrue,
+        reason: extension,
+      );
+    }
+  });
+
   testWidgets('自定义语法、颜色优先级与大文件保护', (tester) async {
     final settings = SettingsStore();
     addTearDown(settings.dispose);

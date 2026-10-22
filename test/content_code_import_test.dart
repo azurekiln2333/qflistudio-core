@@ -659,7 +659,13 @@ void main() {
           final stores = await _createStores(tester, directory);
           await _homeDetail(tester, stores, examplesPage: examplesPage);
           if (examplesPage) {
-            await tester.enterText(find.byType(TextField), _editedCode);
+            await tester.enterText(
+              find.descendant(
+                of: find.byType(CodeSnippet),
+                matching: find.byType(TextField),
+              ),
+              _editedCode,
+            );
             await tester.pump();
           }
           await _importDialog(tester, intoProject: intoProject);
@@ -714,7 +720,13 @@ void main() {
         p.join(existing.path, 'src', 'main.dart'),
       ).readAsStringSync();
       await _homeDetail(tester, stores, examplesPage: true);
-      await tester.enterText(find.byType(TextField), _editedCode);
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(CodeSnippet),
+          matching: find.byType(TextField),
+        ),
+        _editedCode,
+      );
       await _importDialog(tester, intoProject: true);
       await _chooseProject(tester, existing);
       await tester.enterText(
@@ -978,7 +990,13 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.enterText(find.byType(TextField), _editedCode);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(CodeSnippet),
+        matching: find.byType(TextField),
+      ),
+      _editedCode,
+    );
     final l10n = _l10n(tester);
     final save = _iconButton(l10n.saveExample);
     await _tapIconButton(tester, save);
@@ -993,7 +1011,15 @@ void main() {
     await _tapIconButton(tester, reset);
     await tester.pump();
     expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      tester
+          .widget<TextField>(
+            find.descendant(
+              of: find.byType(CodeSnippet),
+              matching: find.byType(TextField),
+            ),
+          )
+          .controller!
+          .text,
       _exampleCode,
     );
     expect(tester.takeException(), isNull);
@@ -1008,7 +1034,13 @@ void main() {
       final l10n = _l10n(tester);
       final save = _iconButton(l10n.saveExample);
       expect(tester.widget<IconButton>(save).onPressed, isNotNull);
-      await tester.enterText(find.byType(TextField), _editedCode);
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(CodeSnippet),
+          matching: find.byType(TextField),
+        ),
+        _editedCode,
+      );
       await _tapIconButton(tester, save);
       await tester.pump();
       await _waitFor(
@@ -1041,7 +1073,15 @@ void main() {
       await _tapIconButton(tester, reset);
       await tester.pump();
       expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        tester
+            .widget<TextField>(
+              find.descendant(
+                of: find.byType(CodeSnippet),
+                matching: find.byType(TextField),
+              ),
+            )
+            .controller!
+            .text,
         _exampleCode,
       );
       expect(_storedExampleCode(file, _example.id), _editedCode);
@@ -1079,7 +1119,13 @@ void main() {
         ),
       );
       await tester.pump();
-      await tester.enterText(find.byType(TextField), _editedCode);
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(CodeSnippet),
+          matching: find.byType(TextField),
+        ),
+        _editedCode,
+      );
       final l10n = _l10n(tester);
       final save = _iconButton(l10n.saveExample);
       await _tapIconButton(tester, save);
@@ -1090,7 +1136,15 @@ void main() {
       );
       expect(examples.items.single.code, _exampleCode);
       expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        tester
+            .widget<TextField>(
+              find.descendant(
+                of: find.byType(CodeSnippet),
+                matching: find.byType(TextField),
+              ),
+            )
+            .controller!
+            .text,
         _editedCode,
       );
       expect(tester.widget<IconButton>(save).onPressed, isNotNull);
@@ -1238,7 +1292,15 @@ void _expectDetail(
   expect(find.byTooltip(l10n.importCodeProject), findsOneWidget);
   if (examplesPage) {
     expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      tester
+          .widget<TextField>(
+            find.descendant(
+              of: find.byType(CodeSnippet),
+              matching: find.byType(TextField),
+            ),
+          )
+          .controller!
+          .text,
       expectedCode,
     );
   } else {

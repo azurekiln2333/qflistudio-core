@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
+import 'language_badge.dart';
 
 enum ProjectCardAction { open, reveal, remove, favorite, export }
 
@@ -164,25 +165,7 @@ class _ProjectCardState extends State<ProjectCard> {
                           ],
                           if (project.language.isNotEmpty) ...[
                             const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: scheme.secondaryContainer,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Text(
-                                project.language,
-                                style: textTheme.labelSmall?.copyWith(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w500,
-                                  color: scheme.onSecondaryContainer,
-                                  height: 1.3,
-                                ),
-                              ),
-                            ),
+                            LanguageBadge(language: project.language, size: 26),
                           ],
                         ],
                       ),

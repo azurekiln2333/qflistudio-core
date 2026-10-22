@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/tutorial.dart';
 import 'app_paths.dart';
+import 'example_input_fixtures.dart';
 
 /// JSON-backed user examples layered over bundled defaults.
 class ExampleCodeStore extends ChangeNotifier {
@@ -26,8 +27,12 @@ class ExampleCodeStore extends ChangeNotifier {
   final Map<String, ExampleCode> _defaults = {};
   final Map<String, ExampleCode> _custom = {};
 
+  ExampleCode? bundledExample(String id) => _defaults[id];
+
   List<ExampleCode> get items => [
-    ..._defaults.keys.map((id) => _custom[id] ?? _defaults[id]!),
+    ..._defaults.keys.map(
+      (id) => _custom[id]?.withCatalogMetadata(_defaults[id]) ?? _defaults[id]!,
+    ),
     ..._custom.entries
         .where((entry) => !_defaults.containsKey(entry.key))
         .map((entry) => entry.value),
@@ -190,6 +195,11 @@ class ExampleCodeStore extends ChangeNotifier {
     'summary': example.summary,
     'code': example.code,
     'output': example.output,
+    if (example.concepts.isNotEmpty) 'concepts': example.concepts,
+    if (example.language.isNotEmpty) 'language': example.language,
+    if (example.level.isNotEmpty) 'level': example.level,
+    if (example.inputFixtures.isNotEmpty)
+      'inputFixtures': example.inputFixtures,
     if (example.sourceLessonId != null)
       'sourceLessonId': example.sourceLessonId,
   };
@@ -209,7 +219,14 @@ class ExampleCodeStore extends ChangeNotifier {
       summary: json['summary'] as String? ?? '',
       code: code,
       output: json['output'] as String? ?? '',
+      concepts: (json['concepts'] as List?)?.whereType<String>().toList() ?? const [],
       sourceLessonId: json['sourceLessonId'] as String?,
+      language: json['language'] as String? ?? '',
+      level: json['level'] as String? ?? '',
+      inputFixtures: ExampleInputFixtures.parse(
+        json['inputFixtures'],
+        input: json['input'],
+      ),
     );
   }
 }
