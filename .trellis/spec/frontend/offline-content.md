@@ -28,6 +28,12 @@ even when a detail page is reopened with the saved example as its initial model.
 Old aggregate lessons resolve missing fixtures by paired `sourceLessonId` once at
 load time. Scratch, new-project and existing-project imports preserve the fixtures.
 
+Go import defaults inspect the currently displayed source. Real top-level
+`Test`/`Benchmark`/`Fuzz` declarations with the corresponding `testing` pointer
+parameter (including `TestMain(*testing.M)`) suggest `snippet_test.go`; ordinary
+programs retain `main.go`. Ignore comments, literals and receiver methods, honor
+normal/grouped/aliased/dot imports, and preserve explicitly chosen names and code.
+
 ## 4. Validation and error matrix
 
 | Condition | Behavior |

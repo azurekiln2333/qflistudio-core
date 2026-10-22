@@ -288,7 +288,10 @@ class _CodeImportDialogState extends State<_CodeImportDialog> {
   late final _fileName = TextEditingController(
     text: _isJava
         ? CodeImportService.suggestedClassName(widget.example.code)
-        : CodeImportService.suggestedFileName(widget.example.type),
+        : CodeImportService.suggestedFileName(
+            widget.example.type,
+            code: widget.example.code,
+          ),
   );
   late final _projectName = TextEditingController(
     text: widget.example.title

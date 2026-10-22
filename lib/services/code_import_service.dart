@@ -9,6 +9,7 @@ import 'app_paths.dart';
 import 'file_backup.dart';
 import 'file_service.dart';
 import 'example_input_fixtures.dart';
+import 'go_source_file_name.dart';
 import 'java_source_renamer.dart';
 import 'project_config.dart';
 import 'project_templates.dart';
@@ -279,7 +280,11 @@ abstract final class CodeImportService {
       ProjectTemplate.fromType(type) ??
       (type.trim().toLowerCase() == 'html' ? ProjectTemplate.html : null);
 
-  static String suggestedFileName(String type) {
+  /// A source-aware default; explicit import filenames remain unchanged.
+  static String suggestedFileName(String type, {String? code}) {
+    if (type.trim().toLowerCase() == 'go' && code != null) {
+      return GoSourceFileName.suggested(code);
+    }
     final mainFile = _templateForType(type)?.mainFile;
     return mainFile == null ? 'snippet.txt' : p.basename(mainFile);
   }
