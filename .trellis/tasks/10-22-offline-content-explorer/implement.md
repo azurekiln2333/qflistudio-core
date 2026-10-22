@@ -5,7 +5,9 @@
 3. [x] Add inline search, language/difficulty chips and reset/empty behavior to both content tabs. Preserve lazy rows and source/import/edit behavior.
 4. [x] Add consistent circle language labels on lists/details and reuse project identification styles.
 5. [x] Test compound filters, reset, custom/saved metadata, large text/narrow layouts, cache/lazy/idle/import regressions.
-6. [ ] Independent review, spec update and coherent conventional commit. Do not include unknown explorer/history modifications.
+6. [x] Content review, spec update and conventional commit ef34591; full core 702 pass/2 skip.
+7. [x] Adopt/review explorer/history, add compatible ordered owner-aware session records and integrate EditorPage restore/save.
+8. [x] Verify concurrent field updates, independent roots, invalid/stale sessions, tab order/active/cursors and narrow UI; repair all four independent-review findings and update spec. Final full core712 pass/2 skip, focused27 pass, analysis clean; separate workspace commit.
 
 Commands: flutter analyze; focused content tests plus existing local_content_lazy_catalog_test.dart, content_idle_frames_test.dart, content_code_import_test.dart, home_content_repository_test.dart, java_content_render_test.dart and python_content_render_test.dart. Product host/device acceptance remains separate.
 
