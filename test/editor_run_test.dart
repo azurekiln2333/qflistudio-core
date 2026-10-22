@@ -166,6 +166,7 @@ void main() {
   ) async {
     final previewRoots = <String>[];
     final previewEntries = <String>[];
+    final previewDefaults = <String>[];
     StudioProfile.current = StudioProfile(
       id: 'preview-owner-test',
       appTitle: 'Preview owner',
@@ -175,21 +176,19 @@ void main() {
       supportedFileExtensions: const ['.html'],
       webPreviewFactory: (root) async {
         previewRoots.add(root);
-        return _RecordingPreview(previewEntries);
+        return _RecordingPreview(root, previewEntries, previewDefaults);
       },
     );
     await fixture.mount(tester);
     final secondary = await fixture.openSecondary(tester, html: true);
     await tester.tap(find.byTooltip(_runTooltip));
-    await _pumpIoUntil(tester, () => previewEntries.length == 1);
+    await _pumpIoUntil(tester, () => previewDefaults.length == 1);
     await tester.pump();
     await tester.longPress(find.byTooltip(_runTooltip));
-    await _pumpIoUntil(tester, () => previewEntries.length == 2);
+    await _pumpIoUntil(tester, () => previewEntries.length == 1);
     expect(previewRoots, [secondary.path, secondary.path]);
-    expect(previewEntries, [
-      p.join(secondary.path, 'custom.html'),
-      p.join(secondary.path, 'other.html'),
-    ]);
+    expect(previewDefaults, [secondary.path]);
+    expect(previewEntries, [p.join(secondary.path, 'other.html')]);
     expect(fixture.runner.entries, isEmpty);
     expect(tester.takeException(), isNull);
   });
@@ -606,10 +605,15 @@ Future<void> _openTerminal(WidgetTester tester) async {
 }
 
 class _RecordingPreview implements WebFilePreviewSession {
-  _RecordingPreview(this.entries);
+  _RecordingPreview(this.root, this.entries, this.defaults);
+  final String root;
   final List<String> entries;
+  final List<String> defaults;
   @override
-  String get url => 'http://127.0.0.1:8080/index.html';
+  String get url {
+    defaults.add(root);
+    throw StateError('factory default recorded before browser launch');
+  }
   @override
   Stream<String> get debugStream => const Stream.empty();
   @override

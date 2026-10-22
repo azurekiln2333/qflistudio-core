@@ -1118,13 +1118,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             await server.stop();
             return;
           }
-          // Resolve the actual configured or active entry through the session's
-          // document root, including a custom HTML entry in a secondary root.
+          // The factory owns the configured document root and default entry.
+          // Only an explicit active-file run asks it to resolve another file.
           final String targetUrl;
-          if (server is WebFilePreviewSession) {
-            targetUrl = server.urlForFile(entry);
-          } else if (entryOverride != null) {
-            throw StateError('preview does not support individual files');
+          if (entryOverride != null) {
+            if (server is! WebFilePreviewSession) {
+              throw StateError('preview does not support individual files');
+            }
+            targetUrl = server.urlForFile(entryOverride);
           } else {
             targetUrl = server.url;
           }
