@@ -7,8 +7,10 @@ import '../content/content_repository.dart';
 import '../terminal/shell/sandbox_shell_backend.dart';
 import 'project_templates.dart';
 import 'code_analysis.dart';
+import 'debug_session.dart';
 
 export 'code_analysis.dart';
+export 'debug_session.dart';
 
 /// 产品线名称登记表。语言 App 的 UI 标题从这里取，后续新增产品时不必散落硬编码。
 abstract final class StudioProductCatalog {
@@ -97,6 +99,7 @@ class StudioProfile {
     required this.templates,
     this.runner,
     this.codeAnalyzer,
+    this.debugger,
     this.webPreviewFactory,
     this.toolsPageBuilder,
     this.toolsTabBuilder,
@@ -133,6 +136,10 @@ class StudioProfile {
   /// Optional product-owned offline syntax checker for unsaved editor buffers.
   /// Null means no checker is installed; it never falls back to running code.
   final CodeAnalyzer? codeAnalyzer;
+
+  /// Optional product-owned offline debugger for an explicit Debug action.
+  /// Null means unavailable; ordinary Run is never a debugger fallback.
+  final StudioDebugger? debugger;
 
   /// Product-owned local web preview implementation.
   final Future<WebPreviewSession> Function(String projectPath)?
