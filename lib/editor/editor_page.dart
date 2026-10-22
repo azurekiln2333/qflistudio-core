@@ -1031,6 +1031,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// runtime routing. Calls with an override must validate it first.
   Future<void> _runProject({String? entryOverride}) async {
     if (_runningProject) return;
+    // Capture the owner before any asynchronous save or tab switch. A workspace
+    // can contain several projects with different entries and relative inputs.
+    final active = _editor.current;
+    final projectPath = active?.projectRootPath ?? widget.project.path;
+    final projectName = active?.ownerProjectName ?? widget.project.name;
     setState(() {
       _runningProject = true;
       _terminalCreated = true;
@@ -1050,7 +1055,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       if (pane.busy) return;
       pane.beginPreparation();
       preparing = true;
-      for (final open in List<OpenFile>.of(_editor.files)) {
+      final sources = _editor.files
+          .where((open) => p.equals(open.projectRootPath, projectPath))
+          .toList();
+      if (sources.any((open) => !_runSourceWithin(projectPath, open.path))) {
+        pane.appendSystem('file is outside its project');
+        return;
+      }
+      for (final open in sources) {
         final error = await _editor.saveFile(open);
         if (!mounted || !pane.mounted) return;
         if (error != null) {
@@ -1058,8 +1070,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           return;
         }
       }
-      final entry =
-          entryOverride ?? RunnerService.findEntry(widget.project.path);
+      final entry = entryOverride ?? RunnerService.findEntry(projectPath);
       if (entry == null) {
         final hint = StudioProfile.current?.entryFileNames;
         pane.appendSystem(
@@ -1067,6 +1078,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               ? '未找到可运行的入口文件（index.html / main.py / Main.java 等）'
               : '未找到可运行的入口文件（${hint.join(' / ')}）',
         );
+        return;
+      }
+      if (!_runSourceWithin(projectPath, entry)) {
+        pane.appendSystem('entry file is outside its project');
         return;
       }
       final ext = p.extension(entry).toLowerCase();
@@ -1080,7 +1095,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       }
       if (pane.onlineSelected && ext != '.html' && ext != '.htm') {
         pane.finishPreparation();
-        await pane.runOnlineProject(widget.project.path, entry);
+        await pane.runOnlineProject(projectPath, entry);
         return;
       }
 
@@ -1096,23 +1111,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         try {
           server =
               await (StudioProfile.current?.webPreviewFactory?.call(
-                    widget.project.path,
+                    projectPath,
                   ) ??
-                  LocalWebServer.start(widget.project.path));
+                  LocalWebServer.start(projectPath));
           if (!mounted) {
             await server.stop();
             return;
           }
-          // A long-press run targets the active file; a tap keeps the default
-          // entry. The session owns the real document root, so it resolves the
-          // URL. An unsupported session or an unreachable file fails here
-          // instead of silently opening the default page.
+          // Resolve the actual configured or active entry through the session's
+          // document root, including a custom HTML entry in a secondary root.
           final String targetUrl;
-          if (entryOverride != null) {
-            if (server is! WebFilePreviewSession) {
-              throw StateError('preview does not support individual files');
-            }
-            targetUrl = server.urlForFile(entryOverride);
+          if (server is WebFilePreviewSession) {
+            targetUrl = server.urlForFile(entry);
+          } else if (entryOverride != null) {
+            throw StateError('preview does not support individual files');
           } else {
             targetUrl = server.url;
           }
@@ -1151,7 +1163,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       }
 
       final result = await RunnerService.runProject(
-        projectPath: widget.project.path,
+        projectPath: projectPath,
         entryFile: entry,
       );
       if (!mounted || !pane.mounted) {
@@ -1166,7 +1178,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         pane.appendSystem(hint);
         if (StudioProfile.current?.offlineOnly != true &&
             OnlineProgram.supports(entry)) {
-          await pane.runOnlineProject(widget.project.path, entry);
+          await pane.runOnlineProject(projectPath, entry);
         }
         return;
       }
@@ -1191,19 +1203,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             StudioProfile.current?.offlineOnly != true &&
             OnlineProgram.supports(entry)) {
           pane.appendSystem('本地运行时不可用，转入在线运行');
-          await pane.runOnlineProject(widget.project.path, entry);
+          await pane.runOnlineProject(projectPath, entry);
         }
         unawaited(
           LocalStatsService.instance.recordRun(
             succeeded: code == 0,
-            project: widget.project.name,
+            project: projectName,
           ),
         );
         unawaited(
           LocalAuditService.instance.record(
             kind: LocalAuditKind.run,
             action: '运行 ${p.basename(entry)}',
-            project: widget.project.name,
+            project: projectName,
             path: entry,
             detail: '退出码 $code',
           ),
@@ -1262,11 +1274,33 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     if (supported.isNotEmpty && !supported.contains(ext)) {
       return '${ext.isEmpty ? 'file' : ext} is not runnable here';
     }
-    final root = p.normalize(p.absolute(widget.project.path));
+    final root = p.normalize(p.absolute(open.projectRootPath));
     final path = p.normalize(p.absolute(open.path));
     if (!p.isWithin(root, path)) return 'active file is outside the project';
     if (!File(path).existsSync()) return 'active file no longer exists';
+    if (!_runSourceWithin(root, path)) {
+      return 'active file is outside the project';
+    }
     return null;
+  }
+
+  bool _runSourceWithin(String projectPath, String path) {
+    final root = p.normalize(p.absolute(projectPath));
+    final source = p.normalize(p.absolute(path));
+    if (!p.isWithin(root, source)) return false;
+    try {
+      final physicalRoot = Directory(root).resolveSymbolicLinksSync();
+      final physicalSource =
+          FileSystemEntity.typeSync(source) == FileSystemEntityType.notFound
+          ? p.join(
+              File(source).parent.resolveSymbolicLinksSync(),
+              p.basename(source),
+            )
+          : File(source).resolveSymbolicLinksSync();
+      return p.isWithin(physicalRoot, physicalSource);
+    } on FileSystemException {
+      return false;
+    }
   }
 
   Future<void> _openOnlineTerminal() async {
