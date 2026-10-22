@@ -4,13 +4,13 @@ import 'package:path/path.dart' as p;
 
 import 'java_topics.dart';
 
-/// Emits the 100-topic outline (markdown) from the authored source of truth so
+/// Emits the complete outline (markdown) from the authored source of truth so
 /// the outline and the shipped records cannot drift.
 ///
 ///   dart run tool/java_content/outline.dart
 Future<void> main() async {
   final buffer = StringBuffer()
-    ..writeln('# Java 100-topic outline')
+    ..writeln('# Java ${javaTopics.length}-topic outline')
     ..writeln()
     ..writeln(
       'Generated from `tool/java_content/java_topics.dart` by '
@@ -38,7 +38,7 @@ Future<void> main() async {
       'qfli_java',
       '.trellis',
       'tasks',
-      '10-09-java-tutorial-rewrite',
+      '10-22-offline-ide-completeness',
       'research',
       'java-topic-outline.md',
     ),

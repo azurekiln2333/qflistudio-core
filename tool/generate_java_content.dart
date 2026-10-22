@@ -19,7 +19,9 @@ Future<void> main(List<String> args) async {
   final contentDir = Directory(p.join(core.path, 'assets', 'content'));
   final tutorialFile = File(p.join(contentDir.path, 'tutorials.json'));
   final exampleFile = File(p.join(contentDir.path, 'examples.json'));
-  final legacyFile = File(p.join(core.path, 'assets', 'tutorials', 'java.json'));
+  final legacyFile = File(
+    p.join(core.path, 'assets', 'tutorials', 'java.json'),
+  );
 
   _checkUnique(javaTopics);
 
@@ -78,8 +80,10 @@ void _checkUnique(List<JavaTopic> topics) {
       throw StateError('Duplicate topic title ${t.title}');
     }
   }
-  if (topics.length > 100) {
-    throw StateError('More than 100 topics: ${topics.length}');
+  for (var index = 0; index < topics.length; index++) {
+    if (topics[index].id != index + 1) {
+      throw StateError('Topic ids must be contiguous and ordered at $index');
+    }
   }
 }
 
@@ -107,6 +111,7 @@ Map<String, dynamic> _tutorialEntry(JavaTopic t, String stamp) {
         'explain': t.explain,
         'code': t.code,
         'output': t.output,
+        'inputFixtures': _inputFixtures(t),
         'pitfalls': t.pitfalls,
         'exercises': <Map<String, String>>[
           for (final task in _tasksFor(t))
@@ -130,7 +135,8 @@ List<JavaTask> _tasksFor(JavaTopic t) {
     JavaTask(
       prompt: '运行示例，观察输出，然后修改程序让结果体现一个新的输入。',
       hint: '改动示例中的常量或数据，重新编译运行，确认输出随之改变。',
-      answer: '把 ${t.concepts.isEmpty ? '示例数据' : t.concepts.first} 相关的一处取值改成你自己的数据后重新运行。',
+      answer:
+          '把 ${t.concepts.isEmpty ? '示例数据' : t.concepts.first} 相关的一处取值改成你自己的数据后重新运行。',
     ),
   ];
 }
@@ -150,9 +156,7 @@ Map<String, dynamic> _exampleEntry(JavaTopic t, String stamp) {
     'updatedAt': stamp,
     'code': t.code,
     'expectedOutput': t.output,
-    'inputFixtures': t.input == null
-        ? <String, String>{}
-        : <String, String>{'stdin': t.input!},
+    'inputFixtures': _inputFixtures(t),
     'templateType': 'java',
     'sourceLessonId': t.tutorialId,
   };
@@ -164,6 +168,10 @@ String _topicName(String title) {
   return index >= 0 ? title.substring(index + 1).trim() : title;
 }
 
+Map<String, String> _inputFixtures(JavaTopic topic) => topic.input == null
+    ? <String, String>{}
+    : <String, String>{'stdin': topic.input!};
+
 Future<void> _writeJson(File file, Map<String, dynamic> doc) async {
   const encoder = JsonEncoder.withIndent('  ');
   await file.writeAsString('${encoder.convert(doc)}\n', flush: true);
@@ -171,7 +179,7 @@ Future<void> _writeJson(File file, Map<String, dynamic> doc) async {
 
 Future<void> _writeLegacy(File file, String stamp) async {
   final chapters = <Map<String, dynamic>>[];
-  // Five chapters of 20 topics keeps the legacy bundle navigable.
+  // Chapters of 20 topics keep the expanding legacy bundle navigable.
   for (var start = 0; start < javaTopics.length; start += 20) {
     final slice = javaTopics.skip(start).take(20).toList();
     final index = start ~/ 20 + 1;
@@ -189,6 +197,7 @@ Future<void> _writeLegacy(File file, String stamp) async {
             'explain': t.explain,
             'code': t.code,
             'output': t.output,
+            'inputFixtures': _inputFixtures(t),
             'tasks': <Map<String, String>>[
               for (final task in _tasksFor(t))
                 <String, String>{
@@ -225,6 +234,7 @@ Future<void> _writeLegacy(File file, String stamp) async {
           'summary': t.summary,
           'code': t.code,
           'output': t.output,
+          'inputFixtures': _inputFixtures(t),
           'sourceLessonId': t.tutorialId,
         },
     ],

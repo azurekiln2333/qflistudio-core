@@ -23,23 +23,29 @@ void main() {
 
   setUpAll(() async {
     catalog = await AssetContentRepository().load();
-    javaTutorials =
-        catalog.tutorials.where((t) => t.type.toLowerCase() == 'java').toList();
-    javaExamples =
-        catalog.examples.where((e) => e.type.toLowerCase() == 'java').toList();
+    javaTutorials = catalog.tutorials
+        .where((t) => t.type.toLowerCase() == 'java')
+        .toList();
+    javaExamples = catalog.examples
+        .where((e) => e.type.toLowerCase() == 'java')
+        .toList();
   });
 
   group('Java content integrity', () {
-    test('exactly 100 tutorials and 100 examples', () {
-      expect(javaTutorials, hasLength(100));
-      expect(javaExamples, hasLength(100));
+    test('280 paired tutorials and examples retain all original IDs', () {
+      expect(javaTutorials, hasLength(280));
+      expect(javaExamples, hasLength(280));
+      expect(javaExamples.map((example) => example.id).toSet(), {
+        for (var id = 1; id <= 280; id++)
+          'java-example-${id.toString().padLeft(3, '0')}',
+      });
     });
 
     test('unique ids and titles', () {
       final ids = javaTutorials.map((t) => t.id).toSet();
-      expect(ids, hasLength(100));
+      expect(ids, hasLength(280));
       final titles = javaTutorials.map((t) => t.title).toSet();
-      expect(titles, hasLength(100));
+      expect(titles, hasLength(280));
     });
 
     test('1:1 pairing by stable id', () {
@@ -103,7 +109,9 @@ void main() {
         // real structure: a class declaration, a main method, and indented body.
         expect(lines.length, greaterThanOrEqualTo(6), reason: example.id);
         expect(
-          lines.any((line) => RegExp(r'^\s*(public\s+)?class\s+Main').hasMatch(line)),
+          lines.any(
+            (line) => RegExp(r'^\s*(public\s+)?class\s+Main').hasMatch(line),
+          ),
           isTrue,
           reason: '${example.id} needs a class line',
         );
@@ -132,12 +140,15 @@ void main() {
       final bodies = javaExamples
           .map((e) => e.code.replaceAll(RegExp(r'\s+'), ' ').trim())
           .toList();
-      expect(bodies.toSet(), hasLength(100));
+      expect(bodies.toSet(), hasLength(280));
     });
 
     test('progression spans beginner, intermediate and advanced', () {
       final levels = javaTutorials.map((t) => t.level).toSet();
-      expect(levels, containsAll(<String>['beginner', 'intermediate', 'advanced']));
+      expect(
+        levels,
+        containsAll(<String>['beginner', 'intermediate', 'advanced']),
+      );
     });
   });
 
@@ -170,65 +181,65 @@ void main() {
       output: '',
     );
 
-    test('all pre-migration Java records are cleared, others preserved', () async {
-      final file = File(p.join(dir.path, 'examples.json'))
-        ..writeAsStringSync(
-          jsonEncode(<String, Object>{
-            'schemaVersion': 1,
-            'examples': [
-              _json(javaExample('java-example-001')),
-              _json(javaExample('legacy-java-custom')),
-              _json(dartExample('dart-custom')),
-            ],
-          }),
-        );
-      final store = ExampleCodeStore(storageFile: file);
-      addTearDown(store.dispose);
-      final bundled = javaExamples
-          .map(
-            (e) => ExampleCode(
-              id: e.id,
-              type: e.type,
-              title: e.title,
-              summary: e.summary,
-              code: e.code,
-              output: e.expectedOutput,
-              sourceLessonId: e.sourceLessonId,
+    test(
+      'all pre-migration Java records are cleared, others preserved',
+      () async {
+        final file = File(p.join(dir.path, 'examples.json'))
+          ..writeAsStringSync(
+            jsonEncode(<String, Object>{
+              'schemaVersion': 1,
+              'examples': [
+                _json(javaExample('java-example-001')),
+                _json(javaExample('legacy-java-custom')),
+                _json(dartExample('dart-custom')),
+              ],
+            }),
+          );
+        final store = ExampleCodeStore(storageFile: file);
+        addTearDown(store.dispose);
+        final bundled = javaExamples
+            .map(
+              (e) => ExampleCode(
+                id: e.id,
+                type: e.type,
+                title: e.title,
+                summary: e.summary,
+                code: e.code,
+                output: e.expectedOutput,
+                sourceLessonId: e.sourceLessonId,
+              ),
+            )
+            .toList();
+        await store.load(
+          defaults: [
+            ...bundled,
+            ExampleCode(
+              id: 'dart-default',
+              type: 'dart',
+              title: 'Dart default',
+              summary: '',
+              code: 'void main() {}',
+              output: '',
             ),
-          )
-          .toList();
-      await store.load(
-        defaults: [
-          ...bundled,
-          ExampleCode(
-            id: 'dart-default',
-            type: 'dart',
-            title: 'Dart default',
-            summary: '',
-            code: 'void main() {}',
-            output: '',
-          ),
-        ],
-      );
+          ],
+        );
 
-      // No old Java records survive; the new defaults are shown.
-      expect(store.items.where((e) => e.type == 'java'), hasLength(100));
-      expect(
-        store.items.where((e) => e.id == 'legacy-java-custom'),
-        isEmpty,
-      );
-      // Unrelated language record is preserved.
-      expect(store.items.any((e) => e.id == 'dart-custom'), isTrue);
-      // The persisted file is rewritten without the old Java records.
-      final persisted =
-          jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-      expect(persisted['contentVersion'], ExampleCodeStore.contentVersion);
-      final persistedIds = (persisted['examples'] as List)
-          .map((e) => (e as Map)['id'])
-          .toSet();
-      expect(persistedIds, isNot(contains('legacy-java-custom')));
-      expect(persistedIds, contains('dart-custom'));
-    });
+        // No old Java records survive; the new defaults are shown.
+        expect(store.items.where((e) => e.type == 'java'), hasLength(280));
+        expect(store.items.where((e) => e.id == 'legacy-java-custom'), isEmpty);
+        // Unrelated language record is preserved.
+        expect(store.items.any((e) => e.id == 'dart-custom'), isTrue);
+        // The persisted file is rewritten without the old Java records.
+        final persisted =
+            jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+        expect(persisted['contentVersion'], ExampleCodeStore.contentVersion);
+        final persistedIds = (persisted['examples'] as List)
+            .map((e) => (e as Map)['id'])
+            .toSet();
+        expect(persistedIds, isNot(contains('legacy-java-custom')));
+        expect(persistedIds, contains('dart-custom'));
+      },
+    );
 
     test('migration is idempotent on a second load', () async {
       final file = File(p.join(dir.path, 'examples.json'))
@@ -268,21 +279,24 @@ void main() {
   });
 
   group('line-break handling', () {
-    test('every Java example preserves real newlines through the adapter', () async {
-      final examples = await LocalContentAdapter.loadExamples(
-        repository: AssetContentRepository(),
-        language: 'java',
-      );
-      expect(examples, hasLength(100));
-      for (final example in examples) {
-        expect(example.code.contains('\n'), isTrue, reason: example.id);
-        final lines = example.code.split('\n');
-        expect(lines.length, greaterThanOrEqualTo(6), reason: example.id);
-        for (final line in lines) {
-          expect(line.contains('\t'), isFalse, reason: example.id);
+    test(
+      'every Java example preserves real newlines through the adapter',
+      () async {
+        final examples = await LocalContentAdapter.loadExamples(
+          repository: AssetContentRepository(),
+          language: 'java',
+        );
+        expect(examples, hasLength(280));
+        for (final example in examples) {
+          expect(example.code.contains('\n'), isTrue, reason: example.id);
+          final lines = example.code.split('\n');
+          expect(lines.length, greaterThanOrEqualTo(6), reason: example.id);
+          for (final line in lines) {
+            expect(line.contains('\t'), isFalse, reason: example.id);
+          }
         }
-      }
-    });
+      },
+    );
 
     test('no literal backslash-n leak in Java string literals', () {
       // A program may legitimately print "\n"; the source must still contain a

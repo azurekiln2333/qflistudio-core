@@ -186,7 +186,7 @@ void main() {
     );
     expect(find.text(lesson.objective), findsOneWidget);
     expect(find.text(lesson.pitfalls.first), findsOneWidget);
-    expect(javaTutorial.allLessons, hasLength(100));
+    expect(javaTutorial.allLessons, hasLength(280));
   });
 
   // Inline-run render on the ACTUAL detail routes. The runner here is a
