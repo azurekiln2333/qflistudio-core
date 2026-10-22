@@ -28,7 +28,7 @@ class JavaTopic {
     this.tasks = const <JavaTask>[],
   });
 
-  /// Stable numeric id, 1..100.
+  /// Stable numeric id, retained as the curriculum expands.
   final int id;
 
   /// `beginner` | `intermediate` | `advanced`.
@@ -60,7 +60,11 @@ class JavaTopic {
 
 /// A practice prompt attached to a lesson.
 class JavaTask {
-  const JavaTask({required this.prompt, required this.hint, required this.answer});
+  const JavaTask({
+    required this.prompt,
+    required this.hint,
+    required this.answer,
+  });
 
   final String prompt;
   final String hint;

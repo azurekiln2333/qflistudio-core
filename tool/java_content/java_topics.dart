@@ -1,6 +1,9 @@
 import 'java_topic.dart';
+import 'java_topics_collections.dart';
+import 'java_topics_io_time.dart';
+import 'java_topics_language.dart';
 
-/// The 100 authored Java topics, ordered fundamentals -> advanced.
+/// The 280 authored Java topics, retaining original IDs and extending practice.
 ///
 /// Code style rule enforced by tests: each program has a `class Main` on its
 /// own line, `main` on its own line, and every statement on its own indented
@@ -30,7 +33,11 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
       'main 的签名必须完整，否则运行时找不到入口。',
     ],
     tasks: <JavaTask>[
-      JavaTask(prompt: '把输出改成你的名字。', hint: '修改字符串字面量。', answer: 'System.out.println("你的名字");'),
+      JavaTask(
+        prompt: '把输出改成你的名字。',
+        hint: '修改字符串字面量。',
+        answer: 'System.out.println("你的名字");',
+      ),
     ],
   ),
   JavaTopic(
@@ -82,10 +89,7 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     }
 }''',
     output: 'a / b = 3\na % b = 1\na / 2.0 = 3.5\n(a + b) * 2 = 18',
-    pitfalls: <String>[
-      '整数除法不会自动保留小数，务必区分。',
-      '在字符串里拼接算式要用括号，否则按字符串拼接。',
-    ],
+    pitfalls: <String>['整数除法不会自动保留小数，务必区分。', '在字符串里拼接算式要用括号，否则按字符串拼接。'],
   ),
   JavaTopic(
     id: 4,
@@ -119,7 +123,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: 'String 的创建、拼接、长度与常用方法。',
     concepts: <String>['String', '不可变', '字符串方法'],
     objective: '能使用 length、toUpperCase、substring、contains 等方法。',
-    explain: 'String 是不可变的。每次「修改」都会产生新对象。常用方法包括长度、'
+    explain:
+        'String 是不可变的。每次「修改」都会产生新对象。常用方法包括长度、'
         '大小写转换、查找和截取。字符串用 + 拼接。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -141,7 +146,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: 'if / else if / else 处理分支逻辑。',
     concepts: <String>['if', 'else if', '比较运算符'],
     objective: '能根据条件选择不同分支并输出对应结果。',
-    explain: 'if 后接布尔表达式。从上到下判断，命中一个分支后其余跳过。'
+    explain:
+        'if 后接布尔表达式。从上到下判断，命中一个分支后其余跳过。'
         '比较用 ==、!=、<、>、<=、>=。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -165,7 +171,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '用 switch 处理多值选择，含新式箭头语法。',
     concepts: <String>['switch', 'case', '箭头语法'],
     objective: '能用 switch 表达式根据枚举或字符串选择结果。',
-    explain: 'switch 适合「一个值对多个固定选项」。新式 `case X ->` 语法不需要'
+    explain:
+        'switch 适合「一个值对多个固定选项」。新式 `case X ->` 语法不需要'
         'break，也不会穿透。default 处理未匹配情况。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -187,7 +194,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '计数循环与累加求和。',
     concepts: <String>['for', '循环变量', '累加'],
     objective: '能用 for 循环重复执行并累计结果。',
-    explain: 'for(初始化; 条件; 步进) 是最常用的计数循环。循环变量作用域只在循环内。'
+    explain:
+        'for(初始化; 条件; 步进) 是最常用的计数循环。循环变量作用域只在循环内。'
         '把累加变量声明在循环外。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -208,7 +216,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '条件循环，以及至少执行一次的 do-while。',
     concepts: <String>['while', 'do-while', '循环控制'],
     objective: '能根据条件使用 while 循环，并说明 do-while 的区别。',
-    explain: 'while 先判断后执行；do-while 先执行一次再判断。适合「直到满足条件才停」'
+    explain:
+        'while 先判断后执行；do-while 先执行一次再判断。适合「直到满足条件才停」'
         '的场景。注意在循环里更新条件变量避免死循环。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -236,7 +245,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '声明、初始化、遍历与数组长度。',
     concepts: <String>['数组', '下标', '遍历'],
     objective: '能创建数组、按下标访问并用增强 for 遍历。',
-    explain: '数组长度固定，用 `new int[n]` 或字面量 `{...}` 创建。下标从 0 开始，'
+    explain:
+        '数组长度固定，用 `new int[n]` 或字面量 `{...}` 创建。下标从 0 开始，'
         '越界会抛异常。`length` 是属性不是方法。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -260,7 +270,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '把逻辑封装成方法，理解参数与返回值。',
     concepts: <String>['方法', '参数', 'return'],
     objective: '能定义带参数和返回值的方法并调用。',
-    explain: '方法把一段逻辑命名复用。`static` 方法属于类，可以直接在 main 里调用。'
+    explain:
+        '方法把一段逻辑命名复用。`static` 方法属于类，可以直接在 main 里调用。'
         '`return` 返回值并结束方法；void 表示无返回值。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -287,7 +298,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '方法调用自身：阶乘与终止条件。',
     concepts: <String>['递归', '终止条件', '调用栈'],
     objective: '能写出带终止条件的递归方法。',
-    explain: '递归方法必须有一个不再递归的终止条件，否则会栈溢出。'
+    explain:
+        '递归方法必须有一个不再递归的终止条件，否则会栈溢出。'
         '每层调用把问题缩小，直到基础情形。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -319,7 +331,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: 'varargs 接收不定参数，方法重载按签名区分。',
     concepts: <String>['可变参数', '方法重载', '签名'],
     objective: '能定义可变参数方法与方法重载。',
-    explain: '`int... nums` 表示可变参数，调用时可传任意个。方法重载是同名不同参数列表，'
+    explain:
+        '`int... nums` 表示可变参数，调用时可传任意个。方法重载是同名不同参数列表，'
         '编译器按实参选择。',
     code: '''public class Main {
     public static void main(String[] args) {
@@ -354,7 +367,8 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     summary: '用 enum 表示一组固定常量并携带字段。',
     concepts: <String>['enum', '常量', '字段'],
     objective: '能定义带属性和方法的枚举。',
-    explain: 'enum 定义一组命名常量，比裸字符串更安全。枚举可以有构造器、字段和方法，'
+    explain:
+        'enum 定义一组命名常量，比裸字符串更安全。枚举可以有构造器、字段和方法，'
         '常量之间用逗号分隔。',
     code: '''public class Main {
     enum Level {
@@ -519,7 +533,10 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     }
 }''',
     output: 'balance=150',
-    pitfalls: <String>['不要为所有字段都机械生成 setter，破坏封装。', '校验放在 setter/业务方法里，而不是调用方。'],
+    pitfalls: <String>[
+      '不要为所有字段都机械生成 setter，破坏封装。',
+      '校验放在 setter/业务方法里，而不是调用方。',
+    ],
   ),
   JavaTopic(
     id: 19,
@@ -561,7 +578,10 @@ const List<JavaTopic> javaTopics = <JavaTopic>[
     }
 }''',
     output: '咪咪: 喵',
-    pitfalls: <String>['子类构造器未显式调用 super 时，会先调用父类无参构造器。', '@Override 写错方法签名会报错，正好用于校验。'],
+    pitfalls: <String>[
+      '子类构造器未显式调用 super 时，会先调用父类无参构造器。',
+      '@Override 写错方法签名会报错，正好用于校验。',
+    ],
   ),
   JavaTopic(
     id: 20,
@@ -817,7 +837,10 @@ public class Main {
     }
 }''',
     output: 'equals=true\nhashSame=true',
-    pitfalls: <String>['重写 equals 不重写 hashCode 会导致哈希集合出错。', 'equals 参数类型是 Object，别写成具体类型。'],
+    pitfalls: <String>[
+      '重写 equals 不重写 hashCode 会导致哈希集合出错。',
+      'equals 参数类型是 Object，别写成具体类型。',
+    ],
   ),
   JavaTopic(
     id: 27,
@@ -1046,7 +1069,10 @@ public class Main {
     }
 }''',
     output: 'sum=0.3\ntotal=59.97\ndiv=3.33',
-    pitfalls: <String>['用 double 构造 BigDecimal 会带入误差，要用字符串。', 'divide 不指定精度可能抛 ArithmeticException。'],
+    pitfalls: <String>[
+      '用 double 构造 BigDecimal 会带入误差，要用字符串。',
+      'divide 不指定精度可能抛 ArithmeticException。',
+    ],
   ),
   JavaTopic(
     id: 34,
@@ -1098,7 +1124,10 @@ public class Main {
     }
 }''',
     output: '张三\n未知\n张三',
-    pitfalls: <String>['Optional 不适合做字段或方法参数。', '不要用 get() 直接取，可能抛 NoSuchElementException。'],
+    pitfalls: <String>[
+      'Optional 不适合做字段或方法参数。',
+      '不要用 get() 直接取，可能抛 NoSuchElementException。',
+    ],
   ),
   JavaTopic(
     id: 36,
@@ -1127,7 +1156,10 @@ public class Main {
     }
 }''',
     output: 'size=3\nget(1)=Kotlin\ncontains=true\nafterRemove=[Kotlin, Java]',
-    pitfalls: <String>['remove(int) 删下标，remove(Object) 删元素，别搞混。', '遍历中直接 remove 会抛 ConcurrentModificationException。'],
+    pitfalls: <String>[
+      'remove(int) 删下标，remove(Object) 删元素，别搞混。',
+      '遍历中直接 remove 会抛 ConcurrentModificationException。',
+    ],
   ),
   JavaTopic(
     id: 37,
@@ -1157,7 +1189,10 @@ public class Main {
     }
 }''',
     output: 'added1=true\nadded2=false\nsize=2\ncommon=[java]',
-    pitfalls: <String>['自定义对象去重要正确重写 equals/hashCode。', 'set.add 返回 boolean，不要当 void 用。'],
+    pitfalls: <String>[
+      '自定义对象去重要正确重写 equals/hashCode。',
+      'set.add 返回 boolean，不要当 void 用。',
+    ],
   ),
   JavaTopic(
     id: 38,
@@ -1188,7 +1223,10 @@ public class Main {
     }
 }''',
     output: 'a=3\nmissing=0\na->3\nb->1',
-    pitfalls: <String>['HashMap 不保证遍历顺序，要稳定顺序用 TreeMap 或先排序。', 'get 缺失键返回 null，Integer 拆箱可能 NPE。'],
+    pitfalls: <String>[
+      'HashMap 不保证遍历顺序，要稳定顺序用 TreeMap 或先排序。',
+      'get 缺失键返回 null，Integer 拆箱可能 NPE。',
+    ],
   ),
   JavaTopic(
     id: 39,
@@ -1216,8 +1254,12 @@ public class Main {
         System.out.println(people);
     }
 }''',
-    output: '[Person[name=乙, age=25], Person[name=丙, age=30], Person[name=甲, age=30]]',
-    pitfalls: <String>['compareTo 返回负/零/正表示小于/等于/大于。', '排序会修改 List 顺序，需要保留原顺序时先复制。'],
+    output:
+        '[Person[name=乙, age=25], Person[name=丙, age=30], Person[name=甲, age=30]]',
+    pitfalls: <String>[
+      'compareTo 返回负/零/正表示小于/等于/大于。',
+      '排序会修改 List 顺序，需要保留原顺序时先复制。',
+    ],
   ),
   JavaTopic(
     id: 40,
@@ -1348,8 +1390,7 @@ public class Main {
     summary: '用泛型+可变参数写通用的最大/查找工具。',
     concepts: <String>['泛型', '可变参数', '比较'],
     objective: '能编写接受可变参数的泛型工具方法。',
-    explain:
-        '把可变参数与泛型、Comparator 结合，可写出通用的集合工具方法。',
+    explain: '把可变参数与泛型、Comparator 结合，可写出通用的集合工具方法。',
     code: '''import java.util.Comparator;
 
 public class Main {
@@ -1379,8 +1420,7 @@ public class Main {
     summary: '用 Map 与正则统计一段文本的词频。',
     concepts: <String>['综合', 'Map', '正则', '排序'],
     objective: '能把集合、正则、排序组合成文本处理程序。',
-    explain:
-        '先用正则分词，再用 Map 计数，最后排序输出。这是文本处理常见套路。',
+    explain: '先用正则分词，再用 Map 计数，最后排序输出。这是文本处理常见套路。',
     code: '''import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -1818,7 +1858,10 @@ public class Main {
     }
 }''',
     output: 'total=6',
-    pitfalls: <String>['next 在无元素时要抛 NoSuchElementException。', '迭代器状态应为每次 iterator() 新建。'],
+    pitfalls: <String>[
+      'next 在无元素时要抛 NoSuchElementException。',
+      '迭代器状态应为每次 iterator() 新建。',
+    ],
   ),
   JavaTopic(
     id: 58,
@@ -1987,7 +2030,10 @@ public class Main {
     }
 }''',
     output: 'square=25\nisEven=true\nconsume:data\nsupplied',
-    pitfalls: <String>['Function<T,R> 两个类型参数别写错顺序。', 'Predicate 是 test，Consumer 是 accept，名字不同。'],
+    pitfalls: <String>[
+      'Function<T,R> 两个类型参数别写错顺序。',
+      'Predicate 是 test，Consumer 是 accept，名字不同。',
+    ],
   ),
   JavaTopic(
     id: 63,
@@ -2015,7 +2061,10 @@ public class Main {
     }
 }''',
     output: 'length=4\n[A, B, C]',
-    pitfalls: <String>['方法引用要求签名与函数式接口一致。', '实例方法引用 obj::m 与类方法引用 String::m 用处不同。'],
+    pitfalls: <String>[
+      '方法引用要求签名与函数式接口一致。',
+      '实例方法引用 obj::m 与类方法引用 String::m 用处不同。',
+    ],
   ),
   JavaTopic(
     id: 64,
@@ -2068,7 +2117,10 @@ public class Main {
     }
 }''',
     output: 'sum=14\nmax=5\ncount=3',
-    pitfalls: <String>['带初始值的 reduce 要用单位元（加法的 0）。', '空流 reduce 无初始值返回 Optional。'],
+    pitfalls: <String>[
+      '带初始值的 reduce 要用单位元（加法的 0）。',
+      '空流 reduce 无初始值返回 Optional。',
+    ],
   ),
   JavaTopic(
     id: 66,
@@ -2228,7 +2280,10 @@ public class Main {
     }
 }''',
     output: 'sum=30\ndoubled=20',
-    pitfalls: <String>['join/get 在异步未完成时会阻塞。', '未捕获的异步异常会随 join 抛出 CompletionException。'],
+    pitfalls: <String>[
+      'join/get 在异步未完成时会阻塞。',
+      '未捕获的异步异常会随 join 抛出 CompletionException。',
+    ],
   ),
   JavaTopic(
     id: 72,
@@ -2255,7 +2310,10 @@ public class Main {
     }
 }''',
     output: 'carol\n5\nnone',
-    pitfalls: <String>['orElse 的参数总会被求值，成本高时用 orElseGet。', 'findAny 在并行流里不保证第一个。'],
+    pitfalls: <String>[
+      'orElse 的参数总会被求值，成本高时用 orElseGet。',
+      'findAny 在并行流里不保证第一个。',
+    ],
   ),
   JavaTopic(
     id: 73,
@@ -2325,7 +2383,10 @@ public class Main {
     }
 }''',
     output: 'five=2\ndone',
-    pitfalls: <String>['Files.lines 必须关闭，否则文件句柄泄漏。', '流已关闭后再使用会报 IllegalStateException。'],
+    pitfalls: <String>[
+      'Files.lines 必须关闭，否则文件句柄泄漏。',
+      '流已关闭后再使用会报 IllegalStateException。',
+    ],
   ),
   JavaTopic(
     id: 75,
@@ -2517,7 +2578,10 @@ public class Main {
     }
 }''',
     output: 'timeout\ndone',
-    pitfalls: <String>['超时不会取消任务，需要时手动 cancel。', '被中断的 sleep 会抛 InterruptedException。'],
+    pitfalls: <String>[
+      '超时不会取消任务，需要时手动 cancel。',
+      '被中断的 sleep 会抛 InterruptedException。',
+    ],
   ),
   JavaTopic(
     id: 81,
@@ -2550,7 +2614,10 @@ public class Main {
     }
 }''',
     output: 'hits=2000',
-    pitfalls: <String>['复合操作（判断再 put）要改用 compute/merge/putIfAbsent。', 'ConcurrentHashMap 不允许 null 键值。'],
+    pitfalls: <String>[
+      '复合操作（判断再 put）要改用 compute/merge/putIfAbsent。',
+      'ConcurrentHashMap 不允许 null 键值。',
+    ],
   ),
   JavaTopic(
     id: 82,
@@ -2579,7 +2646,10 @@ public class Main {
     }
 }''',
     output: 'work done\nwork done\nwork done\nall done',
-    pitfalls: <String>['latch 只能倒计一次，不能重复使用（用 CyclicBarrier）。', '忘记 countDown 会永久阻塞。'],
+    pitfalls: <String>[
+      'latch 只能倒计一次，不能重复使用（用 CyclicBarrier）。',
+      '忘记 countDown 会永久阻塞。',
+    ],
   ),
   JavaTopic(
     id: 83,
@@ -2822,7 +2892,10 @@ public class Main {
     }
 }''',
     output: 'POST /api (2000ms)',
-    pitfalls: <String>['必填项放在 Builder 构造器里，可选字段用链式方法。', 'builder 不要对外暴露可变中间状态。'],
+    pitfalls: <String>[
+      '必填项放在 Builder 构造器里，可选字段用链式方法。',
+      'builder 不要对外暴露可变中间状态。',
+    ],
   ),
   JavaTopic(
     id: 89,
@@ -2904,8 +2977,7 @@ public class Main {
     summary: '手写基础排序与有序数组查找。',
     concepts: <String>['排序', '二分查找', '复杂度'],
     objective: '能实现冒泡排序与二分查找并说明复杂度。',
-    explain:
-        '冒泡排序相邻比较交换，O(n^2)；二分查找要求已排序，每次折半，O(log n)。',
+    explain: '冒泡排序相邻比较交换，O(n^2)；二分查找要求已排序，每次折半，O(log n)。',
     code: '''import java.util.Arrays;
 
 public class Main {
@@ -2989,8 +3061,7 @@ public class Main {
     summary: '用栈/队列实现图搜索。',
     concepts: <String>['图', 'DFS', 'BFS', '访问标记'],
     objective: '能实现广度优先遍历并访问每个节点一次。',
-    explain:
-        'BFS 用队列逐层扩展，DFS 用栈深入。都要用 visited 标记避免重复访问与环。',
+    explain: 'BFS 用队列逐层扩展，DFS 用栈深入。都要用 visited 标记避免重复访问与环。',
     code: '''import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -3375,4 +3446,7 @@ public class Main {
     output: 'byOwner={ann=2, bob=1}\ncompletion=0.0\nerror=标题不能为空',
     pitfalls: <String>['默认分组结果的顺序不固定，要稳定输出用 TreeMap 分组。', '输入校验要在创建入口完成。'],
   ),
+  ...javaCollectionTopics,
+  ...javaIoTimeTopics,
+  ...javaLanguageTopics,
 ];
