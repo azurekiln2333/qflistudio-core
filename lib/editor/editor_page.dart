@@ -32,10 +32,13 @@ import 'editor_fonts.dart';
 import 'code_minimap.dart';
 import 'symbols_bar.dart';
 import 'editor_controller.dart';
+import 'editor_analysis_controller.dart';
+import 'editor_diagnostics.dart';
 import 'editor_find_panel.dart';
 import 'file_explorer.dart';
 import 'highlight_themes.dart';
 import 'open_file.dart';
+import 'editor_problems_bar.dart';
 import 'project_history.dart';
 import 'terminal_pane.dart';
 import '../terminal/widgets/terminal_input.dart';
@@ -48,7 +51,7 @@ import '../services/local_stats_service.dart';
 import 'ai_panel.dart';
 import 'open_performance.dart';
 
-enum _BottomPanel { none, terminal, ai }
+enum _BottomPanel { none, terminal, ai, problems }
 
 class SaveIntent extends Intent {
   const SaveIntent();
@@ -107,6 +110,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   static const double _wideBreakpoint = 720;
 
   late final EditorController _editor;
+  late final EditorAnalysisController _analysis;
   final _sessionRestored = Completer<void>();
   Future<void> _pendingOpen = Future<void>.value();
   final _hiddenViews =
@@ -194,6 +198,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _editor = EditorController(
       project: widget.project,
       onContentChanged: _onFileContentChanged,
+    );
+    _analysis = EditorAnalysisController(
+      editor: _editor,
+      analyzer: StudioProfile.current?.codeAnalyzer,
     );
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
     OpenPerformance.mark('EditorPage initState');
@@ -399,6 +407,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _debugSub?.cancel();
     _cloud?.dispose();
     _tabController?.dispose();
+    _analysis.dispose();
     _editor.dispose();
     _previewServer?.stop();
     super.dispose();
@@ -1827,6 +1836,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                               compactPanel: compactPanel,
                             ),
                           ),
+                        if (_bottomPanel == _BottomPanel.problems &&
+                            bodyHeight >= minEditorHeight + 48)
+                          SizedBox(
+                            height: maxPanelHeight
+                                .clamp(48.0, 240.0)
+                                .toDouble(),
+                            child: EditorProblemsPanel(
+                              analysis: _analysis,
+                              onClose: () => setState(
+                                () => _bottomPanel = _BottomPanel.none,
+                              ),
+                            ),
+                          ),
                         if (_bottomPanel == _BottomPanel.ai && bodyHeight >= 36)
                           AnimatedContainer(
                             duration: const Duration(milliseconds: 150),
@@ -2345,98 +2367,114 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       null,
       settings: widget.settings,
     );
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          child: Listener(
-            onPointerDown: _handlePointerDown,
-            onPointerMove: _handlePointerMove,
-            onPointerUp: _handlePointerUp,
-            onPointerCancel: _handlePointerUp,
-            child: CodeEditor(
-              controller: open.controller,
-              focusNode: open.focusNode,
-              scrollController: open.scrollController,
-              findController: open.findController,
-              shortcutOverrideActions: editorShortcutOverrides(open.controller),
-              style: CodeEditorStyle(
-                fontSize: _fontSize,
-                fontFamily: textStyle.fontFamily,
-                fontFamilyFallback: textStyle.fontFamilyFallback,
-                fontWeight: textStyle.fontWeight,
-                fontStyle: textStyle.fontStyle,
-                fontHeight: textStyle.height,
-                backgroundColor:
-                    theme?.theme['root']?.backgroundColor ?? scheme.surface,
-                textColor: theme?.theme['root']?.color ?? scheme.onSurface,
-                cursorColor:
-                    HighlightThemes.editorColor(
-                      widget.settings,
-                      'editorCursor.foreground',
-                    ) ??
-                    scheme.primary,
-                selectionColor:
-                    HighlightThemes.editorColor(
-                      widget.settings,
-                      'editor.selectionBackground',
-                    ) ??
-                    scheme.primary.withValues(alpha: 0.25),
-                highlightColor: scheme.primaryContainer.withValues(alpha: 0.4),
-                cursorLineColor:
-                    HighlightThemes.editorColor(
-                      widget.settings,
-                      'editor.lineHighlightBackground',
-                    ) ??
-                    scheme.surfaceContainerHighest,
-                chunkIndicatorColor: scheme.outlineVariant,
-                codeTheme: theme,
-              ),
-              wordWrap: false,
-              autofocus: false,
-              readOnly: open.readOnly,
-              indicatorBuilder:
-                  (context, editingController, chunkController, notifier) {
-                    return Row(
-                      children: [
-                        DefaultCodeLineNumber(
-                          controller: editingController,
-                          notifier: notifier,
-                          minNumberCount: 1,
-                          textStyle: textStyle.copyWith(
-                            color: scheme.onSurfaceVariant.withValues(
-                              alpha: 0.55,
-                            ),
-                            fontSize: _fontSize,
-                          ),
-                          focusedTextStyle: textStyle.copyWith(
-                            color: scheme.primary,
-                            fontSize: _fontSize,
-                          ),
-                        ),
-                        DefaultCodeChunkIndicator(
-                          width: 18,
-                          controller: chunkController,
-                          notifier: notifier,
-                        ),
-                      ],
-                    );
-                  },
-              findBuilder: (context, controller, readOnly) =>
-                  EditorFindReplacePanel(
-                    controller: controller,
-                    readOnly: readOnly,
+    return EditorProblemsBar(
+      analysis: _analysis,
+      onOpenProblems: () => setState(() {
+        _terminalKey.currentState?.unfocusInput();
+        _bottomPanel = _BottomPanel.problems;
+      }),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: Listener(
+              onPointerDown: _handlePointerDown,
+              onPointerMove: _handlePointerMove,
+              onPointerUp: _handlePointerUp,
+              onPointerCancel: _handlePointerUp,
+              child: CodeEditor(
+                controller: open.controller,
+                focusNode: open.focusNode,
+                scrollController: open.scrollController,
+                findController: open.findController,
+                shortcutOverrideActions: editorShortcutOverrides(
+                  open.controller,
+                ),
+                style: CodeEditorStyle(
+                  fontSize: _fontSize,
+                  fontFamily: textStyle.fontFamily,
+                  fontFamilyFallback: textStyle.fontFamilyFallback,
+                  fontWeight: textStyle.fontWeight,
+                  fontStyle: textStyle.fontStyle,
+                  fontHeight: textStyle.height,
+                  backgroundColor:
+                      theme?.theme['root']?.backgroundColor ?? scheme.surface,
+                  textColor: theme?.theme['root']?.color ?? scheme.onSurface,
+                  cursorColor:
+                      HighlightThemes.editorColor(
+                        widget.settings,
+                        'editorCursor.foreground',
+                      ) ??
+                      scheme.primary,
+                  selectionColor:
+                      HighlightThemes.editorColor(
+                        widget.settings,
+                        'editor.selectionBackground',
+                      ) ??
+                      scheme.primary.withValues(alpha: 0.25),
+                  highlightColor: scheme.primaryContainer.withValues(
+                    alpha: 0.4,
                   ),
+                  cursorLineColor:
+                      HighlightThemes.editorColor(
+                        widget.settings,
+                        'editor.lineHighlightBackground',
+                      ) ??
+                      scheme.surfaceContainerHighest,
+                  chunkIndicatorColor: scheme.outlineVariant,
+                  codeTheme: theme,
+                ),
+                wordWrap: false,
+                autofocus: false,
+                readOnly: open.readOnly,
+                indicatorBuilder:
+                    (context, editingController, chunkController, notifier) {
+                      return Row(
+                        children: [
+                          if (open.diagnostics case final diagnostics?)
+                            EditorDiagnosticGutter(
+                              diagnostics: diagnostics,
+                              notifier: notifier,
+                            ),
+                          DefaultCodeLineNumber(
+                            controller: editingController,
+                            notifier: notifier,
+                            minNumberCount: 1,
+                            textStyle: textStyle.copyWith(
+                              color: scheme.onSurfaceVariant.withValues(
+                                alpha: 0.55,
+                              ),
+                              fontSize: _fontSize,
+                            ),
+                            focusedTextStyle: textStyle.copyWith(
+                              color: scheme.primary,
+                              fontSize: _fontSize,
+                            ),
+                          ),
+                          DefaultCodeChunkIndicator(
+                            width: 18,
+                            controller: chunkController,
+                            notifier: notifier,
+                          ),
+                        ],
+                      );
+                    },
+                findBuilder: (context, controller, readOnly) =>
+                    EditorFindReplacePanel(
+                      controller: controller,
+                      readOnly: readOnly,
+                    ),
+              ),
             ),
           ),
-        ),
-        VerticalDivider(width: 1, thickness: 1, color: scheme.outlineVariant),
-        if (widget.settings.minimap)
-          CodeMinimap(
-            controller: open.controller,
-            scrollController: open.scrollController,
-          ),
-      ],
+          VerticalDivider(width: 1, thickness: 1, color: scheme.outlineVariant),
+          if (widget.settings.minimap)
+            CodeMinimap(
+              controller: open.controller,
+              scrollController: open.scrollController,
+            ),
+        ],
+      ),
     );
   }
 

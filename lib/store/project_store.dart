@@ -279,12 +279,20 @@ class ProjectStore extends ChangeNotifier {
       p.dirname(template.mainFile ?? 'src/snippet.txt'),
       entryName,
     );
+    final importedFiles = CodeImportService.projectFiles(
+      example: example,
+      entryFile: entryFile,
+      code: source,
+    );
     final files = <TemplateFile>[
       for (final file in template.files)
         if (file.path != template.mainFile &&
-            p.normalize(file.path) != p.normalize(entryFile))
+            !importedFiles.keys.any(
+              (name) => p.equals(p.normalize(name), p.normalize(file.path)),
+            ))
           file,
-      TemplateFile(entryFile, source),
+      for (final entry in importedFiles.entries)
+        TemplateFile(entry.key, entry.value),
     ];
     return _createProject(
       name: name,

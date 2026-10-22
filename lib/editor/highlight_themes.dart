@@ -3,15 +3,22 @@ import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 import 'package:re_highlight/re_highlight.dart';
 import 'package:re_highlight/languages/c.dart';
+import 'package:re_highlight/languages/bash.dart';
 import 'package:re_highlight/languages/cpp.dart';
 import 'package:re_highlight/languages/css.dart';
 import 'package:re_highlight/languages/dart.dart';
 import 'package:re_highlight/languages/java.dart';
 import 'package:re_highlight/languages/javascript.dart';
 import 'package:re_highlight/languages/json.dart';
+import 'package:re_highlight/languages/go.dart';
+import 'package:re_highlight/languages/graphql.dart';
+import 'package:re_highlight/languages/lua.dart';
 import 'package:re_highlight/languages/kotlin.dart';
 import 'package:re_highlight/languages/markdown.dart';
 import 'package:re_highlight/languages/python.dart';
+import 'package:re_highlight/languages/rust.dart';
+import 'package:re_highlight/languages/sql.dart';
+import 'package:re_highlight/languages/typescript.dart';
 import 'package:re_highlight/languages/xml.dart';
 import 'package:re_highlight/styles/github-dark.dart';
 import 'package:re_highlight/styles/vs.dart';
@@ -32,6 +39,12 @@ abstract final class HighlightThemes {
     'cpp': langCpp,
     'kotlin': langKotlin,
     'javascript': langJavascript,
+    'typescript': langTypescript,
+    'rust': langRust,
+    'go': langGo,
+    'lua': langLua,
+    'bash': langBash,
+    'sql': langSql,
     'css': langCss,
     'xml': _htmlMode(),
     'json': langJson,
@@ -46,15 +59,24 @@ abstract final class HighlightThemes {
     '.h': 'c',
     '.cpp': 'cpp',
     '.hpp': 'cpp',
+    '.hh': 'cpp',
+    '.hxx': 'cpp',
+    '.inl': 'cpp',
     '.cc': 'cpp',
     '.cxx': 'cpp',
     '.kt': 'kotlin',
     '.kts': 'kotlin',
     '.js': 'javascript',
     '.mjs': 'javascript',
-    '.ts': 'javascript',
+    '.ts': 'typescript',
     '.jsx': 'javascript',
-    '.tsx': 'javascript',
+    '.tsx': 'typescript',
+    '.rs': 'rust',
+    '.go': 'go',
+    '.lua': 'lua',
+    '.sh': 'bash',
+    '.bash': 'bash',
+    '.sql': 'sql',
     '.css': 'css',
     '.scss': 'css',
     '.html': 'xml',
@@ -239,9 +261,13 @@ abstract final class HighlightThemes {
       }
     } else {
       register(language, _languages[language]!);
-      if (language == 'xml') {
+      if (language == 'xml' ||
+          language == 'javascript' ||
+          language == 'typescript') {
+        register('xml', _languages['xml']!);
         register('css', _languages['css']!);
         register('javascript', _languages['javascript']!);
+        register('graphql', langGraphql);
       }
     }
     return _cache[cacheKey] = CodeHighlightTheme(

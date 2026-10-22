@@ -41,7 +41,8 @@ void main() {
     // An eager ListView(children: ...) also mounts only visible elements. The
     // builder delegate check additionally rules out constructing every Widget.
     expect(list.childrenDelegate, isA<SliverChildBuilderDelegate>());
-    expect(list.childrenDelegate.estimatedChildCount, 102);
+    // One shared filter header, two chapter rows and one hundred lazy lessons.
+    expect(list.childrenDelegate.estimatedChildCount, 103);
     expect(find.byType(ListTile).evaluate().length, lessThan(100));
     expect(find.text('Java chapter 0'), findsOneWidget);
     expect(find.text('Java lesson 0-0'), findsOneWidget);
@@ -57,12 +58,24 @@ void main() {
     await tester.scrollUntilVisible(
       find.text('Java chapter 1'),
       400,
+      scrollable: find
+          .descendant(
+            of: find.byType(ListView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
       maxScrolls: 100,
     );
     expect(find.text('Java chapter 1'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Java lesson 1-49'),
       400,
+      scrollable: find
+          .descendant(
+            of: find.byType(ListView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
       maxScrolls: 100,
     );
     expect(find.text('Lesson summary 1-49'), findsOneWidget);
@@ -137,6 +150,12 @@ void main() {
       await tester.scrollUntilVisible(
         find.text('Java example 99'),
         400,
+        scrollable: find
+            .descendant(
+              of: find.byType(ListView),
+              matching: find.byType(Scrollable),
+            )
+            .first,
         maxScrolls: 100,
       );
       expect(find.text('Example summary 99'), findsOneWidget);
@@ -146,12 +165,13 @@ void main() {
       expect(find.widgetWithText(AppBar, 'Java example 99'), findsOneWidget);
       final snippet = tester.widget<CodeSnippet>(find.byType(CodeSnippet));
       expect(snippet.example.id, 'java-example-99');
-      final field = tester.widget<TextField>(find.byType(TextField));
-      expect(field.controller!.text, savedCode);
-      await tester.enterText(
-        find.byType(TextField),
-        'System.out.println("edit");',
+      final codeField = find.descendant(
+        of: find.byType(CodeSnippet),
+        matching: find.byType(TextField),
       );
+      final field = tester.widget<TextField>(codeField);
+      expect(field.controller!.text, savedCode);
+      await tester.enterText(codeField, 'System.out.println("edit");');
       expect(field.controller!.text, 'System.out.println("edit");');
       expect(tester.takeException(), isNull);
     },

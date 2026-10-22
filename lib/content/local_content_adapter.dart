@@ -19,6 +19,19 @@ abstract final class LocalContentAdapter {
     );
     if (entries.isEmpty) return null;
 
+    final pairedFixtures = <String, Map<String, String>>{};
+    if (entries.any(
+      (entry) => entry.lessons.any((lesson) => lesson.inputFixtures.isEmpty),
+    )) {
+      for (final example in await repository.examples(
+        filter: _filter(language: language, productKey: productKey),
+      )) {
+        final lessonId = example.sourceLessonId;
+        if (lessonId != null && example.inputFixtures.isNotEmpty) {
+          pairedFixtures.putIfAbsent(lessonId, () => example.inputFixtures);
+        }
+      }
+    }
     final first = entries.first;
     return Tutorial(
       language: first.language,
@@ -37,6 +50,11 @@ abstract final class LocalContentAdapter {
                 TutorialLesson(
                   id: lesson.id,
                   type: entry.type,
+                  language: entry.language,
+                  level: entry.level,
+                  inputFixtures: lesson.inputFixtures.isNotEmpty
+                      ? lesson.inputFixtures
+                      : pairedFixtures[lesson.id] ?? const {},
                   title: lesson.title,
                   summary: lesson.summary,
                   concepts: lesson.concepts,
@@ -75,11 +93,15 @@ abstract final class LocalContentAdapter {
         ExampleCode(
           id: entry.id,
           type: entry.type,
+          language: entry.language,
+          level: entry.level,
           title: entry.title,
           summary: entry.summary,
           code: entry.code,
           output: entry.expectedOutput,
           sourceLessonId: entry.sourceLessonId,
+          concepts: entry.concepts,
+          inputFixtures: entry.inputFixtures,
         ),
     ];
   }

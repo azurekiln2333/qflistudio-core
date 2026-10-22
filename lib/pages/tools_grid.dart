@@ -136,7 +136,7 @@ class ToolsGrid extends StatelessWidget {
               ),
               SliverPadding(
                 padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, 8),
-                sliver: _grid(context, section.tools),
+                sliver: ToolsGridSliver(tools: section.tools),
               ),
             ],
             SliverPadding(
@@ -148,8 +148,16 @@ class ToolsGrid extends StatelessWidget {
       },
     );
   }
+}
 
-  Widget _grid(BuildContext context, List<ToolDefinition> tools) {
+/// Shared tool-card geometry for product-owned inline tools scroll views.
+class ToolsGridSliver extends StatelessWidget {
+  const ToolsGridSliver({super.key, required this.tools});
+
+  final List<ToolDefinition> tools;
+
+  @override
+  Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
     final scaler = MediaQuery.textScalerOf(context);
     double extraLineHeight(TextStyle? style, double fallbackSize) {

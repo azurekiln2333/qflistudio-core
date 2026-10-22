@@ -40,6 +40,7 @@ class EditorController extends ChangeNotifier {
     String path, {
     String? ownerProjectName,
     String? ownerProjectPath,
+    String? ownerProjectType,
     bool readOnly = false,
     String? timeLabel,
     FileCursor? cursor,
@@ -70,6 +71,7 @@ class EditorController extends ChangeNotifier {
         highlightTheme: null,
         ownerProjectName: ownerProjectName ?? project.name,
         projectRootPath: ownerProjectPath ?? project.path,
+        projectType: ownerProjectType ?? project.type,
         readOnly: readOnly,
         timeLabel: timeLabel,
         encoding: encoding,
@@ -126,6 +128,9 @@ class EditorController extends ChangeNotifier {
         identical(pre.codeLines, open.controller.value.codeLines)) {
       return;
     }
+    final text = open.controller.text;
+    if (open.lastChangedText == text) return;
+    open.lastChangedText = text;
     open.revision++;
     final wasDirty = open.dirty;
     open.dirty = true;

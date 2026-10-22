@@ -13,6 +13,7 @@ import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import '../services/example_code_store.dart';
 import '../widgets/code_snippet.dart';
+import '../widgets/language_badge.dart';
 
 /// 离线语言 App 的第二页：从随包 JSON 加载入门教程。
 class LocalTutorialsTab extends StatefulWidget {
@@ -165,7 +166,20 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
         });
       }
     }
-    return bundled;
+    final key = StudioProfile.current?.productKey;
+    final allowed = key == null || key == StudioProductCatalog.qfliStudioKey
+        ? null
+        : ContentProductTypes.byProduct[key];
+    return (store?.items ?? bundled)
+        .where(
+          (example) => allowed == null
+              ? (example.language.isEmpty ? example.type : example.language)
+                        .trim()
+                        .toLowerCase() ==
+                    widget.language.trim().toLowerCase()
+              : allowed.contains(languageKey(example.type)),
+        )
+        .toList(growable: false);
   }
 
   @override
@@ -203,7 +217,7 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
   }
 }
 
-class _TutorialList extends StatelessWidget {
+class _TutorialList extends StatefulWidget {
   const _TutorialList({
     required this.tutorial,
     this.store,
@@ -217,21 +231,51 @@ class _TutorialList extends StatelessWidget {
   final SettingsStore? settings;
 
   @override
+  State<_TutorialList> createState() => _TutorialListState();
+}
+
+class _TutorialListState extends State<_TutorialList> {
+  final _filter = _ContentFilterSelection();
+
+  @override
+  void dispose() {
+    _filter.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final lessons = widget.tutorial.allLessons;
     // Only row metadata is flattened here; widgets are created on demand.
     final rows = <({TutorialChapter chapter, TutorialLesson? lesson})>[
-      for (final chapter in tutorial.chapters) ...[
-        (chapter: chapter, lesson: null),
-        for (final lesson in chapter.lessons)
-          (chapter: chapter, lesson: lesson),
-      ],
+      for (final chapter in widget.tutorial.chapters)
+        if (chapter.lessons.any((lesson) => _matches(chapter, lesson))) ...[
+          (chapter: chapter, lesson: null),
+          for (final lesson in chapter.lessons)
+            if (_matches(chapter, lesson)) (chapter: chapter, lesson: lesson),
+        ],
     ];
+    final labels = _ContentLabels(context);
+    final count = rows.where((row) => row.lesson != null).length;
     return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
-      itemCount: rows.length,
+      itemCount: rows.isEmpty ? 2 : rows.length + 1,
       itemBuilder: (context, index) {
-        final row = rows[index];
+        if (index == 0) {
+          return _ContentFilterBar(
+            selection: _filter,
+            languages: [
+              for (final lesson in lessons)
+                _contentLanguage(lesson.type, lesson.language),
+            ],
+            levels: [for (final lesson in lessons) lesson.level],
+            resultLabel: labels.lessonCount(count),
+            onChanged: () => setState(() {}),
+          );
+        }
+        if (rows.isEmpty) return _emptyResults(context);
+        final row = rows[index - 1];
         final lesson = row.lesson;
         if (lesson == null) {
           return Padding(
@@ -247,10 +291,9 @@ class _TutorialList extends StatelessWidget {
         return ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16),
           leading: const Icon(Icons.menu_book_outlined),
-          title: Text(
-            lesson.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          title: _ContentTitle(
+            title: lesson.title,
+            language: _contentLanguage(lesson.type, lesson.language),
           ),
           subtitle: Text(
             lesson.summary,
@@ -262,9 +305,9 @@ class _TutorialList extends StatelessWidget {
             MaterialPageRoute(
               builder: (_) => _LessonPage(
                 lesson: lesson,
-                store: store,
-                auth: auth,
-                settings: settings,
+                store: widget.store,
+                auth: widget.auth,
+                settings: widget.settings,
               ),
             ),
           ),
@@ -272,9 +315,18 @@ class _TutorialList extends StatelessWidget {
       },
     );
   }
+
+  bool _matches(TutorialChapter chapter, TutorialLesson lesson) =>
+      _filter.matches(
+        language: _contentLanguage(lesson.type, lesson.language),
+        level: lesson.level,
+        text:
+            '${chapter.title} ${lesson.title} ${lesson.summary} '
+            '${lesson.concepts.join(' ')}',
+      );
 }
 
-class _ExampleCodeList extends StatelessWidget {
+class _ExampleCodeList extends StatefulWidget {
   const _ExampleCodeList({
     required this.items,
     this.store,
@@ -290,32 +342,55 @@ class _ExampleCodeList extends StatelessWidget {
   final ExampleCodeStore? examples;
 
   @override
+  State<_ExampleCodeList> createState() => _ExampleCodeListState();
+}
+
+class _ExampleCodeListState extends State<_ExampleCodeList> {
+  final _filter = _ContentFilterSelection();
+
+  @override
+  void dispose() {
+    _filter.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final l10n = StudioLocalizations.of(context);
+    final items = widget.items
+        .where(
+          (example) => _filter.matches(
+            language: _contentLanguage(example.type, example.language),
+            level: example.level,
+            text:
+                '${example.title} ${example.summary} ${example.concepts.join(' ')}',
+          ),
+        )
+        .toList(growable: false);
     return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
-      itemCount: items.length + 1,
+      itemCount: items.isEmpty ? 2 : items.length + 1,
       itemBuilder: (context, index) {
         if (index == 0) {
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            child: Text(
-              l10n.examplesCount(items.length),
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
+          return _ContentFilterBar(
+            selection: _filter,
+            languages: [
+              for (final example in widget.items)
+                _contentLanguage(example.type, example.language),
+            ],
+            levels: [for (final example in widget.items) example.level],
+            resultLabel: l10n.examplesCount(items.length),
+            onChanged: () => setState(() {}),
           );
         }
+        if (items.isEmpty) return _emptyResults(context);
         final example = items[index - 1];
         return ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16),
           leading: const Icon(Icons.code_outlined),
-          title: Text(
-            example.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          title: _ContentTitle(
+            title: example.title,
+            language: _contentLanguage(example.type, example.language),
           ),
           subtitle: Text(
             example.summary,
@@ -327,10 +402,10 @@ class _ExampleCodeList extends StatelessWidget {
             MaterialPageRoute(
               builder: (_) => ExampleDetailPage(
                 example: example,
-                store: store,
-                auth: auth,
-                settings: settings,
-                examples: examples,
+                store: widget.store,
+                auth: widget.auth,
+                settings: widget.settings,
+                examples: widget.examples,
               ),
             ),
           ),
@@ -338,6 +413,219 @@ class _ExampleCodeList extends StatelessWidget {
       },
     );
   }
+}
+
+String _contentLanguage(String type, String language) =>
+    languageKey(language.trim().isEmpty ? type : language);
+
+class _ContentFilterSelection {
+  final query = TextEditingController();
+  String? language;
+  String? level;
+
+  bool get active => query.text.isNotEmpty || language != null || level != null;
+
+  bool matches({
+    required String language,
+    required String level,
+    required String text,
+  }) {
+    if (this.language != null && this.language != language) return false;
+    if (this.level != null && this.level != level.trim().toLowerCase()) {
+      return false;
+    }
+    final words = query.text.trim().toLowerCase().split(RegExp(r'\s+'));
+    final searchable = '$text ${languageLabel(language)}'.toLowerCase();
+    return words.every(searchable.contains);
+  }
+
+  void reset() {
+    query.clear();
+    language = null;
+    level = null;
+  }
+
+  void dispose() => query.dispose();
+}
+
+class _ContentFilterBar extends StatelessWidget {
+  const _ContentFilterBar({
+    required this.selection,
+    required this.languages,
+    required this.levels,
+    required this.resultLabel,
+    required this.onChanged,
+  });
+
+  final _ContentFilterSelection selection;
+  final List<String> languages;
+  final List<String> levels;
+  final String resultLabel;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final labels = _ContentLabels(context);
+    final languageChoices = languages
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList();
+    final levelChoices = levels
+        .map((value) => value.trim().toLowerCase())
+        .where((value) => value.isNotEmpty)
+        .toSet()
+        .toList();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            key: const ValueKey('content-query'),
+            controller: selection.query,
+            onChanged: (_) => onChanged(),
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              labelText: labels.search,
+              prefixIcon: const Icon(Icons.search),
+              border: const OutlineInputBorder(),
+              suffixIcon: selection.query.text.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: labels.clear,
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        selection.query.clear();
+                        onChanged();
+                      },
+                    ),
+            ),
+          ),
+          if (languageChoices.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                ChoiceChip(
+                  key: const ValueKey('content-language-all'),
+                  label: Text(StudioLocalizations.of(context).allLanguages),
+                  selected: selection.language == null,
+                  onSelected: (_) {
+                    selection.language = null;
+                    onChanged();
+                  },
+                ),
+                for (final language in languageChoices)
+                  ChoiceChip(
+                    key: ValueKey('content-language-$language'),
+                    label: Text(languageLabel(language)),
+                    selected: selection.language == language,
+                    onSelected: (_) {
+                      selection.language = language;
+                      onChanged();
+                    },
+                  ),
+              ],
+            ),
+          ],
+          if (levelChoices.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                ChoiceChip(
+                  key: const ValueKey('content-level-all'),
+                  label: Text(labels.allLevels),
+                  selected: selection.level == null,
+                  onSelected: (_) {
+                    selection.level = null;
+                    onChanged();
+                  },
+                ),
+                for (final level in levelChoices)
+                  ChoiceChip(
+                    key: ValueKey('content-level-$level'),
+                    label: Text(labels.level(level)),
+                    selected: selection.level == level,
+                    onSelected: (_) {
+                      selection.level = level;
+                      onChanged();
+                    },
+                  ),
+              ],
+            ),
+          ],
+          Wrap(
+            spacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(resultLabel, style: Theme.of(context).textTheme.bodyMedium),
+              if (selection.active)
+                TextButton.icon(
+                  key: const ValueKey('content-reset'),
+                  icon: const Icon(Icons.filter_alt_off_outlined),
+                  label: Text(labels.reset),
+                  onPressed: () {
+                    selection.reset();
+                    onChanged();
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _emptyResults(BuildContext context) => Padding(
+  key: const ValueKey('content-no-results'),
+  padding: const EdgeInsets.all(24),
+  child: Text(_ContentLabels(context).noResults, textAlign: TextAlign.center),
+);
+
+class _ContentTitle extends StatelessWidget {
+  const _ContentTitle({required this.title, required this.language});
+
+  final String title;
+  final String language;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      if (language.isNotEmpty) ...[
+        LanguageBadge(language: language),
+        const SizedBox(width: 8),
+      ],
+      Expanded(
+        child: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+      ),
+    ],
+  );
+}
+
+class _ContentLabels {
+  _ContentLabels(BuildContext context)
+    : chinese = Localizations.localeOf(context).languageCode == 'zh';
+
+  final bool chinese;
+  String get search =>
+      chinese ? '搜索标题、简介或知识点' : 'Search titles, summaries or concepts';
+  String get clear => chinese ? '清除搜索' : 'Clear search';
+  String get allLevels => chinese ? '全部难度' : 'All levels';
+  String get reset => chinese ? '重置筛选' : 'Reset filters';
+  String get noResults => chinese
+      ? '没有符合条件的内容，请调整或重置筛选。'
+      : 'No matching content. Adjust or reset the filters.';
+  String lessonCount(int count) => chinese ? '共 $count 课' : '$count lessons';
+  String level(String level) => switch (level) {
+    'beginner' => chinese ? '入门' : 'Beginner',
+    'intermediate' => chinese ? '进阶' : 'Intermediate',
+    'advanced' => chinese ? '高级' : 'Advanced',
+    _ => level,
+  };
 }
 
 class ExampleDetailPage extends StatefulWidget {
@@ -384,7 +672,15 @@ class _ExampleDetailPageState extends State<ExampleDetailPage> {
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(widget.example.title)),
+      appBar: AppBar(
+        title: _ContentTitle(
+          title: widget.example.title,
+          language: _contentLanguage(
+            widget.example.type,
+            widget.example.language,
+          ),
+        ),
+      ),
       body: _ContentList(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
         children: [
@@ -428,7 +724,11 @@ class _ExampleDetailPageState extends State<ExampleDetailPage> {
     );
   }
 
-  void _reset() => setState(() => _code.text = widget.example.code);
+  void _reset() => setState(
+    () => _code.text =
+        widget.examples?.bundledExample(widget.example.id)?.code ??
+        widget.example.code,
+  );
 
   Future<void> _save() async {
     final store = widget.examples;
@@ -470,7 +770,12 @@ class _LessonPage extends StatelessWidget {
     final theme = Theme.of(context);
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(title: Text(lesson.title)),
+      appBar: AppBar(
+        title: _ContentTitle(
+          title: lesson.title,
+          language: _contentLanguage(lesson.type, lesson.language),
+        ),
+      ),
       body: _ContentList(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
         children: [
@@ -496,11 +801,15 @@ class _LessonPage extends StatelessWidget {
             example: ExampleCode(
               id: lesson.id,
               type: lesson.type,
+              language: lesson.language,
+              level: lesson.level,
               title: lesson.title,
               summary: lesson.summary,
               code: lesson.code,
               output: lesson.output,
               sourceLessonId: lesson.id,
+              concepts: lesson.concepts,
+              inputFixtures: lesson.inputFixtures,
             ),
             store: store,
             auth: auth,

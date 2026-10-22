@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/tutorial.dart';
 import 'app_paths.dart';
+import 'code_import_service.dart';
 import 'java_source_renamer.dart';
 import 'runner_service.dart';
 
@@ -77,15 +78,24 @@ abstract final class DemoRunService {
     if (base == null || base.trim().isEmpty) {
       throw const DemoRunFailure('无法创建临时运行目录');
     }
-    final root = Directory(p.join(base, 'demo_runs'))..createSync(recursive: true);
+    final root = Directory(p.join(base, 'demo_runs'))
+      ..createSync(recursive: true);
     final directory = root.createTempSync('_run_');
 
     final info = _entryInfo(example.code);
     final entryFile = File(p.join(directory.path, '${info.className}.java'));
-    await entryFile.writeAsString(info.code, flush: true);
-
     final RunResult? result;
     try {
+      final files = CodeImportService.projectFiles(
+        example: example,
+        entryFile: '${info.className}.java',
+        code: info.code,
+      );
+      for (final entry in files.entries) {
+        final file = File(p.join(directory.path, entry.key));
+        await file.parent.create(recursive: true);
+        await file.writeAsString(entry.value, flush: true);
+      }
       result = await RunnerService.runProject(
         projectPath: directory.path,
         entryFile: entryFile.path,

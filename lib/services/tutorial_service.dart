@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../models/tutorial.dart';
+import 'example_input_fixtures.dart';
 
 /// 入门教程加载器。
 ///
@@ -81,13 +82,21 @@ abstract final class TutorialService {
       throw TutorialFormatException(language, '顶层必须是 JSON 对象');
     }
     final map = decoded.cast<String, Object?>();
+    final documentType = _str(map['type'], fallback: language);
+    final documentLanguage = _str(map['language'], fallback: language);
+    final documentLevel = _str(map['level']);
     final chapters = <TutorialChapter>[];
     for (final raw in _list(map['chapters'])) {
       final chapter = _map(raw);
       final lessons = <TutorialLesson>[];
       for (final rawLesson in _list(chapter['lessons'])) {
         lessons.add(
-          _lesson(_map(rawLesson), fallbackType: _str(map['type'], fallback: language)),
+          _lesson(
+            _map(rawLesson),
+            fallbackType: documentType,
+            fallbackLanguage: documentLanguage,
+            fallbackLevel: _str(chapter['level'], fallback: documentLevel),
+          ),
         );
       }
       chapters.add(
@@ -99,10 +108,14 @@ abstract final class TutorialService {
       );
     }
 
-    final documentType = _str(map['type'], fallback: language);
     final parsedExamples = [
       for (final raw in _list(map['examples']))
-        _example(_map(raw), fallbackType: documentType),
+        _example(
+          _map(raw),
+          fallbackType: documentType,
+          fallbackLanguage: documentLanguage,
+          fallbackLevel: documentLevel,
+        ),
     ];
     final examples = parsedExamples.isNotEmpty
         ? parsedExamples
@@ -112,11 +125,15 @@ abstract final class TutorialService {
                 ExampleCode(
                   id: lesson.id,
                   type: lesson.type,
+                  language: lesson.language,
+                  level: lesson.level,
                   title: lesson.title,
                   summary: lesson.summary,
                   code: lesson.code,
                   output: lesson.output,
                   sourceLessonId: lesson.id,
+                  concepts: lesson.concepts,
+                  inputFixtures: lesson.inputFixtures,
                 ),
           ];
 
@@ -149,6 +166,8 @@ abstract final class TutorialService {
   static TutorialLesson _lesson(
     Map<String, Object?> map, {
     required String fallbackType,
+    required String fallbackLanguage,
+    required String fallbackLevel,
   }) {
     final tasks = <TutorialTask>[];
     for (final raw in _list(map['tasks'])) {
@@ -164,6 +183,12 @@ abstract final class TutorialService {
     return TutorialLesson(
       id: _str(map['id']),
       type: _str(map['type'], fallback: fallbackType),
+      language: _str(map['language'], fallback: fallbackLanguage),
+      level: _str(map['level'], fallback: fallbackLevel),
+      inputFixtures: ExampleInputFixtures.parse(
+        map['inputFixtures'],
+        input: map['input'],
+      ),
       title: _str(map['title']),
       summary: _str(map['summary']),
       concepts: [for (final c in _list(map['concepts'])) _str(c)],
@@ -177,14 +202,23 @@ abstract final class TutorialService {
   static ExampleCode _example(
     Map<String, Object?> map, {
     required String fallbackType,
+    required String fallbackLanguage,
+    required String fallbackLevel,
   }) => ExampleCode(
     id: _str(map['id']),
     type: _str(map['type'], fallback: fallbackType),
+    language: _str(map['language'], fallback: fallbackLanguage),
+    level: _str(map['level'], fallback: fallbackLevel),
+    inputFixtures: ExampleInputFixtures.parse(
+      map['inputFixtures'],
+      input: map['input'],
+    ),
     title: _str(map['title']),
     summary: _str(map['summary']),
     code: _str(map['code']),
     output: _str(map['output']),
     sourceLessonId: _nullableStr(map['sourceLessonId']),
+    concepts: [for (final value in _list(map['concepts'])) _str(value)],
   );
 
   /// 依次尝试带包名前缀和不带前缀的 asset key。

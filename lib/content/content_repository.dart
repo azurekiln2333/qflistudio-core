@@ -44,7 +44,8 @@ class ContentFilter {
   const ContentFilter({this.language, this.type, this.locale, this.types});
 
   factory ContentFilter.forProduct(String productKey) {
-    final types = ContentProductTypes.byProduct[productKey.trim().toLowerCase()];
+    final types =
+        ContentProductTypes.byProduct[productKey.trim().toLowerCase()];
     if (types == null) {
       throw ArgumentError.value(productKey, 'productKey', 'Unknown product');
     }
@@ -72,8 +73,7 @@ class ContentFilter {
         entry.locale.trim().toLowerCase() != normalizedLocale) {
       return false;
     }
-    if (types != null &&
-        !types!.contains(entry.type.trim().toLowerCase())) {
+    if (types != null && !types!.contains(entry.type.trim().toLowerCase())) {
       return false;
     }
     return true;
@@ -152,6 +152,7 @@ class TutorialLessonContent {
     this.objective = '',
     this.prerequisites = const [],
     this.pitfalls = const [],
+    this.inputFixtures = const {},
   });
 
   final String id;
@@ -171,6 +172,7 @@ class TutorialLessonContent {
 
   /// Common mistakes and important caveats for this lesson.
   final List<String> pitfalls;
+  final Map<String, String> inputFixtures;
 }
 
 class ContentExercise {
@@ -317,11 +319,17 @@ List<Map<String, Object?>> _entries(
 }) {
   if (document is List) return _mapList(document, documentName);
   if (document is! Map) {
-    throw ContentFormatException(documentName, 'top level must be an object or list');
+    throw ContentFormatException(
+      documentName,
+      'top level must be an object or list',
+    );
   }
   final map = document.cast<String, Object?>();
   if (map.containsKey('entries')) {
-    return _mapList(_requiredList(map['entries'], documentName, 'entries'), documentName);
+    return _mapList(
+      _requiredList(map['entries'], documentName, 'entries'),
+      documentName,
+    );
   }
   for (final key in legacyKeys) {
     if (map.containsKey(key)) {
@@ -335,10 +343,7 @@ List<Map<String, Object?>> _entries(
   return const [];
 }
 
-List<Map<String, Object?>> _mapList(
-  List<Object?> values,
-  String documentName,
-) {
+List<Map<String, Object?>> _mapList(List<Object?> values, String documentName) {
   return [
     for (var index = 0; index < values.length; index++)
       _map(values[index], '$documentName.entries[$index]'),
@@ -434,6 +439,7 @@ TutorialLessonContent _parseLesson(
     objective: _text(map['objective']),
     prerequisites: _strings(map['prerequisites']),
     pitfalls: _strings(map['pitfalls']),
+    inputFixtures: _inputFixtures(map),
     exercises: [
       for (final raw in _list(exercisesValue))
         _parseExercise(_map(raw, 'tutorials.exercises')),
@@ -501,7 +507,8 @@ ExampleContent _parseExample(
         : type,
     sourceLessonId: _nullableText(map['sourceLessonId']),
     hasExplicitId: idValue.isNotEmpty,
-    hasExplicitLanguage: languageValue.isNotEmpty || documentLanguage.isNotEmpty,
+    hasExplicitLanguage:
+        languageValue.isNotEmpty || documentLanguage.isNotEmpty,
     hasExplicitType: typeValue.isNotEmpty,
   );
 }
@@ -523,9 +530,8 @@ Map<String, String> _inputFixtures(Map<String, Object?> map) {
   return result;
 }
 
-Map<String, Object?>? _rootMap(Object document) => document is Map
-    ? document.cast<String, Object?>()
-    : null;
+Map<String, Object?>? _rootMap(Object document) =>
+    document is Map ? document.cast<String, Object?>() : null;
 
 Map<String, Object?> _map(Object? value, String path) {
   if (value is Map) return value.cast<String, Object?>();

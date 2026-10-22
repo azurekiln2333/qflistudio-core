@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
@@ -480,16 +481,22 @@ class _CodeImportDialogState extends State<_CodeImportDialog> {
           widget.example,
           _fileName.text.trim(),
         );
-        final target = CodeImportService.destinationPath(
+        final targets = CodeImportService.destinationPaths(
           project: project,
           example: widget.example,
           fileName: resolved.fileName,
         );
         var overwrite = false;
-        if (await FileSystemEntity.type(target, followLinks: false) ==
-            FileSystemEntityType.file) {
+        final existing = <String>[];
+        for (final target in targets) {
+          if (await FileSystemEntity.type(target, followLinks: false) ==
+              FileSystemEntityType.file) {
+            existing.add(p.relative(target, from: project.path));
+          }
+        }
+        if (existing.isNotEmpty) {
           if (!mounted) return;
-          overwrite = await _confirmReplacement(resolved.fileName);
+          overwrite = await _confirmReplacement(existing.join('\n'));
           if (!mounted || !overwrite) return;
         }
         imported = await CodeImportService.importIntoProject(
