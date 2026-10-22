@@ -199,7 +199,7 @@ class EditorController extends ChangeNotifier {
         if (backup) {
           await FileBackup.backupBeforeOverwrite(
             file,
-            projectName: project.name,
+            projectName: open.ownerProjectName,
           );
         }
         await file.writeAsBytes(snapshot, flush: true);
