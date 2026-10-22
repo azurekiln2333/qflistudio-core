@@ -107,6 +107,34 @@ class _FileExplorerState extends State<FileExplorer> {
   String _searchQuery = '';
   late Project _browsing;
   late FileNode _root;
+  int _treeGeneration = 0;
+  Future<void>? _restoring;
+  List<Project> _workspaceProjects = [];
+  int _workspaceSelectionRevision = 0;
+
+  List<Project> get _workspace => [
+    _browsing,
+    for (final project in _workspaceProjects)
+      if (!p.equals(project.path, _browsing.path)) project,
+  ];
+
+  List<FileNode> get _roots => [
+    for (final project in _workspace)
+      FileNode(path: project.path, name: project.name, isDir: true),
+  ];
+
+  Project _ownerOf(String path) {
+    var owner = _browsing;
+    var longestRoot = -1;
+    for (final project in _workspace) {
+      if ((p.equals(project.path, path) || p.isWithin(project.path, path)) &&
+          project.path.length > longestRoot) {
+        owner = project;
+        longestRoot = project.path.length;
+      }
+    }
+    return owner;
+  }
 
   @override
   void dispose() {
@@ -125,6 +153,7 @@ class _FileExplorerState extends State<FileExplorer> {
     );
     _browsing = remembered ?? widget.project;
     _rebuildRoot();
+    unawaited(_restoreWorkspace());
     if (remembered != null && remembered.path != widget.project.path) {
       unawaited(_verifyBrowsing(remembered));
     }
@@ -132,19 +161,118 @@ class _FileExplorerState extends State<FileExplorer> {
 
   /// 校验记住的项目目录是否还在，已失效则回落到当前项目。
   Future<void> _verifyBrowsing(Project remembered) async {
+    final generation = _treeGeneration;
     final exists = await Directory(remembered.path).exists();
-    if (!mounted || exists) return;
+    if (!mounted || generation != _treeGeneration || exists) return;
     setState(() => _browsing = widget.project);
     _rebuildRoot();
   }
 
   void _rebuildRoot() {
+    _treeGeneration++;
     _root = FileNode(path: _browsing.path, name: _browsing.name, isDir: true);
     _children.clear();
     _expanded
       ..clear()
-      ..add(_root.path);
-    _loadChildren(_root);
+      ..addAll(_roots.map((root) => root.path));
+    for (final root in _roots) {
+      unawaited(_loadChildren(root));
+    }
+    _restoring = Future.wait([
+      for (final project in _workspace) _restoreExpanded(project),
+    ]).then((_) {});
+  }
+
+  Future<void> _restoreWorkspace() async {
+    final revision = _workspaceSelectionRevision;
+    final session = await ProjectHistory.load(widget.project.path);
+    if (!mounted || revision != _workspaceSelectionRevision) return;
+    final projects = <Project>[];
+    for (final project in widget.store.projects) {
+      if (project.isCloud ||
+          !session.workspaceRoots.any((path) => p.equals(path, project.path))) {
+        continue;
+      }
+      final exists = await Directory(project.path).exists();
+      if (!mounted || revision != _workspaceSelectionRevision) return;
+      if (exists) projects.add(project);
+    }
+    if (projects.isEmpty) return;
+    _workspaceProjects = projects;
+    setState(_rebuildRoot);
+  }
+
+  Future<void> _manageWorkspace() async {
+    final projects = widget.store.projects
+        .where((project) => !project.isCloud)
+        .toList(growable: false);
+    final selected = {for (final project in _workspace) project.id};
+    final result = await showDialog<List<Project>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: const Text('工作区项目'),
+          content: SizedBox(
+            width: 420,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 440),
+              child: projects.isEmpty
+                  ? const Text('请先在项目列表添加本地项目。')
+                  : ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final project in projects)
+                          CheckboxListTile(
+                            key: ValueKey('workspace-project-${project.id}'),
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(project.name),
+                            subtitle: Text(project.path),
+                            value: selected.contains(project.id),
+                            onChanged: p.equals(project.path, _browsing.path)
+                                ? null
+                                : (value) => update(() {
+                                    if (value == true) {
+                                      selected.add(project.id);
+                                    } else {
+                                      selected.remove(project.id);
+                                    }
+                                  }),
+                          ),
+                      ],
+                    ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, [
+                for (final project in projects)
+                  if (selected.contains(project.id)) project,
+              ]),
+              child: const Text('应用'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    // Flush the outgoing roots before rebuilding so removing a root never
+    // erases the expansion it should recover when added again.
+    await _restoring;
+    if (!mounted) return;
+    await _persistExpanded();
+    if (!mounted) return;
+    _workspaceSelectionRevision++;
+    _workspaceProjects = result;
+    unawaited(
+      ProjectHistory.saveWorkspaceRoots(widget.project.path, [
+        for (final project in result) project.path,
+      ]),
+    );
+    setState(_rebuildRoot);
   }
 
   /// 跨项目浏览：切换文件树根目录。
@@ -155,21 +283,29 @@ class _FileExplorerState extends State<FileExplorer> {
     setState(() => _browsing = project);
     widget.store.setBrowsedProject(project);
     _rebuildRoot();
-    _restoreExpanded();
   }
 
   /// 恢复上次展开的目录（来自项目内 history.json）。
-  Future<void> _restoreExpanded() async {
-    final session = await ProjectHistory.load(_browsing.path);
-    if (!mounted) return;
+  Future<void> _restoreExpanded(Project project) async {
+    final generation = _treeGeneration;
+    final projectPath = project.path;
+    final session = await ProjectHistory.load(projectPath);
+    if (!mounted || generation != _treeGeneration) return;
+    if (!session.treeRootExpanded) _expanded.remove(projectPath);
     for (final rel in session.expandedDirs) {
-      final abs = p.isAbsolute(rel) ? rel : p.join(_browsing.path, rel);
-      if (!Directory(abs).existsSync()) continue;
+      final abs = p.normalize(
+        p.isAbsolute(rel) ? rel : p.join(projectPath, rel),
+      );
+      if (!p.isWithin(projectPath, abs)) continue;
+      final exists = await Directory(abs).exists();
+      if (!mounted || generation != _treeGeneration) return;
+      if (!exists) continue;
       _expanded.add(abs);
       if (!_children.containsKey(abs)) {
         unawaited(
           _loadChildren(
             FileNode(path: abs, name: p.basename(abs), isDir: true),
+            generation: generation,
           ),
         );
       }
@@ -179,24 +315,26 @@ class _FileExplorerState extends State<FileExplorer> {
 
   /// 展开状态持久化（相对浏览项目根目录）。
   Future<void> _persistExpanded() async {
-    final dirs = _expanded
-        .where((path) => p.isWithin(_browsing.path, path))
-        .map(
-          (path) =>
-              p.relative(path, from: _browsing.path).replaceAll(r'\', '/'),
-        )
-        .toList();
-    await ProjectHistory.saveExpandedDirs(_browsing.path, dirs);
+    await Future.wait([
+      for (final project in _workspace)
+        ProjectHistory.saveExpandedDirs(project.path, [
+          for (final path in _expanded)
+            if (p.isWithin(project.path, path))
+              p.relative(path, from: project.path).replaceAll(r'\', '/'),
+        ], treeRootExpanded: _expanded.contains(project.path)),
+    ]);
   }
 
   List<FileNode> _childrenOf(FileNode dir) => _children[dir.path] ?? const [];
 
   /// 打开搜索命中的文件（成功后收起侧栏/抽屉，与树内打开一致）。
   Future<void> _openSearchResult(String path) async {
+    final owner = _ownerOf(path);
     final error = await widget.editor.openPath(
       path,
-      ownerProjectName: _browsing.name,
-      ownerProjectPath: _browsing.path,
+      ownerProjectName: owner.name,
+      ownerProjectPath: owner.path,
+      ownerProjectType: owner.type,
     );
     if (!mounted) return;
     if (error != null) {
@@ -208,7 +346,8 @@ class _FileExplorerState extends State<FileExplorer> {
     widget.onFileOpened?.call();
   }
 
-  Future<void> _loadChildren(FileNode dir) async {
+  Future<void> _loadChildren(FileNode dir, {int? generation}) async {
+    final expectedGeneration = generation ?? _treeGeneration;
     List<FileNode> nodes = const [];
     try {
       // Async listing: a project directory can hold thousands of entries, and
@@ -226,18 +365,24 @@ class _FileExplorerState extends State<FileExplorer> {
     } on FileSystemException {
       nodes = const [];
     }
-    if (!mounted) return;
+    if (!mounted || expectedGeneration != _treeGeneration) return;
     setState(() => _children[dir.path] = nodes);
   }
 
   Future<void> _refresh() async {
+    final generation = _treeGeneration;
     _children.clear();
-    await _loadChildren(_root);
+    for (final root in _roots) {
+      await _loadChildren(root, generation: generation);
+      if (!mounted || generation != _treeGeneration) return;
+    }
     for (final path in _expanded.toList()) {
-      if (path == _root.path) continue;
+      if (_roots.any((root) => p.equals(root.path, path))) continue;
       await _loadChildren(
         FileNode(path: path, name: p.basename(path), isDir: true),
+        generation: generation,
       );
+      if (!mounted || generation != _treeGeneration) return;
     }
   }
 
@@ -292,7 +437,12 @@ class _FileExplorerState extends State<FileExplorer> {
     }
   }
 
-  void _toggle(FileNode node) {
+  Future<void> _toggle(FileNode node) async {
+    final generation = _treeGeneration;
+    // Apply a tap after restoration so it cannot be undone by a late restore,
+    // or persist an incomplete set while the saved directories are loading.
+    await _restoring;
+    if (!mounted || generation != _treeGeneration) return;
     if (_expanded.remove(node.path)) {
       setState(() {});
       unawaited(_persistExpanded());
@@ -305,10 +455,12 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   Future<void> _openFile(FileNode node) async {
+    final owner = _ownerOf(node.path);
     final error = await widget.editor.openPath(
       node.path,
-      ownerProjectName: _browsing.name,
-      ownerProjectPath: _browsing.path,
+      ownerProjectName: owner.name,
+      ownerProjectPath: owner.path,
+      ownerProjectType: owner.type,
     );
     if (!mounted) return;
     if (error != null) {
@@ -321,7 +473,9 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   Future<void> _create(FileNode? dirNode, bool isDir) async {
+    final generation = _treeGeneration;
     final dirPath = dirNode?.path ?? _root.path;
+    final owner = _ownerOf(dirPath);
     final String? name;
     if (isDir) {
       name = await showNewNameDialog(
@@ -334,7 +488,7 @@ class _FileExplorerState extends State<FileExplorer> {
       name = await showNewFileDialog(
         context,
         settings: widget.settings,
-        projectLanguage: widget.project.language,
+        projectLanguage: owner.language,
       );
     }
     if (name == null || !mounted) return;
@@ -359,16 +513,20 @@ class _FileExplorerState extends State<FileExplorer> {
       }
       return;
     }
+    await _restoring;
+    if (!mounted || generation != _treeGeneration) return;
     _expanded.add(dirPath);
+    unawaited(_persistExpanded());
     await _loadChildren(
       FileNode(path: dirPath, name: p.basename(dirPath), isDir: true),
     );
-    if (!isDir) {
-      _openFile(FileNode(path: path, name: name, isDir: false));
+    if (mounted && generation == _treeGeneration && !isDir) {
+      await _openFile(FileNode(path: path, name: name, isDir: false));
     }
   }
 
   Future<void> _delete(FileNode node) async {
+    final owner = _ownerOf(node.path);
     final confirmed = await showDeleteEntryConfirm(
       context,
       name: node.name,
@@ -378,7 +536,7 @@ class _FileExplorerState extends State<FileExplorer> {
     // 先压缩备份到回收站 files_bin，失败则中止删除。
     final backupError = await RecycleBin.backupEntry(
       node.isDir ? Directory(node.path) : File(node.path),
-      projectName: _browsing.name,
+      projectName: owner.name,
     );
     if (backupError != null) {
       if (mounted) {
@@ -401,8 +559,12 @@ class _FileExplorerState extends State<FileExplorer> {
       }
       return;
     }
+    // Backup/deletion may finish after the entire editor has been disposed.
+    if (!mounted) return;
     widget.editor.closePathsUnder(node.path);
-    widget.onEntryDeleted?.call(node.path);
+    if (p.isWithin(widget.project.path, node.path)) {
+      widget.onEntryDeleted?.call(node.path);
+    }
     final parentPath = p.dirname(node.path);
     await _loadChildren(
       FileNode(path: parentPath, name: p.basename(parentPath), isDir: true),
@@ -410,7 +572,8 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   void _showMenu(FileNode node, Offset position) {
-    final isRoot = node.path == _root.path;
+    final isRoot = _roots.any((root) => p.equals(node.path, root.path));
+    final owner = _ownerOf(node.path);
     final l = StudioLocalizations.of(context);
     final items = <PopupMenuEntry<String>>[
       if (!node.isDir)
@@ -531,14 +694,14 @@ class _FileExplorerState extends State<FileExplorer> {
             MaterialPageRoute(
               builder: (_) => FileHistoryPage(
                 originalPath: node.path,
-                projectName: widget.project.name,
-                projectPath: widget.project.path,
+                projectName: owner.name,
+                projectPath: owner.path,
                 onOpenVersion: (backupFile, timeLabel) {
                   widget.editor
                       .openPath(
                         backupFile.path,
-                        ownerProjectName: widget.project.name,
-                        ownerProjectPath: widget.project.path,
+                        ownerProjectName: owner.name,
+                        ownerProjectPath: owner.path,
                         readOnly: true,
                         timeLabel: timeLabel,
                       )
@@ -570,7 +733,12 @@ class _FileExplorerState extends State<FileExplorer> {
 
   Widget _buildSearchResults(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final results = FileExplorer.searchFiles(_browsing.path, _searchQuery);
+    final paths = <String>{};
+    final results = [
+      for (final project in _workspace)
+        for (final node in FileExplorer.searchFiles(project.path, _searchQuery))
+          if (paths.add(p.canonicalize(node.path))) node,
+    ].take(200).toList(growable: false);
     if (results.isEmpty) {
       return Center(
         child: Text(
@@ -586,8 +754,9 @@ class _FileExplorerState extends State<FileExplorer> {
       itemCount: results.length,
       itemBuilder: (context, i) {
         final node = results[i];
-        final rel = p.isWithin(_browsing.path, node.path)
-            ? p.relative(node.path, from: _browsing.path)
+        final owner = _ownerOf(node.path);
+        final rel = p.isWithin(owner.path, node.path)
+            ? p.relative(node.path, from: owner.path).replaceAll(r'\', '/')
             : node.path;
         return ListTile(
           dense: true,
@@ -604,7 +773,7 @@ class _FileExplorerState extends State<FileExplorer> {
             style: Theme.of(context).textTheme.bodyMedium,
           ),
           subtitle: Text(
-            rel,
+            _workspace.length > 1 ? '${owner.name}/$rel' : rel,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: Theme.of(
@@ -639,148 +808,183 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   Widget _buildBody(BuildContext context, ColorScheme scheme) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(
-          height: 48,
-          child: Row(
-            children: [
-              const SizedBox(width: 8),
-              Expanded(
-                child: PopupMenuButton<Project>(
-                  tooltip: '切换项目（跨项目打开文件）',
-                  onSelected: _switchProject,
-                  itemBuilder: (context) => [
-                    for (final p in widget.store.projects)
-                      PopupMenuItem(
-                        value: p,
-                        child: Row(
-                          children: [
-                            Icon(
-                              p.isCloud
-                                  ? Icons.cloud_outlined
-                                  : Icons.folder_outlined,
-                              size: 18,
-                              color: p.path == _browsing.path
-                                  ? scheme.primary
-                                  : scheme.onSurfaceVariant,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                p.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (p.path == _browsing.path)
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 48,
+            child: Row(
+              children: [
+                const SizedBox(width: 8),
+                Expanded(
+                  child: PopupMenuButton<Project>(
+                    tooltip: '切换项目（跨项目打开文件）',
+                    onSelected: _switchProject,
+                    itemBuilder: (context) => [
+                      for (final p in widget.store.projects)
+                        PopupMenuItem(
+                          value: p,
+                          child: Row(
+                            children: [
                               Icon(
-                                Icons.check,
-                                size: 16,
-                                color: scheme.primary,
+                                p.isCloud
+                                    ? Icons.cloud_outlined
+                                    : Icons.folder_outlined,
+                                size: 18,
+                                color: p.path == _browsing.path
+                                    ? scheme.primary
+                                    : scheme.onSurfaceVariant,
                               ),
-                          ],
-                        ),
-                      ),
-                  ],
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHighest.withValues(
-                        alpha: 0.5,
-                      ),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            _browsing.name,
-                            style: Theme.of(context).textTheme.labelLarge,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  p.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if (p.path == _browsing.path)
+                                Icon(
+                                  Icons.check,
+                                  size: 16,
+                                  color: scheme.primary,
+                                ),
+                            ],
                           ),
                         ),
-                        const Icon(Icons.arrow_drop_down, size: 18),
+                    ],
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: scheme.surfaceContainerHighest.withValues(
+                          alpha: 0.5,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _browsing.name,
+                              style: Theme.of(context).textTheme.labelLarge,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const Icon(Icons.arrow_drop_down, size: 18),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '新建文件',
+                  icon: const Icon(Icons.note_add_outlined, size: 20),
+                  onPressed: () => _create(null, false),
+                ),
+                IconButton(
+                  tooltip: '新建文件夹',
+                  icon: const Icon(Icons.create_new_folder_outlined, size: 20),
+                  onPressed: () => _create(null, true),
+                ),
+                IconButton(
+                  tooltip: _searchOpen ? '退出搜索' : '搜索文件',
+                  icon: Icon(_searchOpen ? Icons.close : Icons.search),
+                  onPressed: () {
+                    setState(() {
+                      _searchOpen = !_searchOpen;
+                      _searchQuery = '';
+                      _searchController.clear();
+                    });
+                  },
+                ),
+                IconButton(
+                  tooltip: '刷新',
+                  icon: const Icon(Icons.refresh, size: 20),
+                  onPressed: _refresh,
+                ),
+                const SizedBox(width: 4),
+              ],
+            ),
+          ),
+          if (constraints.maxHeight >= (_searchOpen ? 240 : 144))
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.folder_copy_outlined, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '工作区 · ${_workspace.length} 个项目',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '工作区项目',
+                    icon: const Icon(Icons.tune, size: 20),
+                    onPressed: _manageWorkspace,
+                  ),
+                ],
+              ),
+            ),
+          Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
+          if (_searchOpen)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: Theme.of(context).textTheme.bodyMedium,
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: '按文件名搜索（含子目录）',
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                ),
+                onChanged: (value) => setState(() => _searchQuery = value),
+              ),
+            ),
+          Expanded(
+            child: _searchOpen && _searchQuery.trim().isNotEmpty
+                ? _buildSearchResults(context)
+                : GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onSecondaryTapUp: (details) =>
+                        _showMenu(_root, details.globalPosition),
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      children: [
+                        for (final root in _roots)
+                          KeyedSubtree(
+                            key: ValueKey('workspace-root-${root.path}'),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _buildRow(context, root, 0),
+                                if (_expanded.contains(root.path))
+                                  for (final node in _childrenOf(root))
+                                    _buildNode(context, node, 1),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   ),
-                ),
-              ),
-              IconButton(
-                tooltip: '新建文件',
-                icon: const Icon(Icons.note_add_outlined, size: 20),
-                onPressed: () => _create(null, false),
-              ),
-              IconButton(
-                tooltip: '新建文件夹',
-                icon: const Icon(Icons.create_new_folder_outlined, size: 20),
-                onPressed: () => _create(null, true),
-              ),
-              IconButton(
-                tooltip: _searchOpen ? '退出搜索' : '搜索文件',
-                icon: Icon(_searchOpen ? Icons.close : Icons.search),
-                onPressed: () {
-                  setState(() {
-                    _searchOpen = !_searchOpen;
-                    _searchQuery = '';
-                    _searchController.clear();
-                  });
-                },
-              ),
-              IconButton(
-                tooltip: '刷新',
-                icon: const Icon(Icons.refresh, size: 20),
-                onPressed: _refresh,
-              ),
-              const SizedBox(width: 4),
-            ],
           ),
-        ),
-        Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
-        if (_searchOpen)
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: TextField(
-              controller: _searchController,
-              autofocus: true,
-              style: Theme.of(context).textTheme.bodyMedium,
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: '按文件名搜索（含子目录）',
-                prefixIcon: const Icon(Icons.search, size: 18),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-              ),
-              onChanged: (value) => setState(() => _searchQuery = value),
-            ),
-          ),
-        Expanded(
-          child: _searchOpen && _searchQuery.trim().isNotEmpty
-              ? _buildSearchResults(context)
-              : GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onSecondaryTapUp: (details) =>
-                      _showMenu(_root, details.globalPosition),
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    children: [
-                      _buildRow(context, _root, 0),
-                      if (_expanded.contains(_root.path))
-                        for (final node in _childrenOf(_root))
-                          _buildNode(context, node, 1),
-                    ],
-                  ),
-                ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

@@ -233,6 +233,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       SchedulerBinding.instance.scheduleTask(
         () => _restoreSession().whenComplete(() {
           if (!_sessionRestored.isCompleted) _sessionRestored.complete();
+          if (mounted) _scheduleHistorySave();
         }),
         Priority.animation,
         debugLabel: 'restoreSession',
@@ -321,14 +322,69 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final session = await ProjectHistory.load(widget.project.path);
     if (!mounted) return;
     final opened = <String>[];
-    for (final rel in session.openFiles) {
-      final abs = p.isAbsolute(rel) ? rel : p.join(widget.project.path, rel);
+    String? activePath;
+    final documents = session.documents.isNotEmpty
+        ? session.documents
+        : [
+            for (final rel in session.openFiles)
+              ProjectDocumentSession(
+                projectPath: widget.project.path,
+                relativePath: rel,
+                cursor:
+                    session.cursors[rel] ??
+                    const FileCursor(
+                      baseIndex: 0,
+                      baseOffset: 0,
+                      extentIndex: 0,
+                      extentOffset: 0,
+                    ),
+                isActive: rel == session.activeFile,
+              ),
+          ];
+    final seen = <String>{};
+    for (final document in documents) {
+      final Project owner;
+      if (p.equals(document.projectPath, widget.project.path)) {
+        owner = widget.project;
+      } else {
+        final matches = widget.store.projects.where(
+          (project) =>
+              !project.isCloud && p.equals(project.path, document.projectPath),
+        );
+        if (matches.isEmpty) continue;
+        owner = matches.first;
+      }
+      if (p.isAbsolute(document.relativePath)) continue;
+      final abs = p.normalize(p.join(owner.path, document.relativePath));
+      if (!p.isWithin(owner.path, abs) || !seen.add(p.canonicalize(abs))) {
+        continue;
+      }
       // Async existence check: the sync form blocks the isolate once per
       // remembered tab, and a project can remember several.
       if (!await File(abs).exists()) continue;
-      final error = await _editor.openPath(abs, cursor: session.cursors[rel]);
+      try {
+        if (!p.isWithin(
+          await Directory(owner.path).resolveSymbolicLinks(),
+          await File(abs).resolveSymbolicLinks(),
+        )) {
+          continue;
+        }
+      } on FileSystemException {
+        continue;
+      }
       if (!mounted) return;
-      if (error == null) opened.add(rel);
+      final error = await _editor.openPath(
+        abs,
+        ownerProjectName: owner.name,
+        ownerProjectPath: owner.path,
+        ownerProjectType: owner.type,
+        cursor: document.cursor,
+      );
+      if (!mounted) return;
+      if (error == null) {
+        opened.add(abs);
+        if (document.isActive) activePath = abs;
+      }
     }
     OpenPerformance.mark('restoreSession done (${opened.length} tabs)');
     final initialPath = widget.initialOpenPath;
@@ -337,16 +393,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       return;
     }
     if (opened.isNotEmpty) {
-      final activeRel = session.activeFile;
-      if (activeRel != null) {
-        final idx = _editor.files.indexWhere((f) {
-          final rel = p.isWithin(widget.project.path, f.path)
-              ? p
-                    .relative(f.path, from: widget.project.path)
-                    .replaceAll('\\', '/')
-              : null;
-          return rel == activeRel;
-        });
+      if (activePath != null) {
+        final idx = _editor.files.indexWhere(
+          (f) => p.equals(f.path, activePath!),
+        );
         if (idx >= 0) {
           _editor.select(idx);
           return;
@@ -358,30 +408,45 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   /// 保存会话（光标 + 打开列表）到项目内 history.json。
   Future<void> _saveHistory() async {
+    if (!_sessionRestored.isCompleted) return;
     final cursors = <String, FileCursor>{};
     final openFiles = <String>[];
+    final documents = <ProjectDocumentSession>[];
     String? activeRel;
     for (final f in _editor.files) {
       if (f.readOnly) continue;
-      if (!p.isWithin(widget.project.path, f.path)) continue;
+      if (!p.isWithin(f.projectRootPath, f.path)) continue;
       final rel = p
-          .relative(f.path, from: widget.project.path)
+          .relative(f.path, from: f.projectRootPath)
           .replaceAll('\\', '/');
-      openFiles.add(rel);
       final sel = f.controller.selection;
-      cursors[rel] = FileCursor(
-        baseIndex: sel.baseIndex,
+      final cursor = FileCursor(
+        // Folding changes visible indices; a restored document is unfolded.
+        baseIndex: f.controller.codeLines.index2lineIndex(sel.baseIndex),
         baseOffset: sel.baseOffset,
-        extentIndex: sel.extentIndex,
+        extentIndex: f.controller.codeLines.index2lineIndex(sel.extentIndex),
         extentOffset: sel.extentOffset,
       );
-      if (identical(f, _editor.current)) activeRel = rel;
+      documents.add(
+        ProjectDocumentSession(
+          projectPath: f.projectRootPath,
+          relativePath: rel,
+          cursor: cursor,
+          isActive: identical(f, _editor.current),
+        ),
+      );
+      if (p.equals(f.projectRootPath, widget.project.path)) {
+        openFiles.add(rel);
+        cursors[rel] = cursor;
+        if (identical(f, _editor.current)) activeRel = rel;
+      }
     }
     await ProjectHistory.save(
       widget.project.path,
       cursors: cursors,
       openFiles: openFiles,
       activeFile: activeRel,
+      documents: documents,
     );
   }
 
@@ -452,6 +517,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _onEditorChanged() {
+    if (!_sessionRestored.isCompleted) return;
     if (_editor.current?.readOnly == true) return; // 历史快照只读
     _scheduleHistorySave();
   }
