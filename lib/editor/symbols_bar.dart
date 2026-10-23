@@ -53,10 +53,13 @@ const Map<String, List<String>> kDefaultSymbolSets = {
 };
 
 /// 文件扩展名 → 语言名（与项目语言标注一致）。
-String languageForFileName(String fileName) {
+/// [ownerType] disambiguates .h using the file owner, not the primary project.
+String languageForFileName(String fileName, {String ownerType = ''}) {
   final ext = fileName.contains('.')
       ? fileName.substring(fileName.lastIndexOf('.')).toLowerCase()
       : '';
+  final owner = ownerType.trim().toLowerCase();
+  if (ext == '.h' && (owner == 'cpp' || owner == 'c++')) return 'C++';
   const map = {
     '.py': 'Python',
     '.java': 'Java',
@@ -64,7 +67,11 @@ String languageForFileName(String fileName) {
     '.h': 'C',
     '.cpp': 'C++',
     '.hpp': 'C++',
+    '.hh': 'C++',
+    '.hxx': 'C++',
+    '.inl': 'C++',
     '.cc': 'C++',
+    '.cxx': 'C++',
     '.html': 'Web',
     '.htm': 'Web',
     '.dart': 'Dart',
