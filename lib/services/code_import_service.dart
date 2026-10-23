@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
 import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
@@ -35,6 +37,18 @@ class CodeImportException implements Exception {
 
 abstract final class CodeImportService {
   static final _projectWrites = <String, Future<void>>{};
+
+  /// Allows tests to pause between real writes and inject a later failure.
+  @visibleForTesting
+  static Future<void> Function(String path)? beforeProjectFileWriteForTesting;
+
+  /// Allows tests to save after backup, before the replacement snapshot.
+  @visibleForTesting
+  static Future<void> Function(String path)? beforeProjectFileReplaceForTesting;
+
+  /// Synchronous fault/timing hook; production creation never yields here.
+  @visibleForTesting
+  static void Function(String path)? afterProjectFileCreateForTesting;
 
   /// Source plus validated fixtures, relative to the actual project root.
   static Map<String, String> projectFiles({
@@ -109,9 +123,9 @@ abstract final class CodeImportService {
     bool overwrite = false,
   }) => _serialized(root, () async {
     final absoluteRoot = p.normalize(Directory(root).absolute.path);
-      if (!Directory(absoluteRoot).existsSync()) {
-        throw const CodeImportException(CodeImportFailure.projectUnavailable);
-      }
+    if (!Directory(absoluteRoot).existsSync()) {
+      throw const CodeImportException(CodeImportFailure.projectUnavailable);
+    }
     final originals = <String, List<int>?>{};
     // Preflight the complete set before creating any source/data file or folder.
     for (final name in files.keys) {
@@ -139,15 +153,12 @@ abstract final class CodeImportService {
           (type != FileSystemEntityType.file || !overwrite)) {
         throw CodeImportException(CodeImportFailure.fileExists, path);
       }
-      originals[path] = type == FileSystemEntityType.file
-          ? await File(path).readAsBytes()
-          : null;
     }
-    final written = <String>[];
+    final written = <String, List<int>>{};
     final createdDirectories = <String>[];
     try {
       for (final entry in files.entries) {
-          final file = File(p.normalize(p.join(absoluteRoot, entry.key)));
+        final file = File(p.normalize(p.join(absoluteRoot, entry.key)));
         final missing = <String>[];
         var parent = file.parent.path;
         while (!Directory(parent).existsSync()) {
@@ -159,29 +170,46 @@ abstract final class CodeImportService {
           createdDirectories.add(path);
         }
         // Check again after await; an import must never follow a new link.
-        final resolvedParent = file.parent.resolveSymbolicLinksSync();
-        final resolvedRoot = Directory(absoluteRoot).resolveSymbolicLinksSync();
-        if (!p.equals(resolvedRoot, resolvedParent) &&
-            !p.isWithin(resolvedRoot, resolvedParent)) {
-          throw const CodeImportException(CodeImportFailure.projectUnavailable);
-        }
-        await _writeFile(
+        _checkPhysicalParent(file, absoluteRoot);
+        final beforeWrite = beforeProjectFileWriteForTesting;
+        if (beforeWrite != null) await beforeWrite(file.path);
+        originals[file.path] = await _writeFile(
           file,
           entry.value,
+          projectRoot: absoluteRoot,
           projectName: projectName,
           overwrite: overwrite,
         );
-        written.add(file.path);
+        written[file.path] = utf8.encode(entry.value);
       }
     } catch (error, stack) {
       Object? rollbackError;
-      for (final path in written.reversed) {
+      final conflicts = <String>[];
+      for (final entry in written.entries.toList().reversed) {
+        final path = entry.key;
         try {
+          final file = File(path);
+          final type = FileSystemEntity.typeSync(path, followLinks: false);
+          if (type != FileSystemEntityType.file) {
+            conflicts.add(path);
+            continue;
+          }
+          final resolvedRoot = Directory(
+            absoluteRoot,
+          ).resolveSymbolicLinksSync();
+          final resolvedParent = file.parent.resolveSymbolicLinksSync();
+          if ((!p.equals(resolvedRoot, resolvedParent) &&
+                  !p.isWithin(resolvedRoot, resolvedParent)) ||
+              !listEquals(file.readAsBytesSync(), entry.value)) {
+            conflicts.add(path);
+            continue;
+          }
+          // Do not introduce an async yield between comparison and recovery.
           final bytes = originals[path];
           if (bytes == null) {
-            await File(path).delete();
+            file.deleteSync();
           } else {
-            await File(path).writeAsBytes(bytes, flush: true);
+            file.writeAsBytesSync(bytes, flush: true);
           }
         } on Object catch (failure) {
           rollbackError ??= failure;
@@ -193,6 +221,14 @@ abstract final class CodeImportService {
         } on FileSystemException {
           // Only remove empty directories created by this import.
         }
+      }
+      if (conflicts.isNotEmpty) {
+        throw FileSystemException(
+          'Import failed ($error); rollback conflict: concurrent changes '
+          'preserved for ${conflicts.join(', ')}'
+          '${rollbackError == null ? '' : '; rollback failed ($rollbackError)'}',
+          root,
+        );
       }
       if (rollbackError != null) {
         throw FileSystemException(
@@ -398,12 +434,23 @@ abstract final class CodeImportService {
     }
   }
 
-  static Future<void> _writeFile(
+  static void _checkPhysicalParent(File file, String projectRoot) {
+    final resolvedParent = file.parent.resolveSymbolicLinksSync();
+    final resolvedRoot = Directory(projectRoot).resolveSymbolicLinksSync();
+    if (!p.equals(resolvedRoot, resolvedParent) &&
+        !p.isWithin(resolvedRoot, resolvedParent)) {
+      throw const CodeImportException(CodeImportFailure.projectUnavailable);
+    }
+  }
+
+  static Future<List<int>?> _writeFile(
     File file,
     String code, {
+    required String projectRoot,
     required String projectName,
     bool overwrite = false,
   }) async {
+    _checkPhysicalParent(file, projectRoot);
     final type = FileSystemEntity.typeSync(file.path, followLinks: false);
     if (type != FileSystemEntityType.notFound) {
       if (type != FileSystemEntityType.file || !overwrite) {
@@ -422,6 +469,9 @@ abstract final class CodeImportService {
         if (backupError != null) {
           throw FileSystemException(backupError, file.path);
         }
+        final beforeReplace = beforeProjectFileReplaceForTesting;
+        if (beforeReplace != null) await beforeReplace(file.path);
+        _checkPhysicalParent(file, projectRoot);
         final targetType = FileSystemEntity.typeSync(
           file.path,
           followLinks: false,
@@ -430,7 +480,13 @@ abstract final class CodeImportService {
             targetType != FileSystemEntityType.notFound) {
           throw CodeImportException(CodeImportFailure.fileExists, file.path);
         }
-        await temporaryFile.rename(file.path);
+        // Snapshot the bytes actually replaced, after all asynchronous work.
+        // No same-isolate save can run between this snapshot and the rename.
+        final original = targetType == FileSystemEntityType.file
+            ? file.readAsBytesSync()
+            : null;
+        temporaryFile.renameSync(file.path);
+        return original;
       } finally {
         try {
           await temporaryFile.delete();
@@ -443,11 +499,17 @@ abstract final class CodeImportService {
           // Never delete unrelated entries that may have appeared in the directory.
         }
       }
-      return;
     }
-    // Reserve the name exclusively so simultaneous imports cannot overwrite it.
+    final expectedBytes = utf8.encode(code);
+    // Keep the final checks, reservation and write in one synchronous section.
+    // A same-isolate save must see either no file or the complete import.
+    _checkPhysicalParent(file, projectRoot);
+    if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw CodeImportException(CodeImportFailure.fileExists, file.path);
+    }
     try {
-      await file.create(exclusive: true);
+      file.createSync(exclusive: true);
     } on FileSystemException {
       if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
           FileSystemEntityType.notFound) {
@@ -456,15 +518,43 @@ abstract final class CodeImportService {
       rethrow;
     }
     try {
-      await file.writeAsString(code, flush: true);
-    } catch (_) {
+      afterProjectFileCreateForTesting?.call(file.path);
+      file.writeAsStringSync(code, flush: true);
+    } catch (error, stack) {
+      var recovered = false;
+      Object? cleanupError;
       try {
-        await file.delete();
-      } on FileSystemException {
-        // Preserve the write failure when cleaning our exclusively created file.
+        recovered = _removeFailedNewFile(file, projectRoot, expectedBytes);
+      } on Object catch (failure) {
+        cleanupError = failure;
       }
-      rethrow;
+      if (!recovered) {
+        throw FileSystemException(
+          'Import write failed ($error); cleanup conflict: current target '
+          'preserved${cleanupError == null ? '' : '; cleanup failed ($cleanupError)'}',
+          file.path,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
     }
+    return null;
+  }
+
+  static bool _removeFailedNewFile(
+    File file,
+    String projectRoot,
+    List<int> expectedBytes,
+  ) {
+    _checkPhysicalParent(file, projectRoot);
+    final type = FileSystemEntity.typeSync(file.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return true;
+    if (type != FileSystemEntityType.file) return false;
+    final current = file.readAsBytesSync();
+    // A failed write may have left unknown partial content. Preserve that too:
+    // without an OS identity/CAS primitive it cannot safely be called ours.
+    if (current.isNotEmpty && !listEquals(current, expectedBytes)) return false;
+    file.deleteSync();
+    return true;
   }
 
   static Future<CodeImportResult> openInEditor({
