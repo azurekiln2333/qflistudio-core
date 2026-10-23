@@ -197,11 +197,14 @@ abstract final class HighlightThemes {
 
   /// 内容只用于独立预览的限制检查。编辑器传 null，由 worker 检查 CodeLines，
   /// 避免在 UI build 中重复拼接整份源码。
+  /// [ownerType] is the file owner's project type, including for foreign tabs.
+  /// It disambiguates .h only; explicit extensions and custom grammars win.
   static CodeHighlightTheme? themeFor(
     BuildContext context,
     String fileName,
     String? content, {
     SettingsStore? settings,
+    String ownerType = '',
   }) {
     if (settings?.syntaxHighlighting == false) return null;
     if (content != null &&
@@ -227,8 +230,13 @@ abstract final class HighlightThemes {
         }
       }
     }
+    final extension = p.extension(fileName).toLowerCase();
+    final owner = ownerType.trim().toLowerCase();
     final language =
-        grammar?.scopeName ?? _extToLang[p.extension(fileName).toLowerCase()];
+        grammar?.scopeName ??
+        (extension == '.h' && (owner == 'cpp' || owner == 'c++')
+            ? 'cpp'
+            : _extToLang[extension]);
     if (language == null) return null;
     final cacheKey = grammar == null ? language : 'tm:$language';
     if (_cache[cacheKey] case final cached?) return cached;
