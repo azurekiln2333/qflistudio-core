@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../community/models.dart';
 import '../config/api_config.dart';
+import 'studio_profile.dart';
 
 /// API 调用异常：message 为用户可读文案。
 class ApiException implements Exception {
@@ -126,6 +127,15 @@ class ApiClient {
     if (token != null) 'authorization': 'Bearer $token',
   };
 
+  static void _requireOnline() {
+    if (StudioProfile.current?.offlineOnly == true) {
+      throw ApiException(
+        '离线模式下不可访问在线服务',
+        details: const {'code': 'OFFLINE_ONLY'},
+      );
+    }
+  }
+
   Future<dynamic> _send(
     String method,
     String path, {
@@ -134,6 +144,7 @@ class ApiClient {
     String? token,
     Duration? timeout,
   }) async {
+    _requireOnline();
     final uri = ApiConfig.endpoint(path, query);
     try {
       final request = http.Request(method, uri)
@@ -649,6 +660,7 @@ class ApiClient {
     String command, {
     List<Map<String, String>>? files,
   }) async* {
+    _requireOnline();
     try {
       final request =
           http.Request('POST', ApiConfig.endpoint('/api/terminal/exec/stream'))
