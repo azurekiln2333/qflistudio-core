@@ -43,7 +43,33 @@ normal/grouped/aliased/dot imports, and preserve explicitly chosen names and cod
 | Absolute/traversing/aliased fixture path, metadata or source collision | Reject before writes. |
 | Unsafe linked parent or malformed/reserved path name | Reject import. |
 | Any existing source/fixture target | Include all targets in replacement prompt. |
-| Later existing-project write fails | Restore earlier original bytes/delete newly created files. |
+| Later existing-project write fails | Restore/delete earlier outputs only while their current bytes still match this import. |
+| Another save changes an imported output before rollback | Preserve the changed bytes and report a rollback conflict with the affected paths. |
+| A save or deletion completes after preflight but before replacement | Snapshot the actual target after backup and immediately before replacement; rollback restores that snapshot, not the preflight state. |
+
+Preflight validates the entire target set without retaining stale rollback bytes.
+For replacement, finish staging and backup first, recheck the physical parent and
+target type, read the current bytes synchronously, then rename synchronously with
+no asynchronous yield between snapshot and replacement. A target absent at this
+boundary has no original bytes to restore. Preserve exclusive creation and require
+explicit replacement for any file discovered after preflight.
+
+For a new file, finish asynchronous preparation before the final physical-parent
+and target-type checks, exclusive synchronous creation, and synchronous flushed
+write. Do not yield between reservation and writing; a same-isolate editor save
+must not see an empty reservation and then be overwritten when the import resumes.
+On write failure, cleanup stays synchronous and rechecks confinement, regular-file type and
+bytes. Delete only an empty reservation or the exact complete imported bytes.
+Preserve divergent or unknown partial content and report a cleanup conflict;
+failure is not proof that the current target still belongs to this import.
+
+For replacements, the snapshot boundary preserves saves that complete in the same
+Dart isolate before replacement. For both new and replaced outputs, conditional
+recovery compares current bytes with the import's own bytes and recovers without
+an asynchronous yield, preserving changed content saved before rollback. These
+boundaries are not an operating-system compare-and-swap or locking protocol for
+other processes. An external writer can still race filesystem operations, and
+identical bytes do not identify which writer last saved them.
 
 ## 5. Good, base and bad cases
 
@@ -55,7 +81,13 @@ Bad: changing runnable type to CSS merely to repair display labels.
 
 Run content filters, fixtures, import, lazy catalog, idle-frame and language content
 render tests. Cover saved reload/default restoration, concept-only search, differing
-subject/type, large text/narrow layouts, stdin fixture joins and failed-write rollback.
+subject/type, large text/narrow layouts, stdin fixture joins and failed-write rollback,
+including real saves after preflight, after backup and after the import write,
+deletion at either side of replacement, late no-overwrite conflicts and linked
+parent rejection for both new and existing files. Queue a real save at new-file
+reservation to prove it observes complete imported content and survives a later
+rollback; inject write failure to cover safe empty cleanup and changed-target
+preservation.
 Materialized host files are not OHOS execution evidence.
 
 ## 7. Wrong versus correct
