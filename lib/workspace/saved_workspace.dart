@@ -17,6 +17,13 @@ bool get isMainStudioRelease {
       profile.productKey == StudioProductCatalog.qfliStudioKey;
 }
 
+/// Whether this product offers local named-workspace save and Home entries.
+///
+/// Existing profiles and the shared default enable this independently of
+/// main-product identity and offline/cloud policy.
+bool get supportsSavedWorkspaces =>
+    StudioProfile.current?.supportsSavedWorkspaces ?? true;
+
 /// Comparison key for a project root path.
 ///
 /// Windows paths are case-insensitive, and a workspace may be reopened after a

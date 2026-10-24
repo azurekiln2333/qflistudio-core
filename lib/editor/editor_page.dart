@@ -335,15 +335,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       if (_workspace?.id == widget.workspace?.id) {
         // The same saved workspace was promoted into this live session; keep
         // the live expansion/tab state instead of reloading an older snapshot.
+        _workspace = widget.workspace;
         _workspaceMembers = widget.workspaceMembers;
       } else {
         _applyWorkspace(widget.workspace, widget.workspaceMembers);
       }
-    } else if (!_sameWorkspaceMembers(
-      oldWidget.workspaceMembers,
-      widget.workspaceMembers,
-    )) {
-      _workspaceMembers = widget.workspaceMembers;
+    } else {
+      if (!identical(oldWidget.workspace, widget.workspace)) {
+        // Metadata can change while the retained identity stays the same.
+        // Keep live expansion and dirty buffers instead of reloading a session.
+        _workspace = widget.workspace;
+      }
+      if (!_sameWorkspaceMembers(
+        oldWidget.workspaceMembers,
+        widget.workspaceMembers,
+      )) {
+        _workspaceMembers = widget.workspaceMembers;
+      }
     }
     if (oldWidget.workspace?.id != widget.workspace?.id ||
         !_sameWorkspaceMembers(
@@ -641,14 +649,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// the workspace document; the project's own history is untouched.
   void _onWorkspaceChanged(EditorWorkspaceState state) {
     final attached = state.saved;
-    final previous = _workspace;
     setState(() {
       _workspace = state.saved;
       _workspaceMembers = state.members;
       _workspaceExpandedDirs = state.expandedDirs;
       _workspaceRootExpanded = state.rootExpanded;
     });
-    if (attached != null && previous?.id != attached.id) {
+    if (attached != null) {
       widget.onWorkspaceSaved?.call(attached, state.members);
     }
     _reconcileWorkspaceMembers();

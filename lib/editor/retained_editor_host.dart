@@ -175,7 +175,7 @@ class RetainedEditorController extends ChangeNotifier {
         session.workspaceRevision++;
         changed = true;
       }
-      if (session.workspace?.updatedAt != workspace.updatedAt ||
+      if (!identical(session.workspace, workspace) ||
           !_samePaths(session.workspaceProjects, members)) {
         session.workspace = workspace;
         session.workspaceProjects = members;
@@ -216,7 +216,7 @@ class RetainedEditorController extends ChangeNotifier {
   ) {
     final session = _sessions[key];
     if (session == null) return;
-    if (session.workspace?.id == workspace.id &&
+    if (identical(session.workspace, workspace) &&
         _samePaths(session.workspaceProjects, members)) {
       return;
     }

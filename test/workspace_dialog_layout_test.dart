@@ -160,6 +160,7 @@ void main() {
       templates: [],
       isOffline: true,
       productKey: StudioProductCatalog.jvmxKey,
+      supportsSavedWorkspaces: false,
     );
     final fixture = (await tester.runAsync(
       () => _Fixture.create(saveWorkspace: false),
