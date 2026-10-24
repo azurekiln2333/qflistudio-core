@@ -28,6 +28,7 @@ void main() {
       isOffline: true,
       offlineOnly: true,
       productKey: StudioProductCatalog.forgeKey,
+      supportsSavedWorkspaces: false,
     );
     fixture = await _ExplorerFixture.create();
   });

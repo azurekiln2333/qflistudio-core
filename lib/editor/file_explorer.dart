@@ -212,7 +212,14 @@ class _FileExplorerState extends State<FileExplorer> {
       oldWidget.workspaceMembers,
       widget.workspaceMembers,
     );
-    if (!workspaceChanged && !membersChanged && !primaryChanged) return;
+    if (!workspaceChanged && !membersChanged && !primaryChanged) {
+      // A same-id rename must reach the next settings dialog and expansion
+      // notification without rebuilding the live tree or resetting its scroll.
+      if (!identical(oldWidget.workspace, widget.workspace)) {
+        _savedWorkspace = widget.workspace;
+      }
+      return;
+    }
     if (!workspaceChanged) {
       // Capture the outgoing live roots before the member list/primary moves,
       // otherwise the rebuild restores an already-cleared expansion state.
@@ -330,8 +337,16 @@ class _FileExplorerState extends State<FileExplorer> {
   /// The dialog is available for a standalone project and for a single-project
   /// registry: a workspace can still be named and reopened from Home.
   Future<void> _manageWorkspace() async {
-    if (_savedWorkspace == null && !isMainStudioRelease) {
-      await _manageLegacyWorkspace();
+    if (_savedWorkspace == null &&
+        supportsSavedWorkspaces &&
+        widget.project.isCloud) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('仅本地项目可保存工作区，请先打开本地项目')),
+      );
+      return;
+    }
+    if (_savedWorkspace == null && !supportsSavedWorkspaces) {
+      if (!isMainStudioRelease) await _manageLegacyWorkspace();
       return;
     }
     final result = await showWorkspaceEditorDialog(
@@ -1296,7 +1311,12 @@ class _FileExplorerState extends State<FileExplorer> {
                       minWidth: 40,
                       minHeight: 40,
                     ),
-                    onPressed: _manageWorkspace,
+                    onPressed:
+                        _savedWorkspace != null ||
+                            supportsSavedWorkspaces ||
+                            !isMainStudioRelease
+                        ? _manageWorkspace
+                        : null,
                   ),
                 ],
               ),

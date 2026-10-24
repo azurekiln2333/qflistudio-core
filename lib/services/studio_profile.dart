@@ -112,6 +112,7 @@ class StudioProfile {
     bool? offlineOnly,
     this.productKey = StudioProductCatalog.qfliStudioKey,
     this.showHomeTabs = true,
+    this.supportsSavedWorkspaces = true,
     this.runtimeKind = 'unavailable',
     this.runtimeStatus = 'unavailable',
     this.supportedFileExtensions = const [],
@@ -189,6 +190,13 @@ class StudioProfile {
 
   /// Whether homepage language filter chips are shown. Project scopes remain available.
   final bool showHomeTabs;
+
+  /// Whether local named workspaces can be saved and reopened from Home.
+  ///
+  /// Independent of product identity, language chips and network policy.
+  /// Disabling this keeps the legacy member picker in language products;
+  /// existing explicit workspace sessions remain manageable.
+  final bool supportsSavedWorkspaces;
 
   /// Whether this product must hide every entry that needs the network: the
   /// login/register/account surfaces, the community and check-in sections, the

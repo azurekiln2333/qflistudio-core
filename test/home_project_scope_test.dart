@@ -49,12 +49,12 @@ void main() {
   });
 
   testWidgets(
-    'offline products keep all, history and favorite scopes with language chips hidden',
+    'offline products keep local project and workspace scopes with language chips hidden',
     (tester) async {
       StudioProfile.current = _profile(offlineOnly: true, showHomeTabs: false);
       final fixture = await _mount(tester, root);
 
-      _expectScopeLabels(['全部项目', '历史项目', '收藏项目']);
+      _expectScopeLabels(['全部项目', '历史项目', '收藏项目', '工作区']);
       expect(find.text('云端项目'), findsNothing);
       expect(find.byType(FilterChip), findsNothing);
       expect(_visibleProjectNames(tester), ['Alpha', 'Middle', 'Zulu']);
@@ -84,7 +84,7 @@ void main() {
 
   for (final showHomeTabs in [true, false]) {
     testWidgets(
-      'networked products keep cloud scope with showHomeTabs=$showHomeTabs',
+      'networked products keep workspace and cloud scopes with showHomeTabs=$showHomeTabs',
       (tester) async {
         StudioProfile.current = _profile(
           offlineOnly: false,
@@ -92,7 +92,7 @@ void main() {
         );
         await _mount(tester, root);
 
-        _expectScopeLabels(['全部项目', '历史项目', '收藏项目', '云端项目']);
+        _expectScopeLabels(['全部项目', '历史项目', '收藏项目', '工作区', '云端项目']);
         expect(
           find.byType(FilterChip),
           showHomeTabs ? findsWidgets : findsNothing,
@@ -109,11 +109,39 @@ void main() {
       },
     );
   }
+
+  for (final offlineOnly in [true, false]) {
+    testWidgets(
+      'workspace opt-out keeps child cloud policy with offlineOnly=$offlineOnly',
+      (tester) async {
+        StudioProfile.current = _profile(
+          offlineOnly: offlineOnly,
+          showHomeTabs: false,
+          supportsSavedWorkspaces: false,
+        );
+        await _mount(tester, root);
+
+        _expectScopeLabels([
+          '全部项目',
+          '历史项目',
+          '收藏项目',
+          if (!offlineOnly) '云端项目',
+        ]);
+        expect(find.text('工作区'), findsNothing);
+        expect(find.byType(FilterChip), findsNothing);
+        if (!offlineOnly) {
+          await _selectScope(tester, '云端项目');
+          expect(_visibleProjectNames(tester), ['CloudOnly']);
+        }
+      },
+    );
+  }
 }
 
 StudioProfile _profile({
   required bool offlineOnly,
   required bool showHomeTabs,
+  bool supportsSavedWorkspaces = true,
 }) => StudioProfile(
   id: 'java',
   appTitle: 'QFLIJVMX',
@@ -121,6 +149,7 @@ StudioProfile _profile({
   isOffline: true,
   offlineOnly: offlineOnly,
   showHomeTabs: showHomeTabs,
+  supportsSavedWorkspaces: supportsSavedWorkspaces,
   productKey: StudioProductCatalog.jvmxKey,
 );
 

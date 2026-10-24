@@ -4,7 +4,9 @@
 
 Language-product explorer roots, tree expansion and editor view sessions share
 `history.json`. The main product uses [explicit saved workspaces](saved-workspaces.md)
-and single-project standalone history instead.
+and single-project standalone history instead. Language products retain this
+legacy history until explicitly saving a named document through their default
+`supportsSavedWorkspaces` capability; that document then owns its session.
 Concurrent updates must merge their owned fields, and multi-root tabs must retain
 the correct project identity across real EditorPage reconstruction.
 

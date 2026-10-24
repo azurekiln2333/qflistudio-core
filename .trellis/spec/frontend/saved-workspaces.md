@@ -1,12 +1,24 @@
-# Explicit saved workspaces in the main product
+# Explicit saved workspaces
 
 ## 1. Scope / Trigger
 
-`isMainStudioRelease` selects the main `qflistudio` product (including the
-compatible null-profile shell). Its named workspaces are independent documents.
-Language products retain the legacy [offline workspace](offline-workspace.md)
-history contract. Home's cloud scope, cloud creation and automatic cloud fetch
-are hidden for the main release; registered cloud data is preserved.
+`StudioProfile.supportsSavedWorkspaces` defaults to true, including the compatible
+null-profile shell. It offers local named-workspace save and Home entries across
+products independently of `offlineOnly`, `showHomeTabs` and product identity.
+Named workspaces are independent documents. A cloud primary cannot start a named
+workspace: direct explorer actions explain that a local project must be opened.
+Do not silently filter that primary during save and leave a different live tree.
+
+`isMainStudioRelease` still selects only the main `qflistudio` product and null
+profile. This capability adds the workspace scope alongside previously enabled
+scopes; it does not change cloud filtering, creation or fetching. Main-release
+cloud suppression is a separate Home policy owned by that product. Network-enabled
+language products expose both workspace and cloud scopes. Offline products
+expose only local scopes. Child products retain the legacy
+[offline workspace](offline-workspace.md) history contract until explicitly saving
+a named document. Disabling the capability preserves their legacy member picker,
+disables new named saves in the main product, and hides Home's workspace scope;
+already-open explicit documents remain manageable.
 
 ## 2. Signatures
 
@@ -58,6 +70,14 @@ Selecting an external project opens/resumes a separate standalone editor with
 Keep the original workspace and its dirty buffers live and recoverable. A bare
 saved-workspace explorer without a navigation owner disables external choices.
 Legacy language-product unsaved browsing retains its history contract.
+
+Same-id metadata changes must propagate through retained host, page and explorer.
+Reopening or saving a rename/member edit updates the retained session snapshot
+without changing its key, page/controller identity, live expansion or dirty text.
+A metadata-only explorer update does not rebuild its tree. Subsequent expansion
+notifications must not re-emit an older name or membership. Compare the incoming
+workspace object as well as paths, rather than treating equal ids/timestamps as
+proof that all metadata is unchanged.
 
 On reopening, validate registry membership and actual directories. Skip missing
 members and report them; select a surviving primary. Reconcile retained tabs:
@@ -125,6 +145,14 @@ Open the initially collapsed explorer through its toolbar before clicking rows;
 mounted tree text can be clipped and is not evidence that it receives input.
 Use a nonzero scroll offset and drain each project's queued history via
 `ProjectHistory.load` after unmounting before deleting a temporary fixture.
+
+`saved_workspace_capability_test.dart` covers default/null/optout capability and
+independent offline/main/cloud policy, plus actual explorer rejection of a cloud
+primary. Legacy-dialog fixtures explicitly opt out so they keep exercising that
+compatibility path. `workspace_metadata_refresh_test.dart` covers same-id external
+and in-page metadata refresh with live dirty buffers and unchanged retained
+identity. Product-owned actual-profile Home/save/reopen tests remain required;
+mocked identity changes cannot prove standalone entry availability.
 
 ## 7. Wrong vs Correct
 
