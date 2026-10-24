@@ -32,6 +32,14 @@ unchanged text and folding do not create dirty revisions or analyzer requests.
 Each dispatch receives a fresh timeout after any queue wait. A timed-out provider
 retains its lane until completion; repeated retries must not spawn unlimited work.
 
+The main `qflistudio` product hides `EditorProblemsBar` when its analyzer is null;
+the editor child keeps the full available space and no Problems action is shown.
+A null profile has the same main-product default. Keep the controller's honest
+unavailable state: hiding the optional UI must not report an unchecked file as
+clean. Language products retain their existing unavailable/provider UI, and a
+configured main-product analyzer retains the Problems action. Verify these cases
+with `editor_problems_visibility_test.dart` alongside `editor_analysis_test.dart`.
+
 ## 4. Validation and error matrix
 
 | Condition | Behavior |

@@ -71,6 +71,8 @@ class TerminalPane extends StatefulWidget {
     required this.workingDirectory,
     required this.auth,
     this.onlineEnabled = true,
+    this.executionBlocked = false,
+    this.isExecutionBlocked,
     this.initialOnline = false,
     this.onClose,
     this.onCollapseChanged,
@@ -79,6 +81,7 @@ class TerminalPane extends StatefulWidget {
     this.onResizeEnd,
     this.onActivated,
     this.onInputFocusChanged,
+    this.onRunningWorkChanged,
     this.collapsed = false,
     this.compact = false,
   });
@@ -86,7 +89,15 @@ class TerminalPane extends StatefulWidget {
   final String workingDirectory;
   final AuthStore auth;
   final bool onlineEnabled;
+
+  /// Blocks new commands while the editor's debugger owns execution.
+  /// Existing work can still be interrupted and terminal tabs remain usable.
+  final bool executionBlocked;
+
+  /// Reads the owner's execution lane synchronously, before its next rebuild.
+  final bool Function()? isExecutionBlocked;
   final bool initialOnline;
+  final ValueChanged<bool>? onRunningWorkChanged;
 
   /// 用户点击面板上的关闭按钮时回调（编辑器隐藏整个面板）。
   final VoidCallback? onClose;
@@ -137,6 +148,10 @@ class TerminalPaneState extends State<TerminalPane> {
   String? _onlineToken;
   int _onlineGeneration = 0;
   bool _preparing = false;
+  final _pendingCleanup = <Object>{};
+  final _retiredSessions = <_TerminalSession>{};
+  bool _reportedRunningWork = false;
+  bool _runningWorkNotificationPending = false;
 
   /// A discarded focus node for the per-tab close buttons.
   ///
@@ -175,6 +190,68 @@ class TerminalPaneState extends State<TerminalPane> {
 
   bool get onlineSelected => _session.online;
   bool get busy => _session.running || _preparing;
+  bool get _executionBlocked =>
+      widget.executionBlocked || widget.isExecutionBlocked?.call() == true;
+
+  /// Includes inactive tabs, dispatch preparation and pending tab cleanup.
+  bool get hasRunningWork =>
+      _preparing ||
+      _pendingCleanup.isNotEmpty ||
+      _retiredSessions.isNotEmpty ||
+      _sessions.any(
+        (session) =>
+            session.running ||
+            session.cancelAction != null ||
+            session.hasUnfinishedCancellation ||
+            session.backend?.busy == true,
+      );
+
+  void _notifyRunningWorkChanged() {
+    if (!mounted || _runningWorkNotificationPending) return;
+    _runningWorkNotificationPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _runningWorkNotificationPending = false;
+      if (!mounted) return;
+      final running = hasRunningWork;
+      if (running == _reportedRunningWork) return;
+      _reportedRunningWork = running;
+      widget.onRunningWorkChanged?.call(running);
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _trackCleanup(Future<void> Function() cleanup) async {
+    final pending = Object();
+    _pendingCleanup.add(pending);
+    _notifyRunningWorkChanged();
+    try {
+      await cleanup();
+    } finally {
+      _pendingCleanup.remove(pending);
+      if (mounted) setState(() {});
+      _notifyRunningWorkChanged();
+    }
+  }
+
+  void _retireSession(_TerminalSession session) {
+    _retiredSessions.add(session);
+    _notifyRunningWorkChanged();
+    unawaited(
+      _cleanupRetiredSession(session).catchError((Object error) {
+        if (mounted) appendSystem('终端清理失败：$error');
+      }),
+    );
+  }
+
+  Future<void> _cleanupRetiredSession(
+    _TerminalSession session, {
+    bool retry = false,
+  }) async {
+    await (retry ? session.retryDispose() : session.dispose());
+    if (!_retiredSessions.remove(session)) return;
+    if (mounted) setState(() {});
+    _notifyRunningWorkChanged();
+  }
 
   /// Whether the terminal's prompt input currently holds focus.
   ///
@@ -232,7 +309,7 @@ class TerminalPaneState extends State<TerminalPane> {
     final token = _onlineToken;
     if (token != null) unawaited(_releaseOnlineSession(token));
     for (final session in _sessions) {
-      session.dispose();
+      _retireSession(session);
     }
     super.dispose();
   }
@@ -337,7 +414,7 @@ class TerminalPaneState extends State<TerminalPane> {
       if (only.online) return;
       final replacement = _TerminalSession(id: only.id);
       _sessions[0] = replacement;
-      only.dispose();
+      _retireSession(only);
       setState(() {
         _selectedSessionIndex = 0;
       });
@@ -349,7 +426,7 @@ class TerminalPaneState extends State<TerminalPane> {
       _api.close();
       _api = ApiClient();
     }
-    session.dispose();
+    _retireSession(session);
     setState(() {
       if (_selectedSessionIndex > index) {
         _selectedSessionIndex--;
@@ -360,6 +437,12 @@ class TerminalPaneState extends State<TerminalPane> {
   }
 
   Future<void> _run(String command) async {
+    if (!mounted ||
+        _executionBlocked ||
+        _preparing ||
+        _session.hasUnfinishedCancellation) {
+      return;
+    }
     if (_session.online) {
       await _runOnline(command);
       return;
@@ -367,49 +450,61 @@ class TerminalPaneState extends State<TerminalPane> {
     final trimmed = command.trim();
     final session = _session;
     if (trimmed.isEmpty || session.running) return;
-    // Local-only counters: no server report, because an offline product must
-    // not upload and qflistudio tracks terminal usage through its own pages.
-    unawaited(LocalStatsService.instance.recordTerminalCommand());
-    unawaited(
-      LocalAuditService.instance.record(
-        kind: LocalAuditKind.terminal,
-        action: '执行 $trimmed',
-        project: p.basename(widget.workingDirectory),
-        detail: session.online ? '在线会话' : '本地会话',
-      ),
-    );
-    final backend = await _backendFor(session);
-    _history.add(trimmed);
-    _historyIndex = _history.length;
-    setState(() {
-      _append(
-        _TermLine(text: '$_prompt $trimmed', kind: _LineKind.command),
-        session,
-      );
-      // The previous command's partial rows must not merge into this one.
-      session.pendingStdout = null;
-      session.pendingStderr = null;
-      session.running = true;
-      // Expose the header Stop control for a cancellable local command.
-      session.cancelAction = () => backend.interrupt();
-    });
-    if (!session.follow) session.follow = true;
-    _scrollToBottom(session, true);
-    try {
-      await backend.execute(trimmed);
-    } finally {
-      if (mounted && !session.disposed) {
+    // Reserve the session before backend preparation yields to Debug or a tab
+    // switch. Recheck the editor's execution fence immediately before dispatch.
+    setState(() => session.running = true);
+    _notifyRunningWorkChanged();
+    shell.ShellBackend? backend;
+    final execution = () async {
+      try {
+        backend = await _backendFor(session);
+        if (!mounted || session.disposed || _executionBlocked) return;
+        unawaited(LocalStatsService.instance.recordTerminalCommand());
+        unawaited(
+          LocalAuditService.instance.record(
+            kind: LocalAuditKind.terminal,
+            action: '执行 $trimmed',
+            project: p.basename(widget.workingDirectory),
+            detail: '本地会话',
+          ),
+        );
+        session.history.add(trimmed);
+        session.historyIndex = session.history.length;
         setState(() {
-          session.running = false;
-          session.cancelAction = null;
-          // Finalize any partial row so it stays on its own line.
+          _append(
+            _TermLine(
+              text: '${_promptFor(session)} $trimmed',
+              kind: _LineKind.command,
+            ),
+            session,
+          );
           session.pendingStdout = null;
           session.pendingStderr = null;
+          session.cancelAction = () => backend!.interrupt();
         });
+        if (!session.follow) session.follow = true;
+        _scrollToBottom(session, true);
+        await backend!.execute(trimmed);
+      } finally {
+        if (mounted && !session.disposed) {
+          setState(() {
+            session.running = false;
+            session.cancelAction = null;
+            session.pendingStdout = null;
+            session.pendingStderr = null;
+          });
+          _notifyRunningWorkChanged();
+        }
       }
+    }();
+    session.commandDone = execution;
+    try {
+      await execution;
+    } finally {
+      if (identical(session.commandDone, execution)) session.commandDone = null;
     }
     if (!mounted || session.disposed) return;
-    final code = backend.lastExitCode;
+    final code = backend?.lastExitCode;
     if (code != null && code != 0) {
       setState(() {
         // Keep the real numeric status visible, matching attached runs.
@@ -471,6 +566,7 @@ class TerminalPaneState extends State<TerminalPane> {
     final busy = backend.busy;
     if (session.running == busy) return;
     setState(() => session.running = busy);
+    _notifyRunningWorkChanged();
   }
 
   /// Appends a backend chunk, splitting embedded newlines the way streaming
@@ -521,17 +617,33 @@ class TerminalPaneState extends State<TerminalPane> {
   }
 
   /// Interrupts the active session's running work: the attached-run cancel
-  /// callback when present, otherwise the local shell backend.
+  /// callback when present, otherwise the local shell backend. Also retries
+  /// unfinished cleanup belonging to closed tabs.
   Future<void> interruptActive() async {
     final session = _session;
-    final cancel = session.cancelAction;
-    if (cancel != null) {
-      await cancel();
-      return;
-    }
-    final backend = session.backend;
-    if (backend != null) {
-      await backend.interrupt();
+    final retired = _retiredSessions.toList();
+    await _trackCleanup(() async {
+      await Future.wait<void>([
+        session.interrupt(),
+        for (final closed in retired)
+          _cleanupRetiredSession(closed, retry: true),
+      ], eagerError: false);
+    });
+  }
+
+  Future<void> _interruptFromUi() async {
+    final session = _session;
+    try {
+      await interruptActive();
+    } catch (error) {
+      if (!mounted || session.disposed) return;
+      setState(() {
+        _append(
+          _TermLine(text: '终端停止失败：$error', kind: _LineKind.info),
+          session,
+        );
+      });
+      _scrollToBottom(session);
     }
   }
 
@@ -547,6 +659,7 @@ class TerminalPaneState extends State<TerminalPane> {
         _append(_TermLine(text: text, kind: _LineKind.info));
       }
     });
+    _notifyRunningWorkChanged();
     _scrollToBottom();
   }
 
@@ -556,6 +669,7 @@ class TerminalPaneState extends State<TerminalPane> {
       _preparing = false;
       _running = false;
     });
+    _notifyRunningWorkChanged();
   }
 
   Future<void> showOnline({bool initialize = true}) async {
@@ -570,66 +684,74 @@ class TerminalPaneState extends State<TerminalPane> {
       _selectedSessionIndex = index;
     });
     expand();
-    if (initialize && !_session.initialized && !_session.running) {
+    if (initialize &&
+        !_executionBlocked &&
+        !_session.initialized &&
+        !_session.running) {
       await _runOnline(':', initializing: true);
     }
   }
 
   Future<void> runOnlineProject(String projectPath, String entryFile) async {
-    if (!widget.onlineEnabled) return;
+    if (!mounted || !widget.onlineEnabled || _executionBlocked) return;
     await showOnline(initialize: false);
-    if (!mounted || busy) return;
+    if (!mounted ||
+        _executionBlocked ||
+        busy ||
+        _session.hasUnfinishedCancellation) {
+      return;
+    }
     beginPreparation();
     try {
       final program = await OnlineProgram.prepare(projectPath, entryFile);
-      if (!mounted) return;
+      if (!mounted || _executionBlocked) return;
       finishPreparation();
       await _runOnline(program.command, files: program.files);
     } catch (error) {
       if (!mounted) return;
       finishPreparation();
       appendSystem('$error');
+    } finally {
+      finishPreparation();
     }
   }
 
   /// Runs a `.sql` entry in the user's cloud MySQL practice space, a separate
   /// server from the business database. Output lands in the current session.
   Future<void> runCloudSql(String entryFile) async {
-    if (!mounted || !widget.onlineEnabled) return;
+    if (!mounted ||
+        !widget.onlineEnabled ||
+        _executionBlocked ||
+        busy ||
+        _session.hasUnfinishedCancellation) {
+      return;
+    }
     final token = widget.auth.token;
     if (token == null) {
       appendSystem('请先登录后使用云 MySQL');
       return;
     }
-    final String source;
+    beginPreparation();
     try {
-      source = await File(entryFile).readAsString();
+      final source = await File(entryFile).readAsString();
+      if (!mounted || _executionBlocked) return;
+      final raw = await _api.sqlScript(token, source: source);
+      if (!mounted) return;
+      final output = CloudSqlOutput.fromScript(raw);
+      finishPreparation();
+      await attachOutput(
+        title: '云 MySQL · ${p.basename(entryFile)}',
+        stdout: Stream<String>.fromIterable(output.stdout),
+        stderr: Stream<String>.fromIterable(output.stderr),
+        exitCode: Future<int>.value(output.exitCode),
+      );
     } on FileSystemException catch (error) {
-      appendSystem('无法读取 SQL 文件：${error.message}');
-      return;
-    }
-    if (!mounted) return;
-    Map<String, dynamic> raw;
-    try {
-      raw = await _api.sqlScript(token, source: source);
+      if (mounted) appendSystem('无法读取 SQL 文件：${error.message}');
     } on ApiException catch (error) {
       if (mounted) appendSystem(error.message);
-      return;
+    } finally {
+      finishPreparation();
     }
-    if (!mounted) return;
-    final CloudSqlOutput output;
-    try {
-      output = CloudSqlOutput.fromScript(raw);
-    } on ApiException catch (error) {
-      appendSystem(error.message);
-      return;
-    }
-    await attachOutput(
-      title: '云 MySQL · ${p.basename(entryFile)}',
-      stdout: Stream<String>.fromIterable(output.stdout),
-      stderr: Stream<String>.fromIterable(output.stderr),
-      exitCode: Future<int>.value(output.exitCode),
-    );
   }
 
   Future<void> _runOnline(
@@ -641,7 +763,9 @@ class TerminalPaneState extends State<TerminalPane> {
     final trimmed = command.trim();
     if (trimmed.isEmpty ||
         trimmed.length > 2000 ||
+        _executionBlocked ||
         session.running ||
+        session.hasUnfinishedCancellation ||
         _preparing) {
       return;
     }
@@ -669,6 +793,7 @@ class TerminalPaneState extends State<TerminalPane> {
         session,
       );
     });
+    _notifyRunningWorkChanged();
     _scrollToBottom(session);
     try {
       await for (final event in _api.terminalEvents(
@@ -732,6 +857,7 @@ class TerminalPaneState extends State<TerminalPane> {
           session.pendingStderr = null;
         });
       }
+      _notifyRunningWorkChanged();
     }
   }
 
@@ -771,6 +897,7 @@ class TerminalPaneState extends State<TerminalPane> {
       session.pendingStderr = null;
       _append(_TermLine(text: '回收在线会话...', kind: _LineKind.info), session);
     });
+    _notifyRunningWorkChanged();
     try {
       final token = _onlineToken ?? widget.auth.token;
       if (token != null) await _api.resetTerminal(token);
@@ -793,6 +920,7 @@ class TerminalPaneState extends State<TerminalPane> {
       }
     } finally {
       if (mounted && !session.disposed) setState(() => session.running = false);
+      _notifyRunningWorkChanged();
       _scrollToBottom(session);
     }
   }
@@ -890,6 +1018,9 @@ class TerminalPaneState extends State<TerminalPane> {
   }
 
   void _submit() {
+    if (_executionBlocked || _preparing || _session.hasUnfinishedCancellation) {
+      return;
+    }
     final session = _session;
     final text = session.inputController.text;
     session.inputController.clear();
@@ -940,7 +1071,12 @@ class TerminalPaneState extends State<TerminalPane> {
   }
 
   /// 运行按钮：接管一个外部进程，持续回显输出。
-  void attachProcess(String title, Process process) {
+  void attachProcess(
+    String title,
+    Process process, {
+    void Function(String text, bool isError)? onOutput,
+    ValueChanged<int>? onExit,
+  }) {
     // 记下来，退出页面时可以 kill 掉还在跑的进程。
     _currentProcess = process;
     attachOutput(
@@ -952,11 +1088,18 @@ class TerminalPaneState extends State<TerminalPane> {
           .transform(systemEncoding.decoder)
           .transform(const LineSplitter()),
       exitCode: process.exitCode,
+      onOutput: onOutput,
+      onExit: onExit,
     );
   }
 
   /// Attaches a process already owned by a [ProcessSupervisor].
-  void attachManagedProcess(String title, ManagedProcess process) {
+  void attachManagedProcess(
+    String title,
+    ManagedProcess process, {
+    void Function(String text, bool isError)? onOutput,
+    ValueChanged<int>? onExit,
+  }) {
     final session = _session;
     session.currentManagedProcess = process;
     attachOutput(
@@ -969,6 +1112,8 @@ class TerminalPaneState extends State<TerminalPane> {
           .transform(const LineSplitter()),
       exitCode: process.exitCode,
       cancel: process.cancel,
+      onOutput: onOutput,
+      onExit: onExit,
     );
   }
 
@@ -982,9 +1127,12 @@ class TerminalPaneState extends State<TerminalPane> {
     required Stream<String> stderr,
     required Future<int> exitCode,
     Future<void> Function()? cancel,
+    void Function(String text, bool isError)? onOutput,
+    ValueChanged<int>? onExit,
   }) {
     final session = _session;
     session.cancelAction = cancel;
+    session.attachedExitCode = exitCode;
     // An explicit run follows its own fresh output from the start.
     session.follow = true;
     setState(() {
@@ -1001,10 +1149,12 @@ class TerminalPaneState extends State<TerminalPane> {
       session.pendingStderr = null;
       session.running = true;
     });
+    _notifyRunningWorkChanged();
     _scrollToBottom(session, true);
     return () async {
       final outDone = stdout.listen((line) {
         if (!mounted || session.disposed) return;
+        onOutput?.call(line, false);
         setState(
           () => _append(_TermLine(text: line, kind: _LineKind.stdout), session),
         );
@@ -1012,6 +1162,7 @@ class TerminalPaneState extends State<TerminalPane> {
       }).asFuture<void>();
       final errDone = stderr.listen((line) {
         if (!mounted || session.disposed) return;
+        onOutput?.call(line, true);
         setState(
           () => _append(_TermLine(text: line, kind: _LineKind.stderr), session),
         );
@@ -1022,7 +1173,11 @@ class TerminalPaneState extends State<TerminalPane> {
       session.currentProcess = null;
       session.currentManagedProcess = null;
       session.cancelAction = null;
+      if (identical(session.attachedExitCode, exitCode)) {
+        session.attachedExitCode = null;
+      }
       if (!mounted || session.disposed) return code;
+      onExit?.call(code);
       setState(() {
         if (code != 0) {
           // A successful run ends silently: no synthetic exit-0 line. A nonzero
@@ -1034,6 +1189,7 @@ class TerminalPaneState extends State<TerminalPane> {
         }
         session.running = false;
       });
+      _notifyRunningWorkChanged();
       _scrollToBottom(session);
       return code;
     }();
@@ -1299,7 +1455,9 @@ class TerminalPaneState extends State<TerminalPane> {
                   onPressed: _preparing ? null : () => unawaited(showOnline()),
                   icon: const Icon(Icons.cloud_outlined, size: 18),
                 ),
-              if (_session.cancelAction != null)
+              if (_session.cancelAction != null ||
+                  _session.hasUnfinishedCancellation ||
+                  _retiredSessions.isNotEmpty)
                 IconButton(
                   tooltip: '停止',
                   visualDensity: VisualDensity.compact,
@@ -1308,7 +1466,7 @@ class TerminalPaneState extends State<TerminalPane> {
                     height: 36,
                   ),
                   padding: EdgeInsets.zero,
-                  onPressed: () => unawaited(_session.cancelAction!()),
+                  onPressed: () => unawaited(_interruptFromUi()),
                   icon: const Icon(Icons.stop, size: 18),
                 ),
               SizedBox(
@@ -1645,8 +1803,12 @@ class TerminalPaneState extends State<TerminalPane> {
   /// `cd` is visible and mobile sandbox paths
   /// (`/data/.../app_flutter/<project>`) do not crowd out the transcript.
   String get _prompt {
-    if (_session.online) return '/workspace\$';
-    final backend = _session.backend;
+    return _promptFor(_session);
+  }
+
+  String _promptFor(_TerminalSession session) {
+    if (session.online) return '/workspace\$';
+    final backend = session.backend;
     final base = backend?.cwd ?? widget.workingDirectory;
     final name = p.basename(p.normalize(base));
     final shortName = name.isEmpty ? 'workspace' : name;
@@ -1839,21 +2001,149 @@ class _TerminalSession {
   Process? currentProcess;
   ManagedProcess? currentManagedProcess;
   Future<void> Function()? cancelAction;
+  Future<void>? commandDone;
+  Future<int>? attachedExitCode;
+  Future<void>? _pendingCancellation;
+  Future<void> Function()? _unprovenCancellation;
+  Future<void> Function()? _cleanupCancelAction;
+  bool _cancellationCleaned = false;
+  Future<void>? _disposeFuture;
 
-  void dispose() {
+  bool get hasUnfinishedCancellation => _unprovenCancellation != null;
+
+  /// Stop and tab disposal share a cancellation while it is in flight. Failed
+  /// attempts leave the action available so the next explicit Stop can retry.
+  Future<void> interrupt() {
+    final existing = _pendingCancellation;
+    if (existing != null) return existing;
+    final cancel =
+        (disposed ? _cleanupCancelAction : null) ??
+        _unprovenCancellation ??
+        cancelAction ??
+        backend?.interrupt;
+    if (cancel == null) {
+      if (disposed) _cancellationCleaned = true;
+      return Future<void>.value();
+    }
+    _unprovenCancellation = cancel;
+    late final Future<void> pending;
+    pending = Future<void>.sync(cancel)
+        .then<void>((_) {
+          if (identical(_unprovenCancellation, cancel)) {
+            _unprovenCancellation = null;
+          }
+          if (disposed) _cancellationCleaned = true;
+        })
+        .whenComplete(() {
+          if (identical(_pendingCancellation, pending)) {
+            _pendingCancellation = null;
+          }
+        });
+    return _pendingCancellation = pending;
+  }
+
+  Future<void> retryDispose() async {
+    final previous = _disposeFuture;
+    // The previous pass may still be waiting for worker exit after cancellation
+    // failed. Retry cancellation before waiting for that pass to finish.
+    if (disposed && !_cancellationCleaned && !online) await interrupt();
+    if (previous != null) {
+      try {
+        await previous;
+      } catch (_) {
+        // This explicit retry continues with only the unfinished resources.
+      }
+    }
+    await dispose();
+  }
+
+  Future<void> dispose() {
+    final existing = _disposeFuture;
+    if (existing != null) return existing;
+    final firstDisposal = !disposed;
+    if (firstDisposal) {
+      _cleanupCancelAction = _unprovenCancellation ?? cancelAction;
+    }
     disposed = true;
-    final cancel = cancelAction;
-    if (cancel != null && !online) unawaited(cancel());
+    final cleanup = <Future<void>>[];
+    final cancellation = _pendingCancellation;
+    if (!_cancellationCleaned) {
+      if (cancellation != null) {
+        cleanup.add(cancellation);
+      } else if (!online) {
+        cleanup.add(interrupt());
+      }
+    }
     final managed = currentManagedProcess;
-    if (managed != null) unawaited(managed.cancel());
-    currentProcess?.kill();
-    unawaited(backendSub?.cancel());
-    deferredTap?.cancel();
+    if (managed != null) {
+      cleanup.add(
+        Future<void>.sync(() async {
+          await managed.cancel();
+          if (identical(currentManagedProcess, managed)) {
+            currentManagedProcess = null;
+          }
+        }),
+      );
+    }
+    final process = currentProcess;
+    if (process != null) {
+      cleanup.add(
+        Future<void>.sync(() async {
+          process.kill();
+          await process.exitCode;
+          if (identical(currentProcess, process)) currentProcess = null;
+        }),
+      );
+    }
+    final attached = attachedExitCode;
+    if (attached != null) {
+      cleanup.add(
+        attached.then<void>((_) {
+          if (identical(attachedExitCode, attached)) attachedExitCode = null;
+        }),
+      );
+    }
+    final command = commandDone;
+    if (command != null) {
+      cleanup.add(
+        command.then<void>((_) {
+          if (identical(commandDone, command)) commandDone = null;
+        }),
+      );
+    }
+    final output = backendSub;
+    if (output != null) {
+      cleanup.add(
+        Future<void>.sync(() async {
+          await output.cancel();
+          if (identical(backendSub, output)) backendSub = null;
+        }),
+      );
+    }
     final localBackend = backend;
-    if (localBackend != null) unawaited(localBackend.shutdown());
-    inputController.dispose();
-    listController.dispose();
-    focusNode.dispose();
+    if (localBackend != null) {
+      cleanup.add(
+        Future<void>.sync(() async {
+          await localBackend.shutdown();
+          if (identical(backend, localBackend)) backend = null;
+        }),
+      );
+    }
+    if (firstDisposal) {
+      deferredTap?.cancel();
+      inputController.dispose();
+      listController.dispose();
+      focusNode.dispose();
+    }
+    late final Future<void> pending;
+    pending = Future.wait<void>(cleanup, eagerError: false).then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        if (identical(_disposeFuture, pending)) _disposeFuture = null;
+        Error.throwWithStackTrace(error, stackTrace);
+      },
+    );
+    return _disposeFuture = pending;
   }
 }
 

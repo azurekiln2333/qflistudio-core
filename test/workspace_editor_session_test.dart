@@ -33,6 +33,9 @@ void main() {
       templates: [],
       isOffline: true,
       offlineOnly: true,
+      // A real child product keeps the legacy multi-root history contract;
+      // the main release (qflistudio / null) uses saved workspaces instead.
+      productKey: StudioProductCatalog.forgeKey,
     );
     fixture = await _Fixture.create();
   });

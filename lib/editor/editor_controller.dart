@@ -36,6 +36,8 @@ class EditorController extends ChangeNotifier {
   /// 打开文件；成功返回 null，失败返回错误信息。
   /// [ownerProjectName] 为文件所属项目名（跨项目打开时用于标签显示），
   /// [ownerProjectPath] 为该项目根目录。
+  /// [shouldOpen] lets asynchronous navigation become stale without opening or
+  /// activating a tab. A cancelled open returns null without changing the editor.
   Future<String?> openPath(
     String path, {
     String? ownerProjectName,
@@ -44,8 +46,10 @@ class EditorController extends ChangeNotifier {
     bool readOnly = false,
     String? timeLabel,
     FileCursor? cursor,
+    bool Function()? shouldOpen,
   }) async {
     if (_disposed) return 'Editor closed';
+    if (shouldOpen?.call() == false) return null;
     final existing = files.indexWhere((f) => p.equals(f.path, path));
     if (existing >= 0) {
       select(existing);
@@ -56,12 +60,14 @@ class EditorController extends ChangeNotifier {
     try {
       final stat = await file.stat();
       if (_disposed) return 'Editor closed';
+      if (shouldOpen?.call() == false) return null;
       if (stat.type != FileSystemEntityType.file) return '文件不存在';
       if (stat.size > maxFileSize) {
         return '文件超过 2 MB，暂不支持在编辑器中打开';
       }
       final bytes = await file.readAsBytes();
       if (_disposed) return 'Editor closed';
+      if (shouldOpen?.call() == false) return null;
       if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
       final encoding = TextCodec.detect(bytes);
       final content = TextCodec.byName(encoding).decode(bytes);
@@ -181,10 +187,13 @@ class EditorController extends ChangeNotifier {
     return saveFile(files[index]);
   }
 
+  /// [shouldSave] is rechecked after queued work and backup IO, immediately
+  /// before writing. A cancelled save keeps dirty state and reports cancellation.
   Future<String?> saveFile(
     OpenFile open, {
     bool backup = false,
     List<int>? bytes,
+    bool Function()? shouldSave,
   }) {
     if (open.readOnly) return Future.value();
     final snapshot =
@@ -195,12 +204,14 @@ class EditorController extends ChangeNotifier {
     final write = () async {
       if (previous != null) await previous;
       try {
+        if (shouldSave?.call() == false) return '保存已取消';
         final file = File(open.path);
         if (backup) {
           await FileBackup.backupBeforeOverwrite(
             file,
             projectName: open.ownerProjectName,
           );
+          if (shouldSave?.call() == false) return '保存已取消';
         }
         await file.writeAsBytes(snapshot, flush: true);
         open.modifiedAt = (await file.stat()).modified;
