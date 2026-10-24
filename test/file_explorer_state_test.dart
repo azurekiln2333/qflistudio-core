@@ -8,15 +8,32 @@ import 'package:qfli_studio_core/editor/editor_controller.dart';
 import 'package:qfli_studio_core/editor/file_explorer.dart';
 import 'package:qfli_studio_core/editor/project_history.dart';
 import 'package:qfli_studio_core/models/project.dart';
+import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/services/recycle_bin.dart';
 
 void main() {
   late _ExplorerFixture fixture;
+  StudioProfile? previous;
 
   setUp(() async {
+    previous = StudioProfile.current;
+    // Legacy child contract: multi-root membership and expansion live in the
+    // project's history. The main release uses explicit saved workspaces.
+    StudioProfile.current = const StudioProfile(
+      id: 'explorer-test',
+      appTitle: 'Explorer',
+      templates: [],
+      isOffline: true,
+      offlineOnly: true,
+      productKey: StudioProductCatalog.forgeKey,
+    );
     fixture = await _ExplorerFixture.create();
+  });
+
+  tearDown(() {
+    StudioProfile.current = previous;
   });
 
   testWidgets('reconstructed explorer restores nested expansion', (

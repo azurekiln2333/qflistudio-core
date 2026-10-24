@@ -28,11 +28,17 @@ import '../services/studio_profile.dart';
 import '../services/web_preview_file.dart';
 import '../services/task_activity_service.dart';
 import '../widgets/retained_page.dart';
+import '../workspace/editor_workspace.dart';
+import '../workspace/saved_workspace.dart';
+import '../workspace/workspace_store.dart';
 import 'editor_fonts.dart';
 import 'code_minimap.dart';
 import 'symbols_bar.dart';
 import 'editor_controller.dart';
 import 'editor_analysis_controller.dart';
+import 'editor_debug_controller.dart';
+import 'editor_debug_widgets.dart';
+import 'editor_output_panel.dart';
 import 'editor_diagnostics.dart';
 import 'editor_find_panel.dart';
 import 'file_explorer.dart';
@@ -48,10 +54,20 @@ import '../pages/settings_page.dart';
 import '../pages/content_tools_pages.dart';
 import '../services/local_audit_service.dart';
 import '../services/local_stats_service.dart';
+import '../services/picker_service.dart';
 import 'ai_panel.dart';
 import 'open_performance.dart';
 
-enum _BottomPanel { none, terminal, ai, problems }
+enum _BottomPanel {
+  none,
+  terminal,
+  ai,
+  problems,
+  output,
+  debug,
+  debugConsole,
+  ports,
+}
 
 class SaveIntent extends Intent {
   const SaveIntent();
@@ -83,6 +99,11 @@ class EditorPage extends StatefulWidget {
     this.onMinimize,
     this.onClose,
     this.retainedVisibility,
+    this.workspace,
+    this.workspaceMembers = const [],
+    this.workspaceStore,
+    this.onWorkspaceSaved,
+    this.onProjectSelected,
   });
 
   final Project project;
@@ -100,6 +121,27 @@ class EditorPage extends StatefulWidget {
   final VoidCallback? onClose;
   final ValueListenable<bool>? retainedVisibility;
 
+  /// Explicitly saved workspace this session belongs to, if any.
+  ///
+  /// A workspace open restores its own ordered tab/cursor session; a standalone
+  /// open (null) never restores workspace membership or foreign tabs.
+  final SavedWorkspace? workspace;
+
+  /// Resolved surviving member projects for [workspace], primary first.
+  final List<Project> workspaceMembers;
+
+  /// Store that receives workspace session snapshots. Defaults to the shared
+  /// [WorkspaceStore.instance].
+  final WorkspaceStore? workspaceStore;
+
+  /// Reports a newly attached saved workspace so a retained session can update
+  /// its identity without rebuilding (and losing) the live editor state.
+  final void Function(SavedWorkspace workspace, List<Project> members)?
+  onWorkspaceSaved;
+
+  /// Lets the retained owner open external projects as standalone sessions.
+  final ValueChanged<Project>? onProjectSelected;
+
   @override
   State<EditorPage> createState() => _EditorPageState();
 }
@@ -111,6 +153,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   late final EditorController _editor;
   late final EditorAnalysisController _analysis;
+  late final EditorDebugController _debugger;
+  final _output = EditorOutputBuffer();
+  final _previewConsole = EditorOutputBuffer();
+  DebugPauseToken? _shownPause;
+  Object? _loggedAnalysis;
+  Future<void>? _stoppingPreview;
+  bool _closeTerminalWhenIdle = false;
   final _sessionRestored = Completer<void>();
   Future<void> _pendingOpen = Future<void>.value();
   final _hiddenViews =
@@ -168,6 +217,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   final Map<String, int> _autoEditGeneration = {};
   bool _leaving = false;
 
+  // Workspace session state is separate from project history. It is written to
+  // the saved workspace document, never into another project's history.json.
+  SavedWorkspace? _workspace;
+  List<Project> _workspaceMembers = const [];
+  Map<String, List<String>> _workspaceExpandedDirs = const {};
+  Map<String, bool> _workspaceRootExpanded = const {};
+
+  /// Tabs whose owner project disappeared while the session was live. Their
+  /// buffers are kept, but saving/running would either fail or recreate a
+  /// deleted directory, so both are blocked until the user exports the text.
+  final Set<String> _orphanedPaths = {};
+
+  WorkspaceStore get _workspaceStore =>
+      widget.workspaceStore ?? WorkspaceStore.instance;
+
   // 双指缩放字号 + 滚动收键盘（raw pointer，不与编辑器手势竞争）。
   late double _fontSize;
   late double _savedFontSize;
@@ -195,6 +259,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     FocusManager.instance.addListener(_diagFocus);
     EditorPageDiag.probeAlive('EditorPage.initState');
     _fontSize = _savedFontSize = widget.settings.editorFontSize;
+    _applyWorkspace(widget.workspace, widget.workspaceMembers);
     _editor = EditorController(
       project: widget.project,
       onContentChanged: _onFileContentChanged,
@@ -203,6 +268,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       editor: _editor,
       analyzer: StudioProfile.current?.codeAnalyzer,
     );
+    _debugger = EditorDebugController(
+      editor: _editor,
+      isFileAvailable: (file) => !_isOrphaned(file),
+      isProjectAvailable: _isProjectAvailable,
+    );
+    _debugger.addListener(_onDebuggerChanged);
+    _analysis.addListener(_onAnalysisChanged);
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
     OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
@@ -259,10 +331,59 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         if (mounted) await _openInitialFile(path);
       });
     }
+    if (oldWidget.workspace?.id != widget.workspace?.id) {
+      if (_workspace?.id == widget.workspace?.id) {
+        // The same saved workspace was promoted into this live session; keep
+        // the live expansion/tab state instead of reloading an older snapshot.
+        _workspaceMembers = widget.workspaceMembers;
+      } else {
+        _applyWorkspace(widget.workspace, widget.workspaceMembers);
+      }
+    } else if (!_sameWorkspaceMembers(
+      oldWidget.workspaceMembers,
+      widget.workspaceMembers,
+    )) {
+      _workspaceMembers = widget.workspaceMembers;
+    }
+    if (oldWidget.workspace?.id != widget.workspace?.id ||
+        !_sameWorkspaceMembers(
+          oldWidget.workspaceMembers,
+          widget.workspaceMembers,
+        )) {
+      _reconcileWorkspaceMembers();
+    }
+  }
+
+  static bool _sameWorkspaceMembers(List<Project> a, List<Project> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!p.equals(a[i].path, b[i].path)) return false;
+    }
+    return true;
+  }
+
+  void _applyWorkspace(SavedWorkspace? workspace, List<Project> members) {
+    _workspace = workspace;
+    _workspaceMembers = members.isEmpty ? [widget.project] : members;
+    final session = workspace?.session;
+    final expanded = session?.expandedDirs ?? const <String, List<String>>{};
+    _workspaceExpandedDirs = {
+      for (final entry in expanded.entries)
+        entry.key: List<String>.of(entry.value),
+    };
+    _workspaceRootExpanded = {...?session?.rootExpanded};
   }
 
   Future<void> _closeEditor() async {
-    if (await _confirmDiscardDirty() && mounted) widget.onClose?.call();
+    if (!await _confirmDiscardDirty() || !mounted) return;
+    try {
+      await _stopPreview();
+      await _debugger.close();
+    } catch (error) {
+      _showSnack('关闭前清理失败，请重试：$error');
+      return;
+    }
+    if (mounted) widget.onClose?.call();
   }
 
   void _onRetainedVisibilityChanged() {
@@ -319,40 +440,84 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Future<void> _restoreSession() async {
     if (!mounted) return;
     OpenPerformance.mark('restoreSession start');
-    final session = await ProjectHistory.load(widget.project.path);
+    final workspaceSession = _workspace;
+    final ProjectSession? history;
+    final List<ProjectDocumentSession> documents;
+    if (workspaceSession != null) {
+      // A workspace restores only its own session document. Project history is
+      // deliberately not consulted, so opening the same project standalone
+      // cannot resurrect workspace tabs.
+      history = null;
+      documents = workspaceSession.session.documents;
+      final expanded = workspaceSession.session.expandedDirs;
+      _workspaceExpandedDirs = {
+        for (final entry in expanded.entries)
+          entry.key: List<String>.of(entry.value),
+      };
+      _workspaceRootExpanded = {...workspaceSession.session.rootExpanded};
+    } else {
+      final loaded = await ProjectHistory.load(widget.project.path);
+      history = loaded;
+      // The main release keeps standalone opens single-project: legacy
+      // cross-root rows written by older builds are ignored rather than
+      // restored as a workspace. Language products keep their history contract.
+      documents = isMainStudioRelease
+          ? [
+              for (final document in loaded.documents)
+                if (p.equals(document.projectPath, widget.project.path))
+                  document,
+            ]
+          : loaded.documents;
+    }
     if (!mounted) return;
-    final opened = <String>[];
-    String? activePath;
-    final documents = session.documents.isNotEmpty
-        ? session.documents
+    final restoredDocuments = documents.isNotEmpty
+        ? documents
         : [
-            for (final rel in session.openFiles)
+            for (final rel in history?.openFiles ?? const <String>[])
               ProjectDocumentSession(
                 projectPath: widget.project.path,
                 relativePath: rel,
                 cursor:
-                    session.cursors[rel] ??
+                    history!.cursors[rel] ??
                     const FileCursor(
                       baseIndex: 0,
                       baseOffset: 0,
                       extentIndex: 0,
                       extentOffset: 0,
                     ),
-                isActive: rel == session.activeFile,
+                isActive: rel == history.activeFile,
               ),
           ];
+    final opened = <String>[];
+    String? activePath;
     final seen = <String>{};
-    for (final document in documents) {
+    for (final document in restoredDocuments) {
       final Project owner;
-      if (p.equals(document.projectPath, widget.project.path)) {
+      if (workspaceSession != null) {
+        Project? match;
+        for (final member in _workspaceMembers) {
+          if (!member.isCloud && p.equals(member.path, document.projectPath)) {
+            match = member;
+            break;
+          }
+        }
+        if (match == null) continue;
+        owner = match;
+      } else if (isMainStudioRelease) {
+        if (!p.equals(document.projectPath, widget.project.path)) continue;
         owner = widget.project;
       } else {
-        final matches = widget.store.projects.where(
-          (project) =>
-              !project.isCloud && p.equals(project.path, document.projectPath),
-        );
-        if (matches.isEmpty) continue;
-        owner = matches.first;
+        if (p.equals(document.projectPath, widget.project.path)) {
+          owner = widget.project;
+        } else {
+          final matches = widget.store.projects.where(
+            (project) =>
+                !project.isCloud &&
+                p.equals(project.path, document.projectPath),
+          );
+          if (matches.isEmpty) continue;
+          owner = matches.first;
+        }
       }
       if (p.isAbsolute(document.relativePath)) continue;
       final abs = p.normalize(p.join(owner.path, document.relativePath));
@@ -416,6 +581,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     for (final f in _editor.files) {
       if (f.readOnly) continue;
       if (!p.isWithin(f.projectRootPath, f.path)) continue;
+      // Orphaned buffers (owner left the workspace) never write their path back
+      // into the saved session; recovery is explicit via "另存为…".
+      if (_isOrphaned(f)) continue;
+      final ownedByPrimary = p.equals(f.projectRootPath, widget.project.path);
+      // The main release standalone history owns only this project's own tabs.
+      if (_workspace == null && isMainStudioRelease && !ownedByPrimary) {
+        continue;
+      }
       final rel = p
           .relative(f.path, from: f.projectRootPath)
           .replaceAll('\\', '/');
@@ -435,11 +608,24 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           isActive: identical(f, _editor.current),
         ),
       );
-      if (p.equals(f.projectRootPath, widget.project.path)) {
+      if (ownedByPrimary) {
         openFiles.add(rel);
         cursors[rel] = cursor;
         if (identical(f, _editor.current)) activeRel = rel;
       }
+    }
+    final workspace = _workspace;
+    if (workspace != null) {
+      await _workspaceStore.saveSession(
+        workspace,
+        WorkspaceSessionSnapshot(
+          primaryPath: widget.project.path,
+          documents: documents,
+          expandedDirs: _workspaceExpandedDirs,
+          rootExpanded: _workspaceRootExpanded,
+        ),
+      );
+      return;
     }
     await ProjectHistory.save(
       widget.project.path,
@@ -448,6 +634,88 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       activeFile: activeRel,
       documents: documents,
     );
+  }
+
+  /// Keeps the editor session in sync with the explorer's explicit workspace
+  /// save/update/delete action. Workspace metadata and tabs are persisted into
+  /// the workspace document; the project's own history is untouched.
+  void _onWorkspaceChanged(EditorWorkspaceState state) {
+    final attached = state.saved;
+    final previous = _workspace;
+    setState(() {
+      _workspace = state.saved;
+      _workspaceMembers = state.members;
+      _workspaceExpandedDirs = state.expandedDirs;
+      _workspaceRootExpanded = state.rootExpanded;
+    });
+    if (attached != null && previous?.id != attached.id) {
+      widget.onWorkspaceSaved?.call(attached, state.members);
+    }
+    _reconcileWorkspaceMembers();
+    unawaited(_saveHistory());
+  }
+
+  bool _isProjectAvailable(String projectPath) =>
+      _workspace == null ||
+      _workspaceMembers.any(
+        (member) =>
+            workspacePathKey(member.path) == workspacePathKey(projectPath),
+      );
+
+  bool _isOrphaned(OpenFile open) =>
+      !_isProjectAvailable(open.projectRootPath) ||
+      _orphanedPaths.contains(workspacePathKey(open.path));
+
+  /// Drops clean tabs whose owner left the workspace and keeps dirty buffers
+  /// as explicit recovery items. No source file is modified or recreated.
+  void _reconcileWorkspaceMembers() {
+    if (_workspace == null) {
+      _orphanedPaths.clear();
+      return;
+    }
+    final allowed = <String>{
+      for (final member in _workspaceMembers) workspacePathKey(member.path),
+    };
+    for (var i = _editor.files.length - 1; i >= 0; i--) {
+      final file = _editor.files[i];
+      if (allowed.contains(workspacePathKey(file.projectRootPath))) {
+        _orphanedPaths.remove(workspacePathKey(file.path));
+        continue;
+      }
+      if (file.dirty) {
+        _orphanedPaths.add(workspacePathKey(file.path));
+      } else {
+        _editor.closeAt(i);
+      }
+    }
+    if (_orphanedPaths.isNotEmpty && mounted) {
+      // Called from didUpdateWidget (build phase): defer to the next frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _orphanedPaths.isEmpty) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('部分项目已不可用；未保存的改动仍保留在编辑器中，可通过「另存为…」导出')),
+        );
+      });
+    }
+  }
+
+  /// Explicit recovery for a buffer whose project root disappeared.
+  Future<void> _recoverOrphanedFile() async {
+    final open = _editor.current;
+    if (open == null) return;
+    final location = await PickerService.saveDocument(suggestedName: open.name);
+    final path = location?.path;
+    if (path == null || path.isEmpty) return;
+    try {
+      await File(path).writeAsBytes(
+        TextCodec.byName(open.encoding).encode(open.controller.text),
+        flush: true,
+      );
+      if (!mounted) return;
+      _showSnack('已另存为 $path');
+    } on FileSystemException catch (error) {
+      if (mounted) _showSnack('另存失败：${error.message}');
+    }
   }
 
   @override
@@ -472,9 +740,18 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _debugSub?.cancel();
     _cloud?.dispose();
     _tabController?.dispose();
+    _analysis.removeListener(_onAnalysisChanged);
+    _debugger.removeListener(_onDebuggerChanged);
+    _debugger.dispose();
     _analysis.dispose();
+    _output.dispose();
+    _previewConsole.dispose();
     _editor.dispose();
-    _previewServer?.stop();
+    unawaited(
+      _stopPreview().catchError((Object error) {
+        debugPrint('Editor preview cleanup failed: $error');
+      }),
+    );
     super.dispose();
   }
 
@@ -531,6 +808,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   void _onFileContentChanged(OpenFile open) {
     _scheduleHistorySave();
+    // A buffer whose project was removed must not be written back and recreate
+    // the deleted directory; the user exports it explicitly instead.
+    if (_isOrphaned(open)) return;
     if (!widget.settings.autoSave && !widget.project.isCloud) return;
     _activityTimers.remove(open.path)?.cancel();
     final editGeneration = (_autoEditGeneration[open.path] ?? 0) + 1;
@@ -540,6 +820,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       open,
       backup: widget.settings.backupEnabled,
       bytes: bytes,
+      shouldSave: () =>
+          mounted && _editor.files.contains(open) && !_isOrphaned(open),
     );
     unawaited(
       _finishAutoSave(
@@ -692,12 +974,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   // TEMP-DIAG (remove after device verification): see [EditorPageDiag].
   FocusNode? _diagLastFocus;
   void _diagFocus() {
+    if (!EditorPageDiag.enabled || !mounted || _leaving) return;
     final node = FocusManager.instance.primaryFocus;
     if (identical(node, _diagLastFocus)) return;
     _diagLastFocus = node;
+    final focusContext = node?.context;
     EditorPageDiag.diag(
       'primaryFocus -> label=${node?.debugLabel} '
-      'widget=${node?.context?.widget.runtimeType} hasFocus=${node?.hasFocus}',
+      'widget=${focusContext?.mounted == true ? focusContext!.widget.runtimeType : null} '
+      'hasFocus=${node?.hasFocus}',
     );
   }
 
@@ -857,10 +1142,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Future<void> _saveCurrent() async {
     final open = _editor.current;
     if (open == null || open.readOnly) return;
+    if (_isOrphaned(open)) {
+      _showSnack('项目文件夹已不可用，无法保存；请使用「另存为…」导出改动');
+      return;
+    }
     final wasDirty = open.dirty;
     final token = widget.auth.token;
     final bytes = TextCodec.byName(open.encoding).encode(open.controller.text);
-    final error = await _editor.saveFile(open, bytes: bytes);
+    final error = await _editor.saveFile(
+      open,
+      bytes: bytes,
+      shouldSave: () =>
+          mounted && _editor.files.contains(open) && !_isOrphaned(open),
+    );
     if (error != null) {
       if (mounted) _showSnack(error);
       return;
@@ -941,14 +1235,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final tool = StudioProfile.current?.editorFileTools
         .where((tool) => tool.id == id)
         .firstOrNull;
-    if (_runningFileTool || open == null || open.readOnly || tool == null) {
+    if (_runningFileTool ||
+        _runningProject ||
+        _debugger.busy ||
+        _terminalKey.currentState?.hasRunningWork == true ||
+        open == null ||
+        open.readOnly ||
+        _isOrphaned(open) ||
+        tool == null) {
       return;
     }
     if (!tool.extensions.contains(p.extension(open.path).toLowerCase())) return;
     setState(() => _runningFileTool = true);
     try {
       await _saveCurrent();
-      if (!mounted || !_editor.files.contains(open) || open.dirty) return;
+      if (!mounted ||
+          !_editor.files.contains(open) ||
+          _isOrphaned(open) ||
+          open.dirty) {
+        return;
+      }
       final EditorFileToolResult result;
       try {
         result = await tool.run(open.path, open.projectRootPath);
@@ -957,6 +1263,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         return;
       }
       if (!mounted) return;
+      _output.append(
+        '${tool.label}${result.success ? '完成' : '失败'}\n${result.message}\n',
+      );
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
@@ -998,10 +1307,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           readOnly: open.readOnly,
           save: (text) async {
             if (!mounted || !_editor.files.contains(open)) return '文件已关闭';
+            if (_isOrphaned(open)) return '项目文件夹已不可用，请另存为导出改动';
             if (open.controller.text != text) {
               setState(() => open.controller.text = text);
             }
-            return _editor.saveFile(open);
+            return _editor.saveFile(
+              open,
+              shouldSave: () =>
+                  mounted && _editor.files.contains(open) && !_isOrphaned(open),
+            );
           },
         ),
       );
@@ -1030,15 +1344,38 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// (the active file captured by a long press) through the same save and
   /// runtime routing. Calls with an override must validate it first.
   Future<void> _runProject({String? entryOverride}) async {
-    if (_runningProject) return;
+    if (_runningProject ||
+        _runningFileTool ||
+        _debugger.busy ||
+        _terminalKey.currentState?.hasRunningWork == true) {
+      return;
+    }
     // Capture the owner before any asynchronous save or tab switch. A workspace
     // can contain several projects with different entries and relative inputs.
     final active = _editor.current;
+    if (active != null && _isOrphaned(active)) {
+      _showSnack('项目已从工作区移除，请先通过「另存为…」导出未保存的改动');
+      return;
+    }
     final projectPath = active?.projectRootPath ?? widget.project.path;
     final projectName = active?.ownerProjectName ?? widget.project.name;
+    if (!Directory(projectPath).existsSync()) {
+      setState(() {
+        _terminalCreated = true;
+        _closeTerminalWhenIdle = false;
+        _terminalCollapsed = false;
+        _bottomPanel = _BottomPanel.terminal;
+      });
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      _terminalKey.currentState?.expand();
+      _terminalKey.currentState?.appendSystem('项目文件夹已不可用，无法运行（$projectPath）');
+      return;
+    }
     setState(() {
       _runningProject = true;
       _terminalCreated = true;
+      _closeTerminalWhenIdle = false;
       _terminalCollapsed = false;
       _bottomPanel = _BottomPanel.terminal;
     });
@@ -1056,19 +1393,38 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       pane.beginPreparation();
       preparing = true;
       final sources = _editor.files
-          .where((open) => p.equals(open.projectRootPath, projectPath))
+          .where(
+            (open) =>
+                p.equals(open.projectRootPath, projectPath) &&
+                !_isOrphaned(open),
+          )
           .toList();
+      bool ownerAvailable() =>
+          mounted &&
+          (active == null ||
+              (_editor.files.contains(active) && !_isOrphaned(active)));
       if (sources.any((open) => !_runSourceWithin(projectPath, open.path))) {
         pane.appendSystem('file is outside its project');
         return;
       }
       for (final open in sources) {
-        final error = await _editor.saveFile(open);
+        final error = await _editor.saveFile(
+          open,
+          shouldSave: () =>
+              ownerAvailable() &&
+              _editor.files.contains(open) &&
+              !_isOrphaned(open) &&
+              _runSourceWithin(projectPath, open.path),
+        );
         if (!mounted || !pane.mounted) return;
         if (error != null) {
           pane.appendSystem(error);
           return;
         }
+      }
+      if (!ownerAvailable() || sources.any((open) => open.dirty)) {
+        pane.appendSystem('项目或源文件已更改，请确认后重新运行');
+        return;
       }
       final entry = entryOverride ?? RunnerService.findEntry(projectPath);
       if (entry == null) {
@@ -1102,11 +1458,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       if (ext == '.html' || ext == '.htm') {
         // Detach and stop the previous preview before starting a replacement so
         // no stale session or debug listener survives.
-        await _debugSub?.cancel();
-        _debugSub = null;
-        final previous = _previewServer;
-        _previewServer = null;
-        await previous?.stop();
+        await _stopPreview();
+        if (!ownerAvailable()) return;
         WebPreviewSession? server;
         try {
           server =
@@ -1115,9 +1468,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                   ) ??
                   LocalWebServer.start(projectPath));
           if (!mounted) {
-            await server.stop();
+            _previewServer = server;
+            await _stopPreview();
             return;
           }
+          _previewServer = server;
           // The factory owns the configured document root and default entry.
           // Only an explicit active-file run asks it to resolve another file.
           final String targetUrl;
@@ -1129,9 +1484,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           } else {
             targetUrl = server.url;
           }
-          _previewServer = server;
+          if (mounted) setState(() {});
+          // The same actual browser messages feed the retained Debug Console.
           // 页面 console 日志转发到终端面板（Web 调试）。
           _debugSub = server.debugStream.listen((line) {
+            _previewConsole.append('$line\n');
             _terminalKey.currentState?.appendDebug(line);
           });
           await RunnerService.openUrl(targetUrl);
@@ -1148,21 +1505,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             );
           }
         } catch (error) {
-          // Any failure (including SocketException) tears down the session this
-          // run just created and leaves no stopped reference behind.
-          await _debugSub?.cancel();
-          _debugSub = null;
-          if (identical(_previewServer, server)) _previewServer = null;
-          await server?.stop();
+          // A failed stop retains its real listener for Ports/close to retry.
+          Object? cleanupError;
+          if (server != null && identical(_previewServer, server)) {
+            try {
+              await _stopPreview();
+            } catch (failure) {
+              cleanupError = failure;
+            }
+          }
           if (mounted) {
             _showSnack(
-              error is SocketException ? '启动预览服务失败：${error.message}' : '$error',
+              '${error is SocketException ? '启动预览服务失败：${error.message}' : error}'
+              '${cleanupError == null ? '' : '；预览清理失败，请从 Ports 重试：$cleanupError'}',
             );
           }
         }
         return;
       }
 
+      _output.append('运行 · $projectName/${p.basename(entry)}\n');
       final result = await RunnerService.runProject(
         projectPath: projectPath,
         entryFile: entry,
@@ -1177,6 +1539,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       final hint = result?.hint;
       if (hint != null) {
         pane.appendSystem(hint);
+        _output.append('$hint\n');
         if (StudioProfile.current?.offlineOnly != true &&
             OnlineProgram.supports(entry)) {
           await pane.runOnlineProject(projectPath, entry);
@@ -1197,6 +1560,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           stderr: stderr,
           exitCode: exitCode,
           cancel: result.cancel,
+          onOutput: _recordProgramOutput,
+          onExit: _recordProgramExit,
         );
         if (code == kProgramNotRunExitCode &&
             mounted &&
@@ -1225,12 +1590,22 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       }
       final managedProcess = result?.managedProcess;
       if (managedProcess != null) {
-        pane.attachManagedProcess(result!.title, managedProcess);
+        pane.attachManagedProcess(
+          result!.title,
+          managedProcess,
+          onOutput: _recordProgramOutput,
+          onExit: _recordProgramExit,
+        );
         return;
       }
       final process = result?.process;
       if (process != null) {
-        pane.attachProcess(result!.title, process);
+        pane.attachProcess(
+          result!.title,
+          process,
+          onOutput: _recordProgramOutput,
+          onExit: _recordProgramExit,
+        );
       }
     } catch (error) {
       if (mounted && pane.mounted) pane.appendSystem('cannot execute: $error');
@@ -1246,12 +1621,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// never gets recreated and never falls back to the project entry. A valid
   /// file reuses the same save and runtime routing as [_runProject].
   Future<void> _runActiveFile() async {
-    if (_runningProject) return;
+    if (_runningProject || _debugger.busy) return;
     final open = _editor.current;
     final reason = _activeFileRunError(open);
     if (reason != null) {
       setState(() {
         _terminalCreated = true;
+        _closeTerminalWhenIdle = false;
         _terminalCollapsed = false;
         _bottomPanel = _BottomPanel.terminal;
       });
@@ -1269,6 +1645,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   String? _activeFileRunError(OpenFile? open) {
     if (open == null) return 'no active file to run';
     if (open.readOnly) return 'active file is read-only';
+    if (_isOrphaned(open)) return 'project folder is no longer available';
+    if (!Directory(open.projectRootPath).existsSync()) {
+      return 'project folder is no longer available';
+    }
     final profile = StudioProfile.current;
     final ext = p.extension(open.name).toLowerCase();
     final supported = profile?.supportedFileExtensions ?? const <String>[];
@@ -1307,6 +1687,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Future<void> _openOnlineTerminal() async {
     setState(() {
       _terminalCreated = true;
+      _closeTerminalWhenIdle = false;
       _terminalCollapsed = false;
       _bottomPanel = _BottomPanel.terminal;
     });
@@ -1319,6 +1700,127 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _onDebuggerChanged() {
+    if (!mounted) return;
+    setState(() {});
+    final token = _debugger.snapshot?.pauseToken;
+    if (token == null || token == _shownPause) return;
+    _shownPause = token;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _debugger.snapshot?.pauseToken != token) return;
+      final frame = _debugger.selectedFrame;
+      if (frame?.location != null) unawaited(_debugger.navigate(frame!));
+    });
+  }
+
+  void _onAnalysisChanged() {
+    if (_analysis.pending ||
+        ((StudioProfile.current?.productKey ??
+                    StudioProductCatalog.qfliStudioKey) ==
+                StudioProductCatalog.qfliStudioKey &&
+            _analysis.analyzer == null)) {
+      return;
+    }
+    final identity =
+        _analysis.unavailableReason ??
+        (_analysis.checked ? _analysis.problems : null);
+    if (identity == null || identical(identity, _loggedAnalysis)) return;
+    _loggedAnalysis = identity;
+    final reason = _analysis.unavailableReason;
+    _output.append(
+      reason == null
+          ? '检查 · ${_editor.current?.name ?? ""} · ${_analysis.problems.length} 个问题\n'
+          : '检查不可用 · $reason\n',
+    );
+    for (final problem in _analysis.problems.take(50)) {
+      _output.append('${_analysis.location(problem)} · ${problem.message}\n');
+    }
+    if (_analysis.problems.length > 50) _output.append('其余问题请查看 Problems\n');
+  }
+
+  void _recordProgramOutput(String text, bool isError) {
+    _output.append('${isError ? "[stderr] " : ""}$text\n');
+  }
+
+  void _recordProgramExit(int code) => _output.append('退出码 $code\n');
+
+  Future<void> _startDebug(bool stopOnEntry) async {
+    final active = _editor.current;
+    if (active != null && _isOrphaned(active)) {
+      _showSnack('项目已从工作区移除，请先通过「另存为…」导出未保存的改动');
+      return;
+    }
+    if (_runningProject ||
+        _runningFileTool ||
+        _terminalKey.currentState?.hasRunningWork == true) {
+      _showSnack('请先停止当前运行任务');
+      return;
+    }
+    await _debugger.start(stopOnEntry: stopOnEntry);
+  }
+
+  void _showPanel(_BottomPanel panel) {
+    _terminalKey.currentState?.unfocusInput();
+    setState(() {
+      _bottomPanel = panel;
+      if (panel == _BottomPanel.terminal) {
+        _terminalCreated = true;
+        _closeTerminalWhenIdle = false;
+      }
+    });
+  }
+
+  Future<void> _stopPreview() {
+    final pending = _stoppingPreview;
+    if (pending != null) return pending;
+    final server = _previewServer;
+    if (server == null) return Future<void>.value();
+    return _stoppingPreview = () async {
+      try {
+        await server.stop();
+        if (identical(_previewServer, server)) {
+          await _debugSub?.cancel();
+          _debugSub = null;
+          _previewServer = null;
+        }
+        if (mounted) setState(() {});
+      } finally {
+        _stoppingPreview = null;
+      }
+    }();
+  }
+
+  Widget _buildActivityPanel() {
+    void close() => _showPanel(_BottomPanel.none);
+    return switch (_bottomPanel) {
+      _BottomPanel.debug => EditorDebugPanel(
+        debug: _debugger,
+        runBusy:
+            _runningProject ||
+            _runningFileTool ||
+            _terminalKey.currentState?.hasRunningWork == true,
+        onStart: _startDebug,
+        onClose: close,
+      ),
+      _BottomPanel.output => EditorOutputPanel(
+        output: _output,
+        debug: _debugger,
+        onClose: close,
+      ),
+      _BottomPanel.debugConsole => EditorDebugConsolePanel(
+        previewConsole: _previewConsole,
+        debug: _debugger,
+        onClose: close,
+      ),
+      _BottomPanel.ports => EditorPortsPanel(
+        preview: _previewServer,
+        onStop: _stopPreview,
+        onClose: close,
+      ),
+      _ => const SizedBox.shrink(),
+    };
   }
 
   // ---- UI ----
@@ -1455,21 +1957,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     message: '运行（长按运行当前文件）',
                                     child: Semantics(
                                       button: true,
-                                      enabled: !_runningProject,
+                                      enabled:
+                                          !_runningProject && !_debugger.busy,
                                       child: InkResponse(
-                                        onTap: _runningProject
+                                        onTap: _runningProject || _debugger.busy
                                             ? null
                                             : _runProject,
-                                        onLongPress: _runningProject
+                                        onLongPress:
+                                            _runningProject || _debugger.busy
                                             ? null
                                             : _runActiveFile,
-                                        canRequestFocus: !_runningProject,
+                                        canRequestFocus:
+                                            !_runningProject && !_debugger.busy,
                                         radius: 24,
                                         child: SizedBox.square(
                                           dimension: kMinInteractiveDimension,
                                           child: Icon(
                                             Icons.play_arrow,
-                                            color: _runningProject
+                                            color:
+                                                _runningProject ||
+                                                    _debugger.busy
                                                 ? Theme.of(
                                                     context,
                                                   ).disabledColor
@@ -1492,6 +1999,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     switch (value) {
                                       case 'save':
                                         _saveCurrent();
+                                      case 'recover_orphan':
+                                        unawaited(_recoverOrphanedFile());
                                       case 'close_editor':
                                         unawaited(_closeEditor());
                                       case 'find':
@@ -1506,8 +2015,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         widget.settings.setMinimap(
                                           !widget.settings.minimap,
                                         );
+                                      case 'output':
+                                        _showPanel(_BottomPanel.output);
+                                      case 'debug':
+                                        _showPanel(_BottomPanel.debug);
+                                      case 'debug_console':
+                                        _showPanel(_BottomPanel.debugConsole);
+                                      case 'ports':
+                                        _showPanel(_BottomPanel.ports);
                                       case 'terminal':
                                         _terminalCreated = true;
+                                        _closeTerminalWhenIdle = false;
                                         setState(
                                           () => _bottomPanel =
                                               _bottomPanel ==
@@ -1588,17 +2106,34 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             children: [
                                               Icon(tool.icon, size: 20),
                                               const SizedBox(width: 12),
-                                              Text(tool.label),
+                                              Flexible(child: Text(tool.label)),
                                             ],
                                           ),
                                         ),
+                                    if (_editor.current != null &&
+                                        _isOrphaned(_editor.current!))
+                                      const PopupMenuItem(
+                                        value: 'recover_orphan',
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              Icons.save_as_outlined,
+                                              size: 20,
+                                            ),
+                                            SizedBox(width: 12),
+                                            Flexible(
+                                              child: Text('另存为…（项目不可用）'),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     const PopupMenuItem(
                                       value: 'save',
                                       child: Row(
                                         children: [
                                           Icon(Icons.save_outlined, size: 20),
                                           SizedBox(width: 12),
-                                          Text('保存 (Ctrl+S)'),
+                                          Flexible(child: Text('保存 (Ctrl+S)')),
                                         ],
                                       ),
                                     ),
@@ -1608,7 +2143,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         children: [
                                           Icon(Icons.search, size: 20),
                                           SizedBox(width: 12),
-                                          Text('查找替换 (Ctrl+F)'),
+                                          Flexible(
+                                            child: Text('查找替换 (Ctrl+F)'),
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -1618,7 +2155,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         children: [
                                           Icon(Icons.pin, size: 20),
                                           SizedBox(width: 12),
-                                          Text('跳转到行 (Ctrl+G)'),
+                                          Flexible(
+                                            child: Text('跳转到行 (Ctrl+G)'),
+                                          ),
                                         ],
                                       ),
                                     ),
@@ -1631,7 +2170,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             size: 20,
                                           ),
                                           SizedBox(width: 12),
-                                          Text('格式化 (Ctrl+I)'),
+                                          Flexible(child: Text('格式化 (Ctrl+I)')),
                                         ],
                                       ),
                                     ),
@@ -1684,6 +2223,22 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ),
                                         ],
                                       ),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'output',
+                                      child: Text('Output · 输出'),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'debug',
+                                      child: Text('调试'),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'debug_console',
+                                      child: Text('Debug Console'),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'ports',
+                                      child: Text('Ports · 本地端口'),
                                     ),
                                     PopupMenuItem(
                                       value: 'terminal',
@@ -1937,6 +2492,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                               compactPanel: compactPanel,
                             ),
                           ),
+                        if ({
+                              _BottomPanel.debug,
+                              _BottomPanel.output,
+                              _BottomPanel.debugConsole,
+                              _BottomPanel.ports,
+                            }.contains(_bottomPanel) &&
+                            bodyHeight >= minEditorHeight + 96)
+                          SizedBox(
+                            height: maxPanelHeight
+                                .clamp(96.0, 300.0)
+                                .toDouble(),
+                            child: _buildActivityPanel(),
+                          ),
                         if (_bottomPanel == _BottomPanel.problems &&
                             bodyHeight >= minEditorHeight + 48)
                           SizedBox(
@@ -2016,6 +2584,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       workingDirectory: widget.project.path,
       auth: widget.auth,
       onlineEnabled: StudioProfile.current?.offlineOnly != true,
+      executionBlocked: _debugger.busy || _runningFileTool,
+      isExecutionBlocked: () => _debugger.busy || _runningFileTool,
+      onRunningWorkChanged: (running) {
+        if (!mounted) return;
+        setState(() {
+          if (!running && _closeTerminalWhenIdle) {
+            _terminalCreated = false;
+            _closeTerminalWhenIdle = false;
+          }
+        });
+      },
       compact: compactPanel,
       collapsed: _terminalCollapsed,
       onCollapseChanged: (collapsed) {
@@ -2120,13 +2699,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         setState(() => _terminalInputHasFocus = focused);
       },
       onClose: () {
-        _debugSub?.cancel();
-        _debugSub = null;
         if (mounted) {
+          final busy = _terminalKey.currentState?.hasRunningWork == true;
           setState(() {
             _bottomPanel = _BottomPanel.none;
             _terminalCollapsed = false;
-            _terminalCreated = false;
+            _terminalCreated = busy;
+            _closeTerminalWhenIdle = busy;
             _terminalDragHeight = null;
             _draggingTerminal = false;
             _terminalInputHasFocus = false;
@@ -2168,6 +2747,28 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       store: widget.store,
       settings: widget.settings,
       onFileOpened: onFileOpened,
+      workspace: _workspace,
+      workspaceMembers: _workspaceMembers,
+      workspaceStore: widget.workspaceStore,
+      onWorkspaceChanged: _onWorkspaceChanged,
+      onProjectSelected: (project) {
+        final select = widget.onProjectSelected;
+        if (select != null) {
+          select(project);
+          return;
+        }
+        Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) => EditorPage(
+              project: project,
+              auth: widget.auth,
+              store: widget.store,
+              settings: widget.settings,
+              workspaceStore: widget.workspaceStore,
+            ),
+          ),
+        );
+      },
       onEntryDeleted: _cloud == null
           ? null
           : (path) async {
@@ -2196,7 +2797,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
           ),
           Text(
-            _currentFileSubtitle(),
+            _workspace == null
+                ? _currentFileSubtitle()
+                : '工作区「${_workspace!.name}」 · ${_currentFileSubtitle()}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: Theme.of(
@@ -2266,14 +2869,28 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             ),
             if (showSymbols)
               SymbolsBar(
-                language: languageForFileName(open.name).isNotEmpty
-                    ? languageForFileName(open.name)
+                language:
+                    languageForFileName(
+                      open.name,
+                      ownerType: open.projectType,
+                    ).isNotEmpty
+                    ? languageForFileName(
+                        open.name,
+                        ownerType: open.projectType,
+                      )
                     : widget.project.language,
                 controller: open.controller,
                 symbols: _symbolsFor(open),
                 onSymbolsEdited: (tokens) {
-                  final lang = languageForFileName(open.name).isNotEmpty
-                      ? languageForFileName(open.name)
+                  final lang =
+                      languageForFileName(
+                        open.name,
+                        ownerType: open.projectType,
+                      ).isNotEmpty
+                      ? languageForFileName(
+                          open.name,
+                          ownerType: open.projectType,
+                        )
                       : widget.project.language;
                   widget.settings.setSymbolBar(lang, tokens.join(' '));
                   setState(() {});
@@ -2446,14 +3063,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       );
       if (!mounted || action == null || action == 'cancel') return;
       if (action == 'save') {
-        final error = await _editor.saveAt(index);
+        final error = await _editor.saveFile(
+          open,
+          shouldSave: () =>
+              mounted && _editor.files.contains(open) && !_isOrphaned(open),
+        );
+        if (!mounted) return;
         if (error != null) {
           _showSnack(error);
           return;
         }
       }
     }
-    _editor.closeAt(index);
+    final currentIndex = _editor.files.indexOf(open);
+    if (currentIndex >= 0) _editor.closeAt(currentIndex);
   }
 
   Widget _buildCodeView(BuildContext context, OpenFile open) {
@@ -2467,6 +3090,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       open.name,
       null,
       settings: widget.settings,
+      ownerType: open.projectType,
     );
     return EditorProblemsBar(
       analysis: _analysis,
@@ -2532,6 +3156,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     (context, editingController, chunkController, notifier) {
                       return Row(
                         children: [
+                          if (_debugger.debugger != null && !open.readOnly)
+                            EditorDebugGutter(
+                              debug: _debugger,
+                              file: open,
+                              notifier: notifier,
+                            ),
                           if (open.diagnostics case final diagnostics?)
                             EditorDiagnosticGutter(
                               diagnostics: diagnostics,
@@ -2611,8 +3241,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   /// 当前文件的快捷符号集：用户自定义优先，否则按语言默认。
   List<String> _symbolsFor(OpenFile open) {
-    final lang = languageForFileName(open.name).isNotEmpty
-        ? languageForFileName(open.name)
+    final lang =
+        languageForFileName(open.name, ownerType: open.projectType).isNotEmpty
+        ? languageForFileName(open.name, ownerType: open.projectType)
         : widget.project.language;
     final custom = widget.settings.symbolBars[lang];
     if (custom != null) {

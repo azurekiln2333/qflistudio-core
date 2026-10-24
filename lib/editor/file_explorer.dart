@@ -16,6 +16,10 @@ import '../services/picker_service.dart';
 import '../services/resource_import_service.dart';
 import '../i18n/studio_localizations.dart';
 import '../widgets/project_dialogs.dart';
+import '../workspace/editor_workspace.dart';
+import '../workspace/saved_workspace.dart';
+import '../workspace/workspace_dialogs.dart';
+import '../workspace/workspace_store.dart';
 import 'editor_controller.dart';
 
 class FileNode {
@@ -37,6 +41,11 @@ class FileExplorer extends StatefulWidget {
     this.onFileOpened,
     this.onEntryDeleted,
     this.outlined = true,
+    this.workspace,
+    this.workspaceMembers = const [],
+    this.workspaceStore,
+    this.onWorkspaceChanged,
+    this.onProjectSelected,
   });
 
   /// 是否由本组件自绘 MD3 outlined 卡片外观（圆角 + 细描边）。
@@ -58,6 +67,25 @@ class FileExplorer extends StatefulWidget {
 
   /// 文件成功打开后的回调（抽屉模式下用于自动关闭抽屉）。
   final VoidCallback? onFileOpened;
+
+  /// Explicitly saved workspace this editor session belongs to, if any.
+  ///
+  /// Null means a standalone project open: the tree shows only [project] and
+  /// never restores another project's workspace membership.
+  final SavedWorkspace? workspace;
+
+  /// Resolved surviving members of [workspace], including [project].
+  final List<Project> workspaceMembers;
+
+  /// Store used when the user saves or updates a workspace from the tree.
+  final WorkspaceStore? workspaceStore;
+
+  /// Reports workspace metadata or tree-expansion changes back to the editor so
+  /// the session can be persisted into the workspace document (not history).
+  final ValueChanged<EditorWorkspaceState>? onWorkspaceChanged;
+
+  /// Opens an external project in its own editor session.
+  final ValueChanged<Project>? onProjectSelected;
 
   /// 项目内按名称递归搜索文件（跳过 .git/node_modules/build 等重目录）。
   static List<FileNode> searchFiles(String rootPath, String query) {
@@ -110,12 +138,20 @@ class _FileExplorerState extends State<FileExplorer> {
   int _treeGeneration = 0;
   Future<void>? _restoring;
   List<Project> _workspaceProjects = [];
-  int _workspaceSelectionRevision = 0;
+  SavedWorkspace? _savedWorkspace;
+  Map<String, List<String>> _workspaceExpandedDirs = {};
+  Map<String, bool> _workspaceRootExpanded = {};
+
+  WorkspaceStore get _workspaceStore =>
+      widget.workspaceStore ?? WorkspaceStore.instance;
 
   List<Project> get _workspace => [
-    _browsing,
+    if (_savedWorkspace != null) widget.project else _browsing,
     for (final project in _workspaceProjects)
-      if (!p.equals(project.path, _browsing.path)) project,
+      if (!p.equals(
+        project.path,
+        _savedWorkspace != null ? widget.project.path : _browsing.path,
+      )) project,
   ];
 
   List<FileNode> get _roots => [
@@ -145,18 +181,93 @@ class _FileExplorerState extends State<FileExplorer> {
   @override
   void initState() {
     super.initState();
+    _applyWorkspaceState();
     // 恢复上次浏览的项目（失效则回落到当前项目）。
     // 先乐观地用记住的项目建树，再用异步校验纠正：`existsSync` 会在这里
     // 阻塞首帧，而这个判断只是选择根目录，不值得卡住动画。
-    final remembered = widget.store.projectById(
-      widget.store.lastBrowsedProjectId,
-    );
+    final remembered = widget.workspace != null || isMainStudioRelease
+        ? null
+        : widget.store.projectById(widget.store.lastBrowsedProjectId);
     _browsing = remembered ?? widget.project;
     _rebuildRoot();
-    unawaited(_restoreWorkspace());
+    if (_savedWorkspace == null && !isMainStudioRelease) {
+      // Legacy language-product behavior: an offline App's multi-root
+      // membership still lives in that project's history.
+      unawaited(_restoreLegacyWorkspace());
+    }
     if (remembered != null && remembered.path != widget.project.path) {
       unawaited(_verifyBrowsing(remembered));
     }
+  }
+
+  @override
+  void didUpdateWidget(covariant FileExplorer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final workspaceChanged = oldWidget.workspace?.id != widget.workspace?.id;
+    final primaryChanged = !p.equals(
+      oldWidget.project.path,
+      widget.project.path,
+    );
+    final membersChanged = !_sameProjectPaths(
+      oldWidget.workspaceMembers,
+      widget.workspaceMembers,
+    );
+    if (!workspaceChanged && !membersChanged && !primaryChanged) return;
+    if (!workspaceChanged) {
+      // Capture the outgoing live roots before the member list/primary moves,
+      // otherwise the rebuild restores an already-cleared expansion state.
+      _captureWorkspaceExpansion();
+    }
+    if (workspaceChanged) {
+      _applyWorkspaceState();
+      _browsing = widget.project;
+    } else {
+      _savedWorkspace = widget.workspace;
+      _workspaceProjects = [
+        for (final project in widget.workspaceMembers)
+          if (!p.equals(project.path, widget.project.path)) project,
+      ];
+    }
+    // The browsed root must stay a member: when the old primary A disappears
+    // and the effective primary becomes B, browsing must follow to B instead
+    // of keeping a root that is no longer part of the workspace.
+    //
+    // Membership comes from the resolved widget membership only. Deriving it
+    // from `_workspace`/`_workspaceMembersOrdered` would be circular: those
+    // include `_browsing`, so the stale root A would always look allowed.
+    final allowed = [
+      widget.project,
+      ..._workspaceProjects,
+    ];
+    if (!allowed.any((project) => p.equals(project.path, _browsing.path))) {
+      _browsing = widget.project;
+    }
+    setState(_rebuildRoot);
+  }
+
+  static bool _sameProjectPaths(List<Project> a, List<Project> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!p.equals(a[i].path, b[i].path)) return false;
+    }
+    return true;
+  }
+
+  void _applyWorkspaceState() {
+    _workspaceSelectionRevision++;
+    _savedWorkspace = widget.workspace;
+    _workspaceProjects = [
+      for (final project in widget.workspaceMembers)
+        if (!p.equals(project.path, widget.project.path)) project,
+    ];
+    final expanded =
+        widget.workspace?.session.expandedDirs ??
+        const <String, List<String>>{};
+    _workspaceExpandedDirs = {
+      for (final entry in expanded.entries)
+        entry.key: List<String>.of(entry.value),
+    };
+    _workspaceRootExpanded = {...?widget.workspace?.session.rootExpanded};
   }
 
   /// 校验记住的项目目录是否还在，已失效则回落到当前项目。
@@ -165,6 +276,37 @@ class _FileExplorerState extends State<FileExplorer> {
     final exists = await Directory(remembered.path).exists();
     if (!mounted || generation != _treeGeneration || exists) return;
     setState(() => _browsing = widget.project);
+    _rebuildRoot();
+  }
+
+  /// Guards legacy `history.json` membership restoration against a dialog that
+  /// applied a newer selection while the load/stat work was still in flight.
+  int _workspaceSelectionRevision = 0;
+
+  /// Restores the legacy (language-product) membership stored in this
+  /// project's `history.json`. The main release uses saved workspaces instead.
+  Future<void> _restoreLegacyWorkspace() async {
+    final revision = _workspaceSelectionRevision;
+    final session = await ProjectHistory.load(widget.project.path);
+    if (!mounted || revision != _workspaceSelectionRevision) return;
+    final projects = <Project>[];
+    for (final project in widget.store.projects) {
+      if (project.isCloud ||
+          !session.workspaceRoots.any((path) => p.equals(path, project.path))) {
+        continue;
+      }
+      final exists = await Directory(project.path).exists();
+      if (!mounted || revision != _workspaceSelectionRevision) return;
+      if (exists) projects.add(project);
+    }
+    if (!mounted || revision != _workspaceSelectionRevision) return;
+    if (projects.isEmpty) return;
+    setState(() {
+      _workspaceProjects = [
+        for (final project in projects)
+          if (!p.equals(project.path, widget.project.path)) project,
+      ];
+    });
     _rebuildRoot();
   }
 
@@ -183,26 +325,69 @@ class _FileExplorerState extends State<FileExplorer> {
     ]).then((_) {});
   }
 
-  Future<void> _restoreWorkspace() async {
-    final revision = _workspaceSelectionRevision;
-    final session = await ProjectHistory.load(widget.project.path);
-    if (!mounted || revision != _workspaceSelectionRevision) return;
-    final projects = <Project>[];
-    for (final project in widget.store.projects) {
-      if (project.isCloud ||
-          !session.workspaceRoots.any((path) => p.equals(path, project.path))) {
-        continue;
-      }
-      final exists = await Directory(project.path).exists();
-      if (!mounted || revision != _workspaceSelectionRevision) return;
-      if (exists) projects.add(project);
+  /// Explicitly saves or updates this editor's workspace.
+  ///
+  /// The dialog is available for a standalone project and for a single-project
+  /// registry: a workspace can still be named and reopened from Home.
+  Future<void> _manageWorkspace() async {
+    if (_savedWorkspace == null && !isMainStudioRelease) {
+      await _manageLegacyWorkspace();
+      return;
     }
-    if (projects.isEmpty) return;
-    _workspaceProjects = projects;
-    setState(_rebuildRoot);
+    final result = await showWorkspaceEditorDialog(
+      context,
+      workspaceStore: _workspaceStore,
+      projectStore: widget.store,
+      primary: widget.project,
+      members: _workspaceMembersOrdered,
+      saved: _savedWorkspace,
+    );
+    if (result == null || !mounted) return;
+    _workspaceSelectionRevision++;
+    if (result.deleted) {
+      // Metadata only: project folders, history and open tabs stay untouched.
+      setState(() {
+        _savedWorkspace = null;
+        _workspaceProjects = [];
+        _workspaceExpandedDirs = {};
+        _workspaceRootExpanded = {};
+        _browsing = widget.project;
+      });
+      _rebuildRoot();
+      widget.onWorkspaceChanged?.call(
+        EditorWorkspaceState(saved: null, members: [widget.project]),
+      );
+      return;
+    }
+    final saved = result.workspace!;
+    final members = _membersFor(saved);
+    // Flush the outgoing roots before rebuilding so removing a root never
+    // erases the expansion it should recover when added again.
+    await _restoring;
+    if (!mounted) return;
+    // Merge, never replace: `_captureWorkspaceExpansion` overwrites only the
+    // roots that are live right now, so an entry for a removed root survives
+    // and a re-added root restores its previous expansion.
+    _captureWorkspaceExpansion();
+    setState(() {
+      _savedWorkspace = saved;
+      _workspaceProjects = [
+        for (final project in members)
+          if (!p.equals(project.path, widget.project.path)) project,
+      ];
+      _browsing = widget.project;
+    });
+    // Restore reads the merged map; only capture and save after it completes.
+    _rebuildRoot();
+    await _restoring;
+    if (!mounted) return;
+    _captureWorkspaceExpansion();
+    _notifyWorkspace();
   }
 
-  Future<void> _manageWorkspace() async {
+  /// Language-product membership dialog, preserved from the pre-workspace
+  /// contract: selection is applied immediately and stored in project history.
+  Future<void> _manageLegacyWorkspace() async {
     final projects = widget.store.projects
         .where((project) => !project.isCloud)
         .toList(growable: false);
@@ -211,36 +396,35 @@ class _FileExplorerState extends State<FileExplorer> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, update) => AlertDialog(
+          scrollable: true,
           title: const Text('工作区项目'),
           content: SizedBox(
             width: 420,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 440),
-              child: projects.isEmpty
-                  ? const Text('请先在项目列表添加本地项目。')
-                  : ListView(
-                      shrinkWrap: true,
-                      children: [
-                        for (final project in projects)
-                          CheckboxListTile(
-                            key: ValueKey('workspace-project-${project.id}'),
-                            contentPadding: EdgeInsets.zero,
-                            title: Text(project.name),
-                            subtitle: Text(project.path),
-                            value: selected.contains(project.id),
-                            onChanged: p.equals(project.path, _browsing.path)
-                                ? null
-                                : (value) => update(() {
-                                    if (value == true) {
-                                      selected.add(project.id);
-                                    } else {
-                                      selected.remove(project.id);
-                                    }
-                                  }),
-                          ),
-                      ],
-                    ),
-            ),
+            // Let AlertDialog scroll an intrinsically measurable project list.
+            child: projects.isEmpty
+                ? const Text('请先在项目列表添加本地项目。')
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final project in projects)
+                        CheckboxListTile(
+                          key: ValueKey('workspace-project-${project.id}'),
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(project.name),
+                          subtitle: Text(project.path),
+                          value: selected.contains(project.id),
+                          onChanged: p.equals(project.path, _browsing.path)
+                              ? null
+                              : (value) => update(() {
+                                  if (value == true) {
+                                    selected.add(project.id);
+                                  } else {
+                                    selected.remove(project.id);
+                                  }
+                                }),
+                        ),
+                    ],
+                  ),
           ),
           actions: [
             TextButton(
@@ -259,36 +443,177 @@ class _FileExplorerState extends State<FileExplorer> {
       ),
     );
     if (result == null || !mounted) return;
-    // Flush the outgoing roots before rebuilding so removing a root never
-    // erases the expansion it should recover when added again.
     await _restoring;
     if (!mounted) return;
     await _persistExpanded();
     if (!mounted) return;
     _workspaceSelectionRevision++;
-    _workspaceProjects = result;
+    setState(() {
+      _workspaceProjects = [
+        for (final project in result)
+          if (!p.equals(project.path, widget.project.path)) project,
+      ];
+    });
     unawaited(
       ProjectHistory.saveWorkspaceRoots(widget.project.path, [
         for (final project in result) project.path,
       ]),
     );
-    setState(_rebuildRoot);
-  }
-
-  /// 跨项目浏览：切换文件树根目录。
-  void _switchProject(Project project) {
-    if (identical(project, _browsing) || project.path == _browsing.path) {
-      return;
-    }
-    setState(() => _browsing = project);
-    widget.store.setBrowsedProject(project);
     _rebuildRoot();
   }
 
-  /// 恢复上次展开的目录（来自项目内 history.json）。
+  List<Project> _membersFor(SavedWorkspace workspace) {
+    final members = <Project>[];
+    for (final member in workspace.members) {
+      Project? match;
+      for (final project in widget.store.projects) {
+        if (project.id == member.projectId) {
+          match = project;
+          break;
+        }
+      }
+      if (match == null) {
+        final key = workspacePathKey(member.path);
+        for (final project in widget.store.projects) {
+          if (workspacePathKey(project.path) == key) {
+            match = project;
+            break;
+          }
+        }
+      }
+      if (match == null || match.isCloud) continue;
+      if (members.any((project) => p.equals(project.path, match!.path))) {
+        continue;
+      }
+      members.add(match);
+    }
+    if (!members.any((project) => p.equals(project.path, widget.project.path))) {
+      members.insert(0, widget.project);
+    }
+    return members;
+  }
+
+  /// Ordered members with the editor's primary root first.
+  List<Project> get _workspaceMembersOrdered => [
+    widget.project,
+    for (final project in _workspace)
+      if (!p.equals(project.path, widget.project.path)) project,
+  ];
+
+  /// Merges the live roots' expansion into the saved maps.
+  ///
+  /// Entries for roots that are not mounted right now (a member that was
+  /// removed, or one that has not been restored yet) are preserved so that
+  /// removing and re-adding a root recovers its previous expansion. Only the
+  /// roots that are actually displayed are overwritten.
+  void _captureWorkspaceExpansion() {
+    final expanded = Map<String, List<String>>.of(_workspaceExpandedDirs);
+    final roots = Map<String, bool>.of(_workspaceRootExpanded);
+    for (final project in _workspace) {
+      final expandedKey = _sessionKey(expanded, project.path) ?? project.path;
+      expanded[expandedKey] = [
+        for (final path in _expanded)
+          if (!p.equals(project.path, path) && p.isWithin(project.path, path))
+            p.relative(path, from: project.path).replaceAll(r'\', '/'),
+      ];
+      final rootKey = _sessionKey(roots, project.path) ?? project.path;
+      roots[rootKey] = _expanded.contains(project.path);
+    }
+    _workspaceExpandedDirs = expanded;
+    _workspaceRootExpanded = roots;
+  }
+
+  void _notifyWorkspace() {
+    final saved = _savedWorkspace;
+    if (saved == null) return;
+    widget.onWorkspaceChanged?.call(
+      EditorWorkspaceState(
+        saved: saved,
+        members: _workspaceMembersOrdered,
+        expandedDirs: _workspaceExpandedDirs,
+        rootExpanded: _workspaceRootExpanded,
+      ),
+    );
+  }
+
+  /// Workspace members share a stable tree; external projects own a session.
+  void _switchProject(Project project) {
+    if (workspacePathKey(project.path) == workspacePathKey(_browsing.path)) {
+      return;
+    }
+    if (_savedWorkspace != null) {
+      final member = _workspace.any(
+        (candidate) =>
+            workspacePathKey(candidate.path) == workspacePathKey(project.path),
+      );
+      if (member) {
+        setState(() {
+          _browsing = project;
+          _root = FileNode(path: project.path, name: project.name, isDir: true);
+        });
+      } else {
+        widget.onProjectSelected?.call(project);
+      }
+      return;
+    }
+    if (isMainStudioRelease && widget.onProjectSelected != null) {
+      widget.onProjectSelected!(project);
+      return;
+    }
+    setState(() {
+      _browsing = project;
+      _rebuildRoot();
+    });
+    widget.store.setBrowsedProject(project);
+  }
+
+  /// Finds the stored key for [path] in a workspace session map, tolerating
+  /// Windows path casing and separator differences.
+  String? _sessionKey(Map<String, Object?> map, String path) {
+    final key = workspacePathKey(path);
+    for (final candidate in map.keys) {
+      if (workspacePathKey(candidate) == key) return candidate;
+    }
+    return null;
+  }
+
+  /// Restores this root's expansion.
+  ///
+  /// A saved workspace owns its expansion in the workspace document; a
+  /// standalone project keeps using its own `history.json`.
   Future<void> _restoreExpanded(Project project) async {
     final generation = _treeGeneration;
     final projectPath = project.path;
+    final saved = _savedWorkspace;
+    if (saved != null) {
+      final expandedKey = _sessionKey(_workspaceExpandedDirs, projectPath);
+      final rootKey = _sessionKey(_workspaceRootExpanded, projectPath);
+      if (rootKey != null && _workspaceRootExpanded[rootKey] == false) {
+        _expanded.remove(projectPath);
+      }
+      for (final rel in expandedKey == null
+          ? const <String>[]
+          : _workspaceExpandedDirs[expandedKey]!) {
+        final abs = p.normalize(
+          p.isAbsolute(rel) ? rel : p.join(projectPath, rel),
+        );
+        if (!p.isWithin(projectPath, abs)) continue;
+        final exists = await Directory(abs).exists();
+        if (!mounted || generation != _treeGeneration) return;
+        if (!exists) continue;
+        _expanded.add(abs);
+        if (!_children.containsKey(abs)) {
+          unawaited(
+            _loadChildren(
+              FileNode(path: abs, name: p.basename(abs), isDir: true),
+              generation: generation,
+            ),
+          );
+        }
+      }
+      if (mounted) setState(() {});
+      return;
+    }
     final session = await ProjectHistory.load(projectPath);
     if (!mounted || generation != _treeGeneration) return;
     if (!session.treeRootExpanded) _expanded.remove(projectPath);
@@ -313,16 +638,34 @@ class _FileExplorerState extends State<FileExplorer> {
     if (mounted) setState(() {});
   }
 
-  /// 展开状态持久化（相对浏览项目根目录）。
+  /// 展开状态持久化。
   Future<void> _persistExpanded() async {
-    await Future.wait([
-      for (final project in _workspace)
-        ProjectHistory.saveExpandedDirs(project.path, [
-          for (final path in _expanded)
-            if (p.isWithin(project.path, path))
-              p.relative(path, from: project.path).replaceAll(r'\', '/'),
-        ], treeRootExpanded: _expanded.contains(project.path)),
-    ]);
+    if (_savedWorkspace != null) {
+      _captureWorkspaceExpansion();
+      _notifyWorkspace();
+      return;
+    }
+    if (!isMainStudioRelease) {
+      // Legacy language products keep per-root expansion in project history.
+      await Future.wait([
+        for (final project in _workspace)
+          ProjectHistory.saveExpandedDirs(project.path, [
+            for (final path in _expanded)
+              if (p.isWithin(project.path, path))
+                p.relative(path, from: project.path).replaceAll(r'\', '/'),
+          ], treeRootExpanded: _expanded.contains(project.path)),
+      ]);
+      return;
+    }
+    await ProjectHistory.saveExpandedDirs(
+      widget.project.path,
+      [
+        for (final path in _expanded)
+          if (p.isWithin(widget.project.path, path))
+            p.relative(path, from: widget.project.path).replaceAll(r'\', '/'),
+      ],
+      treeRootExpanded: _expanded.contains(widget.project.path),
+    );
   }
 
   List<FileNode> _childrenOf(FileNode dir) => _children[dir.path] ?? const [];
@@ -812,11 +1155,12 @@ class _FileExplorerState extends State<FileExplorer> {
       builder: (context, constraints) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(
-            height: 48,
+          ConstrainedBox(
+            // Grows instead of clipping when large text needs more than 48px,
+            // so short panels only give up space from the tree below.
+            constraints: const BoxConstraints(minHeight: 48),
             child: Row(
-              children: [
-                const SizedBox(width: 8),
+              children: [                const SizedBox(width: 8),
                 Expanded(
                   child: PopupMenuButton<Project>(
                     tooltip: '切换项目（跨项目打开文件）',
@@ -825,6 +1169,12 @@ class _FileExplorerState extends State<FileExplorer> {
                       for (final p in widget.store.projects)
                         PopupMenuItem(
                           value: p,
+                          enabled: _savedWorkspace == null ||
+                              widget.onProjectSelected != null ||
+                              _workspace.any(
+                                (member) => workspacePathKey(member.path) ==
+                                    workspacePathKey(p.path),
+                              ),
                           child: Row(
                             children: [
                               Icon(
@@ -912,16 +1262,26 @@ class _FileExplorerState extends State<FileExplorer> {
               ],
             ),
           ),
-          if (constraints.maxHeight >= (_searchOpen ? 240 : 144))
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+          // Always visible: saving a workspace must stay reachable even when
+          // the panel is short and the registry has a single project.
+          ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 40),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
               child: Row(
                 children: [
-                  const Icon(Icons.folder_copy_outlined, size: 18),
+                  Icon(
+                    _savedWorkspace == null
+                        ? Icons.folder_copy_outlined
+                        : Icons.workspaces_outline,
+                    size: 18,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '工作区 · ${_workspace.length} 个项目',
+                      _savedWorkspace == null
+                          ? '工作区 · ${_workspace.length} 个项目'
+                          : '${_savedWorkspace!.name} · ${_workspace.length} 个项目',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelMedium,
@@ -930,11 +1290,18 @@ class _FileExplorerState extends State<FileExplorer> {
                   IconButton(
                     tooltip: '工作区项目',
                     icon: const Icon(Icons.tune, size: 20),
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 40,
+                      minHeight: 40,
+                    ),
                     onPressed: _manageWorkspace,
                   ),
                 ],
               ),
             ),
+          ),
           Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
           if (_searchOpen)
             Padding(
@@ -1025,10 +1392,14 @@ class _FileExplorerState extends State<FileExplorer> {
           },
           onSecondaryTapUp: (details) =>
               _showMenu(node, details.globalPosition),
-          child: SizedBox(
-            height: 34,
-            child: Row(
-              children: [
+          child: ConstrainedBox(
+            // Tree rows grow with the text scale; a fixed 34px row overflowed
+            // by a couple of pixels at 2.0x on short panels.
+            constraints: const BoxConstraints(minHeight: 34),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(
+                children: [
                 SizedBox(width: 8.0 + depth * 18.0),
                 if (node.isDir)
                   Icon(
@@ -1077,6 +1448,7 @@ class _FileExplorerState extends State<FileExplorer> {
                     ),
                   ),
               ],
+              ),
             ),
           ),
         ),

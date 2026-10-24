@@ -8,11 +8,16 @@ import '../models/project.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
+import '../workspace/saved_workspace.dart';
+import '../workspace/workspace_store.dart';
 import 'editor_page.dart';
 import 'retained_editor_restore_control.dart';
 
 /// Opens a live project, or resumes its existing editor. Hosted opens finish
 /// immediately; standalone callers keep the ordinary Navigator route lifetime.
+///
+/// Passing [workspace] opens a saved workspace session; it is keyed separately
+/// from a standalone open of the same project so the two never share tabs.
 Future<void> openEditorPage(
   BuildContext context, {
   required Project project,
@@ -20,6 +25,9 @@ Future<void> openEditorPage(
   required ProjectStore store,
   required SettingsStore settings,
   String? initialOpenPath,
+  SavedWorkspace? workspace,
+  List<Project>? workspaceProjects,
+  WorkspaceStore? workspaceStore,
 }) async {
   final controller = RetainedEditorScope.maybeOf(context);
   if (controller != null) {
@@ -29,6 +37,9 @@ Future<void> openEditorPage(
       store: store,
       settings: settings,
       initialOpenPath: initialOpenPath,
+      workspace: workspace,
+      workspaceProjects: workspaceProjects,
+      workspaceStore: workspaceStore,
     );
     return;
   }
@@ -40,6 +51,9 @@ Future<void> openEditorPage(
         store: store,
         settings: settings,
         initialOpenPath: initialOpenPath,
+        workspace: workspace,
+        workspaceMembers: workspaceProjects ?? const [],
+        workspaceStore: workspaceStore,
       ),
     ),
   );
@@ -78,9 +92,53 @@ class RetainedEditorController extends ChangeNotifier {
   List<Project> get projects =>
       List.unmodifiable(_sessions.values.map((session) => session.project));
 
+  /// Read-only view of the live sessions (key, project and saved workspace).
+  /// Used by shell chrome and regression tests; mutations stay internal.
+  List<({String key, Project project, SavedWorkspace? workspace})>
+  get sessionInfos => [
+    for (final entry in _sessions.entries)
+      (
+        key: entry.key,
+        project: entry.value.project,
+        workspace: entry.value.workspace,
+      ),
+  ];
+
   String _projectKey(String path) {
     final normalized = p.normalize(p.absolute(path));
     return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  /// Session identity is the workspace id, not its primary project path: if
+  /// the primary member disappears, Home reopens the same workspace with a
+  /// surviving primary and must resume the same live session (and its dirty
+  /// buffers), not create a second session writing the same workspace file.
+  String _resolveOpenKey(Project project, SavedWorkspace? workspace) {
+    final projectKey = _projectKey(project.path);
+    if (workspace != null) {
+      for (final entry in _sessions.entries) {
+        if (entry.value.workspace?.id == workspace.id) return entry.key;
+      }
+      return 'workspace:${workspace.id}:$projectKey';
+    }
+    final base = 'standalone:$projectKey';
+    // Reuse an existing standalone session for this project. A session promoted
+    // to a saved workspace is excluded so a standalone open never resumes its
+    // extra members.
+    final existing = _sessions[base];
+    if (existing == null || existing.workspace == null) return base;
+    for (final entry in _sessions.entries) {
+      final session = entry.value;
+      if (session.workspace == null &&
+          _projectKey(session.project.path) == projectKey) {
+        return entry.key;
+      }
+    }
+    var index = 2;
+    while (_sessions.containsKey('$base#$index')) {
+      index++;
+    }
+    return '$base#$index';
   }
 
   void open({
@@ -89,12 +147,57 @@ class RetainedEditorController extends ChangeNotifier {
     required ProjectStore store,
     required SettingsStore settings,
     String? initialOpenPath,
+    SavedWorkspace? workspace,
+    List<Project>? workspaceProjects,
+    WorkspaceStore? workspaceStore,
   }) {
-    final key = _projectKey(project.path);
+    final key = _resolveOpenKey(project, workspace);
     final session = _sessions.putIfAbsent(
       key,
-      () => _EditorSession(project, auth, store, settings),
+      () => _EditorSession(
+        project,
+        auth,
+        store,
+        settings,
+        workspace: workspace,
+        workspaceProjects: workspaceProjects ?? const [],
+        workspaceStore: workspaceStore,
+      ),
     );
+    if (workspace != null) {
+      // Re-opening a saved workspace re-resolves its members. The effective
+      // primary may have changed (missing primary → survivor); keep the live
+      // editor and its tabs, including untouched dirty buffers of survivors.
+      final members = workspaceProjects ?? const <Project>[];
+      var changed = false;
+      if (!p.equals(session.project.path, project.path)) {
+        session.project = project;
+        session.workspaceRevision++;
+        changed = true;
+      }
+      if (session.workspace?.updatedAt != workspace.updatedAt ||
+          !_samePaths(session.workspaceProjects, members)) {
+        session.workspace = workspace;
+        session.workspaceProjects = members;
+        session.workspaceRevision++;
+        changed = true;
+      }
+      if (workspaceStore != null && !identical(session.workspaceStore, workspaceStore)) {
+        session.workspaceStore = workspaceStore;
+        changed = true;
+      }
+      if (initialOpenPath != null) {
+        session.initialOpenPath = initialOpenPath;
+        session.openRequest++;
+        changed = true;
+      }
+      _activate(key);
+      // ListenableBuilder only rebuilds on notifications; a re-resolved
+      // workspace must reach EditorPage even when the session is active.
+      if (changed) notifyListeners();
+      return;
+    }
+    if (workspaceStore != null) session.workspaceStore = workspaceStore;
     if (initialOpenPath != null) {
       session.initialOpenPath = initialOpenPath;
       session.openRequest++;
@@ -102,8 +205,47 @@ class RetainedEditorController extends ChangeNotifier {
     _activate(key);
   }
 
-  void resume(Project project) {
-    final key = _projectKey(project.path);
+  /// Keeps a live session's identity in step with a workspace it just saved.
+  ///
+  /// The session key is intentionally stable so open tabs and dirty buffers
+  /// survive the promotion; future standalone opens get a separate session.
+  void attachWorkspace(
+    String key,
+    SavedWorkspace workspace,
+    List<Project> members,
+  ) {
+    final session = _sessions[key];
+    if (session == null) return;
+    if (session.workspace?.id == workspace.id &&
+        _samePaths(session.workspaceProjects, members)) {
+      return;
+    }
+    session.workspace = workspace;
+    session.workspaceProjects = members;
+    session.workspaceRevision++;
+    notifyListeners();
+  }
+
+  /// Attaches a newly saved workspace to the active session (test/UI helper).
+  void attachActiveWorkspace(
+    SavedWorkspace workspace,
+    List<Project> members,
+  ) {
+    final key = _active;
+    if (key == null) return;
+    attachWorkspace(key, workspace, members);
+  }
+
+  static bool _samePaths(List<Project> a, List<Project> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!p.equals(a[i].path, b[i].path)) return false;
+    }
+    return true;
+  }
+
+  void resume(Project project, {SavedWorkspace? workspace}) {
+    final key = _resolveOpenKey(project, workspace);
     if (_sessions.containsKey(key)) _activate(key);
   }
 
@@ -181,16 +323,30 @@ class RetainedEditorController extends ChangeNotifier {
 }
 
 class _EditorSession {
-  _EditorSession(this.project, this.auth, this.store, this.settings);
+  _EditorSession(
+    this.project,
+    this.auth,
+    this.store,
+    this.settings, {
+    this.workspace,
+    this.workspaceProjects = const [],
+    this.workspaceStore,
+  });
 
-  final Project project;
+  Project project;
   final AuthStore auth;
   final ProjectStore store;
   final SettingsStore settings;
+  SavedWorkspace? workspace;
+  List<Project> workspaceProjects;
+  WorkspaceStore? workspaceStore;
+  int workspaceRevision = 0;
   final navigatorKey = GlobalKey<NavigatorState>();
   final visible = ValueNotifier<bool>(false);
   String? initialOpenPath;
   int openRequest = 0;
+
+  String get label => workspace?.name ?? project.name;
 }
 
 /// Place in MaterialApp.builder, above and alongside the root Navigator.
@@ -367,10 +523,7 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
                 interactive: !controller._selectingProject,
                 projectName: controller._lastActive == null
                     ? null
-                    : controller
-                          ._sessions[controller._lastActive!]
-                          ?.project
-                          .name,
+                    : controller._sessions[controller._lastActive!]?.label,
                 hasMultipleSessions: controller._sessions.length > 1,
                 reserveBottom: _restoreControlBottomReservation(context),
                 onRestore: () => controller._activate(controller._lastActive!),
@@ -440,7 +593,7 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
           for (final entry in controller._sessions.entries)
             PopupMenuItem(
               value: entry.key,
-              child: Text(entry.value.project.name),
+              child: Text(entry.value.label),
             ),
         ],
       );
@@ -521,6 +674,18 @@ class _SessionEditor extends StatelessWidget {
       initialOpenPath: session.initialOpenPath,
       openRequest: session.openRequest,
       retainedVisibility: session.visible,
+      workspace: session.workspace,
+      workspaceMembers: session.workspaceProjects,
+      workspaceStore: session.workspaceStore,
+      onWorkspaceSaved: (workspace, members) =>
+          controller.attachWorkspace(sessionKey, workspace, members),
+      onProjectSelected: (project) => controller.open(
+        project: project,
+        auth: session.auth,
+        store: session.store,
+        settings: session.settings,
+        workspaceStore: session.workspaceStore,
+      ),
       onMinimize: controller.minimize,
       onClose: () => controller._close(sessionKey),
     ),

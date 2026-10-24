@@ -194,6 +194,461 @@ void main() {
     expect(find.byType(TextField), findsOneWidget);
   });
 
+  testWidgets(
+    'aggregate work includes preparation and an inactive running tab',
+    (tester) async {
+      final edges = <bool>[];
+      await fixture.mount(tester, onRunningWorkChanged: edges.add);
+      fixture.pane.beginPreparation();
+      expect(fixture.pane.hasRunningWork, isTrue);
+      await tester.pump();
+      fixture.pane.finishPreparation();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(edges, [true, false]);
+      edges.clear();
+
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final result = fixture.pane.attachOutput(
+        title: 'active worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+      );
+      await tester.pump();
+      await _newSession(tester);
+      expect(fixture.pane.busy, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(edges, [true]);
+      exit.complete(0);
+      await stdout.close();
+      await result;
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(edges, [true, false]);
+    },
+  );
+
+  testWidgets('blocked dispatch preserves drafts and parent attached output', (
+    tester,
+  ) async {
+    final previous = StudioProfile.current;
+    final executed = <String>[];
+    StudioProfile.current = StudioProfile(
+      id: 'blocked-terminal',
+      appTitle: 'Blocked terminal',
+      templates: const [],
+      terminalCommandDelegate: (_, command) async {
+        executed.add(command);
+        return true;
+      },
+    );
+    addTearDown(() => StudioProfile.current = previous);
+    await fixture.mount(tester, executionBlocked: true, onlineEnabled: true);
+    await tester.enterText(find.byType(TextField), 'offlinecmd');
+    await tester.testTextInput.receiveAction(TextInputAction.unspecified);
+    await tester.pump();
+    expect(executed, isEmpty);
+    expect(_transcript(tester), isEmpty);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'offlinecmd',
+    );
+    expect(fixture.pane.hasRunningWork, isFalse);
+
+    await fixture.pane.showOnline();
+    await tester.pump();
+    await tester.enterText(find.byType(TextField), 'onlinecmd');
+    await tester.testTextInput.receiveAction(TextInputAction.unspecified);
+    await fixture.pane.runOnlineProject('/missing-project', '/main.py');
+    await fixture.pane.runCloudSql('/missing.sql');
+    expect(_transcript(tester), isEmpty);
+    expect(fixture.pane.hasRunningWork, isFalse);
+
+    // The block belongs to user dispatch, so a prepared parent run still owns
+    // its output and exit callbacks without being silently discarded.
+    fixture.pane.beginPreparation();
+    fixture.pane.finishPreparation();
+    final output = <String>[];
+    final exits = <int>[];
+    final attached = fixture.pane.attachOutput(
+      title: 'already prepared',
+      stdout: Stream.value('real output'),
+      stderr: const Stream.empty(),
+      exitCode: Future.value(7),
+      onOutput: (text, isError) => output.add(text),
+      onExit: exits.add,
+    );
+    await tester.pump();
+    expect(await attached, 7);
+    await tester.pump();
+    expect(output, ['real output']);
+    expect(exits, [7]);
+    expect(fixture.pane.hasRunningWork, isFalse);
+    await tester.tap(find.text('1'));
+    await tester.pump();
+    expect(fixture.pane.onlineSelected, isFalse);
+    await _newSession(tester);
+    expect(fixture.pane.sessionCount, 3);
+  });
+
+  testWidgets('execution callback blocks dispatch before the owner rebuilds', (
+    tester,
+  ) async {
+    final previous = StudioProfile.current;
+    final executed = <String>[];
+    StudioProfile.current = StudioProfile(
+      id: 'synchronous-terminal-fence',
+      appTitle: 'Synchronous terminal fence',
+      templates: const [],
+      terminalCommandDelegate: (_, command) async {
+        executed.add(command);
+        return true;
+      },
+    );
+    addTearDown(() => StudioProfile.current = previous);
+    var blocked = false;
+    await fixture.mount(tester, isExecutionBlocked: () => blocked);
+    await tester.enterText(find.byType(TextField), 'offlinecmd');
+    final mountedPane = tester.widget<TerminalPane>(find.byType(TerminalPane));
+
+    // A debugger can reserve its lane synchronously before setState rebuilds
+    // the terminal. Submission must observe that change in this same widget.
+    blocked = true;
+    await tester.testTextInput.receiveAction(TextInputAction.unspecified);
+    expect(
+      identical(
+        tester.widget<TerminalPane>(find.byType(TerminalPane)),
+        mountedPane,
+      ),
+      isTrue,
+    );
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'offlinecmd',
+    );
+    expect(fixture.pane.hasRunningWork, isFalse);
+    await tester.pump();
+    expect(executed, isEmpty);
+    expect(_transcript(tester), isEmpty);
+  });
+
+  testWidgets(
+    'blocked Stop remains usable until cancellation actually finishes',
+    (tester) async {
+      await fixture.mount(tester, executionBlocked: true);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final cleanup = Completer<void>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          exit.complete(130);
+          await stdout.close();
+          await cleanup.future;
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(await result, 130);
+      expect(cancellations, 1);
+      expect(fixture.pane.busy, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      await _newSession(tester);
+      expect(fixture.pane.sessionCount, 2);
+      cleanup.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+    },
+  );
+
+  testWidgets(
+    'repeated Stop and tab close share the same pending cancellation',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final allowExit = Completer<void>();
+      final cleanup = Completer<void>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          await allowExit.future;
+          exit.complete(130);
+          await stdout.close();
+          await cleanup.future;
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('停止'));
+      await tester.tap(find.byTooltip('停止'));
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      expect(cancellations, 1);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      allowExit.complete();
+      await tester.pump();
+      expect(await result, 130);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      cleanup.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+    },
+  );
+
+  testWidgets('failed Stop remains visible and can retry cancellation', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final stdout = StreamController<String>();
+    final exit = Completer<int>();
+    var cancellations = 0;
+    final result = fixture.pane.attachOutput(
+      title: 'retry worker',
+      stdout: stdout.stream,
+      stderr: const Stream.empty(),
+      exitCode: exit.future,
+      cancel: () async {
+        cancellations++;
+        if (cancellations == 1) throw StateError('cancel unavailable');
+        exit.complete(130);
+        await stdout.close();
+      },
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('停止'));
+    await tester.pump();
+    expect(cancellations, 1);
+    expect(fixture.pane.hasRunningWork, isTrue);
+    expect(find.byTooltip('停止'), findsOneWidget);
+    expect(_line('终端停止失败：Bad state: cancel unavailable'), findsOneWidget);
+    await tester.tap(find.byTooltip('停止'));
+    await tester.pump();
+    expect(await result, 130);
+    expect(cancellations, 2);
+    expect(fixture.pane.hasRunningWork, isFalse);
+  });
+
+  testWidgets(
+    'failed closed-tab cleanup stays busy and Stop retries retained action',
+    (tester) async {
+      final edges = <bool>[];
+      await fixture.mount(tester, onRunningWorkChanged: edges.add);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final recovered = Completer<void>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'retired worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          if (cancellations == 1) {
+            exit.complete(130);
+            await stdout.close();
+            throw StateError('cleanup unavailable');
+          }
+          await recovered.future;
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      expect(await result, 130);
+      await tester.pump();
+      expect(fixture.pane.busy, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(_line('终端清理失败：Bad state: cleanup unavailable'), findsOneWidget);
+      expect(find.byTooltip('停止'), findsOneWidget);
+      expect(edges, [true]);
+
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(cancellations, 2);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      recovered.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(find.byTooltip('停止'), findsNothing);
+      expect(edges, [true, false]);
+    },
+  );
+
+  testWidgets(
+    'failed cancellation waits for worker exit and Stop can retry meanwhile',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'worker still exiting',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          if (cancellations == 1) throw StateError('cancel unavailable');
+          exit.complete(130);
+          await stdout.close();
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      expect(cancellations, 1);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(_line('终端清理失败：Bad state: cancel unavailable'), findsNothing);
+      expect(find.byTooltip('停止'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(await result, 130);
+      await tester.pump();
+      expect(cancellations, 2);
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(find.byTooltip('停止'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'Stop failure after exit keeps the live tab blocked until cleanup retries',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'exited worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          if (cancellations == 1) {
+            exit.complete(130);
+            await stdout.close();
+            throw StateError('cleanup unavailable');
+          }
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(await result, 130);
+      await tester.pump();
+      expect(fixture.pane.busy, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(find.byTooltip('停止'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), 'echo draft');
+      await tester.testTextInput.receiveAction(TextInputAction.unspecified);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'echo draft',
+      );
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      await tester.pump();
+      expect(cancellations, 2);
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(find.byTooltip('停止'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'closing after exit retains an in-flight cancellation action for retry',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final cleanup = Completer<void>();
+      var cancellations = 0;
+      final result = fixture.pane.attachOutput(
+        title: 'worker with late cleanup',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          cancellations++;
+          if (cancellations == 1) {
+            exit.complete(130);
+            await stdout.close();
+            await cleanup.future;
+            throw StateError('late cleanup failure');
+          }
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(await result, 130);
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      cleanup.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(find.byTooltip('停止'), findsOneWidget);
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      await tester.pump();
+      expect(cancellations, 2);
+      expect(fixture.pane.hasRunningWork, isFalse);
+    },
+  );
+
+  testWidgets(
+    'closing a running tab retains pending cleanup in aggregate work',
+    (tester) async {
+      final edges = <bool>[];
+      await fixture.mount(tester, onRunningWorkChanged: edges.add);
+      final stdout = StreamController<String>();
+      final exit = Completer<int>();
+      final cleanup = Completer<void>();
+      final result = fixture.pane.attachOutput(
+        title: 'closing worker',
+        stdout: stdout.stream,
+        stderr: const Stream.empty(),
+        exitCode: exit.future,
+        cancel: () async {
+          exit.complete(130);
+          await stdout.close();
+          await cleanup.future;
+        },
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      expect(await result, 130);
+      expect(fixture.pane.sessionCount, 1);
+      expect(fixture.pane.busy, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(edges, [true]);
+      cleanup.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isFalse);
+      expect(edges, [true, false]);
+    },
+  );
+
   testWidgets('session tabs support keyboard selection and accessible close', (
     tester,
   ) async {
@@ -296,7 +751,8 @@ void main() {
     expect(
       tester.widget<TextField>(prompt).textInputAction,
       TextInputAction.unspecified,
-      reason: 'A terminating action hides the soft keyboard on Return; '
+      reason:
+          'A terminating action hides the soft keyboard on Return; '
           '`unspecified` submits and keeps it up.',
     );
     await tester.enterText(prompt, 'echo terminal-check');
@@ -359,9 +815,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.unspecified);
     await _pumpIoUntil(
       tester,
-      () =>
-          !fixture.pane.busy &&
-          _line('stays-focused').evaluate().isNotEmpty,
+      () => !fixture.pane.busy && _line('stays-focused').evaluate().isNotEmpty,
     );
     expect(
       focusNode.hasFocus,
@@ -379,8 +833,7 @@ void main() {
     await _pumpIoUntil(
       tester,
       () =>
-          !fixture.pane.busy &&
-          _line('hardware-return').evaluate().isNotEmpty,
+          !fixture.pane.busy && _line('hardware-return').evaluate().isNotEmpty,
     );
 
     expect(_line('hardware-return'), findsOneWidget);
@@ -425,9 +878,7 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await _pumpIoUntil(
       tester,
-      () => _line(
-        'cd: 目录不存在: no-such-dir',
-      ).evaluate().isNotEmpty,
+      () => _line('cd: 目录不存在: no-such-dir').evaluate().isNotEmpty,
     );
 
     expect(_line('cd: 目录不存在: no-such-dir'), findsOneWidget);
@@ -456,10 +907,7 @@ void main() {
     await fixture.mount(tester);
     await tester.enterText(find.byType(TextField), 'echo marker');
     await tester.testTextInput.receiveAction(TextInputAction.done);
-    await _pumpIoUntil(
-      tester,
-      () => _line('marker').evaluate().isNotEmpty,
-    );
+    await _pumpIoUntil(tester, () => _line('marker').evaluate().isNotEmpty);
     expect(_line('marker'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField), 'clear');
@@ -653,16 +1101,10 @@ void main() {
     await fixture.mount(tester);
     await tester.enterText(find.byType(TextField), 'echo -n first');
     await tester.testTextInput.receiveAction(TextInputAction.done);
-    await _pumpIoUntil(
-      tester,
-      () => _line('first').evaluate().isNotEmpty,
-    );
+    await _pumpIoUntil(tester, () => _line('first').evaluate().isNotEmpty);
     await tester.enterText(find.byType(TextField), 'echo second');
     await tester.testTextInput.receiveAction(TextInputAction.done);
-    await _pumpIoUntil(
-      tester,
-      () => _line('second').evaluate().isNotEmpty,
-    );
+    await _pumpIoUntil(tester, () => _line('second').evaluate().isNotEmpty);
     final transcript = _transcript(tester);
     // Exact order: cmd1, first, cmd2, second. No merged `firstsecond` row.
     expect(transcript, [
@@ -776,6 +1218,10 @@ class _TerminalFixture {
   Future<void> mount(
     WidgetTester tester, {
     Size size = const Size(600, 300),
+    bool executionBlocked = false,
+    bool Function()? isExecutionBlocked,
+    bool onlineEnabled = false,
+    ValueChanged<bool>? onRunningWorkChanged,
   }) async {
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
@@ -794,7 +1240,10 @@ class _TerminalFixture {
                 key: key,
                 workingDirectory: directory.path,
                 auth: auth,
-                onlineEnabled: false,
+                onlineEnabled: onlineEnabled,
+                executionBlocked: executionBlocked,
+                isExecutionBlocked: isExecutionBlocked,
+                onRunningWorkChanged: onRunningWorkChanged,
               ),
             ),
           ),

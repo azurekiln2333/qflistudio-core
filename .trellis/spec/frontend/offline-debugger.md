@@ -12,6 +12,12 @@ analysis are never debugger fallbacks. No expression evaluation API is provided.
 This contract alone does not implement editor controls, adapters or device
 acceptance. Each is a separate integration gate.
 
+The shared editor integration uses `EditorDebugController` for one session lane,
+`EditorDebugPanel` for capability-gated commands and read-only inspection, and a
+painted `EditorDebugGutter` for physical-line breakpoints and execution position.
+Only explicit Debug launches the provider; missing providers keep the action
+unavailable. Product adapters and packaged-device acceptance remain separate.
+
 ## 2. Requests and source identity
 
 A launch request carries `projectPath`, `entryFilePath`, `language`, immutable
@@ -132,3 +138,84 @@ source snapshots or explicit save requirements, output-only revisions, rolling
 buffer replacement, and unavailable/truncated values. Host tests cannot establish
 OHOS packaged-runtime behavior. Record native ABI and current-device acceptance
 separately, and never mark the umbrella complete from the contract alone.
+
+## 8. Editor integration and lifecycle
+
+Capture the active buffer's physical owning root, configured entry and exact
+source revisions before asynchronous work. A workspace recovery buffer is not a
+runnable owner: the host supplies `isFileAvailable` and the controller rechecks
+it after pending saves and backup IO, immediately before writing. Navigation
+guards belong inside `EditorController.openPath`, before selecting an existing
+tab and after each read/stat await, so stale pause navigation never inserts or
+activates a tab. Cancelled saves report cancellation and retain dirty text.
+
+`paused` requires a current, unconsumed pause token, not merely a retained paused
+snapshot. Hide stack/locals and execution marks after resume/step consumes that
+token. Execution marks require the selected frame and exact captured source text
+inside its canonical owner; dirty-at-launch snapshots are valid, later edits and
+unknown sources are unavailable. Async frame navigation also fences source
+identity and pause generation. Breakpoint replacement inputs are immutable and
+their pending state belongs to the originating run, so an old pending request
+cannot disable later sessions.
+
+Editor Run, file tools and terminal dispatch share the debugger lane. Count all
+terminal tabs and pending cleanup rather than only the selected tab. Closing a
+panel cannot release a worker lease before actual exit. Keep Stop/interrupt
+usable while another command is pending; cleanup errors retain ownership and
+allow explicit retry. Closed-only debugger disposal retries are bounded to three
+attempts with 50 ms delay; exhausted cleanup retains busy and the actual error.
+
+Gutters listen to render-paragraph changes only through `CustomPainter.repaint`.
+The editor publishes geometry during layout; a widget listener must not schedule
+a new build there. Both paint and tap mapping ignore stale paragraph indexes
+after source shrink and map folded chunks to physical source lines.
+
+## 9. Output, console and ports
+
+`EditorOutputBuffer` retains a bounded 128 Ki UTF-16 tail without splitting a
+surrogate pair. Ordinary Run forwards the same actual stream subscriptions used
+by Terminal; do not attach duplicate single-subscription listeners. Exit codes,
+real file-tool results and provider-analysis results may be logged. The main
+product with no analyzer hides that unavailable checker message in Output;
+standalone products retain useful provider-unavailable reasons.
+
+Debug stdout/stderr/console are full retained replacements, including when a
+backend trims a rolling tail. Never append each full snapshot to earlier output.
+Debug Console is read-only and may also retain actual preview console messages.
+Closing Terminal does not cancel the page-owned preview console subscription.
+
+Ports lists only a real preview session started by this editor. Stop delegates
+to that session, keeps a failed listener visible for retry, and cannot remove a
+new replacement session when an old stop finishes. A tab or timeout does not
+prove cleanup. No process/port scanning, shell, REPL or expression evaluator is
+implied by these panels.
+
+
+## 10. Workspace removal and asynchronous command ordering
+
+`isProjectAvailable(String projectPath)` checks current workspace membership for
+an original owner even after clean tabs close. Check it before inserting an
+unopened stack source and after asynchronous reads; a path-only dirty recovery
+set cannot identify closed clean sources. Main saved-workspace membership is
+strict, while standalone multi-root history keeps its existing registered-tab
+behavior. Removed dirty sources remain recoverable through Save As.
+
+Every page write path, including manual save, autosave, tab-close Save and
+document-tool callbacks, passes a live membership predicate to `saveFile`.
+Checking only before entering the write queue is insufficient: a root may be
+removed while the save waits for earlier IO or backup. Keep canceled buffers
+dirty and open. After awaiting a tab-close dialog or save, locate the captured
+file by identity before closing it; an old numeric tab index may now name a
+different file.
+
+Pending breakpoint replacement blocks resume and step dispatch until the
+replacement finishes, without consuming the pause token. Stop remains available.
+Each frame selection or new navigation invalidates older pending navigation,
+even within the same pause generation, so a slow earlier read cannot reactivate
+its tab after a newer stack selection.
+
+Closing a busy terminal hides its panel while retaining the real execution lane.
+Every explicit reopen, including menu, Run feedback and online-terminal routing,
+cancels deferred panel removal. The eventual worker-idle callback must not destroy
+a terminal the user has reopened. Widget tests pump asynchronous cleanup until
+actual busy becomes false instead of directly awaiting fake-time stream cleanup.

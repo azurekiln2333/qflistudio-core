@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../services/code_analysis.dart';
+import '../services/studio_profile.dart';
 import 'editor_analysis_controller.dart';
 
 String _status(EditorAnalysisController analysis) => analysis.pending
@@ -23,38 +23,49 @@ class EditorProblemsBar extends StatelessWidget {
   final VoidCallback onOpenProblems;
   final Widget child;
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      Expanded(child: child),
-      ListenableBuilder(
-        listenable: analysis,
-        builder: (context, _) => Material(
-          color: Theme.of(context).colorScheme.surfaceContainer,
-          child: InkWell(
-            key: const ValueKey('editor-problems-status'),
-            onTap: onOpenProblems,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              child: Row(
-                children: [
-                  const Icon(Icons.rule, size: 16),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      _status(analysis),
-                      style: Theme.of(context).textTheme.labelSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+  Widget build(BuildContext context) {
+    final product =
+        StudioProfile.current?.productKey ?? StudioProductCatalog.qfliStudioKey;
+    if (product == StudioProductCatalog.qfliStudioKey &&
+        analysis.analyzer == null) {
+      return child;
+    }
+    return Column(
+      children: [
+        Expanded(child: child),
+        ListenableBuilder(
+          listenable: analysis,
+          builder: (context, _) => Material(
+            color: Theme.of(context).colorScheme.surfaceContainer,
+            child: InkWell(
+              key: const ValueKey('editor-problems-status'),
+              onTap: onOpenProblems,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.rule, size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _status(analysis),
+                        style: Theme.of(context).textTheme.labelSmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
         ),
-      ),
-    ],
-  );
+      ],
+    );
+  }
 }
 
 /// Actual bounded editor panel. Availability failures never appear as clean code.
