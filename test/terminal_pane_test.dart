@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/editor/terminal_pane.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
+import 'package:qfli_studio_core/services/process_supervisor.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 
 void main() {
@@ -1174,6 +1175,451 @@ void main() {
     expect(prompt, findsOneWidget);
     expect(tester.widget<TextField>(prompt).focusNode!.hasFocus, isTrue);
   });
+
+  for (final failingStream in ['stdout', 'stderr']) {
+    testWidgets(
+      '$failingStream failure keeps ownership until exit and cleanup',
+      (tester) async {
+        await fixture.mount(tester);
+        final stdout = StreamController<String>();
+        final stdoutDone = stdout.done;
+        final stderr = StreamController<String>();
+        final stderrDone = stderr.done;
+        final exit = Completer<int>();
+        final cleanup = Completer<void>();
+        final failure = StateError('$failingStream transport failed');
+        var cancellations = 0;
+        var settled = false;
+        final result = fixture.pane
+            .attachOutput(
+              title: 'failing transport',
+              stdout: stdout.stream,
+              stderr: stderr.stream,
+              exitCode: exit.future,
+              cancel: () async {
+                cancellations++;
+                await cleanup.future;
+              },
+            )
+            .then<Object?>(
+              (value) {
+                settled = true;
+                return value;
+              },
+              onError: (Object error, StackTrace stackTrace) {
+                settled = true;
+                return error;
+              },
+            );
+        Object? resultValue;
+        unawaited(
+          result.then<void>((value) {
+            resultValue = value;
+          }),
+        );
+        (failingStream == 'stdout' ? stdout : stderr).addError(failure);
+        await tester.pump();
+        expect(cancellations, 1);
+        expect(settled, isFalse);
+        expect(fixture.pane.hasRunningWork, isTrue);
+        expect(fixture.pane.busy, isTrue);
+        expect(find.byType(TextField), findsNothing);
+        (failingStream == 'stdout' ? stderr : stdout).add(
+          'last line after error',
+        );
+        exit.complete(130);
+        final streamsClosed = Future.wait([stdoutDone, stderrDone]);
+        unawaited(stdout.close());
+        unawaited(stderr.close());
+        await tester.pump();
+        await streamsClosed;
+        expect(resultValue, same(failure));
+        expect(_line('last line after error'), findsOneWidget);
+        expect(fixture.pane.busy, isFalse);
+        expect(fixture.pane.hasRunningWork, isTrue);
+        cleanup.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(fixture.pane.hasRunningWork, isFalse);
+        final next = fixture.pane.attachOutput(
+          title: 'next actual run',
+          stdout: Stream.value('next output'),
+          stderr: const Stream.empty(),
+          exitCode: Future.value(0),
+        );
+        int? nextValue;
+        unawaited(
+          next.then<void>((value) {
+            nextValue = value;
+          }),
+        );
+        await tester.pump();
+        expect(nextValue, 0);
+        expect(_line('next output'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('errored stream need not close after actual exit is observed', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final stdout = StreamController<String>();
+    final stdoutDone = stdout.done;
+    final exit = Completer<int>();
+    final failure = StateError('stream stays open after error');
+    var cancellations = 0;
+    var settled = false;
+    final result = fixture.pane
+        .attachOutput(
+          title: 'open errored transport',
+          stdout: stdout.stream,
+          stderr: const Stream.empty(),
+          exitCode: exit.future,
+          cancel: () async {
+            cancellations++;
+          },
+        )
+        .then<Object?>(
+          (value) {
+            settled = true;
+            return value;
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            settled = true;
+            return error;
+          },
+        );
+    Object? resultValue;
+    unawaited(
+      result.then<void>((value) {
+        resultValue = value;
+      }),
+    );
+    stdout.addError(failure);
+    await tester.pump();
+    expect(cancellations, 1);
+    expect(settled, isFalse);
+    expect(fixture.pane.hasRunningWork, isTrue);
+    exit.complete(130);
+    await tester.pump();
+    await tester.pump();
+    expect(settled, isTrue);
+    expect(resultValue, same(failure));
+    expect(fixture.pane.hasRunningWork, isFalse);
+    // The source controller stayed open throughout the assertions above.
+    unawaited(stdout.close());
+    await tester.pump();
+    await stdoutDone;
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('transport cleanup failure survives tab close and Stop retry', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final stdout = StreamController<String>();
+    final stdoutDone = stdout.done;
+    final exit = Completer<int>();
+    final failure = StateError('transport failed before tab close');
+    var cancellations = 0;
+    final result = fixture.pane
+        .attachOutput(
+          title: 'closing failed transport',
+          stdout: stdout.stream,
+          stderr: const Stream.empty(),
+          exitCode: exit.future,
+          cancel: () async {
+            cancellations++;
+            if (cancellations <= 2) throw StateError('cleanup not yet proved');
+            exit.complete(130);
+            unawaited(stdout.close());
+            await stdoutDone;
+          },
+        )
+        .then<Object?>(
+          (value) => value,
+          onError: (Object error, StackTrace stackTrace) => error,
+        );
+    Object? resultValue;
+    unawaited(
+      result.then<void>((value) {
+        resultValue = value;
+      }),
+    );
+    stdout.addError(failure);
+    await tester.pump();
+    await tester.pump();
+    expect(cancellations, 1);
+    expect(fixture.pane.hasRunningWork, isTrue);
+    await tester.tap(find.byTooltip('Close terminal 1'));
+    await tester.pump();
+    await tester.pump();
+    expect(cancellations, 2);
+    expect(fixture.pane.hasRunningWork, isTrue);
+    await tester.tap(find.byTooltip('停止'));
+    await tester.pump();
+    await tester.pump();
+    expect(resultValue, same(failure));
+    expect(cancellations, 3);
+    expect(fixture.pane.hasRunningWork, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'exceptional exit is handled early but never proves termination',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final stdoutDone = stdout.done;
+      final exit = Completer<int>();
+      final failure = StateError('exit observer lost');
+      var cancellations = 0;
+      var settled = false;
+      final result = fixture.pane
+          .attachOutput(
+            title: 'unproven worker',
+            stdout: stdout.stream,
+            stderr: const Stream.empty(),
+            exitCode: exit.future,
+            cancel: () async {
+              cancellations++;
+            },
+          )
+          .then<Object?>(
+            (value) {
+              settled = true;
+              return value;
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              settled = true;
+              return error;
+            },
+          );
+      Object? resultValue;
+      unawaited(
+        result.then<void>((value) {
+          resultValue = value;
+        }),
+      );
+      exit.completeError(failure);
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(cancellations, 1);
+      expect(settled, isFalse);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      unawaited(stdout.close());
+      await tester.pump();
+      await stdoutDone;
+      expect(resultValue, same(failure));
+      expect(fixture.pane.busy, isTrue);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(find.byType(TextField), findsNothing);
+      await tester.tap(find.byTooltip('停止'));
+      await tester.pump();
+      expect(cancellations, 2);
+      expect(fixture.pane.hasRunningWork, isTrue);
+      await tester.tap(find.byTooltip('Close terminal 1'));
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.pane.hasRunningWork, isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final failingObserver in ['output', 'exit']) {
+    testWidgets(
+      '$failingObserver observer failure does not strand a terminal worker',
+      (tester) async {
+        await fixture.mount(tester);
+        final stdout = StreamController<String>();
+        final stdoutDone = stdout.done;
+        final exit = Completer<int>();
+        final failure = StateError('$failingObserver observer failed');
+        var cancellations = 0;
+        final result = fixture.pane
+            .attachOutput(
+              title: 'observer failure',
+              stdout: stdout.stream,
+              stderr: const Stream.empty(),
+              exitCode: exit.future,
+              cancel: () async {
+                cancellations++;
+              },
+              onOutput: (_, _) {
+                if (failingObserver == 'output') throw failure;
+              },
+              onExit: (_) {
+                if (failingObserver == 'exit') throw failure;
+              },
+            )
+            .then<Object?>(
+              (value) => value,
+              onError: (Object error, StackTrace stackTrace) => error,
+            );
+        Object? resultValue;
+        unawaited(
+          result.then<void>((value) {
+            resultValue = value;
+          }),
+        );
+        stdout.add('real worker output');
+        await tester.pump();
+        expect(fixture.pane.hasRunningWork, isTrue);
+        expect(cancellations, 0);
+        expect(_line('real worker output'), findsOneWidget);
+        exit.complete(0);
+        unawaited(stdout.close());
+        await tester.pump();
+        await stdoutDone;
+        expect(resultValue, same(failure));
+        expect(fixture.pane.busy, isFalse);
+        expect(fixture.pane.hasRunningWork, isFalse);
+        expect(cancellations, 0);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('old attachment completion never releases a replacement owner', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final oldOut = StreamController<String>();
+    final oldOutDone = oldOut.done;
+    final oldExit = Completer<int>();
+    final nextOut = StreamController<String>();
+    final nextOutDone = nextOut.done;
+    final nextExit = Completer<int>();
+    final failure = StateError('old transport failed');
+    var nextCancellations = 0;
+    final old = fixture.pane
+        .attachOutput(
+          title: 'old worker',
+          stdout: oldOut.stream,
+          stderr: const Stream.empty(),
+          exitCode: oldExit.future,
+        )
+        .then<Object?>(
+          (value) => value,
+          onError: (Object error, StackTrace stackTrace) => error,
+        );
+    final next = fixture.pane.attachOutput(
+      title: 'replacement worker',
+      stdout: nextOut.stream,
+      stderr: const Stream.empty(),
+      exitCode: nextExit.future,
+      cancel: () async {
+        nextCancellations++;
+      },
+    );
+    int? nextValue;
+    unawaited(
+      next.then<void>((value) {
+        nextValue = value;
+      }),
+    );
+    oldOut.addError(failure);
+    oldExit.complete(1);
+    unawaited(oldOut.close());
+    await tester.pump();
+    await oldOutDone;
+    expect(await old, same(failure));
+    expect(nextCancellations, 0);
+    expect(fixture.pane.busy, isTrue);
+    expect(fixture.pane.hasRunningWork, isTrue);
+    nextExit.complete(0);
+    unawaited(nextOut.close());
+    await tester.pump();
+    await nextOutDone;
+    expect(nextValue, 0);
+    expect(fixture.pane.hasRunningWork, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'dispose shares transport cancellation and handles late failure',
+    (tester) async {
+      await fixture.mount(tester);
+      final stdout = StreamController<String>();
+      final stdoutDone = stdout.done;
+      final exit = Completer<int>();
+      final cleanup = Completer<void>();
+      final failure = StateError('transport failed before dispose');
+      var cancellations = 0;
+      final result = fixture.pane
+          .attachOutput(
+            title: 'dispose failed transport',
+            stdout: stdout.stream,
+            stderr: const Stream.empty(),
+            exitCode: exit.future,
+            cancel: () async {
+              cancellations++;
+              await cleanup.future;
+              exit.complete(130);
+              unawaited(stdout.close());
+              await stdoutDone;
+            },
+          )
+          .then<Object?>(
+            (value) => value,
+            onError: (Object error, StackTrace stackTrace) => error,
+          );
+      Object? resultValue;
+      unawaited(
+        result.then<void>((value) {
+          resultValue = value;
+        }),
+      );
+      stdout.addError(failure);
+      await tester.pump();
+      expect(cancellations, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      cleanup.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(resultValue, same(failure));
+      expect(cancellations, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('legacy process adapter observes transport failure future', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final process = _ErroredOutputProcess();
+    fixture.pane.attachProcess('fake process control', process);
+    process.output.addError(StateError('process output failed'));
+    await tester.pump();
+    await tester.pump();
+    expect(process.kills, 1);
+    expect(fixture.pane.hasRunningWork, isFalse);
+    expect(
+      _line('Output failed: Bad state: process output failed'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('managed process adapter observes transport failure future', (
+    tester,
+  ) async {
+    await fixture.mount(tester);
+    final process = _ErroredManagedProcess();
+    fixture.pane.attachManagedProcess('managed process control', process);
+    process.output.addError(StateError('managed output failed'));
+    await tester.pump();
+    await tester.pump();
+    expect(process.cancellations, 1);
+    expect(fixture.pane.hasRunningWork, isFalse);
+    expect(
+      _line('Output failed: Bad state: managed output failed'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 }
 
 Future<void> _pumpFrames(WidgetTester tester, int frames) async {
@@ -1272,4 +1718,59 @@ Future<void> _pumpIoUntil(
     );
   }
   expect(condition(), isTrue, reason: 'The terminal operation did not finish.');
+}
+
+/// In-memory Process contract control. Never creates an operating-system process.
+class _ErroredOutputProcess implements Process {
+  final output = StreamController<List<int>>();
+  final terminal = Completer<int>();
+  var kills = 0;
+
+  @override
+  int get pid => 123456;
+  @override
+  Stream<List<int>> get stdout => output.stream;
+  @override
+  Stream<List<int>> get stderr => const Stream.empty();
+  @override
+  IOSink get stdin => throw UnsupportedError('control has no stdin');
+  @override
+  Future<int> get exitCode => terminal.future;
+  @override
+  bool kill([ProcessSignal signal = ProcessSignal.sigterm]) {
+    kills++;
+    if (!terminal.isCompleted) terminal.complete(130);
+    unawaited(output.close());
+    return true;
+  }
+}
+
+/// In-memory owned-process control. It does not start a supervisor or a worker.
+class _ErroredManagedProcess implements ManagedProcess {
+  _ErroredManagedProcess() {
+    outputDone = output.done;
+  }
+
+  final output = StreamController<List<int>>();
+  late final Future<void> outputDone;
+  final terminal = Completer<int>();
+  var cancellations = 0;
+
+  @override
+  Stream<List<int>> get stdout => output.stream;
+  @override
+  Stream<List<int>> get stderr => const Stream.empty();
+  @override
+  Future<int> get exitCode => terminal.future;
+  @override
+  Future<void> cancel() async {
+    cancellations++;
+    if (!terminal.isCompleted) terminal.complete(130);
+    unawaited(output.close());
+    await outputDone;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('unused managed-process control member');
 }

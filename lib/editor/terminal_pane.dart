@@ -1070,26 +1070,33 @@ class TerminalPaneState extends State<TerminalPane> {
     return KeyEventResult.ignored;
   }
 
-  /// 运行按钮：接管一个外部进程，持续回显输出。
+  /// Attaches a legacy process and observes attachment failures.
   void attachProcess(
     String title,
     Process process, {
     void Function(String text, bool isError)? onOutput,
     ValueChanged<int>? onExit,
   }) {
-    // 记下来，退出页面时可以 kill 掉还在跑的进程。
+    final session = _session;
     _currentProcess = process;
-    attachOutput(
-      title: title,
-      stdout: process.stdout
-          .transform(systemEncoding.decoder)
-          .transform(const LineSplitter()),
-      stderr: process.stderr
-          .transform(systemEncoding.decoder)
-          .transform(const LineSplitter()),
-      exitCode: process.exitCode,
-      onOutput: onOutput,
-      onExit: onExit,
+    _observeAttachedOutput(
+      session,
+      attachOutput(
+        title: title,
+        stdout: process.stdout
+            .transform(systemEncoding.decoder)
+            .transform(const LineSplitter()),
+        stderr: process.stderr
+            .transform(systemEncoding.decoder)
+            .transform(const LineSplitter()),
+        exitCode: process.exitCode,
+        cancel: () async {
+          process.kill();
+          await process.exitCode;
+        },
+        onOutput: onOutput,
+        onExit: onExit,
+      ),
     );
   }
 
@@ -1102,25 +1109,45 @@ class TerminalPaneState extends State<TerminalPane> {
   }) {
     final session = _session;
     session.currentManagedProcess = process;
-    attachOutput(
-      title: title,
-      stdout: process.stdout
-          .transform(systemEncoding.decoder)
-          .transform(const LineSplitter()),
-      stderr: process.stderr
-          .transform(systemEncoding.decoder)
-          .transform(const LineSplitter()),
-      exitCode: process.exitCode,
-      cancel: process.cancel,
-      onOutput: onOutput,
-      onExit: onExit,
+    _observeAttachedOutput(
+      session,
+      attachOutput(
+        title: title,
+        stdout: process.stdout
+            .transform(systemEncoding.decoder)
+            .transform(const LineSplitter()),
+        stderr: process.stderr
+            .transform(systemEncoding.decoder)
+            .transform(const LineSplitter()),
+        exitCode: process.exitCode,
+        cancel: process.cancel,
+        onOutput: onOutput,
+        onExit: onExit,
+      ),
     );
   }
 
-  /// 运行按钮：接管任意一对输出流。
-  ///
-  /// 外部进程和「应用内运行时」（语言 App 自带的解释器/编译器）都走这里，
-  /// 终端面板不关心输出到底来自子进程还是当前 isolate。
+  void _observeAttachedOutput(_TerminalSession session, Future<int> result) {
+    unawaited(
+      result.then<void>(
+        (_) {},
+        onError: (Object error, StackTrace stackTrace) {
+          if (!mounted || session.disposed) return;
+          setState(() {
+            _append(
+              _TermLine(text: 'Output failed: $error', kind: _LineKind.info),
+              session,
+            );
+          });
+          _scrollToBottom(session);
+        },
+      ),
+    );
+  }
+
+  /// Owns line streams until both drain and the actual worker exit is observed.
+  /// A stream/observer failure is reported to the caller after safe completion.
+  /// An exceptional exit future leaves ownership blocked: it proves no exit.
   Future<int> attachOutput({
     required String title,
     required Stream<String> stdout,
@@ -1131,9 +1158,10 @@ class TerminalPaneState extends State<TerminalPane> {
     ValueChanged<int>? onExit,
   }) {
     final session = _session;
+    final attachment = Object();
+    session.attachedRun = attachment;
     session.cancelAction = cancel;
     session.attachedExitCode = exitCode;
-    // An explicit run follows its own fresh output from the start.
     session.follow = true;
     setState(() {
       final command = title.trim();
@@ -1143,55 +1171,135 @@ class TerminalPaneState extends State<TerminalPane> {
           session,
         );
       }
-      // Finalize any partial row from a previous local command so its text
-      // stays on its own line and does not merge into this run's output.
       session.pendingStdout = null;
       session.pendingStderr = null;
       session.running = true;
     });
     _notifyRunningWorkChanged();
     _scrollToBottom(session, true);
-    return () async {
-      final outDone = stdout.listen((line) {
-        if (!mounted || session.disposed) return;
-        onOutput?.call(line, false);
-        setState(
-          () => _append(_TermLine(text: line, kind: _LineKind.stdout), session),
-        );
-        _scrollToBottom(session);
-      }).asFuture<void>();
-      final errDone = stderr.listen((line) {
-        if (!mounted || session.disposed) return;
-        onOutput?.call(line, true);
-        setState(
-          () => _append(_TermLine(text: line, kind: _LineKind.stderr), session),
-        );
-        _scrollToBottom(session);
-      }).asFuture<void>();
-      await Future.wait([outDone, errDone]);
-      final code = await exitCode;
-      session.currentProcess = null;
-      session.currentManagedProcess = null;
-      session.cancelAction = null;
-      if (identical(session.attachedExitCode, exitCode)) {
-        session.attachedExitCode = null;
+
+    Object? firstError;
+    StackTrace? firstStack;
+    int? terminalCode;
+    var cancellationRequested = false;
+    bool current() => identical(session.attachedRun, attachment);
+
+    void fail(Object error, StackTrace stackTrace, {bool stopWorker = true}) {
+      firstError ??= error;
+      firstStack ??= stackTrace;
+      if (!stopWorker ||
+          terminalCode != null ||
+          cancellationRequested ||
+          !current()) {
+        return;
       }
-      if (!mounted || session.disposed) return code;
-      onExit?.call(code);
-      setState(() {
-        if (code != 0) {
-          // A successful run ends silently: no synthetic exit-0 line. A nonzero
-          // status keeps the real number on stderr so diagnostics stay visible.
-          _append(
-            _TermLine(text: 'exit code $code', kind: _LineKind.stderr),
-            session,
-          );
+      cancellationRequested = true;
+      // Share Stop's in-flight cancellation and retained failure/retry action.
+      unawaited(
+        session.interrupt().then<void>(
+          (_) => _notifyRunningWorkChanged(),
+          onError: (Object cleanupError, StackTrace cleanupStack) {
+            if (mounted && !session.disposed && current()) {
+              setState(() {
+                _append(
+                  _TermLine(
+                    text: 'Output cleanup failed: $cleanupError',
+                    kind: _LineKind.info,
+                  ),
+                  session,
+                );
+              });
+              _scrollToBottom(session);
+            }
+            _notifyRunningWorkChanged();
+          },
+        ),
+      );
+    }
+
+    // Register immediately, before waiting for either stream. A failed exit
+    // future must be handled even while output remains open indefinitely.
+    final observedExit = exitCode.then<void>(
+      (code) {
+        terminalCode = code;
+      },
+      onError: (Object error, StackTrace stackTrace) => fail(error, stackTrace),
+    );
+
+    Future<void> consume(Stream<String> stream, bool isError) {
+      try {
+        return stream
+            .listen((line) {
+              if (!mounted || session.disposed || !current()) return;
+              try {
+                onOutput?.call(line, isError);
+              } on Object catch (error, stackTrace) {
+                fail(error, stackTrace, stopWorker: false);
+              }
+              if (!mounted || session.disposed || !current()) return;
+              setState(() {
+                _append(
+                  _TermLine(
+                    text: line,
+                    kind: isError ? _LineKind.stderr : _LineKind.stdout,
+                  ),
+                  session,
+                );
+              });
+              _scrollToBottom(session);
+            })
+            .asFuture<void>()
+            .then<void>(
+              (_) {},
+              onError: (Object error, StackTrace stackTrace) {
+                // asFuture cancels the bad subscription. A transport that never
+                // closes after its error must not hide an observed worker exit.
+                fail(error, stackTrace);
+              },
+            );
+      } on Object catch (error, stackTrace) {
+        fail(error, stackTrace);
+        return Future<void>.value();
+      }
+    }
+
+    final outDone = consume(stdout, false);
+    final errDone = consume(stderr, true);
+    return () async {
+      await Future.wait<void>([outDone, errDone, observedExit]);
+      final code = terminalCode;
+      if (code != null && current()) {
+        // An older attachment must never clear a replacement worker's state.
+        session.attachedRun = null;
+        session.currentProcess = null;
+        session.currentManagedProcess = null;
+        session.cancelAction = null;
+        if (identical(session.attachedExitCode, exitCode)) {
+          session.attachedExitCode = null;
         }
         session.running = false;
-      });
-      _notifyRunningWorkChanged();
-      _scrollToBottom(session);
-      return code;
+        if (mounted && !session.disposed) {
+          try {
+            onExit?.call(code);
+          } on Object catch (error, stackTrace) {
+            fail(error, stackTrace, stopWorker: false);
+          }
+          setState(() {
+            if (code != 0) {
+              _append(
+                _TermLine(text: 'exit code $code', kind: _LineKind.stderr),
+                session,
+              );
+            }
+          });
+          _scrollToBottom(session);
+        }
+        _notifyRunningWorkChanged();
+      }
+      final error = firstError;
+      if (error != null) Error.throwWithStackTrace(error, firstStack!);
+      // A non-error exit observer always supplies a real integer exit code.
+      return code!;
     }();
   }
 
@@ -2003,6 +2111,7 @@ class _TerminalSession {
   Future<void> Function()? cancelAction;
   Future<void>? commandDone;
   Future<int>? attachedExitCode;
+  Object? attachedRun;
   Future<void>? _pendingCancellation;
   Future<void> Function()? _unprovenCancellation;
   Future<void> Function()? _cleanupCancelAction;

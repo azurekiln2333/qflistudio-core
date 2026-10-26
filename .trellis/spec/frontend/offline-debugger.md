@@ -219,3 +219,10 @@ Every explicit reopen, including menu, Run feedback and online-terminal routing,
 cancels deferred panel removal. The eventual worker-idle callback must not destroy
 a terminal the user has reopened. Widget tests pump asynchronous cleanup until
 actual busy becomes false instead of directly awaiting fake-time stream cleanup.
+
+
+## 11. Attached output failures
+
+Register real exit observation before waiting for either output stream. Capture transport and observer errors without skipping lifecycle finalization. Cancel a failed transport subscription, request shared retryable cancellation, and wait for actual worker exit plus healthy-stream drainage before releasing running resources. Keep failed or in-flight cleanup in aggregate ownership. An exceptional exit future proves no exit and must remain blocked. Attachment identity prevents an older completion from clearing a replacement run. Void process adapters must observe the returned attachment future.
+
+Widget fixtures capture controller.done immediately after controller creation, before cancellation. A close after cancellation can return a root-zone singleton future that FakeAsync pumping cannot flush. Create completion observers before pumping, retain exact failure assertions and test cleanup retries, late exit, replacement ownership and both process adapters.
