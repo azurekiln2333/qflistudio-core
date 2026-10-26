@@ -261,18 +261,17 @@ class ManagedProcess {
       return;
     }
 
-    try {
-      final closed = process.stdin.close();
-      if (_windows) {
-        await closed;
-      } else {
-        await closed.timeout(_terminationGrace);
-      }
-    } catch (_) {
-      // A process can close stdin concurrently while it is being cancelled.
-    }
+    // Closing a pipe can wait for buffered input that the child never reads.
+    // Observe close failures immediately, but dispatch Windows tree termination
+    // before waiting for that input to settle.
+    final stdinClosed = _closeStdin(process);
 
     if (!_windows) {
+      try {
+        await stdinClosed.timeout(_terminationGrace);
+      } on TimeoutException {
+        // A non-reading child must not prevent POSIX termination either.
+      }
       await _cancelPosix(process);
       return;
     }
@@ -289,6 +288,10 @@ class ManagedProcess {
       process.kill();
     }
 
+    // Keep cancellation ownership until the input pipe settles as well. A
+    // root-only fallback does not turn a blocked pipe into completed cleanup.
+    await stdinClosed;
+
     try {
       final code = await process.exitCode;
       await _cleanup();
@@ -296,6 +299,14 @@ class ManagedProcess {
     } catch (error, stackTrace) {
       await _cleanup();
       if (!_exitCode.isCompleted) _exitCode.completeError(error, stackTrace);
+    }
+  }
+
+  static Future<void> _closeStdin(Process process) async {
+    try {
+      await process.stdin.close();
+    } catch (_) {
+      // A process can close stdin concurrently while it is being cancelled.
     }
   }
 

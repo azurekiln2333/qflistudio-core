@@ -1,0 +1,11 @@
+00:00 +0: loading D:/MyNewProjects/qfli_studio_core/test/process_supervisor_test.dart
+00:00 +0: forwards output and removes a naturally completed process
+00:00 +1: registers before starter completion and cancellation is idempotent
+00:00 +2: uses Windows tree termination and falls back to direct kill
+00:00 +3: Windows tree termination starts before blocked stdin and retains ownership
+00:00 +4: Windows unavailable tree fallback kills before blocked stdin settles
+00:00 +5: Windows throwing tree fallback kills before blocked stdin settles
+00:00 +6: POSIX cancellation escalates an ignored TERM and drains output
+00:01 +7: Windows unavailable tree command keeps its direct kill fallback
+00:01 +8: natural exit cannot clean up while cancellation is still pending
+00:01 +9: All tests passed!
