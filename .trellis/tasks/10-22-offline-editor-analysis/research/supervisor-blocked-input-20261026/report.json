@@ -1,0 +1,234 @@
+{
+  "grant": "C-supervisor-input-20261026-01",
+  "startedAt": "2026-10-26T06:14:47.571282+00:00",
+  "payloadBudgetSeconds": 90,
+  "cleanupAllowanceSeconds": 15,
+  "rootGrantBudgetSeconds": 150,
+  "steps": [
+    {
+      "name": "format",
+      "command": [
+        "D:\\ProgramFiles\\flutter_ohos\\bin\\cache\\dart-sdk\\bin\\dart.exe",
+        "format",
+        "--output=none",
+        "--set-exit-if-changed",
+        "lib/services/process_supervisor.dart",
+        "test/process_supervisor_test.dart"
+      ],
+      "cleanupErrors": [],
+      "terminalAndEmpty": true,
+      "handlesClosed": true,
+      "retainedRootHandle": 400,
+      "retainedJobHandle": 380,
+      "rootIdentityVerified": true,
+      "job": {
+        "pid": 66616,
+        "threadId": 87460,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374688876027795",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "exactCleanupProof": true,
+      "processHandleClosed": true,
+      "jobHandleClosed": true,
+      "stdoutSha256": "48119b7f93f88ac166398c1576d4686ff2163286c1e198494980483fef718e84",
+      "stdoutBytes": 47,
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "passed": true
+    },
+    {
+      "name": "analyze",
+      "command": [
+        "cmd.exe",
+        "/d",
+        "/c",
+        "D:\\ProgramFiles\\flutter_ohos\\bin\\flutter.bat analyze --no-pub lib/services/process_supervisor.dart test/process_supervisor_test.dart"
+      ],
+      "cleanupErrors": [],
+      "terminalAndEmpty": true,
+      "handlesClosed": true,
+      "retainedRootHandle": 448,
+      "retainedJobHandle": 428,
+      "rootIdentityVerified": true,
+      "job": {
+        "pid": 83688,
+        "threadId": 21512,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374688883501619",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "exactCleanupProof": true,
+      "processHandleClosed": true,
+      "jobHandleClosed": true,
+      "stdoutSha256": "f097a65ebeb694c4d591ee50f5539f211e17b837052f4b9b7eecf04e417ebd67",
+      "stdoutBytes": 96,
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "passed": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cmd.exe",
+        "/d",
+        "/c",
+        "D:\\ProgramFiles\\flutter_ohos\\bin\\flutter.bat test --no-pub --concurrency=1 test/process_supervisor_test.dart"
+      ],
+      "cleanupErrors": [],
+      "terminalAndEmpty": true,
+      "handlesClosed": true,
+      "retainedRootHandle": 380,
+      "retainedJobHandle": 428,
+      "rootIdentityVerified": true,
+      "job": {
+        "pid": 88880,
+        "threadId": 32608,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374688918130760",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "exactCleanupProof": true,
+      "processHandleClosed": true,
+      "jobHandleClosed": true,
+      "stdoutSha256": "3813f678b49febb811c3bc591239abda972a1b4c4c293ccb3c4934829ecd5356",
+      "stdoutBytes": 791,
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "passed": true
+    }
+  ],
+  "allJobsTerminalAndEmpty": true,
+  "allHandlesClosed": true,
+  "sdkOnly": true,
+  "deviceExecuted": false,
+  "outerTerminalObservation": "Required from root tool; not asserted by runner",
+  "passed": true,
+  "hashChecks": [
+    {
+      "stage": "before-format",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "after-format",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "before-analyze",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "after-analyze",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "before-test",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "after-test",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "final",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    },
+    {
+      "stage": "finally",
+      "hashes": {
+        "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+        "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+        "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+        "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+        "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+        "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+      },
+      "stable": true
+    }
+  ],
+  "everHold": false,
+  "budgetIsHardExitGuarantee": false,
+  "inputPaths": {
+    "source:lib/services/process_supervisor.dart": "D:\\MyNewProjects\\qfli_studio_core\\lib\\services\\process_supervisor.dart",
+    "source:test/process_supervisor_test.dart": "D:\\MyNewProjects\\qfli_studio_core\\test\\process_supervisor_test.dart",
+    "runner": "D:\\MyNewProjects\\qfli_c\\build\\run_core_supervisor_window.py",
+    "helper": "D:\\MyNewProjects\\qfli_c\\build\\baseline_200_owned_job.py",
+    "dart": "D:\\ProgramFiles\\flutter_ohos\\bin\\cache\\dart-sdk\\bin\\dart.exe",
+    "flutter": "D:\\ProgramFiles\\flutter_ohos\\bin\\flutter.bat"
+  },
+  "initialHashes": {
+    "source:lib/services/process_supervisor.dart": "095de8c17c66dc206fe170b3f99b7447d8660f183085ecb338f97484ff0e5bfc",
+    "source:test/process_supervisor_test.dart": "8da86730e70b6b8d29b00aabf76cef3962af10bcf3b88efbcd2a00e800509b78",
+    "runner": "7ba6c9e2945afd6c730a90c4868d32e21ae982913c4256a551403281ea996447",
+    "helper": "5c3dc4d0bdaaa26233212560968b58d02e215eb27c29e9e88be4c99d212ce116",
+    "dart": "f65cad70999405c5093de5a37899fdd03b119328964d437b933782ca41e5a259",
+    "flutter": "f83bfed7ecd10fd1afd8ce19c0b0119d2c80e24fbf26f4ff4f63c1cc5f75dcd5"
+  },
+  "elapsedSeconds": 8.12,
+  "releaseEvidence": "ROOT_OUTER_TERMINAL_REQUIRED"
+}

@@ -226,3 +226,24 @@ actual busy becomes false instead of directly awaiting fake-time stream cleanup.
 Register real exit observation before waiting for either output stream. Capture transport and observer errors without skipping lifecycle finalization. Cancel a failed transport subscription, request shared retryable cancellation, and wait for actual worker exit plus healthy-stream drainage before releasing running resources. Keep failed or in-flight cleanup in aggregate ownership. An exceptional exit future proves no exit and must remain blocked. Attachment identity prevents an older completion from clearing a replacement run. Void process adapters must observe the returned attachment future.
 
 Widget fixtures capture controller.done immediately after controller creation, before cancellation. A close after cancellation can return a root-zone singleton future that FakeAsync pumping cannot flush. Create completion observers before pumping, retain exact failure assertions and test cleanup retries, late exit, replacement ownership and both process adapters.
+
+## 12. Cancellation with blocked process input
+
+Closing stdin can wait for buffered bytes that a child never reads. Observe the
+close future immediately, but dispatch Windows tree termination before awaiting
+that future. Await stdin settlement before releasing cancellation ownership.
+Natural root exit must not bypass an in-flight cancellation. Repeated requests
+share the same cancellation future.
+
+POSIX retains its bounded input-close grace before its existing tree signals.
+The Windows Boolean tree-command result and direct-kill fallback are legacy
+behavior. They do not prove exact descendant identities or terminal state.
+Product adapters must not report completed subtree cleanup solely from a root
+kill, an exit status of 130, closed streams or a cancellation timeout. Preserve
+pending or failed ownership when cleanup is unproved.
+
+A blocked-input fake must verify that termination starts while stdin is still
+pending. Keep ownership assertions for natural root exit and fallback paths.
+Actual descendant cleanup needs a separately identified live-process regression.
+Do not attribute residual host processes to a test without parent or launch
+identity evidence.

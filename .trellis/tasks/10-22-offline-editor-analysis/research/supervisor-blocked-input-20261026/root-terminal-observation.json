@@ -1,0 +1,18 @@
+{
+  "observedUtc": "2026-10-26T06:17:02.111665+00:00",
+  "grantSeq": 858,
+  "releaseSeq": 859,
+  "originalSession": 49738,
+  "originalTerminalChunk": "55c9b9",
+  "originalExitCode": 0,
+  "releasePublisherChunk": "067df6",
+  "releasePublisherExitCode": 0,
+  "publisherAppendedUtc": "2026-10-26T06:16:06.708Z",
+  "grantUtc": "2026-10-26T06:14:47.476Z",
+  "appendElapsedSeconds": 79.232,
+  "scope": "host SDK focused tests only",
+  "testsPassed": 9,
+  "allExactOwnedJobsTerminalAndEmpty": true,
+  "strongerWindowsDescendantContractProven": false,
+  "retryAfterCancelFailureImplemented": false
+}
