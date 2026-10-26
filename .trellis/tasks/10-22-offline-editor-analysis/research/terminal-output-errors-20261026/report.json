@@ -1,0 +1,87 @@
+{
+  "grant": "C-terminal-errors-20261026-10",
+  "startedAt": "2026-10-26T03:09:09.404316+00:00",
+  "steps": [
+    {
+      "name": "format",
+      "command": [
+        "D:/ProgramFiles/flutter_ohos/bin/cache/dart-sdk/bin/dart.exe",
+        "format",
+        "lib/editor/terminal_pane.dart",
+        "test/terminal_pane_test.dart"
+      ],
+      "cleanupErrors": [],
+      "empty": true,
+      "job": {
+        "pid": 82996,
+        "threadId": 83852,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374577494056482",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "handlesClosed": true,
+      "stdoutSha256": "40f77278b207e7b34e8996c0fe9c582929dad3049f45062297f6b58782fab9b8",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "analyze",
+      "command": [
+        "cmd.exe",
+        "/d",
+        "/c",
+        "D:\\ProgramFiles\\flutter_ohos\\bin\\flutter.bat analyze --no-pub lib/editor/terminal_pane.dart test/terminal_pane_test.dart"
+      ],
+      "cleanupErrors": [],
+      "empty": true,
+      "job": {
+        "pid": 22976,
+        "threadId": 73740,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374577501301866",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "handlesClosed": true,
+      "stdoutSha256": "2b093dcc0a0aa28209adc60ecbc9066f150d806f60f776dfdfab0dd1b484d1b2",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "tests",
+      "command": [
+        "cmd.exe",
+        "/d",
+        "/c",
+        "D:\\ProgramFiles\\flutter_ohos\\bin\\flutter.bat test --no-pub --concurrency=1 test/terminal_pane_test.dart"
+      ],
+      "cleanupErrors": [],
+      "empty": true,
+      "job": {
+        "pid": 69892,
+        "threadId": 83204,
+        "createdSuspended": true,
+        "assignedBeforeResume": true,
+        "terminal": true,
+        "creationFiletime100ns": "134374577537706322",
+        "jobActiveProcesses": 0,
+        "exitCode": 0
+      },
+      "handlesClosed": true,
+      "stdoutSha256": "57b5c19421d221fc82019d7370906d57ee710aa1d54e2b5614aa7ec62d2e9f07",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "allJobsEmpty": true,
+  "sdkOnly": true,
+  "deviceExecuted": false,
+  "elapsedSeconds": 15.57,
+  "passed": true,
+  "sourceHashes": {
+    "lib/editor/terminal_pane.dart": "7bf7d36524eb4db8b4d57d10aace5227446769f95622879af80ac7216d6beffd",
+    "test/terminal_pane_test.dart": "295e39012868cc7e3a593e7c3288f6849cded9e264d54332727a9724867ce100"
+  }
+}

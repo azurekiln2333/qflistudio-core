@@ -1,0 +1,49 @@
+00:00 +0: loading D:/MyNewProjects/qfli_studio_core/test/terminal_pane_test.dart
+00:00 +0: empty prompt begins at the top of the terminal scrollback
+00:00 +1: success preserves stdout and returns the next prompt silently
+00:00 +2: preparation and running hide the prompt until streams drain
+00:00 +3: nonzero exit 7 preserves diagnostics and its integer
+00:01 +4: nonzero exit 127 preserves diagnostics and its integer
+00:01 +5: long output and the prompt scroll together in a short pane
+00:01 +6: stream output and exit status stay with their source session
+00:01 +7: aggregate work includes preparation and an inactive running tab
+00:02 +8: blocked dispatch preserves drafts and parent attached output
+00:02 +9: execution callback blocks dispatch before the owner rebuilds
+00:02 +10: blocked Stop remains usable until cancellation actually finishes
+00:02 +11: repeated Stop and tab close share the same pending cancellation
+00:02 +12: failed Stop remains visible and can retry cancellation
+00:02 +13: failed closed-tab cleanup stays busy and Stop retries retained action
+00:02 +14: failed cancellation waits for worker exit and Stop can retry meanwhile
+00:02 +15: Stop failure after exit keeps the live tab blocked until cleanup retries
+00:03 +16: closing after exit retains an in-flight cancellation action for retry
+00:03 +17: closing a running tab retains pending cleanup in aggregate work
+00:03 +18: session tabs support keyboard selection and accessible close
+00:03 +19: the stop action cancels an attached run and restores input
+00:03 +20: Enter executes a command and history stays with its session
+00:03 +21: Return keeps the input focused so the keyboard stays up
+00:03 +22: a hardware Return key submits the command
+00:03 +23: a quiet successful command still bounds the transcript
+00:05 +24: portable command errors keep cwd and stay quiet on success
+00:05 +25: ls lists real files in the session directory
+00:05 +26: clear empties the transcript but keeps the session and cwd
+00:05 +27: tapping the canvas focuses the input
+00:05 +28: tapping the canvas while focused keeps the input focused
+00:05 +29: long output scrolls back while a stream still runs
+00:06 +30: session switches retain each scroll offset
+00:06 +31: interruptActive forwards to the active session backend
+00:06 +32: the Stop control cancels a running local command
+00:06 +33: partial output stays on its own line across commands
+00:06 +34: double click on old output does not focus or jump to bottom
+00:07 +35: scrolling to the prompt can still focus the input
+00:07 +36: stdout failure keeps ownership until exit and cleanup
+00:07 +37: stderr failure keeps ownership until exit and cleanup
+00:07 +38: errored stream need not close after actual exit is observed
+00:07 +39: transport cleanup failure survives tab close and Stop retry
+00:07 +40: exceptional exit is handled early but never proves termination
+00:07 +41: output observer failure does not strand a terminal worker
+00:08 +42: exit observer failure does not strand a terminal worker
+00:08 +43: old attachment completion never releases a replacement owner
+00:08 +44: dispose shares transport cancellation and handles late failure
+00:08 +45: legacy process adapter observes transport failure future
+00:08 +46: managed process adapter observes transport failure future
+00:08 +47: All tests passed!
