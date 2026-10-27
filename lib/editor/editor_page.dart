@@ -85,6 +85,54 @@ class FormatIntent extends Intent {
   const FormatIntent();
 }
 
+/// Borrows one controller and overrides only its newline entry point.
+class _InlineSourceController extends CodeLineEditingControllerDelegate {
+  _InlineSourceController({
+    required super.delegate,
+    required VoidCallback? Function() readOnNewLine,
+  }) : _readOnNewLine = readOnNewLine;
+
+  final VoidCallback? Function() _readOnNewLine;
+  final List<VoidCallback> _forwardedListeners = [];
+  bool _disposed = false;
+
+  @override
+  void applyNewLine() {
+    if (_disposed) return;
+    final onNewLine = _readOnNewLine();
+    if (onNewLine != null) {
+      onNewLine();
+    } else {
+      delegate.applyNewLine();
+    }
+  }
+
+  @override
+  void addListener(VoidCallback listener) {
+    if (_disposed) return;
+    _forwardedListeners.add(listener);
+    super.addListener(listener);
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    if (_forwardedListeners.remove(listener)) {
+      super.removeListener(listener);
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    for (final listener in _forwardedListeners.toList()) {
+      super.removeListener(listener);
+    }
+    _forwardedListeners.clear();
+    // The base delegate disposes the borrowed controller. Core owns that object.
+  }
+}
+
 /// 编辑器页：左侧文件树卡片 + 可选文件标签栏 + re_editor 代码编辑区
 /// + minimap 鸟瞰 + 本地终端面板 + 运行。
 class EditorPage extends StatefulWidget {
@@ -236,9 +284,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   late double _fontSize;
   late double _savedFontSize;
   final Map<OpenFile, Widget> _codeViews = {};
+  final Map<OpenFile, InlineDocumentEditor> _inlineDocuments = {};
+  final Map<OpenFile, _InlineSourceController> _inlineSourceControllers = {};
+  final Set<OpenFile> _inlineFocusDocuments = {};
+  OpenFile? _inlineActiveDocument;
+  bool _inlineRebuildQueued = false;
   final Map<int, Offset> _activePointers = {};
   double? _pinchStartDistance;
   double? _pinchStartFontSize;
+  ValueChanged<double>? _pinchSourceFontSizeChanged;
 
   /// 长按空行时强制显示选择工具栏（仅粘贴），点击关闭后复位。
   bool _pasteToolbarVisible = false;
@@ -753,6 +807,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _analysis.dispose();
     _output.dispose();
     _previewConsole.dispose();
+    for (final controller in _inlineSourceControllers.values) {
+      controller.dispose();
+    }
+    _inlineSourceControllers.clear();
+    for (final contribution in _inlineDocuments.values) {
+      contribution.removeListener(_onInlineDocumentChanged);
+      contribution.dispose();
+    }
+    _inlineDocuments.clear();
+    _inlineFocusDocuments.clear();
     _editor.dispose();
     unawaited(
       _stopPreview().catchError((Object error) {
@@ -801,6 +865,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _onEditorChanged() {
+    final current = _editor.current;
+    if (!identical(_inlineActiveDocument, current)) {
+      final previous = _inlineActiveDocument;
+      _inlineActiveDocument = current;
+      if (_inlineFocusDocuments.contains(previous) ||
+          _inlineFocusDocuments.contains(current)) {
+        _onInlineDocumentChanged();
+      }
+    }
     if (!_sessionRestored.isCompleted) return;
     if (_editor.current?.readOnly == true) return; // 历史快照只读
     _scheduleHistorySave();
@@ -1031,7 +1104,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       _longPressTimer = null;
       final points = _activePointers.values.toList();
       _pinchStartDistance = (points[0] - points[1]).distance;
-      _pinchStartFontSize = _fontSize;
+      final open = _editor.current;
+      final contribution = _inlineDocumentFor(open);
+      final updateFontSize = contribution?.onSourceFontSizeChanged;
+      _pinchSourceFontSizeChanged = updateFontSize == null
+          ? null
+          : (size) {
+              if (open != null &&
+                  _inlineDocumentAvailable(open) &&
+                  identical(_inlineDocuments[open], contribution)) {
+                updateFontSize(size);
+              }
+            };
+      _pinchStartFontSize = contribution?.sourceTextStyle?.fontSize ?? _fontSize;
     } else if (_activePointers.length == 1) {
       // 单指按下：启动长按计时器，500ms 后弹出粘贴工具栏。
       _longPressTimer?.cancel();
@@ -1059,11 +1144,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       final points = _activePointers.values.toList();
       final distance = (points[0] - points[1]).distance;
       if (_pinchStartDistance! > 0) {
-        setState(() {
-          _fontSize = (_pinchStartFontSize! * distance / _pinchStartDistance!)
-              .clamp(EditorFonts.minSize, EditorFonts.maxSize);
-          _codeViews.clear();
-        });
+        final fontSize = (_pinchStartFontSize! * distance / _pinchStartDistance!)
+            .clamp(EditorFonts.minSize, EditorFonts.maxSize);
+        final updateFontSize = _pinchSourceFontSizeChanged;
+        if (updateFontSize != null) {
+          updateFontSize(fontSize);
+        } else {
+          setState(() {
+            _fontSize = fontSize;
+            _codeViews.clear();
+          });
+        }
       }
       return;
     }
@@ -1074,11 +1165,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _longPressTimer = null;
     _activePointers.remove(event.pointer);
     if (_activePointers.length < 2) {
-      if (_pinchStartFontSize != null) {
+      if (_pinchStartFontSize != null && _pinchSourceFontSizeChanged == null) {
         unawaited(widget.settings.setEditorFont(size: _fontSize));
       }
       _pinchStartDistance = null;
       _pinchStartFontSize = null;
+      _pinchSourceFontSizeChanged = null;
     }
   }
 
@@ -1100,6 +1192,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     if (!mounted) return;
     final count = _editor.files.length;
     _codeViews.removeWhere((file, _) => !_editor.files.contains(file));
+    for (final file in _inlineDocuments.keys.toList()) {
+      if (_editor.files.contains(file)) continue;
+      _inlineSourceControllers.remove(file)?.dispose();
+      final contribution = _inlineDocuments.remove(file)!;
+      contribution.removeListener(_onInlineDocumentChanged);
+      contribution.dispose();
+      _inlineFocusDocuments.remove(file);
+    }
     final old = _tabController;
     if (old != null && old.length == count) {
       if (old.index != _editor.currentIndex &&
@@ -1149,9 +1249,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Future<void> _saveCurrent() async {
     final open = _editor.current;
     if (open == null || open.readOnly) return;
+    final error = await _saveInlineDocument(open);
+    if (error != null && mounted) _showSnack(error);
+  }
+
+  Future<String?> _saveInlineDocument(OpenFile open) async {
+    if (!mounted || !_editor.files.contains(open)) return '文件已关闭';
+    if (open.readOnly) return '历史快照只读';
     if (_isOrphaned(open)) {
-      _showSnack('项目文件夹已不可用，无法保存；请使用「另存为…」导出改动');
-      return;
+      return '项目文件夹已不可用，请另存为导出改动';
     }
     final wasDirty = open.dirty;
     final token = widget.auth.token;
@@ -1162,10 +1268,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       shouldSave: () =>
           mounted && _editor.files.contains(open) && !_isOrphaned(open),
     );
-    if (error != null) {
-      if (mounted) _showSnack(error);
-      return;
-    }
+    if (error != null) return error;
     if (wasDirty) {
       _manualSaveGeneration[open.path] =
           (_manualSaveGeneration[open.path] ?? 0) + 1;
@@ -1176,6 +1279,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       final syncError = await _cloud!.pushBytes(token, open.path, bytes);
       if (mounted) setState(() => _syncError = syncError);
     }
+    return null;
   }
 
   void _openFind() {
@@ -1291,10 +1395,163 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
+  bool _hasInlineDocumentEditor(OpenFile? open) {
+    final profile = StudioProfile.current;
+    return open != null &&
+        profile?.inlineDocumentEditorFactory != null &&
+        profile!.supportedFileExtensions.contains(
+          p.extension(open.name).toLowerCase(),
+        );
+  }
+
+  bool _inlineDocumentAvailable(OpenFile open) =>
+      mounted && _editor.files.contains(open) && !_isOrphaned(open);
+
+  InlineDocumentEditor? _inlineDocumentFor(OpenFile? open) {
+    if (open == null || !_hasInlineDocumentEditor(open)) return null;
+    final existing = _inlineDocuments[open];
+    if (existing != null) return existing;
+    final contribution = StudioProfile.current!.inlineDocumentEditorFactory!(
+      InlineDocumentRequest(
+        path: open.path,
+        name: open.name,
+        projectPath: open.projectRootPath,
+        readOnly: open.readOnly,
+        readEncoding: () => open.encoding,
+        readDirty: () => open.dirty,
+        controller: open.controller,
+        focusNode: open.focusNode,
+        scrollController: open.scrollController,
+        findController: open.findController,
+        save: () => _saveInlineDocument(open),
+        openFile: (path) => _openInlineDocument(open, path),
+        showProblems: () {
+          if (_inlineDocumentAvailable(open)) _showPanel(_BottomPanel.problems);
+        },
+        showOutput: () {
+          if (mounted && _editor.files.contains(open)) {
+            _showPanel(_BottomPanel.output);
+          }
+        },
+        recordOutput: (message) {
+          if (mounted && _editor.files.contains(open)) _output.append(message);
+        },
+        isAvailable: () => _inlineDocumentAvailable(open),
+        setFocusMode: (enabled) {
+          if (!mounted || !_editor.files.contains(open)) return;
+          setState(() {
+            if (enabled) {
+              _inlineFocusDocuments.add(open);
+            } else {
+              _inlineFocusDocuments.remove(open);
+            }
+          });
+        },
+      ),
+    );
+    _inlineDocuments[open] = contribution;
+    _inlineSourceControllers[open] = _InlineSourceController(
+      delegate: open.controller,
+      readOnNewLine: () => _inlineDocuments[open]?.onSourceNewLine,
+    );
+    contribution.addListener(_onInlineDocumentChanged);
+    return contribution;
+  }
+
+  void _onInlineDocumentChanged() {
+    if (!mounted) return;
+    if (SchedulerBinding.instance.schedulerPhase !=
+        SchedulerPhase.persistentCallbacks) {
+      setState(() {});
+      return;
+    }
+    if (_inlineRebuildQueued) return;
+    _inlineRebuildQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _inlineRebuildQueued = false;
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _invokeInlineDocumentAction(
+    OpenFile open,
+    InlineDocumentAction action,
+  ) async {
+    if (!mounted ||
+        !_editor.files.contains(open) ||
+        !identical(open, _editor.current) ||
+        !action.enabled) {
+      return;
+    }
+    try {
+      await action.invoke(context);
+    } catch (error) {
+      if (mounted) _showSnack('操作失败：$error');
+    }
+  }
+
+  Future<String?> _openInlineDocument(OpenFile source, String path) async {
+    if (!_inlineDocumentAvailable(source)) return '文件所属项目已不可用';
+    if (path.startsWith(r'\\') || path.startsWith('//')) {
+      return '请选择本机项目文件';
+    }
+    final uri = Uri.tryParse(path);
+    if (uri != null && uri.hasScheme && uri.scheme.length > 1) {
+      return '请先将文档导入本机项目';
+    }
+    final target = p.normalize(
+      p.isAbsolute(path) ? path : p.join(source.projectRootPath, path),
+    );
+    final owners = <Project>[
+      widget.project,
+      ..._workspaceMembers,
+      ...widget.store.projects.where((project) => !project.isCloud),
+    ].where((project) => p.isWithin(project.path, target)).toList()
+      ..sort((left, right) => right.path.length.compareTo(left.path.length));
+    if (owners.isEmpty) return '请先添加文件所属项目';
+    final owner = owners.first;
+    if (!_isProjectAvailable(owner.path)) return '文件所属项目不在当前工作区';
+    try {
+      final root = await Directory(owner.path).resolveSymbolicLinks();
+      final resolved = await File(target).resolveSymbolicLinks();
+      if (!p.isWithin(root, resolved)) return '文件不在项目目录内';
+      if (!_inlineDocumentAvailable(source) ||
+          !_isProjectAvailable(owner.path)) {
+        return '文件所属项目已不可用';
+      }
+      return _editor.openPath(
+        target,
+        ownerProjectName: owner.name,
+        ownerProjectPath: owner.path,
+        ownerProjectType: owner.type,
+        shouldOpen: () =>
+            _inlineDocumentAvailable(source) && _isProjectAvailable(owner.path),
+      );
+    } on FileSystemException catch (error) {
+      return '无法打开文件：${error.message}';
+    }
+  }
+
+  Widget _buildDocumentView(BuildContext context, OpenFile open) {
+    final contribution = _inlineDocumentFor(open);
+    if (contribution == null) return _buildCodeView(context, open);
+    return AnimatedBuilder(
+      animation: contribution,
+      builder: (context, _) => contribution.build(
+        context,
+        _buildCodeView(context, open),
+      ),
+    );
+  }
+
   /// 当前文件能否交给产品自带的整页文档工具（如 Markdown 编辑/预览工作台）。
   bool _hasDocumentTool(OpenFile? open) {
     final profile = StudioProfile.current;
-    if (open == null || profile?.documentToolBuilder == null) return false;
+    if (open == null ||
+        _hasInlineDocumentEditor(open) ||
+        profile?.documentToolBuilder == null) {
+      return false;
+    }
     return profile!.supportedFileExtensions.contains(
       p.extension(open.name).toLowerCase(),
     );
@@ -1302,7 +1559,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   void _openContentTool() {
     final open = _editor.current;
-    if (open == null) return;
+    if (open == null || _hasInlineDocumentEditor(open)) return;
     final documentTool = StudioProfile.current?.documentToolBuilder;
     if (documentTool != null && _hasDocumentTool(open)) {
       final page = documentTool(
@@ -1836,7 +2093,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
-    final sidebarVisible = _explorerVisible ?? false;
+    final focusMode = _inlineFocusDocuments.contains(_editor.current);
+    final sidebarVisible = !focusMode && (_explorerVisible ?? false);
     return Shortcuts(
       shortcuts: const {
         SingleActivator(LogicalKeyboardKey.keyS, control: true): SaveIntent(),
@@ -1879,7 +2137,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           child: Scaffold(
             key: _scaffoldKey,
             drawerScrimColor: scheme.surface,
-            appBar: PreferredSize(
+            appBar: focusMode ? null : PreferredSize(
               preferredSize: const Size.fromHeight(kToolbarHeight),
               child: SelectionToolbarScope(
                 editor: _editor,
@@ -1895,6 +2153,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                   final selected = hasSelection || _pasteToolbarVisible
                       ? controller
                       : null;
+                  final inlineOpen = _editor.current;
+                  final inlineEditor = _inlineDocumentFor(inlineOpen);
+                  final inlineActions = inlineEditor?.actions ??
+                      const <InlineDocumentAction>[];
+                  final inlineMenu = inlineEditor?.menuActions ??
+                      const <InlineDocumentAction>[];
                   return AppBar(
                     backgroundColor: selected != null
                         ? scheme.surfaceContainerHigh
@@ -1948,7 +2212,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                       : _undoCurrent,
                                   icon: const Icon(Icons.undo),
                                 ),
-                                if (_hasDocumentTool(_editor.current))
+                                if (inlineEditor != null)
+                                  for (final action in inlineActions)
+                                    IconButton(
+                                      key: ValueKey('inline-action-${action.id}'),
+                                      tooltip: action.label,
+                                      onPressed: action.enabled
+                                          ? () => unawaited(
+                                              _invokeInlineDocumentAction(
+                                                inlineOpen!, action,
+                                              ),
+                                            )
+                                          : null,
+                                      icon: Icon(action.icon),
+                                    )
+                                else if (_hasDocumentTool(_editor.current))
                                   IconButton(
                                     tooltip: '编辑与预览',
                                     onPressed: _openContentTool,
@@ -1997,6 +2275,18 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                   tooltip: '更多',
                                   icon: const Icon(Icons.more_vert),
                                   onSelected: (value) {
+                                    if (value.startsWith('inline:')) {
+                                      final id = value.substring(7);
+                                      for (final action in inlineMenu) {
+                                        if (action.id == id && inlineOpen != null) {
+                                          unawaited(_invokeInlineDocumentAction(
+                                            inlineOpen, action,
+                                          ));
+                                          break;
+                                        }
+                                      }
+                                      return;
+                                    }
                                     if (value.startsWith('file_tool:')) {
                                       unawaited(
                                         _runEditorTool(value.substring(10)),
@@ -2081,6 +2371,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     }
                                   },
                                   itemBuilder: (context) => [
+                                    for (final action in inlineMenu)
+                                      PopupMenuItem<String>(
+                                        key: ValueKey('inline-menu-${action.id}'),
+                                        value: 'inline:${action.id}',
+                                        enabled: action.enabled,
+                                        child: Row(
+                                          children: [
+                                            Icon(action.icon, size: 20),
+                                            const SizedBox(width: 12),
+                                            Flexible(child: Text(action.label)),
+                                          ],
+                                        ),
+                                      ),
+                                    if (inlineMenu.isNotEmpty)
+                                      const PopupMenuDivider(),
                                     if (widget.onClose != null)
                                       const PopupMenuItem(
                                         value: 'close_editor',
@@ -2181,7 +2486,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         ],
                                       ),
                                     ),
-                                    if (p
+                                    if (inlineEditor == null && (p
                                                 .extension(
                                                   _editor.current?.name ?? '',
                                                 )
@@ -2198,7 +2503,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                                   _editor.current?.name ?? '',
                                                 )
                                                 .toLowerCase() ==
-                                            '.markdown')
+                                            '.markdown'))
                                       const PopupMenuItem(
                                         value: 'content_tool',
                                         child: Row(
@@ -2354,7 +2659,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 },
               ),
             ),
-            drawer: wide
+            drawer: wide || focusMode
                 ? null
                 : Drawer(
                     width: _sidebarWidth + _cardMargin * 2,
@@ -2447,7 +2752,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              if (wide) ...[
+                              if (wide && !focusMode) ...[
                                 ClipRect(
                                   child: AnimatedAlign(
                                     duration: const Duration(milliseconds: 200),
@@ -2848,15 +3153,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         // the code view: re_editor asserts when its height reaches zero. Shed
         // optional chrome as the available height shrinks.
         final available = constraints.maxHeight;
-        final showTabs = widget.settings.showEditorTabs && available >= 220;
-        final showSymbols = available >= 160;
-        final showStatus = available >= 110;
+        final contribution = _inlineDocumentFor(open);
+        final focused = _inlineFocusDocuments.contains(open);
+        final showTabs = !focused &&
+            widget.settings.showEditorTabs && available >= 220;
+        final showSymbols = !focused && available >= 160 &&
+            (contribution?.showCoreSymbols ?? true);
+        final showStatus = !focused && available >= 110 &&
+            (contribution?.showCoreStatus ?? true);
         return Column(
           children: [
             if (showTabs) _buildTabBar(context),
             Expanded(
               child: _editor.files.length <= 1 || !showTabs
-                  ? _buildCodeView(context, open)
+                  ? _buildDocumentView(context, open)
                   : TabBarView(
                       controller: _tabController,
                       children: [
@@ -2867,7 +3177,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             child: _codeViews.putIfAbsent(
                               file,
                               () => RetainedPage(
-                                child: _buildCodeView(context, file),
+                                child: _buildDocumentView(context, file),
                               ),
                             ),
                           ),
@@ -3091,14 +3401,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     // actually on screen and the user can type.
     OpenPerformance.mark('code view built (interactive)');
     final scheme = Theme.of(context).colorScheme;
-    final textStyle = widget.settings.editorTextStyle;
-    final theme = HighlightThemes.themeFor(
-      context,
-      open.name,
-      null,
-      settings: widget.settings,
-      ownerType: open.projectType,
-    );
+    final contribution = _inlineDocumentFor(open);
+    final sourceTextStyle = contribution?.sourceTextStyle;
+    final textStyle = sourceTextStyle ?? widget.settings.editorTextStyle;
+    final fontSize = sourceTextStyle?.fontSize ?? _fontSize;
+    final theme = contribution?.sourceHighlightEnabled == false
+        ? null
+        : HighlightThemes.themeFor(
+            context,
+            open.name,
+            null,
+            settings: widget.settings,
+            ownerType: open.projectType,
+          );
     return EditorProblemsBar(
       analysis: _analysis,
       onOpenProblems: () => setState(() {
@@ -3115,15 +3430,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               onPointerUp: _handlePointerUp,
               onPointerCancel: _handlePointerUp,
               child: CodeEditor(
-                controller: open.controller,
+                controller: _inlineSourceControllers[open] ?? open.controller,
                 focusNode: open.focusNode,
                 scrollController: open.scrollController,
                 findController: open.findController,
-                shortcutOverrideActions: editorShortcutOverrides(
-                  open.controller,
-                ),
+                shortcutOverrideActions: {
+                  ...editorShortcutOverrides(open.controller),
+                  ...?contribution?.shortcutOverrideActions,
+                },
                 style: CodeEditorStyle(
-                  fontSize: _fontSize,
+                  fontSize: fontSize,
                   fontFamily: textStyle.fontFamily,
                   fontFamilyFallback: textStyle.fontFamilyFallback,
                   fontWeight: textStyle.fontWeight,
@@ -3182,11 +3498,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                               color: scheme.onSurfaceVariant.withValues(
                                 alpha: 0.55,
                               ),
-                              fontSize: _fontSize,
+                              fontSize: fontSize,
                             ),
                             focusedTextStyle: textStyle.copyWith(
                               color: scheme.primary,
-                              fontSize: _fontSize,
+                              fontSize: fontSize,
                             ),
                           ),
                           DefaultCodeChunkIndicator(

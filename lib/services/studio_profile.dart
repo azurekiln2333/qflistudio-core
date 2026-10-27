@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:re_editor/re_editor.dart';
 
 import '../store/project_store.dart';
 import '../content/content_repository.dart';
@@ -104,6 +105,7 @@ class StudioProfile {
     this.toolsPageBuilder,
     this.toolsTabBuilder,
     this.documentToolBuilder,
+    this.inlineDocumentEditorFactory,
     this.terminalCommandDelegate,
     this.contentRepositoryFactory,
     this.editorFileTools = const [],
@@ -177,6 +179,14 @@ class StudioProfile {
   /// null keeps the built-in content tools.
   final Widget Function(DocumentToolRequest request)? documentToolBuilder;
 
+  /// Optional live contribution inside the existing project editor.
+  ///
+  /// The factory is used for [supportedFileExtensions]. Core retains one
+  /// contribution per open file and keeps its controller, history and save
+  /// ownership. A contribution must reuse the supplied source widget.
+  final InlineDocumentEditor Function(InlineDocumentRequest request)?
+  inlineDocumentEditorFactory;
+
   /// Actions contributed by a language product to the current-file menu.
   final List<EditorFileTool> editorFileTools;
 
@@ -249,6 +259,104 @@ class StudioProfile {
     final allowed = templates.map((t) => t.language).toSet();
     return source.where(allowed.contains).toList(growable: false);
   }
+}
+
+/// Product UI around a live core editor, without another editor route.
+abstract class InlineDocumentEditor extends ChangeNotifier {
+  Widget build(BuildContext context, Widget sourceEditor);
+
+  List<InlineDocumentAction> get actions => const [];
+  List<InlineDocumentAction> get menuActions => const [];
+
+  /// Replaces individual actions inside the existing source editor shortcuts.
+  /// Products retain read-only and IME composition guards in their actions.
+  Map<Type, Action<Intent>> get shortcutOverrideActions => const {};
+
+  /// Handles source newline commands from both keyboard and platform IME paths.
+  /// The callback edits the borrowed controller and retains composition guards.
+  /// Null preserves the controller's existing newline behavior.
+  VoidCallback? get onSourceNewLine => null;
+
+  /// Replaces source typography when non-null, including the font family.
+  /// A null font family in an overridden style uses the platform default.
+  TextStyle? get sourceTextStyle => null;
+
+  /// Receives pinch updates when the product owns the source font size.
+  /// Supply this callback when [sourceTextStyle] specifies a font size.
+  ValueChanged<double>? get onSourceFontSizeChanged => null;
+
+  /// False disables source highlighting. Null retains the core preference.
+  bool? get sourceHighlightEnabled => null;
+
+  bool get showCoreSymbols => false;
+  bool get showCoreStatus => false;
+}
+
+class InlineDocumentAction {
+  const InlineDocumentAction({
+    required this.id,
+    required this.label,
+    required this.icon,
+    required this.invoke,
+    this.enabled = true,
+  });
+
+  final String id;
+  final String label;
+  final IconData icon;
+  final FutureOr<void> Function(BuildContext context) invoke;
+  final bool enabled;
+}
+
+/// Live resources borrowed from one open core file.
+///
+/// Core owns these resources. Product contributions must not dispose them.
+/// [isAvailable] rejects closed, disposed and orphaned owner states. Text edits
+/// use [controller]'s existing undo transaction APIs. [save] preserves core's
+/// queued revision and owner checks; it never copies text from another buffer.
+class InlineDocumentRequest {
+  const InlineDocumentRequest({
+    required this.path,
+    required this.name,
+    required this.projectPath,
+    required this.readOnly,
+    required String Function() readEncoding,
+    required bool Function() readDirty,
+    required this.controller,
+    required this.focusNode,
+    required this.scrollController,
+    required this.findController,
+    required this.save,
+    required this.openFile,
+    required this.showProblems,
+    required this.showOutput,
+    required this.recordOutput,
+    required this.isAvailable,
+    required this.setFocusMode,
+  }) : _readEncoding = readEncoding,
+       _readDirty = readDirty;
+
+  final String path;
+  final String name;
+  final String projectPath;
+  final bool readOnly;
+  final String Function() _readEncoding;
+  final bool Function() _readDirty;
+  String get encoding => _readEncoding();
+  bool get dirty => _readDirty();
+  final CodeLineEditingController controller;
+  final FocusNode focusNode;
+  final CodeScrollController scrollController;
+  final CodeFindController findController;
+  final Future<String?> Function() save;
+  final Future<String?> Function(String path) openFile;
+  final VoidCallback showProblems;
+  final VoidCallback showOutput;
+  final ValueChanged<String> recordOutput;
+  final bool Function() isAvailable;
+
+  /// Hides the main editor chrome. The product must supply an exit affordance.
+  final ValueChanged<bool> setFocusMode;
 }
 
 /// The file handed to [StudioProfile.documentToolBuilder].
