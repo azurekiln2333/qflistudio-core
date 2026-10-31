@@ -1,0 +1,669 @@
+/// 真实项目文件工具：路径约束、读取、创建、覆盖、替换、备份和并发冲突检测。
+///
+/// 所有路径都相对项目根目录，结果只在本机文件系统上产生。
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+
+/// 工具失败原因；[code] 供控制器映射为工具错误或冲突。
+class VibeToolException implements Exception {
+  const VibeToolException(this.message, {this.code = 'error'});
+
+  final String message;
+  final String code;
+
+  bool get isConflict => code == 'conflict';
+
+  @override
+  String toString() => message;
+}
+
+class VibeWriteResult {
+  const VibeWriteResult({
+    required this.relativePath,
+    required this.bytes,
+    required this.created,
+    this.backupPath,
+  });
+
+  final String relativePath;
+  final int bytes;
+  final bool created;
+
+  /// 覆盖前的备份绝对路径；新建文件为 null。
+  final String? backupPath;
+}
+
+/// 项目内文件访问。一个会话共用一个实例，以便记录已读内容。
+class VibeProjectFiles {
+  VibeProjectFiles({
+    required String projectRoot,
+    this.maxReadBytes = 256 * 1024,
+    this.maxWriteBytes = 256 * 1024,
+    this.maxListEntries = 400,
+    this.shouldWrite,
+  }) : projectRoot = p.normalize(p.absolute(projectRoot));
+
+  /// 落入最终提交点的编辑器保护：返回 false 时拒绝覆盖。
+  ///
+  /// 在路径锁内、冲突复查和备份之后、真正写盘之前调用。
+  final bool Function(String absolutePath)? shouldWrite;
+
+  final String projectRoot;
+  final int maxReadBytes;
+  final int maxWriteBytes;
+  final int maxListEntries;
+
+  static const String backupDirName = 'vibe-backups';
+  static const Set<String> _protectedSegments = {'.qfli', '.git'};
+  static const Set<String> _excludedDirs = {
+    'node_modules',
+    'build',
+    'target',
+    'vendor',
+    '__pycache__',
+    '.dart_tool',
+    '.gradle',
+    '.idea',
+    '.qfli',
+    '.git',
+  };
+
+  static bool _isProtected(String segment) =>
+      _protectedSegments.contains(segment.toLowerCase());
+
+  static bool _isExcluded(String name) =>
+      _excludedDirs.contains(name.toLowerCase());
+
+  final Map<String, String> _knownContent = {};
+
+  /// 跨实例的写入队列，按物理路径串行化。
+  static final Map<String, Future<void>> _pathQueues = {};
+
+  String? _realRoot;
+
+  String get realRoot =>
+      _realRoot ??= Directory(projectRoot).resolveSymbolicLinksSync();
+
+  /// 把工具参数里的相对路径转换成受约束的绝对路径。
+  ///
+  /// 拒绝绝对路径、盘符、`..`、NUL、受保护目录和符号链接逃逸。
+  String resolve(String rawPath) {
+    if (rawPath.contains('\u0000')) {
+      throw const VibeToolException('路径包含非法字符', code: 'escape');
+    }
+    final normalized = rawPath.replaceAll('\\', '/').trim();
+    if (normalized.isEmpty) {
+      throw const VibeToolException('路径不能为空');
+    }
+    if (normalized.startsWith('/') ||
+        RegExp(r'^[A-Za-z]:').hasMatch(normalized)) {
+      throw const VibeToolException('只允许项目内的相对路径', code: 'escape');
+    }
+    final segments = normalized.split('/');
+    for (final segment in segments) {
+      if (segment.isEmpty || segment == '.' || segment == '..') {
+        throw const VibeToolException('路径不能包含 . 或 ..', code: 'escape');
+      }
+      if (segment.contains('\u0000')) {
+        throw const VibeToolException('路径包含非法字符', code: 'escape');
+      }
+    }
+    if (_isProtected(segments.first)) {
+      throw const VibeToolException('不能读写项目元数据目录', code: 'protected');
+    }
+    final absolute = p.normalize(p.joinAll([projectRoot, ...segments]));
+    if (!p.equals(absolute, projectRoot) &&
+        !p.isWithin(projectRoot, absolute)) {
+      throw const VibeToolException('路径超出项目目录', code: 'escape');
+    }
+    _requireNoLinkEscape(absolute);
+    return absolute;
+  }
+
+  String relative(String absolutePath) =>
+      p.relative(absolutePath, from: projectRoot).replaceAll('\\', '/');
+
+  /// 逐级检查已存在的路径段，拒绝符号链接和穿越。
+  void _requireNoLinkEscape(String absolute) {
+    final root = p.normalize(projectRoot);
+    final relativeParts = p.split(p.relative(absolute, from: root));
+    var cursor = root;
+    for (final part in relativeParts) {
+      if (part == '.' || part.isEmpty) continue;
+      cursor = p.join(cursor, part);
+      final type = FileSystemEntity.typeSync(cursor, followLinks: false);
+      if (type == FileSystemEntityType.notFound) break;
+      if (type == FileSystemEntityType.link) {
+        throw const VibeToolException('路径包含符号链接，已拒绝', code: 'escape');
+      }
+    }
+    // 已存在的最近祖先还要落在根目录的真实路径内。
+    var ancestor = absolute;
+    while (FileSystemEntity.typeSync(ancestor, followLinks: false) ==
+        FileSystemEntityType.notFound) {
+      final parent = p.dirname(ancestor);
+      if (p.equals(parent, ancestor)) break;
+      ancestor = parent;
+    }
+    if (FileSystemEntity.typeSync(ancestor, followLinks: false) ==
+        FileSystemEntityType.notFound) {
+      throw const VibeToolException('项目目录不存在', code: 'not_found');
+    }
+    final ancestorType = FileSystemEntity.typeSync(
+      ancestor,
+      followLinks: false,
+    );
+    final real = ancestorType == FileSystemEntityType.directory
+        ? Directory(ancestor).resolveSymbolicLinksSync()
+        : File(ancestor).resolveSymbolicLinksSync();
+    if (!p.equals(real, realRoot) && !p.isWithin(realRoot, real)) {
+      throw const VibeToolException('路径超出项目目录', code: 'escape');
+    }
+  }
+
+  /// 列目录；默认只列一层，跳过隐藏项和依赖/构建目录。
+  Future<List<Map<String, Object?>>> list({
+    String? path,
+    bool recursive = false,
+  }) async {
+    final start = path == null || path.trim().isEmpty
+        ? projectRoot
+        : resolve(path);
+    final type = FileSystemEntity.typeSync(start);
+    if (type == FileSystemEntityType.notFound) {
+      throw const VibeToolException('目录不存在', code: 'not_found');
+    }
+    if (type != FileSystemEntityType.directory) {
+      throw const VibeToolException('目标不是目录');
+    }
+    final entries = <Map<String, Object?>>[];
+    Future<void> walk(Directory directory) async {
+      final children = await directory.list(followLinks: false).toList();
+      children.sort((a, b) {
+        final rank = (a is Directory ? 0 : 1) - (b is Directory ? 0 : 1);
+        return rank != 0
+            ? rank
+            : p
+                  .basename(a.path)
+                  .toLowerCase()
+                  .compareTo(p.basename(b.path).toLowerCase());
+      });
+      for (final entity in children) {
+        final name = p.basename(entity.path);
+        if (name.startsWith('.')) continue;
+        if (entity is Link) continue;
+        if (entity is Directory) {
+          if (_isExcluded(name)) continue;
+          entries.add({'path': relative(entity.path), 'type': 'directory'});
+          if (entries.length > maxListEntries) {
+            throw const VibeToolException('目录条目过多，请缩小路径范围', code: 'too_large');
+          }
+          if (recursive) await walk(entity);
+        } else if (entity is File) {
+          entries.add({
+            'path': relative(entity.path),
+            'type': 'file',
+            'bytes': await entity.length(),
+          });
+          if (entries.length > maxListEntries) {
+            throw const VibeToolException('目录条目过多，请缩小路径范围', code: 'too_large');
+          }
+        }
+      }
+    }
+
+    await walk(Directory(start));
+    return entries;
+  }
+
+  /// 读取文本文件并记录内容，后续写入据此检测并发变化。
+  Future<String> read(String path) async {
+    final absolute = resolve(path);
+    final file = File(absolute);
+    if (!await file.exists()) {
+      throw const VibeToolException('文件不存在', code: 'not_found');
+    }
+    final length = await file.length();
+    if (length > maxReadBytes) {
+      throw VibeToolException(
+        '文件超过 ${maxReadBytes ~/ 1024} KiB，无法读取',
+        code: 'too_large',
+      );
+    }
+    final text = _decodeText(await file.readAsBytes());
+    _knownContent[absolute] = text;
+    return text;
+  }
+
+  /// 严格 UTF-8 文本策略：二进制或非 UTF-8 文件不允许读取或覆盖。
+  /// 宽松解码后回写会破坏原字节，因此这里直接拒绝。
+  static String _decodeText(List<int> bytes) {
+    if (bytes.contains(0)) {
+      throw const VibeToolException('文件包含 NUL 字节，按二进制文件拒绝', code: 'binary');
+    }
+    try {
+      return utf8.decode(bytes);
+    } on FormatException {
+      throw const VibeToolException('文件不是 UTF-8 文本，工具拒绝读取或覆盖', code: 'binary');
+    }
+  }
+
+  /// 创建或覆盖文件。已存在的文件必须先读取，且磁盘内容不能变化。
+  ///
+  /// 同一物理路径的写入跨实例串行化；真正写盘前在锁内复查磁盘内容和
+  /// [shouldWrite]。
+  Future<VibeWriteResult> write(
+    String path,
+    String content, {
+    bool createOnly = false,
+  }) async {
+    if (utf8.encode(content).length > maxWriteBytes) {
+      throw VibeToolException(
+        '写入内容超过 ${maxWriteBytes ~/ 1024} KiB',
+        code: 'too_large',
+      );
+    }
+    if (content.contains('\u0000')) {
+      throw const VibeToolException('写入内容不能包含 NUL 字节', code: 'binary');
+    }
+    final absolute = resolve(path);
+    final type = FileSystemEntity.typeSync(absolute, followLinks: false);
+    if (type == FileSystemEntityType.directory) {
+      throw const VibeToolException('目标是目录，不能写入文件');
+    }
+    if (type == FileSystemEntityType.file && createOnly) {
+      throw const VibeToolException('文件已存在，未覆盖', code: 'exists');
+    }
+    return _withPathQueue(
+      _physical(absolute),
+      () => _commitWrite(path, content, createOnly: createOnly),
+    );
+  }
+
+  /// 物理队列键：真实根 + 相对路径，别名根不会落到不同队列。
+  String _physical(String absolute) {
+    final relativePath = p.relative(absolute, from: projectRoot);
+    return p.normalize(p.join(realRoot, relativePath));
+  }
+
+  Future<VibeWriteResult> _commitWrite(
+    String path,
+    String content, {
+    required bool createOnly,
+  }) async {
+    // 出队后重新校验路径：排队期间父目录可能被换成链接。
+    final absolute = resolve(path);
+    final file = File(absolute);
+    final relativePath = relative(absolute);
+    await file.parent.create(recursive: true);
+    final exists =
+        FileSystemEntity.typeSync(absolute, followLinks: false) ==
+        FileSystemEntityType.file;
+
+    if (createOnly) {
+      if (exists) {
+        throw const VibeToolException('文件已存在，未覆盖', code: 'exists');
+      }
+      // 创建前保护：拒绝时不会留下空文件。
+      if (shouldWrite?.call(absolute) == false) {
+        throw const VibeToolException('编辑器中有未保存的修改，已拒绝覆盖', code: 'conflict');
+      }
+      try {
+        // 原子独占创建：并发创建只有一个赢家。
+        await file.create(exclusive: true);
+      } on FileSystemException {
+        throw const VibeToolException('文件已存在，未覆盖', code: 'exists');
+      }
+      await file.writeAsString(content, flush: true);
+      _knownContent[absolute] = content;
+      return VibeWriteResult(
+        relativePath: relativePath,
+        bytes: utf8.encode(content).length,
+        created: true,
+      );
+    }
+
+    String? backup;
+    if (exists) {
+      final known = _knownContent[absolute];
+      if (known == null) {
+        throw const VibeToolException('写入已有文件前请先 read_file', code: 'not_read');
+      }
+      // 锁内、真正写盘前复查磁盘内容。
+      final current = _decodeText(await file.readAsBytes());
+      if (current != known) {
+        throw const VibeToolException('文件已在会话外被修改，已拒绝覆盖', code: 'conflict');
+      }
+      backup = await _backup(absolute);
+      if (backup == null) {
+        throw const VibeToolException('备份失败，已取消写入', code: 'backup');
+      }
+      // 备份也是 await：写盘前再对一次磁盘版本。
+      final latest = _decodeText(await file.readAsBytes());
+      if (latest != known) {
+        throw const VibeToolException('文件在备份期间被修改，已拒绝覆盖', code: 'conflict');
+      }
+    }
+    // 最终提交点再问一次编辑器，覆盖备份读取期间的脏缓冲变化。
+    if (shouldWrite?.call(absolute) == false) {
+      throw const VibeToolException('编辑器中有未保存的修改，已拒绝覆盖', code: 'conflict');
+    }
+    await file.writeAsString(content, flush: true);
+    _knownContent[absolute] = content;
+    return VibeWriteResult(
+      relativePath: relativePath,
+      bytes: utf8.encode(content).length,
+      created: !exists,
+      backupPath: backup,
+    );
+  }
+
+  /// 同一物理路径串行执行；键在 Windows 上不区分大小写。
+  static Future<T> _withPathQueue<T>(
+    String absolute,
+    Future<T> Function() action,
+  ) async {
+    final key = Platform.isWindows ? absolute.toLowerCase() : absolute;
+    final previous = _pathQueues[key] ?? Future<void>.value();
+    final gate = Completer<void>();
+    _pathQueues[key] = gate.future;
+    try {
+      await previous;
+      return await action();
+    } finally {
+      gate.complete();
+      if (identical(_pathQueues[key], gate.future)) {
+        _pathQueues.remove(key);
+      }
+    }
+  }
+
+  /// 精确替换一处文本；[replaceAll] 为 false 时多处匹配会失败。
+  Future<VibeWriteResult> edit(
+    String path,
+    String oldText,
+    String newText, {
+    bool replaceAll = false,
+  }) async {
+    if (oldText.isEmpty) {
+      throw const VibeToolException('oldText 不能为空');
+    }
+    final absolute = resolve(path);
+    final known = _knownContent[absolute];
+    if (known == null) {
+      throw const VibeToolException('修改已有文件前请先 read_file', code: 'not_read');
+    }
+    final file = File(absolute);
+    if (!await file.exists()) {
+      throw const VibeToolException('文件不存在', code: 'not_found');
+    }
+    final current = _decodeText(await file.readAsBytes());
+    if (current != known) {
+      throw const VibeToolException('文件已在会话外被修改，已拒绝编辑', code: 'conflict');
+    }
+    final first = current.indexOf(oldText);
+    if (first < 0) {
+      throw const VibeToolException('未找到 oldText', code: 'no_match');
+    }
+    if (!replaceAll && current.indexOf(oldText, first + oldText.length) >= 0) {
+      throw const VibeToolException(
+        'oldText 匹配多处，请提供更长的唯一片段',
+        code: 'ambiguous',
+      );
+    }
+    final updated = replaceAll
+        ? current.replaceAll(oldText, newText)
+        : current.replaceRange(first, first + oldText.length, newText);
+    return write(path, updated);
+  }
+
+  /// 覆盖前把当前磁盘内容复制到项目内备份目录。
+  Future<String?> _backup(String absolute) async {
+    try {
+      final stamp = DateTime.now();
+      String two(int value) => value.toString().padLeft(2, '0');
+      final label =
+          '${stamp.year}${two(stamp.month)}${two(stamp.day)}'
+          '-${two(stamp.hour)}${two(stamp.minute)}${two(stamp.second)}'
+          '-${stamp.millisecond.toString().padLeft(3, '0')}';
+      final flat = relative(absolute).replaceAll('/', '__');
+      final dir = Directory(p.join(projectRoot, '.qfli', backupDirName));
+      // 备份目录本身也不能通过链接逃出项目。
+      _requireNoLinkEscape(dir.path);
+      await dir.create(recursive: true);
+      final realDir = dir.resolveSymbolicLinksSync();
+      if (!p.equals(realDir, realRoot) && !p.isWithin(realRoot, realDir)) {
+        return null;
+      }
+      var target = p.join(dir.path, '$label-$flat');
+      var index = 1;
+      while (FileSystemEntity.typeSync(target, followLinks: false) !=
+              FileSystemEntityType.notFound ||
+          FileSystemEntity.typeSync('$target.json', followLinks: false) !=
+              FileSystemEntityType.notFound) {
+        if (++index > 1000) return null;
+        target = p.join(dir.path, '$label-$flat-$index');
+      }
+      // 创建后被替换成链接时，父目录真实路径会变化。
+      final realParent = Directory(
+        p.dirname(target),
+      ).resolveSymbolicLinksSync();
+      if (!p.equals(realParent, realDir)) return null;
+      await File(absolute).copy(target);
+      await File('$target.json').writeAsString(
+        jsonEncode({
+          'path': relative(absolute),
+          'time': stamp.toIso8601String(),
+        }),
+        flush: true,
+      );
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// 新建项目快照：最多 64 个文件、合计 256 KiB 解码数据，不跟随符号链接。
+abstract final class VibeProjectSnapshot {
+  static const int maxFiles = 64;
+  static const int maxBytes = 256 * 1024;
+  static const Set<String> excludedDirs = {
+    'node_modules',
+    'build',
+    'target',
+    'vendor',
+    '__pycache__',
+    '.dart_tool',
+    '.gradle',
+    '.idea',
+    '.qfli',
+    '.git',
+  };
+
+  static bool _isExcluded(String name) =>
+      excludedDirs.contains(name.toLowerCase());
+
+  static Future<List<Map<String, String>>> collect(String projectRoot) async {
+    final files = <Map<String, String>>[];
+    var bytes = 0;
+    Future<void> walk(Directory directory) async {
+      final children = await directory.list(followLinks: false).toList();
+      for (final entity in children) {
+        final name = p.basename(entity.path);
+        if (name.startsWith('.')) continue;
+        if (entity is Link) continue;
+        if (entity is Directory) {
+          if (_isExcluded(name)) continue;
+          await walk(entity);
+        } else if (entity is File) {
+          if (files.length >= maxFiles) {
+            throw const VibeToolException(
+              '项目超过 64 个文件，在线运行只支持小型项目',
+              code: 'too_large',
+            );
+          }
+          final content = <int>[];
+          await for (final chunk in entity.openRead()) {
+            bytes += chunk.length;
+            if (bytes > maxBytes) {
+              throw const VibeToolException(
+                '项目副本超过 256 KiB，无法上传终端',
+                code: 'too_large',
+              );
+            }
+            content.addAll(chunk);
+          }
+          files.add({
+            'path': p
+                .relative(entity.path, from: projectRoot)
+                .replaceAll('\\', '/'),
+            'content': base64Encode(content),
+          });
+        }
+      }
+    }
+
+    await walk(Directory(projectRoot));
+    return files;
+  }
+}
+
+/// OpenAI 兼容的工具定义；服务端只接受这些字段。
+List<Map<String, dynamic>> vibeToolSpecs() => [
+  {
+    'type': 'function',
+    'function': {
+      'name': 'list_files',
+      'description': '列出项目目录。路径相对项目根目录，默认只列一层。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': '目录相对路径，省略表示根目录'},
+          'recursive': {'type': 'boolean', 'description': '是否递归列出，默认 false'},
+        },
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'read_file',
+      'description': '读取项目内文本文件。覆盖已有文件前必须先读取。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': '文件相对路径'},
+        },
+        'required': ['path'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'write_file',
+      'description': '创建文件或整体覆盖已有文件。父目录不存在时自动创建。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': '文件相对路径'},
+          'content': {'type': 'string', 'description': '完整文件内容'},
+          'createOnly': {
+            'type': 'boolean',
+            'description': '为 true 时只创建，已存在则失败',
+          },
+        },
+        'required': ['path', 'content'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'edit_file',
+      'description': '把文件中的一段文本替换为新文本。oldText 必须唯一匹配。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'path': {'type': 'string', 'description': '文件相对路径'},
+          'oldText': {'type': 'string', 'description': '要替换的原文本'},
+          'newText': {'type': 'string', 'description': '替换后的文本'},
+          'replaceAll': {'type': 'boolean', 'description': '是否替换全部匹配，默认 false'},
+        },
+        'required': ['path', 'oldText', 'newText'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'run_command',
+      'description': '在隔离在线终端运行命令并返回真实退出码和输出。项目会作为快照上传，无法访问本机。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'command': {'type': 'string', 'description': '要执行的 shell 命令'},
+        },
+        'required': ['command'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'todo',
+      'description': '提交或更新任务计划。每次提交完整列表，面板会实时显示进度。多步骤任务在建文件前先列计划。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'items': {
+            'type': 'array',
+            'description': '完整计划，按执行顺序；最多 20 项，最多一项 doing',
+            'items': {
+              'type': 'object',
+              'properties': {
+                'id': {'type': 'string', 'description': '条目 id，省略时按顺序生成'},
+                'title': {'type': 'string', 'description': '一步可验证的动作'},
+                'status': {
+                  'type': 'string',
+                  'enum': ['pending', 'doing', 'done'],
+                  'description': '条目状态，默认 pending',
+                },
+              },
+              'required': ['title'],
+              'additionalProperties': false,
+            },
+          },
+        },
+        'required': ['items'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'use_skill',
+      'description': '读取一个技能的完整步骤。系统提示里只有技能名称和描述，需要细节时调用本工具。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'name': {'type': 'string', 'description': '技能名称，必须来自技能索引'},
+        },
+        'required': ['name'],
+        'additionalProperties': false,
+      },
+    },
+  },
+];

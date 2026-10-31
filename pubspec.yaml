@@ -48,6 +48,7 @@ flutter:
   assets:
     - assets/tutorials/
     - assets/content/
+    - assets/skills/
     - assets/fonts/roboto_mono/OFL.txt
 
   fonts:
