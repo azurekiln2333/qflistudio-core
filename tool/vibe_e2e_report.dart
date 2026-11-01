@@ -7,6 +7,8 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import 'vibe_e2e_local_executor.dart' show kVibeE2eLocalExecutor;
+
 /// 与 [ReportWriter] 一起使用的 schema 版本；字段变动必须加一。
 const int kVibeE2eSchema = 1;
 
@@ -48,6 +50,8 @@ class VibeE2eCredentials {
     'protocol': protocol,
     'keyPresent': true,
     'keyLength': apiKey.length,
+    // 命令在哪执行：每个场景都靠这一点区分本机与云终端。
+    'executor': kVibeE2eLocalExecutor,
   };
 
   @override

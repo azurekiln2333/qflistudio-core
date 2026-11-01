@@ -83,6 +83,16 @@ class VibeE2eScenarioOutcome {
     return null;
   }
 
+  /// 本轮全部助手文本，按出现顺序拼接。
+  ///
+  /// [assistantReply] 只看最后一条，而检索类场景常常先说一句就收尾；
+  /// 判断是否引用网址要看整段回答，不能只看末句。
+  String get assistantTranscript => messages
+      .where((message) => !message.isUser && message.tool == null)
+      .map((message) => message.text.trim())
+      .where((text) => text.isNotEmpty)
+      .join('\n\n');
+
   Future<bool> hasFile(String relative) =>
       File(p.join(projectRoot, relative)).exists();
 }
@@ -101,27 +111,30 @@ abstract final class VibeE2eAssertions {
     VibeE2eScenarioOutcome outcome,
   ) {
     final runs = outcome.runs;
-    if (runs.length < 2) {
+    // 只算拿到真实退出码的运行。云终端漏令牌的 401 不是命令的结果，
+    // 拿它当「第一次运行」会把日志读成另一种事实。
+    final decided = runs.where((run) => run.exitCode != null).toList();
+    if (decided.length < 2) {
       return [
         VibeE2eAssertion(
           name: 'runs_at_least_two',
           ok: false,
-          detail: '运行 ${runs.length} 次',
+          detail: '带退出码的运行 ${decided.length} 次 / 共 ${runs.length} 次',
         ),
       ];
     }
-    final first = runs.first.exitCode;
-    final last = runs.last.exitCode;
+    final first = decided.first.exitCode;
+    final last = decided.last.exitCode;
     return [
       VibeE2eAssertion(
         name: 'first_run_failed',
         ok: first != null && first != 0,
-        detail: first == null ? '未返回退出码' : 'exit $first',
+        detail: 'exit $first',
       ),
       VibeE2eAssertion(
         name: 'last_run_passed',
         ok: last == 0,
-        detail: last == null ? '未返回退出码' : 'exit $last',
+        detail: 'exit $last',
       ),
     ];
   }
@@ -266,7 +279,9 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
       final searchCalls = outcome.toolCalls
           .where((call) => searchTools.contains(call.toolName))
           .toList();
-      final reply = outcome.assistantReply ?? '';
+      // 判断引用要看整段回答：检索场景常常先说一句就收尾。
+      final reply = outcome.assistantTranscript;
+      final cited = RegExp(r'https?://\S+').hasMatch(reply);
       return [
         VibeE2eAssertion(
           name: 'search_tool_called',
@@ -275,8 +290,8 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
         ),
         VibeE2eAssertion(
           name: 'reply_cites_url',
-          ok: RegExp(r'https?://\S+').hasMatch(reply),
-          detail: '回答里是否含链接',
+          ok: cited,
+          detail: cited ? '回答含链接' : '回答里没有网址（回答共 ${reply.length} 字）',
         ),
       ];
     },

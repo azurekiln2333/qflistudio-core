@@ -96,6 +96,37 @@ VibeLocalCommand? parseVibeLocalCommand(String command) {
   );
 }
 
+/// 命令里写的解释器名 → 宿主机上真能跑的可执行文件。
+///
+/// Windows 的 `python3.exe` 常常只是应用商店占位存根，一跑就返回 9009。
+/// 这里按「能真跑」的顺序回落，始终返回真实可用的路径。
+Future<String> resolveVibeLocalInterpreter(String requested) async {
+  final candidates = requested == 'node'
+      ? const <String>['node']
+      : const <String>['python', 'python3', 'py'];
+  for (final candidate in candidates) {
+    if (await _runsAtAll(candidate)) return candidate;
+  }
+  // 都不可用时原样返回，让真实失败（而不是被伪造的成功）进入报告。
+  return requested;
+}
+
+Future<bool> _runsAtAll(String executable) async {
+  try {
+    final probe = await Process.start(executable, const ['-V']);
+    final code = await probe.exitCode.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        probe.kill();
+        return 9009;
+      },
+    );
+    return code == 0;
+  } on Object {
+    return false;
+  }
+}
+
 /// 把真实进程输出按行推给 `InteropRun`。
 Stream<String> _lines(Stream<List<int>> bytes) => bytes
     .transform(utf8.decoder)
@@ -119,7 +150,9 @@ Future<VibeLocalRun> runVibeLocalCommand({
       '本地执行器只支持 python/python3/node 加一个项目内脚本',
     );
   }
-  final executable = executableOverride ?? parsed.executable;
+  final executable =
+      executableOverride ??
+      await resolveVibeLocalInterpreter(parsed.executable);
   final started = DateTime.now();
   final process = await Process.start(executable, [
     parsed.entry,
