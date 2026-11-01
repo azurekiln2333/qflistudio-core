@@ -15,28 +15,61 @@ import 'interop_protocol.dart';
 import 'interop_targets.dart';
 
 /// Result of asking a receiver whether it is installed and capable.
+///
+/// The platform cannot always answer "installed yes/no": reading another
+/// app's bundle record needs a permission Studio may not hold. So the answer
+/// keeps three states instead of collapsing them into one bool:
+///
+///   - [status] `installed` — the receiver answered and can serve the run.
+///   - [status] `missing` — the receiver is not installed, or explicitly
+///     refused. The user gets an actionable hint.
+///   - [status] `unknown` — Studio could not find out. The caller must not
+///     claim either way; it offers to try and falls back to the online
+///     terminal when the start really fails.
 class InteropProbe {
   const InteropProbe({
-    required this.available,
+    required this.status,
     this.protocol,
     this.languages = const <String>{},
     this.diagnostic,
   });
 
+  /// The receiver is installed and answered the handshake.
+  const InteropProbe.installed({this.protocol, this.languages = const <String>{}})
+    : status = InteropProbeStatus.installed,
+      diagnostic = null;
+
+  /// The receiver is not installed. [diagnostic] says what to install.
   const InteropProbe.missing(String this.diagnostic)
-    : available = false,
+    : status = InteropProbeStatus.missing,
       protocol = null,
       languages = const <String>{};
 
-  final bool available;
+  /// Studio could not determine whether the receiver is installed.
+  const InteropProbe.unknown(String this.diagnostic)
+    : status = InteropProbeStatus.unknown,
+      protocol = null,
+      languages = const <String>{};
 
-  /// Protocol the receiver answered with, when available.
+  final InteropProbeStatus status;
+
+  /// Protocol the receiver answered with, when installed.
   final String? protocol;
 
   /// Languages the receiver reported through the handshake.
   final Set<String> languages;
   final String? diagnostic;
+
+  /// Whether the run should be offered. Unknown is "try it": the start call
+  /// still fails honestly and the caller falls back.
+  bool get available => status != InteropProbeStatus.missing;
+
+  /// Whether the answer is a confirmed installation.
+  bool get isInstalled => status == InteropProbeStatus.installed;
 }
+
+/// The three answers a handshake can give.
+enum InteropProbeStatus { installed, missing, unknown }
 
 /// A request that has been handed to the platform and can be cancelled.
 class InteropLaunch {
@@ -101,11 +134,21 @@ class MethodChannelInteropTransport implements InteropTransport {
         'protocol': kInteropProtocol,
       });
       if (raw == null) {
-        return const InteropProbe.missing('对方没有回应能力探测。');
+        return const InteropProbe.unknown('对方没有回应能力探测。');
       }
-      final available = raw['available'] == true;
-      if (!available) {
-        return InteropProbe.missing('${raw['diagnostic'] ?? '对方应用未安装或未响应。'}');
+      final diagnostic = raw['diagnostic'] as String?;
+      // The bridge answers `available` plus `installed`. A bridge that does not
+      // report `installed` at all is an old build, so its answer is unknown.
+      final installed = raw['installed'];
+      if (installed == false || raw['available'] == false) {
+        return InteropProbe.missing(
+          diagnostic ?? InteropTargets.installHint(target.language),
+        );
+      }
+      if (installed != true) {
+        return InteropProbe.unknown(
+          diagnostic ?? '无法确认 ${target.productName} 是否已安装。',
+        );
       }
       final languages = <String>{};
       final rawLanguages = raw['languages'];
@@ -114,8 +157,7 @@ class MethodChannelInteropTransport implements InteropTransport {
           if (item is String) languages.add(item);
         }
       }
-      return InteropProbe(
-        available: true,
+      return InteropProbe.installed(
         protocol: raw['protocol'] as String?,
         languages: languages,
       );

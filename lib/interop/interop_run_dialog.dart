@@ -137,8 +137,11 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
   @override
   Widget build(BuildContext context) {
     final target = InteropTargets.forLanguage(widget.language);
+    // The title names the app the run happens in, so the dialog can never look
+    // like a run that stayed inside Studio.
+    final app = target?.productName ?? widget.language;
     return AlertDialog(
-      title: Text(_exitCode == null ? '正在本机运行' : '运行结束'),
+      title: Text(_exitCode == null ? '正在本机运行 · $app' : '运行结束 · $app'),
       content: SizedBox(
         width: 520,
         height: 320,
@@ -161,7 +164,7 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.all(8),
                   child: SelectableText(
-                    _lines.isEmpty ? '正在连接配套应用…' : _lines.join('\n'),
+                    _lines.isEmpty ? '正在连接 $app…' : _lines.join('\n'),
                     style: const TextStyle(
                       fontFamily: 'monospace',
                       fontSize: 12,

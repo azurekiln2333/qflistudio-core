@@ -64,6 +64,112 @@ void main() {
     });
   });
 
+  group('channel argument contract', () {
+    // The probe bug this group exists for: Dart sent `bundleName` as a channel
+    // argument while the ArkTS handler stored it as `targetBundle` and the
+    // probe read `bundleName`. Every side compiled; the device answered
+    // "unknown app" for an installed app. Text checks on the protocol string
+    // could not see it because the two sides never disagreed on the protocol.
+    //
+    // So the keys are compared, not described: the Dart file is parsed for the
+    // channel arguments it sends and the ArkTS file for what it reads.
+
+    final transport = read(
+      'qfli_studio_core',
+      p.join('lib', 'interop', 'interop_transport.dart'),
+    );
+    final bridge = read(
+      'qflistudio',
+      p.join('ohos', 'entry', 'src', 'main', 'ets', 'interop',
+          'StudioInterop.ets'),
+    );
+
+    /// Top-level argument keys sent with `invokeMethod`/`invokeMapMethod`, in
+    /// order, for the method named [method].
+    List<String> sentKeys(String method) {
+      final call = RegExp(
+        "methods\\s*\\.\\s*invoke(?:Map)?Method\\s*<[^>]*>\\(\\s*'$method'\\s*,",
+      ).firstMatch(transport);
+      expect(call, isNotNull, reason: 'no channel call for $method');
+      final start = call!.end;
+      final close = transport.indexOf('\)', start);
+      expect(close, greaterThan(start), reason: 'unterminated $method call');
+      final block = transport.substring(start, close);
+      final keys = RegExp(r"'([A-Za-z][A-Za-z0-9]*)'\s*:").allMatches(block);
+      return keys.map((match) => match.group(1)!).toList();
+    }
+
+    test('probe sends the keys the bridge stores for probe', () {
+      expect(sentKeys('probe'), <String>[
+        'bundleName',
+        'abilityName',
+        'language',
+        'protocol',
+      ]);
+    });
+
+    test('start sends the keys the bridge reads for start', () {
+      expect(sentKeys('start'), <String>[
+        'bundleName',
+        'abilityName',
+        'parameters',
+      ]);
+    });
+
+    test('the bridge reads probe values under names it actually stores', () {
+      // `onMethodCall` copies channel arguments into the map the handlers read.
+      // A handler that reads a key the bridge never sets gets undefined, which
+      // is exactly the shipped probe bug.
+      final copied = RegExp(
+        "raw\\.set\\('([A-Za-z][A-Za-z0-9]*)'",
+      ).allMatches(bridge).map((match) => match.group(1)!).toSet();
+      final stored = RegExp(
+        "raw\\.set\\(key,",
+      ).hasMatch(bridge);
+      expect(
+        copied,
+        containsAll(<String>['targetBundle']),
+        reason: 'the bridge no longer copies bundleName to targetBundle',
+      );
+      expect(
+        stored,
+        isTrue,
+        reason: 'the bridge no longer copies the extra channel arguments',
+      );
+      final probeBody = RegExp(
+        r'export function probe\(raw: Map<string, string>\)[\s\S]*?\n}',
+      ).firstMatch(bridge);
+      expect(probeBody, isNotNull, reason: 'probe is gone or renamed');
+      final readKey = RegExp(
+        "raw\\.get\\('([A-Za-z][A-Za-z0-9]*)'\\)",
+      ).firstMatch(probeBody!.group(0)!)!;
+      expect(
+        readKey.group(1),
+        'targetBundle',
+        reason: 'probe reads a key the channel never sets',
+      );
+    });
+
+    test('the bridge answers installed and available separately', () {
+      // The Dart reader treats `installed` as the authority and falls back to
+      // `unknown`. A bridge that stops reporting it would silently turn every
+      // answer into "unknown", so the answer keys are pinned here too.
+      for (final key in <String>[
+        "result.set('installed'",
+        "result.set('available'",
+        "result.set('languages'",
+      ]) {
+        expect(bridge, contains(key));
+      }
+    });
+
+    test('the Dart reader accepts exactly the keys the bridge reports', () {
+      for (final key in <String>['installed', 'available', 'languages', 'protocol']) {
+        expect(transport, contains("raw['$key']"));
+      }
+    });
+  });
+
   group('Java receiver', () {
     final source = read(
       'qfli_java',

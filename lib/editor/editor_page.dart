@@ -59,6 +59,7 @@ import 'ai_panel.dart';
 import 'open_performance.dart';
 import '../interop/interop_run_dialog.dart';
 import '../interop/interop_targets.dart';
+import '../interop/interop_transport.dart';
 
 enum _BottomPanel {
   none,
@@ -333,6 +334,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _analysis.addListener(_onAnalysisChanged);
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
     OpenPerformance.mark('EditorPage initState');
+    // One probe so the Run label can name the sibling app before the first tap.
+    unawaited(_refreshRunButtonProduct());
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
@@ -1609,6 +1612,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// Runs the project entry on a normal tap, or an explicit [entryOverride]
   /// (the active file captured by a long press) through the same save and
   /// runtime routing. Calls with an override must validate it first.
+  ///
+  /// A normal tap first asks whether a sibling app answers for this entry. When
+  /// one does, the same button compiles and runs the project inside it; every
+  /// other case keeps the original path untouched.
   Future<void> _runProject({String? entryOverride}) async {
     if (_runningProject ||
         _runningFileTool ||
@@ -1625,6 +1632,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
     final projectPath = active?.projectRootPath ?? widget.project.path;
     final projectName = active?.ownerProjectName ?? widget.project.name;
+    final sibling = await _answeringSiblingApp(
+      entryOverride ?? _entryFileOf(projectPath),
+    );
+    if (!mounted) return;
+    if (sibling != null) {
+      await _runInSiblingApp();
+      return;
+    }
     if (!Directory(projectPath).existsSync()) {
       setState(() {
         _terminalCreated = true;
@@ -2012,6 +2027,41 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   void _recordProgramExit(int code) => _output.append('退出码 $code\n');
 
+  /// Tooltip for the Run button.
+  ///
+  /// The label names the sibling app when one answers, so the user can see
+  /// where the button will run the project before pressing it. The decision is
+  /// async, so the answer is cached from the last probe and refreshed on the
+  /// next Run; before the first answer the plain label shows.
+  String get _runButtonTooltip {
+    final product = _runButtonProduct;
+    if (product == null) return '运行（长按运行当前文件）';
+    return '运行（在 $product 中，长按运行当前文件）';
+  }
+
+  /// Product name of the sibling app a Run tap would use, when cached.
+  String? _runButtonProduct;
+
+  Future<void> _refreshRunButtonProduct() async {
+    final runner = StudioProfile.current?.interopRunner;
+    final entry = _entryFileOf(
+      _editor.current?.projectRootPath ?? widget.project.path,
+    );
+    final target = _interopTargetFor(entry);
+    if (runner == null || target == null) {
+      if (_runButtonProduct != null && mounted) {
+        setState(() => _runButtonProduct = null);
+      }
+      return;
+    }
+    final probe = await runner.probe(target.language);
+    if (!mounted) return;
+    final product = probe.isInstalled ? target.productName : null;
+    if (product != _runButtonProduct) {
+      setState(() => _runButtonProduct = product);
+    }
+  }
+
   /// The device app that owns this project's toolchain, or null when none does.
   ///
   /// The entry file decides: a project can hold several files and only one of
@@ -2028,6 +2078,37 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   String? _entryFileOf(String projectPath) {
     final entry = RunnerService.findEntry(projectPath);
     return entry == null ? null : p.normalize(p.absolute(entry));
+  }
+
+  /// The sibling app a normal Run would use for [entryFile], when one answers.
+  ///
+  /// Run is one button, so the decision must happen before the button's own
+  /// path starts:
+  ///
+  ///   - a receiver the probe confirmed  -> cross-app compile and run;
+  ///   - a receiver the probe reports missing -> the path is unchanged, and the
+  ///     existing runner decides (local, then the online terminal);
+  ///   - a receiver the probe cannot confirm -> still unchanged, because a
+  ///     confident switch into another app the user may not have installed is
+  ///     worse than the path that already works.
+  Future<InteropTarget?> _answeringSiblingApp(String? entryFile) async {
+    final runner = StudioProfile.current?.interopRunner;
+    final target = _interopTargetFor(entryFile);
+    if (runner == null || target == null) return null;
+    if (p.extension(entryFile!).toLowerCase() == '.html') return null;
+    final probe = await runner.probe(target.language);
+    if (!mounted) return null;
+    if (probe.isInstalled) return target;
+    if (probe.status == InteropProbeStatus.unknown && mounted) {
+      // The user still gets a way to try, from the menu, where the wording can
+      // explain why Studio is unsure.
+      _showSnack(
+        probe.diagnostic ??
+            '无法确认 ${target.productName} 是否已安装，已在更多菜单保留「在 '
+                '${target.productName} 中运行」。',
+      );
+    }
+    return null;
   }
 
   /// Compiles and runs the open project inside the sibling app that owns the
@@ -2072,9 +2153,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       _showSnack('没有支持该项目入口的配套应用');
       return;
     }
+    // An explicit request from the menu runs even when the probe is unsure: the
+    // start call fails honestly and the dialog shows the real reason.
     final probe = await runner.probe(target.language);
     if (!mounted) return;
-    if (!probe.available) {
+    if (probe.status == InteropProbeStatus.missing) {
       _showSnack(
         probe.diagnostic ?? InteropTargets.installHint(target.language),
       );
@@ -2097,6 +2180,40 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         project: active?.ownerProjectName ?? widget.project.name,
       ),
     );
+  }
+
+  /// Runs the project in the online terminal instead of a sibling app.
+  ///
+  /// The menu keeps this next to the cross-app entry so a user who does not
+  /// want the run to leave Studio has one obvious alternative, and so the
+  /// normal Run path never looks like it silently changed target.
+  Future<void> _runProjectOnline() async {
+    if (_runningProject ||
+        _runningFileTool ||
+        _debugger.busy ||
+        _terminalKey.currentState?.hasRunningWork == true) {
+      _showSnack('请先停止当前运行任务');
+      return;
+    }
+    final projectPath =
+        _editor.current?.projectRootPath ?? widget.project.path;
+    final entry = _entryFileOf(projectPath);
+    if (entry == null) {
+      _showSnack('未找到可运行的入口文件');
+      return;
+    }
+    setState(() {
+      _terminalCreated = true;
+      _closeTerminalWhenIdle = false;
+      _terminalCollapsed = false;
+      _bottomPanel = _BottomPanel.terminal;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    final pane = _terminalKey.currentState;
+    if (pane == null) return;
+    pane.expand();
+    await pane.runOnlineProject(projectPath, entry);
   }
 
   Future<void> _startDebug(bool stopOnEntry) async {
@@ -2328,7 +2445,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                   // configured project entry, a long press runs
                                   // the file that is active when it fires.
                                   Tooltip(
-                                    message: '运行（长按运行当前文件）',
+                                    message: _runButtonTooltip,
                                     child: Semantics(
                                       button: true,
                                       enabled:
@@ -2389,6 +2506,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         unawaited(_recoverOrphanedFile());
                                       case 'interop_run':
                                         unawaited(_runInSiblingApp());
+                                      case 'run_online':
+                                        unawaited(_runProjectOnline());
                                       case 'close_editor':
                                         unawaited(_closeEditor());
                                       case 'find':
@@ -2551,8 +2670,34 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             const SizedBox(width: 12),
                                             Flexible(
                                               child: Text(
-                                                '在 ${interopTarget.productName} 中运行',
+                                                '运行（${interopTarget.productName}）',
                                               ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    if (_interopTargetFor(
+                                          _entryFileOf(
+                                            _editor.current?.projectRootPath ??
+                                                widget.project.path,
+                                          ),
+                                        ) !=
+                                        null)
+                                      PopupMenuItem(
+                                        value: 'run_online',
+                                        enabled:
+                                            !_runningProject &&
+                                            !_debugger.busy &&
+                                            StudioProfile
+                                                    .current
+                                                    ?.offlineOnly !=
+                                                true,
+                                        child: const Row(
+                                          children: [
+                                            Icon(Icons.cloud_outlined, size: 20),
+                                            SizedBox(width: 12),
+                                            Flexible(
+                                              child: Text('改用在线终端运行'),
                                             ),
                                           ],
                                         ),
