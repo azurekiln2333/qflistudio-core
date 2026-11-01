@@ -72,14 +72,20 @@ class VibeRoundFacts {
   int reads = 0;
   int listings = 0;
   int planUpdates = 0;
+  int newSources = 0;
   final List<int?> exitCodes = [];
   final List<String> errors = [];
 
-  /// 本轮是否推动了任务：成功写入文件或读取文件，或跑完了一条命令。
+  /// 本轮是否推动了任务：成功写入或读取文件，跑完命令，
+  /// 或检索到新的网址、新的页面正文。
   ///
   /// 退出码非零同样算进展：模型看到了真实错误才能修复。
+  /// 联网检索带回新信息也是进展，不能当成“什么都没发生”。
   bool get progressed =>
-      writes > 0 || reads > 0 || exitCodes.any((code) => code != null);
+      writes > 0 ||
+      reads > 0 ||
+      newSources > 0 ||
+      exitCodes.any((code) => code != null);
 
   /// 开工阶段的表现：更新计划或成功列出目录。
   ///

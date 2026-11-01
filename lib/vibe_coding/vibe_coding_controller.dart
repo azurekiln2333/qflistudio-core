@@ -157,6 +157,13 @@ class VibeCodingController extends ChangeNotifier {
   /// 本轮终端不可用（未登录或会话过期）。
   bool _terminalUnavailable = false;
 
+  /// 本次 send 已用过的搜索查询与网址，用于去重。
+  final Set<String> _seenQueries = {};
+  final Set<String> _seenUrls = {};
+
+  /// 本次 send 成功的搜索次数，用于提醒模型开始总结。
+  int _searchCount = 0;
+
   /// 本次 send 内是否有成功的写入，且内置 HTML 检查未报错。
   ///
   /// 跨轮累积：常见节奏是先写文件、下一轮才跑验证，重置会让判据失效。
@@ -210,6 +217,9 @@ class VibeCodingController extends ChangeNotifier {
     _lastError = null;
     _terminalUnavailable = false;
     _wroteCleanThisSend = false;
+    _seenQueries.clear();
+    _seenUrls.clear();
+    _searchCount = 0;
     _appendMessage(VibeMessage(isUser: true, text: prompt));
     _history.add({'role': 'user', 'content': prompt});
     _trimHistory();
@@ -449,6 +459,7 @@ class VibeCodingController extends ChangeNotifier {
     }
     // 列目录与更新计划只在开工阶段算进展，由守卫按轮次判定。
     facts.listings += outcome.listedDirs;
+    facts.newSources += outcome.newSources;
     if (outcome.plan != null) facts.planUpdates++;
     if (outcome.ranCommand) facts.exitCodes.add(outcome.exitCode);
     if (outcome.status == VibeToolStatus.error ||
@@ -853,11 +864,31 @@ class VibeCodingController extends ChangeNotifier {
       onlineAllowed: _onlineAllowed,
     );
     if (result == null) return _error('error', '未知联网工具：$name');
+    var fresh = 0;
+    if (result.ok) {
+      // 只有带回新查询或新网址才算进展，重复搜索不推任务向前。
+      final query = '${args['query'] ?? args['url'] ?? ''}'
+          .trim()
+          .toLowerCase();
+      final dedupeKey = '$name|$query';
+      final newQuery = query.isNotEmpty && _seenQueries.add(dedupeKey);
+      final urls = RegExp(
+        "[hH][tT][tT][pP][sS]?://[^\\s<>\"']+",
+      ).allMatches(result.modelText).map((m) => m.group(0)!).toList();
+      final newUrls = urls.where(_seenUrls.add).length;
+      if (newQuery || newUrls > 0) fresh = 1;
+      if (name == 'web_search' && result.ok) _searchCount++;
+    }
+    var text = result.modelText;
+    if (result.ok && _searchCount >= 3 && name == 'web_search') {
+      text = '$text\n\n信息已足够，请直接用中文总结并列出来源网址，不要继续搜索。';
+    }
     return _ToolOutcome(
       status: result.ok ? VibeToolStatus.ok : VibeToolStatus.error,
       summary: result.summary,
-      modelText: result.modelText,
+      modelText: text,
       code: result.ok ? null : 'web',
+      newSources: fresh,
     );
   }
 
@@ -1334,6 +1365,7 @@ class _ToolOutcome {
     this.plan,
     this.code,
     this.listedDirs = 0,
+    this.newSources = 0,
   });
 
   final VibeToolStatus status;
@@ -1353,6 +1385,9 @@ class _ToolOutcome {
 
   /// 本次调用成功列出的目录数（0 或 1）。
   final int listedDirs;
+
+  /// 本次联网调用带回的新来源数（0 或 1）；重复查询与重复网址为 0。
+  final int newSources;
 
   /// 失败分类（`conflict`、`unread`、`plan` 等）；成功时为 null。
   final String? code;

@@ -600,6 +600,65 @@ void main() {
     },
   );
 
+  test('counts four distinct searches as progress', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        for (var i = 0; i < 4; i++)
+          _toolCall('s$i', 'web_search', {'query': 'query$i'}),
+        _textReply('总结如下。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('查一下资料');
+    await settle(controller, VibePhase.succeeded);
+
+    expect(controller.lastError, isNull);
+    expect(relay.searchQueries, hasLength(4));
+
+    controller.dispose();
+  });
+
+  test('stops when every search repeats the same query', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        for (var i = 0; i < 4; i++)
+          _toolCall('s$i', 'web_search', {'query': 'same'}),
+        _textReply('总结如下。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('查一下资料');
+    await settle(controller, VibePhase.failed);
+
+    expect(controller.lastError, contains('没有进展'));
+
+    controller.dispose();
+  });
+
+  test('tells the model to summarise after three searches', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        for (var i = 0; i < 4; i++)
+          _toolCall('s$i', 'web_search', {'query': 'query$i'}),
+        _textReply('总结如下。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('查一下资料');
+    await settle(controller, VibePhase.succeeded);
+
+    final body = relay.chatBodies.last['messages'] as List;
+    final hints = body.where(
+      (m) =>
+          m is Map &&
+          m['role'] == 'tool' &&
+          '${m['content']}'.contains('信息已足够'),
+    );
+    expect(hints, isNotEmpty);
+
+    controller.dispose();
+  });
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {
@@ -998,6 +1057,28 @@ class _FakeRelay {
           headers: {'content-type': 'application/x-ndjson'},
         );
       }
+      if (request.url.path == '/api/ai/web_search') {
+        final decoded = jsonDecode(body) as Map<String, dynamic>;
+        searchQueries.add('${decoded['query']}');
+        final label = '${decoded['query']}';
+        return http.StreamedResponse(
+          Stream.value(
+            utf8.encode(
+              jsonEncode({
+                'results': [
+                  {
+                    'title': '结果 $label',
+                    'url': 'https://example.com/$label',
+                    'snippet': '关于 $label 的摘要',
+                  },
+                ],
+              }),
+            ),
+          ),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
       if (request.url.path == '/api/ai/chat') {
         final decoded = jsonDecode(body) as Map<String, dynamic>;
         final index = chatBodies.length;
@@ -1035,6 +1116,7 @@ class _FakeRelay {
   final authorizations = <String?>[];
   StreamController<List<int>>? holdTerminal;
   int? terminalStatus;
+  final searchQueries = <String>[];
   Completer<void>? holdDelete;
   int deleteCalls = 0;
   Future<void> Function(int index, Map<String, dynamic> body)? onChat;
