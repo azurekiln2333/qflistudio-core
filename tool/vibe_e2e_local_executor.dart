@@ -53,32 +53,94 @@ class VibeLocalRun {
   };
 }
 
-/// 解析后的本地命令。
+/// 分段之间的连接符。
+///
+/// 语义不同，不能一律当串联：`&&` 前段失败后段不跑，`||` 前段成功
+/// 后段不跑，`|` 把前段输出交给后段。
+enum VibeChainOp { then, orElse, pipe }
+
+/// 一条被校验过的命令：段落 + 连接符。
 class VibeLocalCommand {
   const VibeLocalCommand({
     required this.executable,
     required this.entry,
     required this.mergeStderr,
     required this.raw,
+    this.ops = const [],
   });
 
   final String executable;
 
-  /// 相对项目根的脚本路径。
+  /// 相对项目根的脚本路径，或 echo 的文本。
   final String entry;
   final bool mergeStderr;
   final String raw;
+
+  /// `ops[i]` 连接第 i 段与第 i+1 段。只有一段时为空。
+  final List<VibeChainOp> ops;
 }
 
-/// 解析 `python3 verify.py 2>&1` 这类命令；不认识的语法返回 null。
+/// 逐段切分后的结果：段落与连接符。
+class _Chain {
+  const _Chain(this.parts, this.ops);
+  final List<String> parts;
+  final List<VibeChainOp> ops;
+}
+
+/// 按从左到右的顺序切出段落与连接符。
 ///
-/// 支持用 `;` / `&&` 串联的片段，但每个片段都必须在白名单里。
-/// 模型很常写成 `python3 verify.py; echo ---; wc -c result.txt`，
-/// 拒掉整条会让它落到云终端，从而丢掉真实退出码。
+/// 引号内的连接符不算分隔，避免 `echo "a && b"` 被切开。
+_Chain _splitChain(String text) {
+  final parts = <String>[];
+  final ops = <VibeChainOp>[];
+  var current = StringBuffer();
+  String? quote;
+  for (var i = 0; i < text.length; i++) {
+    final ch = text[i];
+    if (quote != null) {
+      current.write(ch);
+      if (ch == quote) quote = null;
+      continue;
+    }
+    if (ch == '"' || ch == "'") {
+      quote = ch;
+      current.write(ch);
+      continue;
+    }
+    final two = i + 1 < text.length ? text.substring(i, i + 2) : '';
+    if (two == '&&' || two == '||') {
+      parts.add(current.toString().trim());
+      ops.add(two == '&&' ? VibeChainOp.then : VibeChainOp.orElse);
+      current = StringBuffer();
+      i++;
+      continue;
+    }
+    if (ch == ';') {
+      parts.add(current.toString().trim());
+      ops.add(VibeChainOp.then);
+      current = StringBuffer();
+      continue;
+    }
+    if (ch == '|') {
+      parts.add(current.toString().trim());
+      ops.add(VibeChainOp.pipe);
+      current = StringBuffer();
+      continue;
+    }
+    current.write(ch);
+  }
+  parts.add(current.toString().trim());
+  return _Chain(parts, ops);
+}
+
+/// 解析一条命令；任何一段不在白名单就整条返回 null。
+///
+/// 返回 null 意味着「本执行器不接」，调用方会如实报失败；
+/// 不会把命令静默交给云终端。
 VibeLocalCommand? parseVibeLocalCommand(String command) {
   var text = command.trim();
   if (text.isEmpty) return null;
-  // `cd "$(pwd)" && ...` 只是回到当前目录，先剔掉再切片段。
+  // `cd "$(pwd)" && ...` 只是回到当前目录，先剔掉再切段。
   for (final prefix in const <String>[
     'cd "\$(pwd)" && ',
     'cd \$(pwd) && ',
@@ -89,20 +151,24 @@ VibeLocalCommand? parseVibeLocalCommand(String command) {
     }
   }
   if (text.isEmpty) return null;
-  final segments = text
-      .split(RegExp(r'\s*(?:;|&&)\s*'))
-      .where((part) => part.isNotEmpty)
-      .map(_parseSegment)
-      .toList();
-  if (segments.isEmpty || segments.any((segment) => segment == null)) {
-    return null;
+  final chain = _splitChain(text);
+  if (chain.parts.length != chain.ops.length + 1) return null;
+  // 管道需要真进程间管道，本执行器不伪造，整条拒绝。
+  if (chain.ops.contains(VibeChainOp.pipe)) return null;
+  final parsed = <VibeLocalCommand>[];
+  for (final part in chain.parts) {
+    final segment = _parseSegment(part);
+    if (segment == null) return null;
+    parsed.add(segment);
   }
-  final first = segments.first!;
+  if (parsed.any((segment) => segment.executable.isEmpty)) return null;
+  final first = parsed.first;
   return VibeLocalCommand(
     executable: first.executable,
     entry: first.entry,
-    mergeStderr: segments.any((segment) => segment!.mergeStderr),
+    mergeStderr: parsed.any((segment) => segment.mergeStderr),
     raw: text,
+    ops: chain.ops,
   );
 }
 
@@ -216,14 +282,37 @@ Stream<String> _lines(Stream<List<int>> bytes) => bytes
 /// 三个八进制位，与 `od -c` 的单字节显示一致。
 String _octal(int byte) => '\\${byte.toRadixString(8).padLeft(3, '0')}';
 
-/// 把一条命令拆成已校验的片段序列。
-List<VibeLocalCommand> _segmentsOf(String command) => command
-    .trim()
-    .split(RegExp(r'\s*(?:;|&&)\s*'))
-    .where((part) => part.isNotEmpty)
-    .map(_parseSegment)
-    .whereType<VibeLocalCommand>()
-    .toList();
+/// 把一条命令拆成已校验的段落序列（与 `parseVibeLocalCommand` 同一规则）。
+List<VibeLocalCommand> _segmentsOf(String command) {
+  var text = command.trim();
+  for (final prefix in const <String>[
+    'cd "\$(pwd)" && ',
+    'cd \$(pwd) && ',
+    'cd . && ',
+  ]) {
+    while (text.startsWith(prefix)) {
+      text = text.substring(prefix.length).trim();
+    }
+  }
+  return _splitChain(
+    text,
+  ).parts.map(_parseSegment).whereType<VibeLocalCommand>().toList();
+}
+
+/// 取一条命令的连接符序列。
+List<VibeChainOp> _opsOf(String command) {
+  var text = command.trim();
+  for (final prefix in const <String>[
+    'cd "\$(pwd)" && ',
+    'cd \$(pwd) && ',
+    'cd . && ',
+  ]) {
+    while (text.startsWith(prefix)) {
+      text = text.substring(prefix.length).trim();
+    }
+  }
+  return _splitChain(text).ops;
+}
 
 /// 在宿主机上跑一条被支持的命令。
 ///
@@ -250,12 +339,23 @@ Future<VibeLocalRun> runVibeLocalCommand({
   // `$?` 只指紧邻上一条命令的退出码，单独记录。
   var previousCode = 0;
   var timedOut = false;
-  for (final part in _segmentsOf(command)) {
+  final parts = _segmentsOf(command);
+  final ops = _opsOf(command);
+  for (var index = 0; index < parts.length; index++) {
+    final part = parts[index];
+    // `&&` 前段失败就跳过后段；`||` 前段成功就跳过后段。
+    // 管道已在解析阶段整条拒绝，不会走到这里。
+    if (index > 0) {
+      final op = ops[index - 1];
+      if (op == VibeChainOp.then && previousCode != 0) break;
+      if (op == VibeChainOp.orElse && previousCode == 0) break;
+    }
     // echo 不调外部进程，`$?` 填上一段的真实退出码。
     if (part.executable == 'echo') {
       final text = '${part.entry.replaceAll(r'$?', '$previousCode')}\n';
       out.write(text);
       merged.write(text);
+      previousCode = code;
       continue;
     }
     // wc/od 在 Windows 上不存在，这里直接读文件，语义一致。
@@ -266,7 +366,8 @@ Future<VibeLocalRun> runVibeLocalCommand({
       if (!file.existsSync()) {
         merged.write('${part.executable}: ${part.entry}: 文件不存在\n');
         code = 1;
-        break;
+        previousCode = 1;
+        continue;
       }
       final bytes = file.readAsBytesSync();
       final text = part.executable == 'wc'
@@ -306,8 +407,8 @@ Future<VibeLocalRun> runVibeLocalCommand({
     );
     await Future.wait([outDone, errDone]);
     previousCode = code;
-    // 与 shell 一致：任一段失败就停，退出码取该段。
-    if (code != 0) break;
+    // `;` 与 `|` 继续往下跑；`&&`/`||` 由循环开头的短路判定处理。
+    if (code != 0 && (index + 1) >= parts.length) break;
   }
   if (timedOut) merged.write('执行超时（${timeout.inSeconds} 秒）\n');
   return VibeLocalRun(

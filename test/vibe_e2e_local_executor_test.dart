@@ -115,6 +115,70 @@ void main() {
       expect(failed.merged, isNot(contains('result.txt')));
     }, skip: skipPython);
 
+    test('a && chain stops after a failing segment', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File(
+        '${root.path}/bad.py',
+      ).writeAsStringSync('import sys\nsys.exit(2)\n');
+      File('${root.path}/ok.py').writeAsStringSync('print("reached")\n');
+
+      final run = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python bad.py && $python ok.py',
+      );
+      expect(run.exitCode, 2);
+      expect(run.merged, isNot(contains('reached')));
+    }, skip: skipPython);
+
+    test('a && chain runs the second segment on success', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File('${root.path}/ok.py').writeAsStringSync('print("passed")\n');
+      File('${root.path}/result.txt').writeAsStringSync('42\n');
+
+      final run = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python ok.py && wc -c result.txt && od -c result.txt',
+      );
+      expect(run.exitCode, 0);
+      expect(run.merged, contains('passed'));
+      expect(run.merged, contains('3 result.txt'));
+    }, skip: skipPython);
+
+    test('the verify.py && wc && od shape from messages is accepted', () {
+      final parsed = parseVibeLocalCommand(
+        'python3 verify.py && wc -c result.txt && od -c result.txt',
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.ops, [VibeChainOp.then, VibeChainOp.then]);
+    });
+
+    test('any off-allowlist segment rejects the whole chain', () {
+      // 关键点：不回落到云终端，而是整条不接。
+      expect(parseVibeLocalCommand('python3 verify.py && rm -rf .'), isNull);
+      expect(parseVibeLocalCommand('python3 verify.py | sh'), isNull);
+      expect(
+        parseVibeLocalCommand('python3 verify.py || curl http://x'),
+        isNull,
+      );
+    });
+
+    test('a || chain runs the fallback only on failure', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File(
+        '${root.path}/bad.py',
+      ).writeAsStringSync('import sys\nsys.exit(4)\n');
+      File('${root.path}/ok.py').writeAsStringSync('print("fallback")\n');
+
+      final run = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python bad.py || $python ok.py',
+      );
+      expect(run.merged, contains('fallback'));
+    }, skip: skipPython);
+
     test('stderr lands in the merged output', () async {
       final root = await Directory.systemTemp.createTemp('vibe-local-');
       addTearDown(() => root.delete(recursive: true));
