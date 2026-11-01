@@ -153,6 +153,15 @@ class VibeCodingController extends ChangeNotifier {
   bool _cancelRequested = false;
   bool _disposed = false;
   bool _usedTerminal = false;
+
+  /// 本轮终端不可用（未登录或会话过期）。
+  bool _terminalUnavailable = false;
+
+  /// 本次 send 内是否有成功的写入，且内置 HTML 检查未报错。
+  ///
+  /// 跨轮累积：常见节奏是先写文件、下一轮才跑验证，重置会让判据失效。
+  bool _wroteCleanThisSend = false;
+
   bool _roundHadFailures = false;
 
   VibePhase get phase => _phase;
@@ -199,6 +208,8 @@ class VibeCodingController extends ChangeNotifier {
     }
     _cancelRequested = false;
     _lastError = null;
+    _terminalUnavailable = false;
+    _wroteCleanThisSend = false;
     _appendMessage(VibeMessage(isUser: true, text: prompt));
     _history.add({'role': 'user', 'content': prompt});
     _trimHistory();
@@ -340,6 +351,7 @@ class VibeCodingController extends ChangeNotifier {
         final answered = <String>{};
         final facts = VibeRoundFacts();
         _roundHadFailures = false;
+        _terminalUnavailable = false;
         for (final call in parsed) {
           if (_cancelRequested || _disposed) {
             _finalizeCancelled(parsed, answered, null, null);
@@ -383,6 +395,21 @@ class VibeCodingController extends ChangeNotifier {
           });
         }
         _trimHistory();
+        // 终端不可用时模型容易反复重试。已经写好文件、结构检查也通过时，
+        // 把它当完成：缺的只是一次无处可跑的命令。
+        if (_terminalUnavailable) {
+          if (_wroteCleanThisSend) {
+            _appendMessage(
+              VibeMessage(isUser: false, text: '已写入文件，命令验证因终端未登录未执行。'),
+            );
+            _finalizeOpenPlan(failed: false);
+            _finish(VibePhase.succeeded);
+            return;
+          }
+          _finalizeOpenPlan(failed: true);
+          _fail('终端不可用（未登录或登录已过期），无法运行命令验证');
+          return;
+        }
         final stalled = guard.endRound(facts);
         if (stalled != null) {
           _finalizeOpenPlan(failed: true);
@@ -634,6 +661,9 @@ class VibeCodingController extends ChangeNotifier {
           guard.markWritten(result.relativePath);
           _onFileChanged?.call(result.relativePath);
           final verify = await _verificationHint(result.relativePath);
+          // 内置检查报错时不能算干净写入，否则会把错页面当完成。
+          _wroteCleanThisSend =
+              _wroteCleanThisSend || (verify == null || verify.contains('已通过'));
           return _ToolOutcome(
             status: VibeToolStatus.ok,
             summary:
@@ -948,7 +978,12 @@ class VibeCodingController extends ChangeNotifier {
   Future<_ToolOutcome> _runCommandInTerminal(String command, int index) async {
     final token = _tokenProvider();
     if (token == null || token.isEmpty) {
-      return _error('auth', '需要登录后才能使用在线终端');
+      _terminalUnavailable = true;
+      return _error(
+        'auth',
+        '终端不可用（未登录）。不要重试 run_command，'
+            '直接说明未能运行验证，并用 list_files 与内置检查说明交付物。',
+      );
     }
     final List<Map<String, String>> snapshot;
     try {
@@ -1017,6 +1052,21 @@ class VibeCodingController extends ChangeNotifier {
                 final message = error is ApiException
                     ? error.message
                     : '终端连接失败：$error';
+                if (_isTerminalAuthFailure(error, message)) {
+                  _terminalUnavailable = true;
+                  finish(
+                    _ToolOutcome(
+                      status: VibeToolStatus.error,
+                      summary: message,
+                      modelText:
+                          'error(auth): 终端不可用（$message）。'
+                          '不要重试 run_command，直接说明未能运行验证。',
+                      output: _combine(stdout.value, stderr.value),
+                      code: 'auth',
+                    ),
+                  );
+                  return;
+                }
                 finish(
                   _ToolOutcome(
                     status: VibeToolStatus.error,
@@ -1227,6 +1277,19 @@ class VibeCodingController extends ChangeNotifier {
     'cleaning' => '清理环境',
     _ => '准备执行',
   };
+
+  /// 终端认证失败：未登录、登录过期或令牌被拒。
+  ///
+  /// 这类失败重试也没用，必须让模型停下并如实说明。
+  static bool _isTerminalAuthFailure(Object error, String message) {
+    if (error is ApiException &&
+        (error.statusCode == 401 || error.statusCode == 403)) {
+      return true;
+    }
+    const hints = ['未登录', '登录已过期', '登录过期', '需要登录', '重新登录', 'unauthorized'];
+    final lower = message.toLowerCase();
+    return hints.any((hint) => lower.contains(hint.toLowerCase()));
+  }
 
   static _ToolOutcome _error(
     String code,

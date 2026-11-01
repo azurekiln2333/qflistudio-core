@@ -551,6 +551,55 @@ void main() {
     controller.dispose();
   });
 
+  test('finishes successfully when the terminal rejects the login', () async {
+    final relay = _FakeRelay()
+      ..terminalStatus = 401
+      ..chatReplies.addAll([
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content': '<!doctype html><html><body><h1>a</h1></body></html>',
+        }),
+        _toolCall('c1', 'run_command', {'command': 'python3 check.py'}),
+        _textReply('页面已写好，命令未能运行。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做一个网站');
+    await settle(controller, VibePhase.succeeded);
+
+    final run = controller.messages.firstWhere(
+      (m) => m.tool?.toolName == 'run_command',
+    );
+    expect(run.tool!.status, VibeToolStatus.error);
+    expect(run.tool!.result, contains('未登录'));
+    expect(
+      controller.messages.any((m) => m.text.contains('命令验证因终端未登录未执行')),
+      isTrue,
+    );
+    expect(controller.lastError, isNull);
+
+    controller.dispose();
+  });
+
+  test(
+    'fails when the terminal rejects the login and nothing was written',
+    () async {
+      final relay = _FakeRelay()
+        ..terminalStatus = 401
+        ..chatReplies.add(
+          _toolCall('c1', 'run_command', {'command': 'python3 check.py'}),
+        );
+      final controller = build(relay);
+
+      controller.send('跑检查');
+      await settle(controller, VibePhase.failed);
+
+      expect(controller.lastError, contains('终端不可用'));
+
+      controller.dispose();
+    },
+  );
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {
@@ -919,6 +968,13 @@ class _FakeRelay {
       authorizations.add(request.headers['authorization']);
       if (request.url.path == '/api/terminal/exec/stream') {
         terminalBodies.add(jsonDecode(body) as Map<String, dynamic>);
+        if (terminalStatus != null) {
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(jsonEncode({'error': '未登录或登录已过期'}))),
+            terminalStatus!,
+            headers: {'content-type': 'application/json'},
+          );
+        }
         if (holdTerminal != null) {
           // 真实的中断会关闭字节流；这里照做，让控制器看到流已结束。
           final abort = request is http.AbortableRequest
@@ -978,6 +1034,7 @@ class _FakeRelay {
   final terminalBodies = <Map<String, dynamic>>[];
   final authorizations = <String?>[];
   StreamController<List<int>>? holdTerminal;
+  int? terminalStatus;
   Completer<void>? holdDelete;
   int deleteCalls = 0;
   Future<void> Function(int index, Map<String, dynamic> body)? onChat;
