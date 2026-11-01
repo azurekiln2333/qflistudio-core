@@ -38,7 +38,8 @@ const int kVibeWebMaxBodyBytes = 512 * 1024;
 const Duration kVibeWebTimeout = Duration(seconds: 15);
 
 /// 直连最多跟随的跳转次数，与服务端一致。
-const int kVibeWebMaxRedirects = 5;
+/// 直连最多跟随的跳转次数。fetch 和 search 共用同一预算。
+const int kVibeWebMaxRedirects = 3;
 
 /// Bing 拒绝默认脚本 UA，直连也要带常规浏览器 UA。
 const String _browserUserAgent =
@@ -429,6 +430,11 @@ Future<VibeWebToolResult> _directFetch(
   }
 }
 
+/// 直连跟随跳转的最大跳数。上一跳不算作一次跳转。
+///
+/// 与 [kVibeWebMaxRedirects] 同值，保留独立名字便于搜索源单独收紧。
+const int kVibeDirectMaxRedirects = kVibeWebMaxRedirects;
+
 /// 直连搜索：请求 Bing RSS 并解析，规则与服务端 `web-search.js` 一致。
 Future<VibeWebToolResult> _directSearchImpl(
   String query,
@@ -532,16 +538,55 @@ Future<VibeWebToolResult> _directFetchImpl(
 }
 
 /// 直连 GET，带总超时、响应体上限与浏览器 UA。
+///
+/// 搜索源会先 302 到区域站点（实测 `www.bing.com` → `cn.bing.com`），
+/// 所以必须手动跟随：每一跳都重新做 SSRF 校验，协议只允许 http/https。
 Future<String> _directGet(
   http.Client client,
   Uri url, {
   required String accept,
 }) async {
-  final response = await _directSend(client, url, accept: accept);
-  if (!response.isSuccess) {
-    throw _DirectFailure('network', '目标站点返回 ${response.statusCode}');
+  var current = url;
+  for (var hop = 0; hop <= kVibeDirectMaxRedirects; hop++) {
+    _requireFetchableUri(current);
+    await assertPublicHost(current.host);
+
+    final response = await _directSend(client, current, accept: accept);
+    if (response.isRedirect) {
+      final location = response.headers['location'];
+      if (location == null || location.trim().isEmpty) {
+        throw const _DirectFailure('network', '跳转缺少目标地址');
+      }
+      final next = current.resolve(location.trim());
+      // 降级到 file/ftp 等协议必须在这里就拒掉，不能等下一次请求。
+      if (next.scheme != 'http' && next.scheme != 'https') {
+        throw const _DirectFailure('ssrf', '跳转目标不是 http 或 https');
+      }
+      current = next;
+      continue;
+    }
+    if (!response.isSuccess) {
+      throw _DirectFailure('network', '目标站点返回 ${response.statusCode}');
+    }
+    return response.body;
   }
-  return response.body;
+  throw const _DirectFailure(
+    'network',
+    '跳转次数超过 $kVibeDirectMaxRedirects 次',
+  );
+}
+
+/// 协议与凭据的即时校验；跳转后也要重新调用。
+void _requireFetchableUri(Uri uri) {
+  if (uri.scheme != 'http' && uri.scheme != 'https') {
+    throw const _DirectFailure('ssrf', '只允许 http 或 https 网址');
+  }
+  if (uri.userInfo.isNotEmpty) {
+    throw const _DirectFailure('ssrf', '网址不能包含用户名或密码');
+  }
+  if (_isBlockedAddress(uri.host)) {
+    throw const _DirectFailure('ssrf', '拒绝访问本机或内网地址');
+  }
 }
 
 class _DirectResponse {
@@ -607,6 +652,10 @@ class _DirectFailure implements Exception {
 
   final String code;
   final String message;
+
+  /// 没有这个覆盖，错误会显示成 `Instance of '_DirectFailure'`。
+  @override
+  String toString() => message;
 }
 
 /// 两条链路共用的结果格式化：标题、链接、摘要。
@@ -729,7 +778,12 @@ String _stripTags(String value) {
       : _decodeEntities(titleMatch.group(1) ?? '')
             .replaceAll(RegExp(r'\s+'), ' ')
             .trim();
-  final body = html
+  // 标题只算元数据，不能混进正文；head 里的剩余内容也一并去掉。
+  final withoutHead = html.replaceAll(
+    RegExp(r'<head[\s\S]*?</head>', caseSensitive: false),
+    ' ',
+  );
+  final body = withoutHead
       .replaceAll(RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
       .replaceAll(RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
       .replaceAll(RegExp(r'<noscript[\s\S]*?</noscript>', caseSensitive: false), ' ')
@@ -794,6 +848,47 @@ Future<List<String>> assertPublicHost(
     }
   }
   return addresses;
+}
+
+/// 直连搜索的可测入口：供实时验收直接调用真实网络链路。
+///
+/// 生产调用走 [executeVibeWebTool]；这里只暴露同一实现，避免测试重写解析逻辑。
+@visibleForTesting
+Future<List<Map<String, String>>> fetchDirectRssForTest(
+  String query,
+  http.Client client,
+) async {
+  final url = Uri.parse(kVibeDirectSearchEndpoint).replace(
+    queryParameters: {
+      'q': query,
+      'format': 'rss',
+      'count': '$kVibeWebMaxResults',
+    },
+  );
+  // 与生产路径同一条实现，包含手动跟随 302。
+  final xml = await _directGet(
+    client,
+    url,
+    accept: 'application/rss+xml, application/xml',
+  );
+  return parseBingRss(xml, kVibeWebMaxResults);
+}
+/// 直连抓取的可测入口：返回真实提取出的标题与正文。
+@visibleForTesting
+Future<({String title, String text})> fetchDirectPageForTest(
+  Uri uri,
+  http.Client client,
+) async {
+  await assertPublicHost(uri.host);
+  final response = await _directSend(
+    client,
+    uri,
+    accept: 'text/html,application/xhtml+xml,text/plain;q=0.9',
+  );
+  if (!response.isSuccess) {
+    throw StateError('目标站点返回 ${response.statusCode}');
+  }
+  return extractPageText(response.body);
 }
 
 /// 供控制器拼接工具列表：本地工具加上联网工具。

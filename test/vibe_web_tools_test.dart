@@ -150,12 +150,14 @@ void main() {
     });
 
     test('server errors become tool failures, not exceptions', () async {
+      // 503 属于“中转不可用”，会回退直连；这里禁用回退，只看中转错误本身。
       final api = clientReturning({'error': '搜索服务未配置'}, status: 503);
       final result = (await executeVibeWebTool(
         name: 'web_search',
         arguments: const {'query': 'x'},
         api: api,
         token: 't',
+        allowDirectFallback: false,
       ))!;
       expect(result.ok, isFalse);
       expect(result.modelText, contains('搜索服务未配置'));
@@ -263,8 +265,410 @@ void main() {
     });
   });
 
-  group('offline-only products', () {
-    test('both tools refuse with zero requests', () async {
+  group('direct fallback when the relay is not deployed', () {
+    // 真实线上状态：/api/ai/web_search 返回 404。
+    ApiClient relay404() => ApiClient(
+      transport: MockClient(
+        (_) async => http.Response('Cannot POST /api/ai/web_search', 404),
+      ),
+    );
+
+    // 真实 Bing RSS 响应片段（与 2026-11-01 观测一致）。
+    const realRss =
+        '<?xml version="1.0" encoding="utf-8" ?><rss version="2.0">'
+        '<channel><title>必应：Flutter 教程</title>'
+        '<item><title>Flutter - Build apps for any screen</title>'
+        '<link>https://flutter.dev/</link>'
+        '<description>Flutter transforms the entire app development process.</description></item>'
+        '<item><title><![CDATA[Flutter 教程 | 菜鸟教程]]></title>'
+        '<link>https://www.runoob.com/flutter/flutter-tutorial.html</link>'
+        '<description>Flutter 是 UI 工具包 &amp; 更多。</description></item>'
+        '<item><title>Bad</title><link>javascript:alert(1)</link>'
+        '<description>x</description></item>'
+        '</channel></rss>';
+
+    test('search falls back to a direct Bing RSS request', () async {
+      final directCalls = <http.Request>[];
+      final direct = MockClient((request) async {
+        directCalls.add(request);
+        // http.Response 默认按 latin1 编码，中文 RSS 必须用 bytes + UTF-8。
+        return http.Response.bytes(
+          utf8.encode(realRss),
+          200,
+          headers: {'content-type': 'application/rss+xml; charset=utf-8'},
+        );
+      });
+
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'Flutter 教程'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+
+      expect(result.ok, isTrue, reason: result.modelText);
+      expect(result.direct, isTrue);
+      expect(result.summary, contains('直连'));
+      expect(result.modelText, contains('Flutter - Build apps for any screen'));
+      expect(
+        result.modelText,
+        contains('https://www.runoob.com/flutter/flutter-tutorial.html'),
+      );
+      expect(result.modelText, contains('Flutter 教程 | 菜鸟教程'));
+      expect(result.modelText, isNot(contains('javascript:')));
+
+      expect(directCalls, hasLength(1));
+      final url = directCalls.single.url;
+      expect(url.host, 'www.bing.com');
+      expect(url.queryParameters['format'], 'rss');
+      expect(url.queryParameters['q'], 'Flutter 教程');
+      expect(directCalls.single.headers['user-agent'], contains('Mozilla'));
+    });
+
+    test('fetch falls back to a direct request and extracts text', () async {
+      final direct = MockClient(
+        (request) async => http.Response(
+          '<html><head><title>Demo &amp; Page</title>'
+          '<style>.a{color:red}</style></head>'
+          '<body><script>evil()</script><h1>正文标题</h1><p>第一段</p></body></html>',
+          200,
+          headers: {'content-type': 'text/html; charset=utf-8'},
+        ),
+      );
+      final result = (await executeVibeWebTool(
+        name: 'web_fetch',
+        arguments: const {'url': 'https://example.com/doc'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isTrue, reason: result.modelText);
+      expect(result.direct, isTrue);
+      expect(result.summary, contains('直连'));
+      expect(result.modelText, contains('Demo & Page'));
+      expect(result.modelText, contains('正文标题'));
+      expect(result.modelText, isNot(contains('evil')));
+      expect(result.modelText, isNot(contains('color:red')));
+    });
+
+    test('direct fetch rejects an internal redirect target', () async {
+      var requests = 0;
+      final direct = MockClient((request) async {
+        requests++;
+        return http.Response('', 302, headers: {
+          'location': 'http://127.0.0.1/admin',
+        });
+      });
+      final result = (await executeVibeWebTool(
+        name: 'web_fetch',
+        arguments: const {'url': 'https://example.com/go'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(result.modelText, contains('ssrf'));
+      // 只跟一跳：拒绝发生在向内网发请求之前。
+      expect(requests, 1);
+    });
+
+    test('direct fetch rejects a non-http scheme and metadata address', () async {
+      final direct = MockClient((_) async => http.Response('secret', 200));
+      for (final url in [
+        'http://169.254.169.254/latest/meta-data/',
+        'file:///etc/passwd',
+      ]) {
+        final result = (await executeVibeWebTool(
+          name: 'web_fetch',
+          arguments: {'url': url},
+          api: relay404(),
+          token: 't',
+          directClient: direct,
+        ))!;
+        expect(result.ok, isFalse, reason: url);
+      }
+    });
+
+    test('a 401 relay reply is not retried directly', () async {
+      var directCalls = 0;
+      final direct = MockClient((_) async {
+        directCalls++;
+        return http.Response.bytes(utf8.encode(realRss), 200);
+      });
+      final api = ApiClient(
+        transport: MockClient(
+          (_) async => http.Response.bytes(
+            utf8.encode(jsonEncode({'error': '未登录'})),
+            401,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          ),
+        ),
+      );
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: api,
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(result.direct, isFalse);
+      expect(directCalls, 0, reason: '业务拒绝不该触发直连');
+    });
+
+    test('a 5xx relay reply also falls back', () async {
+      final direct = MockClient(
+        (_) async => http.Response.bytes(utf8.encode(realRss), 200),
+      );
+      final api = ApiClient(
+        transport: MockClient(
+          // http.Response 默认按 latin1 编码，中文错误体必须声明 UTF-8。
+          (_) async => http.Response.bytes(
+            utf8.encode(jsonEncode({'error': '服务繁忙'})),
+            503,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          ),
+        ),
+      );
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: api,
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isTrue, reason: result.modelText);
+      expect(result.direct, isTrue);
+    });
+
+    test('fallback can be disabled', () async {
+      var directCalls = 0;
+      final direct = MockClient((_) async {
+        directCalls++;
+        return http.Response.bytes(utf8.encode(realRss), 200);
+      });
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+        allowDirectFallback: false,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(directCalls, 0);
+    });
+
+    test('direct failure reports both paths honestly', () async {
+      final direct = MockClient(
+        (_) async => http.Response('gone', 500),
+      );
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(result.direct, isTrue);
+      expect(result.modelText, contains('直连也失败'));
+      expect(result.modelText, contains('404'));
+    });
+  });
+
+  group('direct redirects', () {
+    // 真实情况：www.bing.com 先 302 到 cn.bing.com，再返回 RSS。
+    ApiClient relay404() => ApiClient(
+      transport: MockClient(
+        (_) async => http.Response('Cannot POST /api/ai/web_search', 404),
+      ),
+    );
+
+    test('follows a 302 to a public host and parses the result', () async {
+      final hops = <String>[];
+      final direct = MockClient((request) async {
+        hops.add(request.url.toString());
+        if (request.url.host == 'www.bing.com') {
+          return http.Response('', 302, headers: {
+            'location':
+                'https://cn.bing.com/search?q=Flutter&format=rss&count=3',
+          });
+        }
+        return http.Response.bytes(
+          utf8.encode(
+            '<rss><channel>'
+            '<item><title>区域站点结果</title>'
+            '<link>https://cn.example/one</link>'
+            '<description>正文摘要</description></item>'
+            '</channel></rss>',
+          ),
+          200,
+          headers: {'content-type': 'application/rss+xml; charset=utf-8'},
+        );
+      });
+
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'Flutter'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+
+      expect(result.ok, isTrue, reason: result.modelText);
+      expect(result.direct, isTrue);
+      expect(result.modelText, contains('区域站点结果'));
+      expect(result.modelText, contains('https://cn.example/one'));
+      // 两跳：原始地址 + 跳转后地址。
+      expect(hops, hasLength(2));
+      expect(hops.first, contains('www.bing.com'));
+      expect(hops.last, contains('cn.bing.com'));
+    });
+
+    test('rejects a 302 that points at 127.0.0.1', () async {
+      final hops = <String>[];
+      final direct = MockClient((request) async {
+        hops.add(request.url.toString());
+        return http.Response('', 302, headers: {
+          'location': 'http://127.0.0.1:8080/admin',
+        });
+      });
+
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+
+      expect(result.ok, isFalse);
+      expect(result.modelText, contains('ssrf'));
+      // 关键：内网地址一次都不应该被请求。
+      expect(hops, hasLength(1));
+      expect(hops.single, isNot(contains('127.0.0.1')));
+    });
+
+    test('rejects a redirect that downgrades to a non-http scheme', () async {
+      final direct = MockClient(
+        (_) async => http.Response('', 302, headers: {
+          'location': 'file:///etc/passwd',
+        }),
+      );
+      final result = (await executeVibeWebTool(
+        name: 'web_search',
+        arguments: const {'query': 'x'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(result.modelText, contains('ssrf'));
+    });
+
+    test('stops after the redirect budget', () async {
+      // 用字面公网 IP，避开 DNS 解析失败干扰跳数断言。
+      var hops = 0;
+      final direct = MockClient((request) async {
+        hops++;
+        return http.Response('', 302, headers: {'location': '/next'});
+      });
+      final result = (await executeVibeWebTool(
+        name: 'web_fetch',
+        arguments: const {'url': 'https://93.184.216.34/start'},
+        api: relay404(),
+        token: 't',
+        directClient: direct,
+      ))!;
+      expect(result.ok, isFalse);
+      expect(result.modelText, contains('跳转'));
+      // 初始请求 + kVibeDirectMaxRedirects 次跳转后停止。
+      expect(hops, kVibeDirectMaxRedirects + 1);
+    });
+  });
+
+  group('direct parsing and SSRF primitives', () {    test('parseBingRss handles CDATA and drops unsafe links', () {
+      const xml =
+          '<rss><channel>'
+          '<item><title><![CDATA[A & B]]></title><link>https://a.example/</link>'
+          '<description>x</description></item>'
+          '<item><title>T2</title><link>javascript:void(0)</link></item>'
+          '<item><title>T3</title><link></link></item>'
+          '</channel></rss>';
+      final results = parseBingRss(xml, 8);
+      expect(results, hasLength(1));
+      expect(results.single['title'], 'A & B');
+      expect(results.single['url'], 'https://a.example/');
+    });
+
+    test('parseBingRss honours the limit', () {
+      final xml = [
+        '<rss>',
+        for (var i = 0; i < 5; i++)
+          '<item><title>T$i</title><link>https://e$i.example/</link>'
+              '<description>s</description></item>',
+        '</rss>',
+      ].join();
+      expect(parseBingRss(xml, 2), hasLength(2));
+    });
+
+    test('extractPageText and normalizePageText', () {
+      // title 不进 body 文本；body 只保留正文并去空行。
+      final page = extractPageText(
+        '<html><head><title>T</title></head><body>\n\n  a   b \n<p>c</p>\n</body></html>',
+      );
+      expect(page.title, 'T');
+      expect(page.text, 'a b\nc');
+      expect(normalizePageText('  a \n\n\n b\t\tc  '), 'a\nb c');
+    });
+
+    test('assertPublicHost rejects names resolving to private addresses', () async {
+      // 任一 DNS 记录落入内网就整体拒绝。
+      Object? caught;
+      try {
+        await assertPublicHost(
+          'mixed.example',
+          resolve: (_) async => ['93.184.216.34', '10.1.2.3'],
+        );
+      } on Object catch (error) {
+        caught = error;
+      }
+      expect(caught, isNotNull, reason: '内网记录必须被拒绝');
+      expect(caught.toString(), contains('内网'));
+
+      // 只有公网记录时放行，并回传解析结果。
+      expect(
+        await assertPublicHost(
+          'ok.example',
+          resolve: (_) async => ['93.184.216.34'],
+        ),
+        ['93.184.216.34'],
+      );
+    });
+
+    test('assertPublicHost rejects localhost without a lookup', () async {
+      var lookups = 0;
+      Object? caught;
+      try {
+        await assertPublicHost(
+          'api.localhost',
+          resolve: (_) async {
+            lookups++;
+            return ['127.0.0.1'];
+          },
+        );
+      } on Object catch (error) {
+        caught = error;
+      }
+      expect(caught, isNotNull, reason: 'localhost 必须被拒绝');
+      expect(caught.toString(), contains('本机'));
+      expect(lookups, 0, reason: '不该为 localhost 发起解析');
+    });
+  });
+
+  group('offline-only products', () {    test('both tools refuse with zero requests', () async {
       StudioProfile.current = StudioProfile(
         id: 'offline',
         appTitle: 'Offline',
