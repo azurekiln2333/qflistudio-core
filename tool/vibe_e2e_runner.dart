@@ -260,6 +260,12 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
             (call) => call.toolName == 'run_command' && call.exitCode == null,
           )
           .length,
+      // 被白名单拒绝、改走云终端的命令原文，不追着改，先记下来。
+      'rejectedCommands': [
+        for (final call in toolCalls)
+          if (call.toolName == 'run_command' && call.exitCode == null)
+            call.summary,
+      ],
       'cloudTerminal': runtime.hasTerminal ? 'relay' : 'skipped',
       'cloudTerminalReason': runtime.hasTerminal
           ? '已配置本站登录令牌'
