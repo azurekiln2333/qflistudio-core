@@ -108,7 +108,11 @@ VibeSkill? parseVibeSkill(
         ).firstMatch(trimmed);
         if (match == null) continue;
         pendingKey = match.group(1)!.toLowerCase();
-        pendingValue.add(_unquote(match.group(2)!.trim()));
+        final value = match.group(2)!.trim();
+        // YAML 块标量（`>-`、`|`）只表示折叠或保留换行，不是内容。
+        if (!RegExp(r'^[|>][-+]?$').hasMatch(value)) {
+          pendingValue.add(_unquote(value));
+        }
       }
       flush();
       name = block['name'];
@@ -170,6 +174,9 @@ class VibeSkillLibrary {
   ];
 
   static List<VibeSkill>? _builtInCache;
+
+  /// 测试用：清空内置技能缓存。
+  static void resetBuiltInCache() => _builtInCache = null;
 
   /// 按顺序发现技能；同名技能只保留最先出现的来源。
   Future<List<VibeSkill>> load() async {
@@ -274,9 +281,6 @@ class VibeSkillLibrary {
     _builtInCache = List.unmodifiable(skills);
     return _builtInCache!;
   }
-
-  /// 只测试用：清空内置技能缓存。
-  static void resetBuiltInCache() => _builtInCache = null;
 }
 
 /// 技能索引：一行一个技能，供提示词使用；超出上限时截断并标注。

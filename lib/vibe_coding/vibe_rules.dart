@@ -39,19 +39,25 @@ String loadVibeRules(String projectRoot) {
       continue;
     }
     final trimmed = clampVibeText(text, kVibeMaxRuleFileChars);
+    final fileTruncated = text.length > kVibeMaxRuleFileChars;
     if (trimmed.trim().isEmpty) continue;
     final header = '### $relative';
     final budget = kVibeMaxRulesChars - used;
-    if (budget <= header.length + 32) {
+    if (budget <= header.length + 40) {
       sections.add('（其余规则文件已达上限，未加载）');
       break;
     }
-    final room = budget - header.length - '（规则已截断）'.length - 2;
-    final body = trimmed.length <= room
-        ? trimmed
-        : '${clampVibeText(trimmed, room)}\n（规则已截断）';
-    sections.add('$header\n${body.trimRight()}');
-    used += body.length + header.length + 2;
+    const mark = '（规则已截断）';
+    final room = budget - header.length - 2;
+    var body = trimmed;
+    var marked = fileTruncated;
+    if (body.length + (marked ? mark.length + 1 : 0) > room) {
+      body = clampVibeText(trimmed, room - mark.length - 1);
+      marked = true;
+    }
+    final section = '$header\n${body.trimRight()}${marked ? '\n$mark' : ''}';
+    sections.add(section);
+    used += section.length + 2;
   }
   return sections.join('\n\n');
 }

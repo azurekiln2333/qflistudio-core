@@ -19,9 +19,15 @@ import 'vibe_skills.dart';
 import 'vibe_tools.dart';
 
 export 'vibe_loop_guard.dart'
-    show vibeRoundBudget, kVibeBaseRounds, kVibeMaxRoundBudget;
+    show
+        VibeLoopGuard,
+        VibeRoundFacts,
+        vibeRoundBudget,
+        kVibeBaseRounds,
+        kVibeMaxRoundBudget;
 export 'vibe_plan.dart'
     show
+        VibePlanException,
         VibePlanItem,
         VibePlanStatus,
         kVibeMaxPlanItems,
@@ -33,6 +39,8 @@ export 'vibe_skills.dart'
         VibeSkillLibrary,
         VibeSkillSource,
         buildVibeSkillIndex,
+        kVibeMaxSkillIndexChars,
+        kVibeSkillMaxBodyChars,
         parseVibeSkill,
         vibePromptWantsWeb;
 export 'vibe_models.dart';
