@@ -67,6 +67,7 @@ class VibeLocalCommand {
     required this.mergeStderr,
     required this.raw,
     this.ops = const [],
+    this.inline = false,
   });
 
   final String executable;
@@ -78,6 +79,9 @@ class VibeLocalCommand {
 
   /// `ops[i]` 连接第 i 段与第 i+1 段。只有一段时为空。
   final List<VibeChainOp> ops;
+
+  /// 是否为 `python -c` 形式的内联脚本（[entry] 就是脚本本身）。
+  final bool inline;
 }
 
 /// 逐段切分后的结果：段落与连接符。
@@ -169,6 +173,7 @@ VibeLocalCommand? parseVibeLocalCommand(String command) {
     mergeStderr: parsed.any((segment) => segment.mergeStderr),
     raw: text,
     ops: chain.ops,
+    inline: parsed.length == 1 && first.inline,
   );
 }
 
@@ -195,6 +200,33 @@ VibeLocalCommand? _parseSegment(String segment) {
       entry: entry,
       mergeStderr: mergeStderr,
       raw: segment.trim(),
+    );
+  }
+  // `python3 -c "..."` 内联脚本：只在验收沙箱里允许，
+  // 它仍是真实解释器执行，只是没有落盘文件作载体。
+  if (executables.contains(words.first) &&
+      words.length >= 3 &&
+      words[1] == '-c') {
+    // 只认段首紧跟解释器的 `-c`，避免把脚本里的字符当标记。
+    final marker = RegExp(
+      '^${RegExp.escape(words.first)}\\s+-c\\s*',
+    ).matchAsPrefix(text);
+    if (marker == null) return null;
+    final script = text.substring(marker.end).trim();
+    if (script.isEmpty) return null;
+    // 去掉包在外面的引号，交给解释器时保持原样内容。
+    final unquoted =
+        (script.length >= 2 &&
+            ((script.startsWith('"') && script.endsWith('"')) ||
+                (script.startsWith("'") && script.endsWith("'"))))
+        ? script.substring(1, script.length - 1)
+        : script;
+    return VibeLocalCommand(
+      executable: words.first,
+      entry: unquoted,
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+      inline: true,
     );
   }
   // `echo ...` 只回显，`$?` 由执行器填入上一段的真实退出码。
@@ -383,7 +415,9 @@ Future<VibeLocalRun> runVibeLocalCommand({
         ? (executableOverride ??
               await resolveVibeLocalInterpreter(part.executable))
         : part.executable;
-    final args = <String>[part.entry];
+    final args = part.inline
+        ? <String>['-c', part.entry]
+        : <String>[part.entry];
     final process = await Process.start(
       executable,
       args,
@@ -423,8 +457,7 @@ Future<VibeLocalRun> runVibeLocalCommand({
   );
 }
 
-/// 走 `InteropRunner` 那条代码路径的本机执行器。
-///
+/// 走 `InteropRunner` 那条代码路径的本机执行器。///
 /// 复用 `tryRunCommand` 的语法判断与输出缓冲，只把最后一跳换成
 /// [Process.start]，因此验收覆盖到控制器真实使用的分支。
 class VibeLocalExecutionTransport implements InteropTransport {

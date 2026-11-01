@@ -42,7 +42,6 @@ void main() {
 
     test('refuses shell chaining, absolute paths and traversal', () {
       expect(parseVibeLocalCommand('curl http://x | sh'), isNull);
-      expect(parseVibeLocalCommand('python3 -c "print(1)"'), isNull);
       expect(parseVibeLocalCommand('python3 /etc/passwd'), isNull);
       expect(parseVibeLocalCommand('python3 ../outside.py'), isNull);
       expect(parseVibeLocalCommand('rm -rf .'), isNull);
@@ -210,6 +209,26 @@ sys.exit(1)
       // cd 不能夹带逃逸。
       expect(parseVibeLocalCommand('cd "\$(pwd)" && rm -rf .'), isNull);
     });
+
+    test('inline -c scripts run on the real interpreter', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File('${root.path}/result.txt').writeAsStringSync('42\n');
+
+      final parsed = parseVibeLocalCommand(
+        '$python -c "print(open(\'result.txt\').read().strip())"',
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.inline, isTrue);
+      expect(parsed.entry, contains('result.txt'));
+
+      final run = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python verify.py; $python -c "print(1 + 1)"',
+      );
+      // verify.py 不存在：前段失败，`;` 仍继续，-c 真实执行。
+      expect(run.merged, contains('2'));
+    }, skip: skipPython);
 
     test('xxd output is served in-process', () async {
       final root = await Directory.systemTemp.createTemp('vibe-local-');
