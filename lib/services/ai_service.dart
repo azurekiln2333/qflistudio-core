@@ -250,6 +250,10 @@ abstract final class AiService {
   ) {
     final system = <String>[];
     final input = <Map<String, dynamic>>[];
+    // 实测约束：newapi 的 Responses 兼容层拒绝带 type 的内容块
+    // （`does not support input.N.content.M.content_type`），只接受字符串
+    // content，加独立的 function_call / function_call_output 条目。
+    // 真实 OpenAI Responses 也接受字符串 content，两边因此都兼容。
     for (final message in messages) {
       final role = _role(message['role']);
       final text = message['content'] is String
@@ -259,32 +263,23 @@ abstract final class AiService {
         case 'system':
           if (text.isNotEmpty) system.add(text);
         case 'user':
-          input.add({
-            'role': 'user',
-            'content': [
-              {'type': 'input_text', 'text': text},
-            ],
-          });
+          input.add({'role': 'user', 'content': text});
         case 'assistant':
-          final parts = <Map<String, dynamic>>[];
           if (text.isNotEmpty) {
-            parts.add({'type': 'output_text', 'text': text});
+            input.add({'role': 'assistant', 'content': text});
           }
           final calls = message['tool_calls'];
           if (calls is List) {
             for (final call in calls) {
               final encoded = _openAiCall(call);
               final function = encoded['function'] as Map<String, dynamic>;
-              parts.add({
+              input.add({
                 'type': 'function_call',
                 'call_id': encoded['id'],
                 'name': function['name'],
                 'arguments': function['arguments'],
               });
             }
-          }
-          if (parts.isNotEmpty) {
-            input.add({'role': 'assistant', 'content': parts});
           }
         case 'tool':
           input.add({

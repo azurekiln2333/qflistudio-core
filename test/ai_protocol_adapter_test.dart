@@ -253,10 +253,11 @@ void main() {
       expect(body.containsKey('max_tokens'), isFalse);
       final input = (body['input'] as List).cast<Map>();
       expect(input.first['role'], 'user');
-      expect(input.first['content'][0]['type'], 'input_text');
-      final assistant = input[1];
-      expect(assistant['content'][0]['type'], 'output_text');
-      final call = assistant['content'][1];
+      // 兼容层只收字符串 content，因此这里断言字符串而不是内容块。
+      expect(input.first['content'], '用 web_search 查今天新闻。');
+      expect(input[1]['role'], 'assistant');
+      expect(input[1]['content'], '我来搜索。');
+      final call = input[2];
       expect(call['type'], 'function_call');
       expect(call['call_id'], 'call_00_demo');
       expect(call['name'], 'web_search');
