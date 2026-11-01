@@ -57,6 +57,8 @@ import '../services/local_stats_service.dart';
 import '../services/picker_service.dart';
 import 'ai_panel.dart';
 import 'open_performance.dart';
+import '../interop/interop_run_dialog.dart';
+import '../interop/interop_targets.dart';
 
 enum _BottomPanel {
   none,
@@ -2010,6 +2012,93 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   void _recordProgramExit(int code) => _output.append('退出码 $code\n');
 
+  /// The device app that owns this project's toolchain, or null when none does.
+  ///
+  /// The entry file decides: a project can hold several files and only one of
+  /// them names a toolchain. An entry that matches no receiver must produce no
+  /// menu item, because an action that can only fail is worse than none.
+  InteropTarget? _interopTargetFor(String? entryFile) {
+    if (StudioProfile.current?.interopRunner == null || entryFile == null) {
+      return null;
+    }
+    return InteropTargets.forEntryFile(entryFile);
+  }
+
+  /// Entry file of [projectPath], or null when the project has none.
+  String? _entryFileOf(String projectPath) {
+    final entry = RunnerService.findEntry(projectPath);
+    return entry == null ? null : p.normalize(p.absolute(entry));
+  }
+
+  /// Compiles and runs the open project inside the sibling app that owns the
+  /// toolchain.
+  ///
+  /// The probe runs first. Without it an uninstalled sibling app would look
+  /// like a run that started and produced nothing, so the user gets an install
+  /// hint instead.
+  Future<void> _runInSiblingApp() async {
+    final runner = StudioProfile.current?.interopRunner;
+    if (runner == null) return;
+    if (_runningProject ||
+        _runningFileTool ||
+        _debugger.busy ||
+        _terminalKey.currentState?.hasRunningWork == true) {
+      _showSnack('请先停止当前运行任务');
+      return;
+    }
+    final active = _editor.current;
+    if (active != null && _isOrphaned(active)) {
+      _showSnack('项目已从工作区移除，请先通过「另存为…」导出未保存的改动');
+      return;
+    }
+    final projectPath = active?.projectRootPath ?? widget.project.path;
+    if (!Directory(projectPath).existsSync()) {
+      _showSnack('项目文件夹已不可用（$projectPath）');
+      return;
+    }
+    // The payload is built from disk, so an unsaved buffer would compile bytes
+    // the user cannot see. Refuse instead of guessing which version to run.
+    final unsaved = _editor.files
+        .where((open) => p.equals(open.projectRootPath, projectPath))
+        .where((open) => open.dirty)
+        .toList();
+    if (unsaved.isNotEmpty) {
+      _showSnack('请先保存 ${unsaved.length} 个未保存的文件');
+      return;
+    }
+    final entry = _entryFileOf(projectPath);
+    final target = _interopTargetFor(entry);
+    if (entry == null || target == null) {
+      _showSnack('没有支持该项目入口的配套应用');
+      return;
+    }
+    final probe = await runner.probe(target.language);
+    if (!mounted) return;
+    if (!probe.available) {
+      _showSnack(
+        probe.diagnostic ?? InteropTargets.installHint(target.language),
+      );
+      return;
+    }
+    final code = await showInteropRunDialog(
+      context: context,
+      projectRoot: projectPath,
+      language: target.language,
+      entryFile: entry,
+      runner: runner,
+    );
+    if (!mounted || code == null) return;
+    _output.append(
+      '跨应用运行 · ${p.basename(entry)} · ${target.productName} · 退出码 $code\n',
+    );
+    unawaited(
+      LocalStatsService.instance.recordRun(
+        succeeded: code == 0,
+        project: active?.ownerProjectName ?? widget.project.name,
+      ),
+    );
+  }
+
   Future<void> _startDebug(bool stopOnEntry) async {
     final active = _editor.current;
     if (active != null && _isOrphaned(active)) {
@@ -2298,6 +2387,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         _saveCurrent();
                                       case 'recover_orphan':
                                         unawaited(_recoverOrphanedFile());
+                                      case 'interop_run':
+                                        unawaited(_runInSiblingApp());
                                       case 'close_editor':
                                         unawaited(_closeEditor());
                                       case 'find':
@@ -2435,6 +2526,33 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             SizedBox(width: 12),
                                             Flexible(
                                               child: Text('另存为…（项目不可用）'),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    if (_interopTargetFor(
+                                          _entryFileOf(
+                                            _editor.current?.projectRootPath ??
+                                                widget.project.path,
+                                          ),
+                                        )
+                                        case final interopTarget?)
+                                      PopupMenuItem(
+                                        value: 'interop_run',
+                                        enabled:
+                                            !_runningProject &&
+                                            !_debugger.busy,
+                                        child: Row(
+                                          children: [
+                                            const Icon(
+                                              Icons.developer_board_outlined,
+                                              size: 20,
+                                            ),
+                                            const SizedBox(width: 12),
+                                            Flexible(
+                                              child: Text(
+                                                '在 ${interopTarget.productName} 中运行',
+                                              ),
                                             ),
                                           ],
                                         ),

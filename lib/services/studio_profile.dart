@@ -5,6 +5,7 @@ import 'package:re_editor/re_editor.dart';
 
 import '../store/project_store.dart';
 import '../content/content_repository.dart';
+import '../interop/interop_runner.dart';
 import '../terminal/shell/sandbox_shell_backend.dart';
 import 'project_templates.dart';
 import 'code_analysis.dart';
@@ -99,6 +100,7 @@ class StudioProfile {
     required this.appTitle,
     required this.templates,
     this.runner,
+    this.interopRunner,
     this.codeAnalyzer,
     this.debugger,
     this.webPreviewFactory,
@@ -135,6 +137,15 @@ class StudioProfile {
 
   /// 本地运行后端。null 表示沿用 [RunnerService] 的默认行为。
   final ProgramRunner? runner;
+
+  /// Cross-app backend: compiles and runs a project inside the sibling
+  /// language app that owns the toolchain.
+  ///
+  /// Null means this product has no sibling receiver, and the editor offers no
+  /// cross-app entry. A non-null value does not promise the sibling app is
+  /// installed: [InteropRunner.probe] decides that, and the editor shows an
+  /// install hint when the probe fails.
+  final InteropRunner? interopRunner;
 
   /// Optional product-owned offline syntax checker for unsaved editor buffers.
   /// Null means no checker is installed; it never falls back to running code.
