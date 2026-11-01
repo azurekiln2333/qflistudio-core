@@ -59,6 +59,7 @@ const Map<String, Set<String>> kVibeBuiltInSkillLanguages = {
   'web-app-scaffold': {'*'},
   'bug-fix-loop': {'*'},
   'project-review': {'*'},
+  'web-research': {'*'},
 };
 
 /// 从 `SKILL.md` 文本解析技能；缺少描述返回 null。
@@ -171,6 +172,7 @@ class VibeSkillLibrary {
     'assets/skills/web-app-scaffold/SKILL.md',
     'assets/skills/bug-fix-loop/SKILL.md',
     'assets/skills/project-review/SKILL.md',
+    'assets/skills/web-research/SKILL.md',
   ];
 
   static List<VibeSkill>? _builtInCache;

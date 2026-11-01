@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
-import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
+import 'package:qfli_studio_core/vibe_coding/vibe_skills.dart';
 
 /// Serves a fixed set of packaged skill assets and records every load.
 class _FakeAssets extends CachingAssetBundle {
@@ -160,6 +160,7 @@ void main() {
         'assets/skills/web-app-scaffold/SKILL.md',
         'assets/skills/bug-fix-loop/SKILL.md',
         'assets/skills/project-review/SKILL.md',
+        'assets/skills/web-research/SKILL.md',
       ]);
     });
 
@@ -233,6 +234,20 @@ void main() {
         expect(skill!.description, isNotEmpty, reason: asset);
         expect(skill.isBuiltIn, isTrue);
       }
+    });
+
+    test('web-research states the citation rule', () {
+      final asset = VibeSkillLibrary.builtInAssetDirs.firstWhere(
+        (dir) => dir.contains('web-research'),
+      );
+      final body = File(
+        p.joinAll([Directory.current.path, ...asset.split('/')]),
+      ).readAsStringSync();
+      expect(body, contains('web_search'));
+      expect(body, contains('web_fetch'));
+      expect(body, contains('完整网址'));
+      expect(body, contains('不编造'));
+      expect(kVibeBuiltInSkillLanguages.containsKey('web-research'), isTrue);
     });
   });
 }

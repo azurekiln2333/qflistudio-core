@@ -533,6 +533,24 @@ void main() {
     controller.dispose();
   });
 
+  test('tells the model to cite the URLs it actually got', () async {
+    final relay = _FakeRelay()..chatReplies.add(_textReply('好的。'));
+    final controller = build(relay);
+
+    controller.send('查一下 Dart 的当前版本');
+    await settle(controller, VibePhase.succeeded);
+
+    final system = (relay.chatBodies.first['messages'] as List).first as Map;
+    final prompt = '${system['content']}';
+    expect(prompt, contains('web_search'));
+    expect(prompt, contains('web_fetch'));
+    expect(prompt, contains('标题'));
+    expect(prompt, contains('完整网址'));
+    expect(prompt, contains('不得编造'));
+
+    controller.dispose();
+  });
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {

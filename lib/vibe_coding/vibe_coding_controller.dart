@@ -1092,6 +1092,10 @@ class VibeCodingController extends ChangeNotifier {
 7. 工具失败时读取真实错误，修复后重新运行，直到验证通过或确认无法继续。
 8. 网页类交付物的完成标准：list_files 能看到全部文件，且 run_command 的结构检查通过。
 9. 同一个失败命令连续报错时，先 read_file 看当前内容，不要盲目重试。
+10. 用过 web_search 或 web_fetch 时，最终回答必须列出所用来源：
+    每条一行，写标题和完整网址，例如“- 标题 — https://example.com/a”。
+    只引用工具实际返回过的网址，逐字照抄，不得编造或补全。
+    工具没返回可用结果时，直接说明查不到，不要编造来源。
 回答用中文，简洁说明改动内容和真实验证结果。''';
 
   int _appendMessage(VibeMessage message) {
