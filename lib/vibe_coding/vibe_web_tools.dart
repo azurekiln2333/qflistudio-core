@@ -1,13 +1,19 @@
 /// 联网检索工具：`web_search` 与 `web_fetch`。
 ///
-/// 两个工具都经过 [ApiClient] 的中转接口，密钥与出网策略留在服务端；
+/// 优先走 [ApiClient] 的中转接口；中转未部署（404）或不可用时，
+/// 设备端直连搜索源/目标站点兜底，摘要上标明“直连”。
+/// 两条链路共用同一套解析、SSRF 防护与大小、超时上限。
 /// 离线专属产品在构造请求前就被拒绝。工具结果只作为模型反馈，
 /// 从不伪造成功，也不把网页内容当成本地文件。
 library;
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../services/api_client.dart';
 import '../services/studio_profile.dart';
@@ -21,6 +27,30 @@ const int kVibeWebMaxResults = 8;
 
 /// `web_fetch` 保留的正文上限（UTF-16 字符）。
 const int kVibeWebMaxFetchChars = 20000;
+
+/// 直连搜索源：与服务端同一个 Bing RSS 端点。
+const String kVibeDirectSearchEndpoint = 'https://www.bing.com/search';
+
+/// 直连抓取的响应体上限（字节），与服务端一致。
+const int kVibeWebMaxBodyBytes = 512 * 1024;
+
+/// 直连请求总超时，与服务端一致。
+const Duration kVibeWebTimeout = Duration(seconds: 15);
+
+/// 直连最多跟随的跳转次数，与服务端一致。
+const int kVibeWebMaxRedirects = 5;
+
+/// Bing 拒绝默认脚本 UA，直连也要带常规浏览器 UA。
+const String _browserUserAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+/// 只接受这些内容类型，避免把二进制当正文解析。
+const Set<String> _allowedContentTypes = {
+  'text/html',
+  'text/plain',
+  'application/xhtml+xml',
+};
 
 /// 当前产品是否允许联网工具。
 ///
@@ -36,18 +66,22 @@ class VibeWebToolResult {
     required this.ok,
     required this.summary,
     required this.modelText,
+    this.direct = false,
   });
 
   /// 失败时也返回模型可读文本，让模型能改用别的办法。
   final bool ok;
 
-  /// 工具卡片上的一行摘要。
+  /// 工具卡片上的一行摘要；直连兜底时带“直连”标注。
   final String summary;
 
   /// 回传给模型的内容。
   final String modelText;
 
-  VibeWebToolResult.failure(String code, String message)
+  /// 是否由设备端直连完成（中转不可用时的兜底）。
+  final bool direct;
+
+  VibeWebToolResult.failure(String code, String message, {this.direct = false})
     : ok = false,
       summary = message,
       modelText = 'error($code): $message';
@@ -102,6 +136,8 @@ Future<VibeWebToolResult?> executeVibeWebTool({
   required ApiClient api,
   required String token,
   bool Function()? onlineAllowed,
+  http.Client? directClient,
+  bool allowDirectFallback = true,
 }) async {
   if (!isVibeWebTool(name)) return null;
   // 产品开关与 offlineOnly 档位任一为假都在本地拒绝：
@@ -112,16 +148,93 @@ Future<VibeWebToolResult?> executeVibeWebTool({
   if (token.isEmpty) {
     return VibeWebToolResult.failure('auth', '需要登录后才能使用联网工具');
   }
+  final validation = _validateArguments(name, arguments);
+  if (validation != null) return validation;
+
+  String? relayMessage;
   try {
     return switch (name) {
       'web_search' => await _search(arguments, api, token),
       _ => await _fetch(arguments, api, token),
     };
   } on ApiException catch (error) {
-    // 兜底：策略拒绝仍报 OFFLINE_ONLY，便于控制器区分“不能上网”和“网络故障”。
-    final code = error.details['code'] == 'OFFLINE_ONLY' ? 'OFFLINE_ONLY' : 'network';
-    return VibeWebToolResult.failure(code, error.message);
+    // 策略拒绝必须保留原错误码，便于控制器区分“不能上网”和“网络故障”。
+    if (error.details['code'] == 'OFFLINE_ONLY') {
+      return VibeWebToolResult.failure('OFFLINE_ONLY', error.message);
+    }
+    if (!_isRelayUnavailable(error) || !allowDirectFallback) {
+      return VibeWebToolResult.failure('network', error.message);
+    }
+    relayMessage = error.message;
   }
+
+  // 中转不可用：设备端直连，沿用同一套解析与防护。
+  final client = directClient ?? http.Client();
+  final owned = directClient == null;
+  try {
+    return switch (name) {
+      'web_search' => await _directSearch(
+        arguments['query'] as String,
+        client,
+        relayMessage,
+      ),
+      _ => await _directFetch(
+        Uri.parse(arguments['url'] as String),
+        client,
+        relayMessage,
+      ),
+    };
+  } on _DirectFailure catch (error) {
+    return VibeWebToolResult.failure(error.code, error.message, direct: true);
+  } finally {
+    if (owned) client.close();
+  }
+}
+
+/// 中转是否“不可用”而不是“业务拒绝”。
+///
+/// 404 = 端点未部署，5xx = 服务故障，无状态码 = 根本没连上。
+/// 429、401、400 是明确的业务答复，直连也得不到不同结果，因此不回退。
+bool _isRelayUnavailable(ApiException error) {
+  final status = error.statusCode;
+  if (status == null) return true;
+  return status == 404 || status >= 500;
+}
+
+/// 参数校验；返回 null 表示通过。
+VibeWebToolResult? _validateArguments(
+  String name,
+  Map<String, dynamic> arguments,
+) {
+  if (name == 'web_search') {
+    final query = arguments['query'];
+    if (query is! String || query.trim().isEmpty) {
+      return VibeWebToolResult.failure('error', 'query 必须是非空字符串');
+    }
+    if (query.length > 200) {
+      return VibeWebToolResult.failure('error', 'query 超过 200 字符');
+    }
+    return null;
+  }
+  final raw = arguments['url'];
+  if (raw is! String || raw.trim().isEmpty) {
+    return VibeWebToolResult.failure('error', 'url 必须是非空字符串');
+  }
+  final uri = Uri.tryParse(raw.trim());
+  if (uri == null || !uri.hasAuthority) {
+    return VibeWebToolResult.failure('error', 'url 不是有效网址');
+  }
+  if (uri.scheme != 'http' && uri.scheme != 'https') {
+    return VibeWebToolResult.failure('ssrf', '只允许 http 或 https 网址');
+  }
+  if (uri.userInfo.isNotEmpty) {
+    return VibeWebToolResult.failure('ssrf', '网址不能包含用户名或密码');
+  }
+  // 中转侧还有一层校验；这里先挡掉明显的内网地址，省一次往返。
+  if (_isBlockedAddress(uri.host)) {
+    return VibeWebToolResult.failure('ssrf', '拒绝访问本机或内网地址');
+  }
+  return null;
 }
 
 Future<VibeWebToolResult> _search(
@@ -268,7 +381,8 @@ bool _isBlockedV4(List<int> bytes) {
 bool _isBlockedV6(List<int> bytes) {
   if (bytes.length != 16) return true;
   // IPv4 映射地址 ::ffff:a.b.c.d 按 IPv4 规则判断。
-  final mapped = bytes.take(10).every((byte) => byte == 0) &&
+  final mapped =
+      bytes.take(10).every((byte) => byte == 0) &&
       bytes[10] == 0xff &&
       bytes[11] == 0xff;
   if (mapped) return _isBlockedV4(bytes.sublist(12));
@@ -281,6 +395,405 @@ bool _isBlockedV6(List<int> bytes) {
   // ff00::/8 组播。
   if (bytes[0] == 0xff) return true;
   return false;
+}
+
+/// 直连搜索入口：失败时补上中转原因，便于定位是哪条链路没通。
+Future<VibeWebToolResult> _directSearch(
+  String query,
+  http.Client client,
+  String relayMessage,
+) async {
+  try {
+    return await _directSearchImpl(query.trim(), client);
+  } on _DirectFailure catch (error) {
+    throw _DirectFailure(
+      error.code,
+      '直连也失败：${error.message}（中转：$relayMessage）',
+    );
+  }
+}
+
+/// 直连抓取入口，同上。
+Future<VibeWebToolResult> _directFetch(
+  Uri uri,
+  http.Client client,
+  String relayMessage,
+) async {
+  try {
+    return await _directFetchImpl(uri, client);
+  } on _DirectFailure catch (error) {
+    throw _DirectFailure(
+      error.code,
+      '直连也失败：${error.message}（中转：$relayMessage）',
+    );
+  }
+}
+
+/// 直连搜索：请求 Bing RSS 并解析，规则与服务端 `web-search.js` 一致。
+Future<VibeWebToolResult> _directSearchImpl(
+  String query,
+  http.Client client,
+) async {
+  final url = Uri.parse(kVibeDirectSearchEndpoint).replace(
+    queryParameters: {
+      'q': query,
+      'format': 'rss',
+      'count': '$kVibeWebMaxResults',
+    },
+  );
+  final html = await _directGet(
+    client,
+    url,
+    accept: 'application/rss+xml, application/xml',
+  );
+  final results = parseBingRss(html, kVibeWebMaxResults);
+  if (results.isEmpty) {
+    return const VibeWebToolResult(
+      ok: true,
+      direct: true,
+      summary: '直连：没有结果',
+      modelText: '没有找到相关结果，可以换关键词再试。',
+    );
+  }
+  final formatted = _formatResults(results);
+  return VibeWebToolResult(
+    ok: true,
+    direct: true,
+    summary: '直连：${formatted.summary}',
+    modelText: formatted.modelText,
+  );
+}
+
+/// 直连抓取：SSRF 校验（含真实 DNS 解析）、逐跳校验跳转、大小与超时上限。
+Future<VibeWebToolResult> _directFetchImpl(
+  Uri start,
+  http.Client client,
+) async {
+  var current = start;
+  for (var hop = 0; hop <= kVibeWebMaxRedirects; hop++) {
+    if (current.scheme != 'http' && current.scheme != 'https') {
+      throw const _DirectFailure('ssrf', '只允许 http 或 https 网址');
+    }
+    if (current.userInfo.isNotEmpty) {
+      throw const _DirectFailure('ssrf', '网址不能包含用户名或密码');
+    }
+    await assertPublicHost(current.host);
+
+    final response = await _directSend(
+      client,
+      current,
+      accept: 'text/html,application/xhtml+xml,text/plain;q=0.9',
+    );
+    if (response.isRedirect) {
+      final location = response.headers['location'];
+      if (location == null || location.isEmpty) {
+        throw const _DirectFailure('network', '跳转缺少目标地址');
+      }
+      current = current.resolve(location);
+      continue;
+    }
+    if (!response.isSuccess) {
+      throw _DirectFailure('network', '目标站点返回 ${response.statusCode}');
+    }
+    final type = (response.headers['content-type'] ?? '')
+        .split(';')
+        .first
+        .trim()
+        .toLowerCase();
+    if (type.isNotEmpty && !_allowedContentTypes.contains(type)) {
+      throw _DirectFailure('unsupported', '不支持的内容类型：$type');
+    }
+
+    final extracted = extractPageText(response.body);
+    final text = extracted.text;
+    if (text.trim().isEmpty) {
+      return VibeWebToolResult(
+        ok: true,
+        direct: true,
+        summary: '直连：页面没有正文',
+        modelText: '抓取成功，但没有提取到正文：$current',
+      );
+    }
+    final formatted = _formatPage(
+      uri: current,
+      title: extracted.title,
+      text: text,
+      truncated: response.truncated || text.length > kVibeWebMaxFetchChars,
+      direct: true,
+    );
+    return VibeWebToolResult(
+      ok: true,
+      direct: true,
+      summary: '直连：${formatted.summary}',
+      modelText: formatted.modelText,
+    );
+  }
+  throw const _DirectFailure('network', '跳转次数过多');
+}
+
+/// 直连 GET，带总超时、响应体上限与浏览器 UA。
+Future<String> _directGet(
+  http.Client client,
+  Uri url, {
+  required String accept,
+}) async {
+  final response = await _directSend(client, url, accept: accept);
+  if (!response.isSuccess) {
+    throw _DirectFailure('network', '目标站点返回 ${response.statusCode}');
+  }
+  return response.body;
+}
+
+class _DirectResponse {
+  const _DirectResponse({
+    required this.statusCode,
+    required this.headers,
+    required this.body,
+    required this.truncated,
+  });
+
+  final int statusCode;
+  final Map<String, String> headers;
+  final String body;
+  final bool truncated;
+
+  bool get isSuccess => statusCode >= 200 && statusCode < 300;
+  bool get isRedirect => statusCode >= 300 && statusCode < 400;
+}
+
+/// 一次真实的直连请求。超时与尺寸上限在读取前就生效。
+Future<_DirectResponse> _directSend(
+  http.Client client,
+  Uri url, {
+  required String accept,
+}) async {
+  try {
+    final request = http.Request('GET', url)
+      ..followRedirects = false
+      ..headers.addAll({
+        'user-agent': _browserUserAgent,
+        'accept': accept,
+      });
+    final streamed = await client.send(request).timeout(kVibeWebTimeout);
+    final bytes = await streamed.stream
+        .fold<BytesBuilder>(BytesBuilder(), (builder, chunk) {
+          if (builder.length < kVibeWebMaxBodyBytes) builder.add(chunk);
+          return builder;
+        })
+        .timeout(kVibeWebTimeout);
+    final captured = bytes.takeBytes();
+    return _DirectResponse(
+      statusCode: streamed.statusCode,
+      headers: streamed.headers,
+      body: utf8.decode(captured, allowMalformed: true),
+      truncated: captured.length >= kVibeWebMaxBodyBytes,
+    );
+  } on TimeoutException {
+    throw const _DirectFailure('timeout', '请求超时');
+  } on SocketException {
+    throw const _DirectFailure('network', '无法连接目标站点');
+  } on HandshakeException {
+    throw const _DirectFailure('network', '无法建立安全连接');
+  } on http.ClientException {
+    throw const _DirectFailure('network', '无法连接目标站点');
+  } on FormatException {
+    throw const _DirectFailure('network', '目标站点返回了无法解析的内容');
+  }
+}
+
+/// 直连失败；只在模块内部抛出，对外统一转成 [VibeWebToolResult.failure]。
+class _DirectFailure implements Exception {
+  const _DirectFailure(this.code, this.message);
+
+  final String code;
+  final String message;
+}
+
+/// 两条链路共用的结果格式化：标题、链接、摘要。
+VibeWebToolResult _formatResults(List<Object?> results) {
+  final lines = <String>[];
+  var index = 0;
+  for (final item in results) {
+    if (item is! Map) continue;
+    final title = item['title'] is String ? item['title'] as String : '';
+    final url = item['url'] is String ? item['url'] as String : '';
+    final snippet = item['snippet'] is String ? item['snippet'] as String : '';
+    if (url.isEmpty) continue;
+    index++;
+    lines.add(
+      '$index. ${title.isEmpty ? url : title}\n'
+      '   $url\n'
+      "${snippet.isEmpty ? '' : '   $snippet\n'}",
+    );
+    if (index >= kVibeWebMaxResults) break;
+  }
+  if (lines.isEmpty) {
+    return const VibeWebToolResult(
+      ok: true,
+      summary: '没有可用结果',
+      modelText: '没有找到可直接引用的结果。',
+    );
+  }
+  return VibeWebToolResult(
+    ok: true,
+    summary: '$index 条结果',
+    modelText: '搜索结果（引用时请给出链接）：\n${lines.join()}',
+  );
+}
+
+/// 两条链路共用的页面结果格式化，含长度上限。
+VibeWebToolResult _formatPage({
+  required Uri uri,
+  required String title,
+  required String text,
+  required bool truncated,
+  bool direct = false,
+}) {
+  final clipped = text.length > kVibeWebMaxFetchChars;
+  final bounded = clipped
+      ? '${text.substring(0, kVibeWebMaxFetchChars)}\n…（已截断）'
+      : text;
+  return VibeWebToolResult(
+    ok: true,
+    direct: direct,
+    summary: '${bounded.length} 字符${truncated || clipped ? '（已截断）' : ''}',
+    modelText:
+        '网页：${title.isEmpty ? uri.toString() : title}\n'
+        '${uri.toString()}\n\n$bounded',
+  );
+}
+
+/// 解析 Bing RSS。与服务端 `parseRss` 同一规则：
+/// 先去标签再解实体（CDATA 必须先展开），只接受 http/https 链接。
+@visibleForTesting
+List<Map<String, String>> parseBingRss(String xml, int limit) {
+  final results = <Map<String, String>>[];
+  for (final chunk in xml.split(RegExp(r'<item>', caseSensitive: false)).skip(1)) {
+    final item = chunk.split(RegExp(r'</item>', caseSensitive: false)).first;
+    final title = _stripTags(_pickTag(item, 'title'));
+    final link = _decodeEntities(_pickTag(item, 'link')).trim();
+    final snippet = _stripTags(_pickTag(item, 'description'));
+    if (link.isEmpty) continue;
+    final uri = Uri.tryParse(link);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+      continue;
+    }
+    if (title.isEmpty && snippet.isEmpty) continue;
+    results.add({
+      'title': title.isEmpty ? uri.toString() : title,
+      'url': uri.toString(),
+      'snippet': snippet,
+    });
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+String _pickTag(String item, String tag) {
+  // 模板字符串里反斜杠原样保留：写成 [\\s\\S] 会让整个正则失效。
+  final match = RegExp(
+    '<$tag[^>]*>([\\s\\S]*?)</$tag>',
+    caseSensitive: false,
+  ).firstMatch(item);
+  return match?.group(1) ?? '';
+}
+
+String _decodeEntities(String value) => value
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replaceAll('&apos;', "'")
+    .replaceAll('&nbsp;', ' ')
+    .replaceAll('&amp;', '&');
+
+String _stripTags(String value) {
+  final expanded = value.replaceAllMapped(
+    RegExp(r'<!\[CDATA\[([\s\S]*?)\]\]>'),
+    (match) => match.group(1) ?? '',
+  );
+  return _decodeEntities(
+    _decodeEntities(expanded).replaceAll(RegExp('<[^>]*>'), ' '),
+  ).replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+/// 提取标题与正文。与服务端 `extractText` + `normalizeText` 同一规则。
+@visibleForTesting
+({String title, String text}) extractPageText(String html) {
+  final titleMatch = RegExp(
+    r'<title[^>]*>([\s\S]*?)</title>',
+    caseSensitive: false,
+  ).firstMatch(html);
+  final title = titleMatch == null
+      ? ''
+      : _decodeEntities(titleMatch.group(1) ?? '')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+  final body = html
+      .replaceAll(RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<noscript[\s\S]*?</noscript>', caseSensitive: false), ' ')
+      .replaceAll(RegExp(r'<!--[\s\S]*?-->'), ' ')
+      .replaceAll(
+        RegExp(r'</(p|div|li|h[1-6]|tr|br)>', caseSensitive: false),
+        '\n',
+      )
+      .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+      .replaceAll(RegExp('<[^>]*>'), ' ');
+  return (title: title, text: normalizePageText(_decodeEntities(body)));
+}
+
+/// 去空行、压缩行内空白。与服务端 `normalizeText` 一致。
+@visibleForTesting
+String normalizePageText(String value) => value
+    .split('\n')
+    .map((line) => line.replaceAll(RegExp(r'[ \t\u00a0]+'), ' ').trim())
+    .where((line) => line.isNotEmpty)
+    .join('\n');
+
+/// 直连前的完整 SSRF 校验：字面量 + 真实 DNS 解析结果全部必须为公网地址。
+///
+/// 与只用字面量判断的 [_isBlockedAddress] 互补：域名可以解析到内网，
+/// 因此这里必须先解析再判断，任一记录命中内网就整体拒绝。
+@visibleForTesting
+Future<List<String>> assertPublicHost(
+  String host, {
+  Future<List<String>> Function(String host)? resolve,
+}) async {
+  final value = host.trim().toLowerCase();
+  final bare = value.startsWith('[') && value.endsWith(']')
+      ? value.substring(1, value.length - 1)
+      : value;
+  if (bare.isEmpty) throw const _DirectFailure('ssrf', '网址缺少主机名');
+  if (bare == 'localhost' || bare.endsWith('.localhost')) {
+    throw const _DirectFailure('ssrf', '拒绝访问本机地址');
+  }
+  if (InternetAddress.tryParse(bare) != null) {
+    if (_isBlockedAddress(bare)) {
+      throw const _DirectFailure('ssrf', '拒绝访问本机或内网地址');
+    }
+    return [bare];
+  }
+  final List<String> addresses;
+  try {
+    addresses = resolve != null
+        ? await resolve(bare)
+        : [
+            for (final entry in await InternetAddress.lookup(bare))
+              entry.address,
+          ];
+  } on SocketException {
+    throw const _DirectFailure('network', '无法解析主机名');
+  }
+  if (addresses.isEmpty) {
+    throw const _DirectFailure('network', '无法解析主机名');
+  }
+  for (final address in addresses) {
+    if (_isBlockedAddress(address)) {
+      throw const _DirectFailure('ssrf', '拒绝访问本机或内网地址');
+    }
+  }
+  return addresses;
 }
 
 /// 供控制器拼接工具列表：本地工具加上联网工具。
