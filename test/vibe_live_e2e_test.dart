@@ -29,6 +29,15 @@ void main() {
   final skipReason = runtime == null
       ? '缺少 QFLI_DEBUG_BASE_URL / QFLI_DEBUG_API_KEY / QFLI_DEBUG_MODEL'
       : null;
+  // 只跑指定场景：逗号分隔。留空时跑全部三个。
+  final only = (Platform.environment['QFLI_E2E_SCENARIOS'] ?? '')
+      .split(',')
+      .map((key) => key.trim())
+      .where((key) => key.isNotEmpty)
+      .toSet();
+  final scenarios = only.isEmpty
+      ? vibeE2eScenarios
+      : vibeE2eScenarios.where((s) => only.contains(s.key)).toList();
 
   test(
     'live scenarios report real tool results against the debug upstream',
@@ -37,7 +46,7 @@ void main() {
       final active = runtime!;
       final results = <VibeE2eScenarioResult>[];
       try {
-        for (final scenario in vibeE2eScenarios) {
+        for (final scenario in scenarios) {
           final result = await runVibeE2eScenario(scenario, active);
           results.add(result);
           stdout.writeln(vibeE2eLine(result.toJson()));
