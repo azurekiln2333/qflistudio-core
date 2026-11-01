@@ -136,6 +136,31 @@ sys.exit(1)
   });
 
   group('VibeLocalExecutionTransport', () {
+    test('xxd and a cd-pwd prefix are accepted', () {
+      final parsed = parseVibeLocalCommand(
+        'cd "\$(pwd)" && python3 verify.py; echo "EXIT=\$?"; xxd result.txt',
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.executable, 'python3');
+      expect(parsed.entry, 'verify.py');
+      // cd 不能夹带逃逸。
+      expect(parseVibeLocalCommand('cd "\$(pwd)" && rm -rf .'), isNull);
+    });
+
+    test('xxd output is served in-process', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File('${root.path}/verify.py').writeAsStringSync('print("ok")\n');
+      File('${root.path}/result.txt').writeAsStringSync('42\n');
+
+      final run = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python verify.py; echo "EXIT=\$?"; xxd result.txt',
+      );
+      expect(run.exitCode, 0);
+      expect(run.merged, contains('EXIT=0'));
+      expect(run.merged, contains(r'\064'));
+    }, skip: skipPython);
     test('drives InteropRunner.tryRunCommand on the host', () async {
       final root = await Directory.systemTemp.createTemp('vibe-local-');
       addTearDown(() => root.delete(recursive: true));

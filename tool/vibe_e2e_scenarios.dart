@@ -60,6 +60,7 @@ class VibeE2eScenarioOutcome {
     required this.toolCalls,
     required this.messages,
     required this.changedFiles,
+    this.toolPayloads = const [],
   });
 
   final String projectRoot;
@@ -69,6 +70,19 @@ class VibeE2eScenarioOutcome {
 
   /// `onFileChanged` 报告的相对路径，按发生顺序。
   final List<String> changedFiles;
+
+  /// 工具往返的原始文本：请求参数与返回内容。
+  ///
+  /// `VibeToolCall` 只留缩略摘要，无法据此判「网址是不是工具给的」。
+  final List<VibeToolPayload> toolPayloads;
+
+  /// 工具真的返回过的全部文本，用逗号拼在一起。
+  String get toolOutputText => toolPayloads
+      .map((payload) => '${payload.arguments}\n${payload.result}')
+      .join('\n');
+
+  /// [url] 是否出现在工具往返文本里。
+  bool returnedByTools(String url) => toolOutputText.contains(url);
 
   List<VibeToolCall> callsOf(String name) =>
       toolCalls.where((call) => call.toolName == name).toList();
@@ -92,6 +106,13 @@ class VibeE2eScenarioOutcome {
       .map((message) => message.text.trim())
       .where((text) => text.isNotEmpty)
       .join('\n\n');
+
+  /// 回答里出现的网址，按出现顺序去重。
+  List<String> get citedUrls => {
+    ...RegExp(
+      r'https?://[^\s<>"`）)]+',
+    ).allMatches(assistantTranscript).map((m) => m.group(0)!),
+  }.toList();
 
   Future<bool> hasFile(String relative) =>
       File(p.join(projectRoot, relative)).exists();
@@ -138,6 +159,19 @@ abstract final class VibeE2eAssertions {
       ),
     ];
   }
+}
+
+/// 一次工具往返的原始文本。
+class VibeToolPayload {
+  const VibeToolPayload({
+    required this.toolName,
+    required this.arguments,
+    required this.result,
+  });
+
+  final String toolName;
+  final String arguments;
+  final String result;
 }
 
 /// 内置场景表。顺序即报告顺序。
@@ -245,6 +279,12 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
     },
     assertions: (outcome) {
       final runs = outcome.runs;
+      // 与 firstFailLastPass 同一原则：云终端 401 不是命令结果。
+      final decided = runs.where((run) => run.exitCode != null).toList();
+      final runsWithoutExit = runs
+          .where((run) => run.exitCode == null)
+          .toList();
+      final markerRun = decided.isEmpty ? null : decided.last;
       return [
         ...VibeE2eAssertions.firstFailLastPass(outcome),
         VibeE2eAssertion(
@@ -257,9 +297,22 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
         VibeE2eAssertion(
           name: 'verification_marker',
           ok:
-              runs.isNotEmpty &&
-              (runs.last.commandOutput ?? '').contains('QFLI_VIBE_VERIFIED_42'),
-          detail: '最后一次 run_command 的输出',
+              markerRun != null &&
+              markerRun.exitCode == 0 &&
+              (markerRun.commandOutput ?? '').contains(
+                'QFLI_VIBE_VERIFIED_42',
+              ) &&
+              // 更早必须存在一次真实失败，否则「修好」没有证据。
+              decided
+                  .take(decided.length - 1)
+                  .any((run) => run.exitCode != null && run.exitCode != 0),
+          detail: markerRun == null
+              ? '没有任何带退出码的 run_command'
+              : '最后一个带退出码的运行 exit=${markerRun.exitCode}，'
+                    '输出${(markerRun.commandOutput ?? '').contains('QFLI_VIBE_VERIFIED_42') ? '含' : '不含'}标记，'
+                    '更早存在非零退出码：'
+                    '${decided.take(decided.length - 1).any((run) => run.exitCode != null && run.exitCode != 0)}，'
+                    '无退出码的调用 ${runsWithoutExit.length} 次',
         ),
       ];
     },
@@ -281,7 +334,8 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
           .toList();
       // 判断引用要看整段回答：检索场景常常先说一句就收尾。
       final reply = outcome.assistantTranscript;
-      final cited = RegExp(r'https?://\S+').hasMatch(reply);
+      final citedUrls = outcome.citedUrls;
+      final cited = citedUrls.isNotEmpty;
       return [
         VibeE2eAssertion(
           name: 'search_tool_called',
@@ -292,6 +346,17 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
           name: 'reply_cites_url',
           ok: cited,
           detail: cited ? '回答含链接' : '回答里没有网址（回答共 ${reply.length} 字）',
+        ),
+        // 引用必须是工具真的返回过的网址，不得捏造。
+        VibeE2eAssertion(
+          name: 'citations_from_tool_output',
+          ok: citedUrls.isEmpty
+              ? !cited
+              : citedUrls.every(outcome.returnedByTools),
+          detail: citedUrls.isEmpty
+              ? '回答没有引用任何网址'
+              : '引 ${citedUrls.length} 个网址，工具未返回的：'
+                    '${citedUrls.where((u) => !outcome.returnedByTools(u)).join(' ')}',
         ),
       ];
     },
@@ -382,6 +447,7 @@ const Set<String> kVibeE2eAssertionNames = {
   'verification_marker',
   'search_tool_called',
   'reply_cites_url',
+  'citations_from_tool_output',
 };
 
 /// 校验报告结构；返回问题列表，空表示合格。

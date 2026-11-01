@@ -6,7 +6,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart'
-    show VibePhase, VibeToolCall, VibeToolStatus;
+    show VibeMessage, VibePhase, VibeToolCall, VibeToolStatus;
 
 import '../tool/vibe_e2e_report.dart';
 import '../tool/vibe_e2e_scenarios.dart';
@@ -268,7 +268,10 @@ void main() {
       final htmlOnly = scenario.assertions!(outcome);
       final htmlOnlyByName = {for (final a in htmlOnly) a.name: a};
       expect(htmlOnlyByName['html_well_formed']!.ok, isFalse);
-      expect(htmlOnlyByName['html_assets_exist']!.detail, contains('index.html'));
+      expect(
+        htmlOnlyByName['html_assets_exist']!.detail,
+        contains('index.html'),
+      );
 
       File(p.join(root.path, 'index.html')).writeAsStringSync(
         '<!doctype html><html><head>'
@@ -386,6 +389,119 @@ void main() {
           },
         ]),
         isTrue,
+      );
+    });
+
+    test('citations that the tools never returned are caught', () {
+      final scenario = vibeE2eScenarios.firstWhere(
+        (s) => s.key == 'web_search',
+      );
+      // 工具真的返回过 example.com 的链接，模型另外编了一个。
+      final outcome = VibeE2eScenarioOutcome(
+        projectRoot: Directory.systemTemp.path,
+        phase: VibePhase.succeeded,
+        toolCalls: const [
+          VibeToolCall(
+            id: '1',
+            toolName: 'web_search',
+            summary: '{}',
+            status: VibeToolStatus.ok,
+            result: '直连：8 条结果',
+          ),
+        ],
+        messages: const [
+          VibeMessage(
+            isUser: false,
+            text: '见 https://example.com/a 与 https://fake.test/b',
+          ),
+        ],
+        changedFiles: const [],
+        toolPayloads: const [
+          VibeToolPayload(
+            toolName: 'web_search',
+            arguments: '{}',
+            result: 'https://example.com/a',
+          ),
+        ],
+      );
+      final byName = {for (final a in scenario.assertions!(outcome)) a.name: a};
+      expect(byName['reply_cites_url']!.ok, isTrue);
+      expect(byName['citations_from_tool_output']!.ok, isFalse);
+      expect(
+        byName['citations_from_tool_output']!.detail,
+        contains('https://fake.test/b'),
+      );
+    });
+
+    test('verification ignores a trailing run with no exit code', () {
+      final scenario = vibeE2eScenarios.firstWhere(
+        (s) => s.key == 'python_fix_loop',
+      );
+      VibeToolCall run(int? exit, String? output) => VibeToolCall(
+        id: 'r$exit',
+        toolName: 'run_command',
+        summary: 'python3 verify.py',
+        status: exit == 0 ? VibeToolStatus.ok : VibeToolStatus.error,
+        result: exit == null ? '未登录或登录已过期' : '跨应用 · 退出码 $exit',
+        exitCode: exit,
+        commandOutput: output,
+      );
+      final outcome = VibeE2eScenarioOutcome(
+        projectRoot: Directory.systemTemp.path,
+        phase: VibePhase.succeeded,
+        toolCalls: [
+          run(1, 'AssertionError'),
+          run(0, 'QFLI_VIBE_VERIFIED_42'),
+          run(null, null), // 云终端 401：不是命令结果
+          const VibeToolCall(
+            id: 'e1',
+            toolName: 'edit_file',
+            summary: 'math_ops.py',
+            status: VibeToolStatus.ok,
+            result: '已替换 math_ops.py',
+          ),
+        ],
+        messages: const [],
+        changedFiles: const [],
+      );
+      final byName = {for (final a in scenario.assertions!(outcome)) a.name: a};
+      expect(byName['verification_marker']!.ok, isTrue);
+      expect(byName['verification_marker']!.detail, contains('无退出码的调用 1 次'));
+    });
+
+    test('citations the tools returned are accepted', () {
+      final scenario = vibeE2eScenarios.firstWhere(
+        (s) => s.key == 'web_search',
+      );
+      final outcome = VibeE2eScenarioOutcome(
+        projectRoot: Directory.systemTemp.path,
+        phase: VibePhase.succeeded,
+        toolCalls: const [
+          VibeToolCall(
+            id: '1',
+            toolName: 'web_search',
+            summary: '{}',
+            status: VibeToolStatus.ok,
+            result: '直连：8 条结果',
+          ),
+        ],
+        messages: const [
+          VibeMessage(isUser: false, text: '最新版本见 https://example.com/a 。'),
+        ],
+        changedFiles: const [],
+        toolPayloads: const [
+          VibeToolPayload(
+            toolName: 'web_search',
+            arguments: '{}',
+            result: 'https://example.com/a',
+          ),
+        ],
+      );
+      final failed = scenario.assertions!(outcome).where((a) => !a.ok).toList();
+      expect(
+        failed,
+        isEmpty,
+        reason: failed.map((a) => '${a.name}=${a.detail}').join(', '),
       );
     });
   });

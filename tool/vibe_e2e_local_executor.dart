@@ -76,7 +76,18 @@ class VibeLocalCommand {
 /// 模型很常写成 `python3 verify.py; echo ---; wc -c result.txt`，
 /// 拒掉整条会让它落到云终端，从而丢掉真实退出码。
 VibeLocalCommand? parseVibeLocalCommand(String command) {
-  final text = command.trim();
+  var text = command.trim();
+  if (text.isEmpty) return null;
+  // `cd "$(pwd)" && ...` 只是回到当前目录，先剔掉再切片段。
+  for (final prefix in const <String>[
+    'cd "\$(pwd)" && ',
+    'cd \$(pwd) && ',
+    'cd . && ',
+  ]) {
+    while (text.startsWith(prefix)) {
+      text = text.substring(prefix.length).trim();
+    }
+  }
   if (text.isEmpty) return null;
   final segments = text
       .split(RegExp(r'\s*(?:;|&&)\s*'))
@@ -146,6 +157,17 @@ VibeLocalCommand? _parseSegment(String segment) {
     if (entry.startsWith('/') || entry.contains('..')) return null;
     return VibeLocalCommand(
       executable: 'od',
+      entry: entry,
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+    );
+  }
+  // `xxd <file>` 与 `od -c` 同类，只读字节。
+  if (words.first == 'xxd' && words.length == 2) {
+    final entry = words[1].replaceAll('\\', '/');
+    if (entry.startsWith('/') || entry.contains('..')) return null;
+    return VibeLocalCommand(
+      executable: 'xxd',
       entry: entry,
       mergeStderr: mergeStderr,
       raw: segment.trim(),
@@ -237,7 +259,9 @@ Future<VibeLocalRun> runVibeLocalCommand({
       continue;
     }
     // wc/od 在 Windows 上不存在，这里直接读文件，语义一致。
-    if (part.executable == 'wc' || part.executable == 'od') {
+    if (part.executable == 'wc' ||
+        part.executable == 'od' ||
+        part.executable == 'xxd') {
       final file = File(p.join(projectRoot, part.entry));
       if (!file.existsSync()) {
         merged.write('${part.executable}: ${part.entry}: 文件不存在\n');

@@ -219,6 +219,18 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
       toolCalls: toolCalls,
       messages: active.messages,
       changedFiles: changed,
+      // 调用实参来自 tool_calls，结果原文来自控制器消息，两边合起来才是
+      // 「工具返回过什么」的完整证据。
+      toolPayloads: [
+        ...runtime.transport.toolPayloads,
+        for (final call in toolCalls)
+          if ((call.result ?? '').isNotEmpty)
+            VibeToolPayload(
+              toolName: call.toolName,
+              arguments: call.summary,
+              result: '${call.result}\n${call.commandOutput ?? ''}',
+            ),
+      ],
     );
     final assertions = <VibeE2eAssertion>[
       if (timedOut)
@@ -242,10 +254,27 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
       ...await vibeE2eFileEvidence(root.path),
       'roundDurationsMs': roundDurations,
       'executor': kVibeE2eLocalExecutor,
+      // 无退出码的调用单独计数，不藏起来。
+      'runsWithoutExit': toolCalls
+          .where(
+            (call) => call.toolName == 'run_command' && call.exitCode == null,
+          )
+          .length,
       'cloudTerminal': runtime.hasTerminal ? 'relay' : 'skipped',
       'cloudTerminalReason': runtime.hasTerminal
           ? '已配置本站登录令牌'
           : kVibeE2eTerminalTokenMissing,
+      if (scenario.key == 'web_search') ...{
+        'answerLength': outcome.assistantTranscript.length,
+        'citedUrls': outcome.citedUrls,
+        'citationsAllFromTools': outcome.citedUrls.every(
+          outcome.returnedByTools,
+        ),
+        // 工具真正回给的正文，供事后核对引用是否捏造。
+        'toolOutput': outcome.toolOutputText.length > 12000
+            ? outcome.toolOutputText.substring(0, 12000)
+            : outcome.toolOutputText,
+      },
       if (scenario.key == 'static_site') ...{
         'htmlCheck': checkVibeHtml(root.path, 'index.html').toJson(),
         'scriptLogic': vibeHtmlHasScriptLogic(

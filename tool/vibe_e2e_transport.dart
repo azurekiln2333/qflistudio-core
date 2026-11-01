@@ -19,6 +19,8 @@ import 'package:http/http.dart' as http;
 import 'package:qfli_studio_core/services/ai_service.dart';
 import 'package:qfli_studio_core/services/api_client.dart' show ApiException;
 
+import 'vibe_e2e_scenarios.dart' show VibeToolPayload;
+
 /// 一次模型回复；字段与 `AiChatResult` 对齐，供验收驱动直接消费。
 class VibeDebugChatReply {
   const VibeDebugChatReply({
@@ -64,6 +66,14 @@ class VibeDebugTransport {
   /// 本传输会真实发出请求，因此永远"支持"。
   bool get isSupported => true;
 
+  /// 已真实发出的模型请求次数。
+  int get callCount => _callCount;
+  int _callCount = 0;
+
+  /// 至今最慢的一次请求耗时。
+  Duration? get slowestCall => _slowestCall;
+  Duration? _slowestCall;
+
   /// 实际请求的端点，供报告记录（不含密钥）。
   Uri get endpoint => Uri.parse(AiService.endpoint(baseUrl, protocol));
 
@@ -75,6 +85,9 @@ class VibeDebugTransport {
     List<Map<String, dynamic>>? tools,
     Future<void>? abortTrigger,
   }) async {
+    // 工具正文只存在请求历史的 tool 消息里，界面消息只留摘要。
+    // 引用校验必须比对正文，否则会把真实网址误判成捏造。
+    _recordToolResults(messages);
     final body = AiService.encodeRequest(
       protocol: protocol,
       model: model.trim(),
@@ -94,6 +107,8 @@ class VibeDebugTransport {
           ..body = jsonEncode(body);
 
     final http.Response response;
+    final startedAt = DateTime.now();
+    _callCount++;
     try {
       response = await _client
           .send(request)
@@ -125,6 +140,10 @@ class VibeDebugTransport {
     }
 
     final text = utf8.decode(response.bodyBytes);
+    final elapsed = DateTime.now().difference(startedAt);
+    if (_slowestCall == null || elapsed > _slowestCall!) {
+      _slowestCall = elapsed;
+    }
     Object? data;
     try {
       data = text.isEmpty ? null : jsonDecode(text);
@@ -157,11 +176,57 @@ class VibeDebugTransport {
       );
     }
     final content = assistant['content'];
+    // 把工具往返的原文记下来：「引用的网址是不是工具给的」只能靠它判。
+    _recordToolPayloads(rawMessage: assistant, data: data);
     return VibeDebugChatReply(
       model: data['model'] is String ? data['model'] as String : model,
       content: content is String ? content : '',
       rawMessage: assistant,
     );
+  }
+
+  /// 工具往返原文，按发生顺序。
+  ///
+  /// 这里只记「工具调用」的实参：哪些网址是工具查的。
+  /// 工具结果原文由调用方从消息里补，不靠解析请求体。
+  final List<VibeToolPayload> toolPayloads = [];
+
+  /// 从一次回复里抽取工具调用的名字与实参。
+  void _recordToolPayloads({
+    required Map<String, dynamic> rawMessage,
+    required Object? data,
+  }) {
+    final calls = rawMessage['tool_calls'];
+    if (calls is! List) return;
+    for (final call in calls) {
+      if (call is! Map) continue;
+      final fn = call['function'];
+      if (fn is! Map) continue;
+      toolPayloads.add(
+        VibeToolPayload(
+          toolName: '${fn['name']}',
+          arguments: '${fn['arguments']}',
+          result: '',
+        ),
+      );
+    }
+  }
+
+  /// 从请求历史里取出工具返回的正文（每次请求都采，后到的覆盖同 id 的）。
+  void _recordToolResults(List<Map<String, dynamic>> messages) {
+    for (final message in messages) {
+      if (message['role'] != 'tool') continue;
+      final content = message['content'];
+      if (content is! String || content.trim().isEmpty) continue;
+      final id = '${message['tool_call_id'] ?? ''}';
+      toolPayloads.add(
+        VibeToolPayload(
+          toolName: id.isEmpty ? 'tool_result' : 'tool_result:$id',
+          arguments: '',
+          result: content,
+        ),
+      );
+    }
   }
 
   /// 把可能出现的密钥片段从文案里抹掉，再交给上层或报告。
