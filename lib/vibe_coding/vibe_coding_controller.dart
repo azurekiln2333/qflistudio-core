@@ -10,6 +10,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../interop/interop_runner.dart';
 import '../services/api_client.dart';
 import 'vibe_loop_guard.dart';
 import 'vibe_models.dart';
@@ -17,6 +18,7 @@ import 'vibe_plan.dart';
 import 'vibe_rules.dart';
 import 'vibe_skills.dart';
 import 'vibe_tools.dart';
+import 'vibe_web_tools.dart';
 
 export 'vibe_loop_guard.dart'
     show
@@ -92,6 +94,8 @@ class VibeCodingController extends ChangeNotifier {
     VibeProjectFiles? files,
     int? maxRounds,
     VibeAgentContext? context,
+    AiEndpoint Function()? endpointProvider,
+    InteropRunner? interopRunner,
   }) : _api = api,
        _tokenProvider = tokenProvider,
        _projectName = projectName,
@@ -102,7 +106,9 @@ class VibeCodingController extends ChangeNotifier {
        _onNotice = onNotice,
        _files = files ?? VibeProjectFiles(projectRoot: projectRoot),
        _maxRounds = maxRounds,
-       _context = context {
+       _context = context,
+       _endpointProvider = endpointProvider,
+       _interop = interopRunner {
     _history.add({'role': 'system', 'content': _systemPrompt()});
   }
 
@@ -117,6 +123,12 @@ class VibeCodingController extends ChangeNotifier {
   final VibeProjectFiles _files;
   final int? _maxRounds;
   final VibeAgentContext? _context;
+
+  /// 每轮读取一次：用户在设置里改协议或地址后立即生效，无需重建会话。
+  final AiEndpoint Function()? _endpointProvider;
+
+  /// 跨应用运行器；为 null 时只走在线终端。
+  final InteropRunner? _interop;
 
   late final VibeAgentContext _agent =
       _context ??
@@ -265,8 +277,9 @@ class VibeCodingController extends ChangeNotifier {
           reply = await _api.aiChat(
             token: activeToken,
             messages: List.unmodifiable(_history),
-            tools: vibeToolSpecs(),
+            tools: _toolSpecs(),
             abortTrigger: _abort?.future,
+            endpoint: _endpointProvider?.call(),
           );
         } on ApiException catch (error) {
           if (_cancelRequested || _disposed) {
@@ -414,6 +427,10 @@ class VibeCodingController extends ChangeNotifier {
       _roundHadFailures = true;
     }
   }
+
+  /// 本轮工具列表。离线专属产品不暴露联网工具。
+  List<Map<String, dynamic>> _toolSpecs() =>
+      vibeWebToolsAvailable ? vibeToolSpecsWithWeb() : vibeToolSpecs();
 
   /// 载入本次 send 的技能与规则，并写入系统提示后可变的上下文块。
   void _prepareContext(String prompt) {
@@ -657,6 +674,9 @@ class VibeCodingController extends ChangeNotifier {
           return _updatePlan(args);
         case 'use_skill':
           return _useSkill(args);
+        case 'web_search':
+        case 'web_fetch':
+          return await _runWebTool(name, args);
         default:
           return _error('error', '未知工具：$name');
       }
@@ -735,6 +755,34 @@ sys.exit(1 if failed else 0)
         'python3 - <<\'PY\'\n$_htmlCheckScript${'PY'}';
   }
 
+  /// `web_search` / `web_fetch`：经服务端中转真实检索，结果原样交给模型。
+  Future<_ToolOutcome> _runWebTool(
+    String name,
+    Map<String, dynamic> args,
+  ) async {
+    if (!vibeWebToolsAvailable) {
+      return _error('OFFLINE_ONLY', '当前产品为离线模式，不能访问网络');
+    }
+    final token = _tokenProvider();
+    if (token == null || token.isEmpty) {
+      return _error('auth', '需要登录后才能使用联网工具');
+    }
+    final result = await executeVibeWebTool(
+      name: name,
+      arguments: args,
+      api: _api,
+      token: token,
+      onlineAllowed: _onlineAllowed,
+    );
+    if (result == null) return _error('error', '未知联网工具：$name');
+    return _ToolOutcome(
+      status: result.ok ? VibeToolStatus.ok : VibeToolStatus.error,
+      summary: result.summary,
+      modelText: result.modelText,
+      code: result.ok ? null : 'web',
+    );
+  }
+
   /// `todo`：整体替换计划，并把快照挂到该工具条目上。
   _ToolOutcome _updatePlan(Map<String, dynamic> args) {
     final next = parseVibePlan(args['items']);
@@ -778,6 +826,7 @@ sys.exit(1 if failed else 0)
     );
   }
 
+  /// 走在线终端：快照上传、进度与退出码。
   Future<_ToolOutcome> _runCommand(Map<String, dynamic> args, int index) async {
     final command = args['command'];
     if (command is! String || command.trim().isEmpty) {
@@ -786,6 +835,65 @@ sys.exit(1 if failed else 0)
     if (command.length > 2000) {
       return _error('error', '命令超过 2000 字符');
     }
+    // 先尝试跨应用运行：OHOS 上由兄弟应用用本地工具链编译并执行。
+    // 返回 null 表示不适用（无桥接、入口不匹配、命令不属于该语法），
+    // 此时才回落到在线终端，两条路径不会重复执行。
+    final interop = await _tryInteropRun(command, index);
+    if (interop != null) return interop;
+    if (_cancelRequested) return _cancelledOutcome();
+    return _runCommandInTerminal(command, index);
+  }
+
+  /// 跨应用运行一次命令；不适用时返回 null。
+  ///
+  /// 只有结果里的内容都是对方应用真实输出时才当作成功，不编造退出码。
+  Future<_ToolOutcome?> _tryInteropRun(String command, int index) async {
+    final runner = _interop;
+    if (runner == null || !runner.isSupported) return null;
+    if (!InteropRunner.supports(_language)) return null;
+    _updateTool(index, stage: '跨应用运行');
+    final InteropRun? run;
+    try {
+      run = await runner.tryRunCommand(
+        projectRoot: _files.projectRoot,
+        language: _language,
+        command: command,
+      );
+    } on Object catch (error) {
+      // 桥接自身出错时回落到在线终端，并把原因交给模型。
+      _updateTool(index, stage: '跨应用不可用，改用在线终端');
+      _notice('跨应用运行失败，已改用在线终端：$error');
+      return null;
+    }
+    if (run == null) return null;
+    final stdout = _TailBuffer(kVibeMaxCommandTailChars);
+    final stderr = _TailBuffer(kVibeMaxCommandTailChars);
+    _updateTool(index, output: '');
+    await for (final chunk in run.stdout) {
+      stdout.add('$chunk\n');
+      _updateTool(index, output: _combine(stdout.value, stderr.value));
+    }
+    await for (final chunk in run.stderr) {
+      stderr.add('$chunk\n');
+      _updateTool(index, output: _combine(stdout.value, stderr.value));
+    }
+    final exitCode = await run.exitCode;
+    final output = _combine(stdout.value, stderr.value);
+    final diagnostics = run.diagnostics.isEmpty
+        ? ''
+        : '\n${run.diagnostics.join('\n')}';
+    return _ToolOutcome(
+      status: exitCode == 0 ? VibeToolStatus.ok : VibeToolStatus.error,
+      summary: '跨应用 · 退出码 $exitCode',
+      modelText:
+          '退出码：$exitCode（跨应用运行：${run.title}）$diagnostics\n'
+          '${output.isEmpty ? '（无输出）' : output}',
+      output: output.isEmpty ? null : output,
+      exitCode: exitCode,
+    );
+  }
+
+  Future<_ToolOutcome> _runCommandInTerminal(String command, int index) async {
     final token = _tokenProvider();
     if (token == null || token.isEmpty) {
       return _error('auth', '需要登录后才能使用在线终端');
@@ -846,7 +954,12 @@ sys.exit(1 if failed else 0)
               }
             },
             onError: (Object error) {
-              if (_cancelRequested) {
+              // 取消后 abortTrigger 会先结束字节流，紧跟着的“请求已取消”
+              // 不是终端故障，不能当作模型需要处理的错误。
+              final cancelled =
+                  _cancelRequested ||
+                  (error is ApiException && error.message == '请求已取消');
+              if (cancelled) {
                 finish(_cancelledOutcome());
               } else {
                 final message = error is ApiException
@@ -863,6 +976,10 @@ sys.exit(1 if failed else 0)
               }
             },
             onDone: () {
+              if (_cancelRequested) {
+                finish(_cancelledOutcome());
+                return;
+              }
               if (!sawResult) {
                 finish(
                   _ToolOutcome(

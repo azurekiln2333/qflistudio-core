@@ -17,6 +17,8 @@ const Set<String> kVibeToolNames = {
   'run_command',
   'todo',
   'use_skill',
+  'web_search',
+  'web_fetch',
 };
 
 class VibeToolCall {

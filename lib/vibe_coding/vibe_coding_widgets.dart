@@ -159,6 +159,8 @@ String vibeToolLabel(String toolName) => switch (toolName) {
   'run_command' => '运行命令',
   'todo' => '更新计划',
   'use_skill' => '使用技能',
+  'web_search' => '联网搜索',
+  'web_fetch' => '抓取网页',
   _ => toolName,
 };
 

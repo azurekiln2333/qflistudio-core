@@ -92,7 +92,7 @@ void main() {
       expect(first.containsKey('model'), isFalse);
       expect(first.containsKey('apiKey'), isFalse);
       expect((first['messages'] as List).first['role'], 'system');
-      expect((first['tools'] as List), hasLength(7));
+      expect((first['tools'] as List), hasLength(9));
       expect(relay.authorizations.first, 'Bearer local-token');
 
       // Round two must contain the full assistant tool call and its tool reply.
@@ -742,6 +742,13 @@ class _FakeRelay {
       if (request.url.path == '/api/terminal/exec/stream') {
         terminalBodies.add(jsonDecode(body) as Map<String, dynamic>);
         if (holdTerminal != null) {
+          // 真实的中断会关闭字节流；这里照做，让控制器看到流已结束。
+          final abort = request is http.AbortableRequest
+              ? request.abortTrigger
+              : null;
+          abort?.whenComplete(() {
+            if (!holdTerminal!.isClosed) holdTerminal!.close();
+          });
           final response = http.StreamedResponse(
             holdTerminal!.stream,
             200,
