@@ -21,10 +21,11 @@ description: 从一句话需求搭出可打开的静态网站，包含文件结�
 ## 步骤
 
 1. 先用 todo 列出计划：结构、样式、交互、自检。
-2. 用 write_file 创建 `index.html`，一次写完整文件。
+2. 规划完成后立刻用 write_file 创建 `index.html`，一次写完整文件。
+   不要反复 list_files 看目录：建站阶段的空目录没有信息量。
 3. 用 write_file 创建 `styles.css`，包含窄屏（≤ 480 px）布局。
 4. 用 write_file 创建 `app.js`，事件绑定放在 `DOMContentLoaded` 之后或脚本末尾。
-5. 用 list_files 确认文件真的存在。
+5. 文件写完后用 list_files 确认存在。一次调用就够，path 用 `.` 表示项目根。
 6. 用 run_command 执行自检，把真实输出贴回给用户。
 
 ## 自检命令

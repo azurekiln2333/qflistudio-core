@@ -420,6 +420,9 @@ class VibeCodingController extends ChangeNotifier {
     } else if (outcome.readPath != null) {
       facts.reads++;
     }
+    // 列目录与更新计划只在开工阶段算进展，由守卫按轮次判定。
+    facts.listings += outcome.listedDirs;
+    if (outcome.plan != null) facts.planUpdates++;
     if (outcome.ranCommand) facts.exitCodes.add(outcome.exitCode);
     if (outcome.status == VibeToolStatus.error ||
         outcome.status == VibeToolStatus.conflict) {
@@ -600,6 +603,7 @@ class VibeCodingController extends ChangeNotifier {
             status: VibeToolStatus.ok,
             summary: '${entries.length} 个条目',
             modelText: text,
+            listedDirs: 1,
           );
         case 'read_file':
           final path = _requiredString(args, 'path');
@@ -1031,13 +1035,15 @@ sys.exit(1 if failed else 0)
 项目：$_projectName（$_language），所有路径都相对当前项目根目录。
 工具规则：
 1. 只能通过工具读写项目文件，不要输出绝对路径。
-2. 多步骤任务先用 todo 列出计划，每完成一步就把该项改为 done。
+2. 多步骤任务先用 todo 列出计划，完成后立刻开始写文件，不要停下来反复列目录。
 3. 修改已有文件前先 read_file；小改动用 edit_file，新建文件用 write_file。
-4. 用 run_command 运行代码、构建或测试，命令在隔离在线终端执行。
-5. 没有真实工具结果时不得声称运行成功或测试通过。
-6. 工具失败时读取真实错误，修复后重新运行，直到验证通过或确认无法继续。
-7. 网页类交付物的完成标准：list_files 能看到全部文件，且 run_command 的结构检查通过。
-8. 同一个失败命令连续报错时，先 read_file 看当前内容，不要盲目重试。
+4. 建站类任务：规划完成后立刻用 write_file 创建 index.html，不要反复 list_files。
+   根目录用 `.` 或空串一次列完就够了，列完就动手。
+5. 用 run_command 运行代码、构建或测试，命令在隔离在线终端执行。
+6. 没有真实工具结果时不得声称运行成功或测试通过。
+7. 工具失败时读取真实错误，修复后重新运行，直到验证通过或确认无法继续。
+8. 网页类交付物的完成标准：list_files 能看到全部文件，且 run_command 的结构检查通过。
+9. 同一个失败命令连续报错时，先 read_file 看当前内容，不要盲目重试。
 回答用中文，简洁说明改动内容和真实验证结果。''';
 
   int _appendMessage(VibeMessage message) {
@@ -1212,6 +1218,7 @@ class _ToolOutcome {
     this.writtenPath,
     this.plan,
     this.code,
+    this.listedDirs = 0,
   });
 
   final VibeToolStatus status;
@@ -1228,6 +1235,9 @@ class _ToolOutcome {
 
   /// todo 提交后的计划快照。
   final List<VibePlanItem>? plan;
+
+  /// 本次调用成功列出的目录数（0 或 1）。
+  final int listedDirs;
 
   /// 失败分类（`conflict`、`unread`、`plan` 等）；成功时为 null。
   final String? code;

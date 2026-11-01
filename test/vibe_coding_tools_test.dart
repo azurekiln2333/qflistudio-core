@@ -45,7 +45,19 @@ void main() {
         () => guard.resolve('src/\u0000evil.py'),
         throwsA(isA<VibeToolException>()),
       );
-      expect(() => guard.resolve(''), throwsA(isA<VibeToolException>()));
+      expect(
+        () => guard.resolve('src/./a.py'),
+        throwsA(isA<VibeToolException>()),
+      );
+    });
+
+    test('maps . and an empty path to the project root', () {
+      final guard = files();
+      final root = guard.projectRoot;
+      expect(guard.resolve(''), root);
+      expect(guard.resolve('.'), root);
+      expect(guard.resolve('./'), root);
+      expect(guard.resolve(' . '), root);
     });
 
     test('protects metadata directories case-insensitively', () {

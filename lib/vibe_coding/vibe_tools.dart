@@ -76,6 +76,12 @@ class VibeProjectFiles {
   static bool _isProtected(String segment) =>
       _protectedSegments.contains(segment.toLowerCase());
 
+  /// 归一化后的路径是否指项目根目录（`.` 或空串）。
+  static bool isProjectRootPath(String rawPath) {
+    final normalized = rawPath.replaceAll('\\', '/').trim();
+    return normalized.isEmpty || normalized == '.' || normalized == './';
+  }
+
   static bool _isExcluded(String name) =>
       _excludedDirs.contains(name.toLowerCase());
 
@@ -97,6 +103,8 @@ class VibeProjectFiles {
       throw const VibeToolException('路径包含非法字符', code: 'escape');
     }
     final normalized = rawPath.replaceAll('\\', '/').trim();
+    // 约定：`.` 与空串都表示项目根目录，列表工具靠它们就地看根。
+    if (isProjectRootPath(normalized)) return projectRoot;
     if (normalized.isEmpty) {
       throw const VibeToolException('路径不能为空');
     }
@@ -171,7 +179,7 @@ class VibeProjectFiles {
     String? path,
     bool recursive = false,
   }) async {
-    final start = path == null || path.trim().isEmpty
+    final start = path == null || isProjectRootPath(path)
         ? projectRoot
         : resolve(path);
     final type = FileSystemEntity.typeSync(start);

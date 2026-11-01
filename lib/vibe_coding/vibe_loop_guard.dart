@@ -17,6 +17,12 @@ const int kVibeRepeatLimit = 3;
 /// 连续多少轮没有进展后停止。
 const int kVibeNoProgressRounds = 2;
 
+/// 前若干轮里，规划与看目录都算推进任务。
+///
+/// 模型常见节奏：先写 todo、再列目录、然后动手。若这几步就判无进展，
+/// 会把正常开工的代理提前停掉。
+const int kVibeSetupRounds = 3;
+
 /// 按提示词规模计算本轮轮数预算。
 int vibeRoundBudget(String prompt) {
   final lower = prompt.toLowerCase();
@@ -64,6 +70,8 @@ Object? _sorted(Object? value) {
 class VibeRoundFacts {
   int writes = 0;
   int reads = 0;
+  int listings = 0;
+  int planUpdates = 0;
   final List<int?> exitCodes = [];
   final List<String> errors = [];
 
@@ -72,6 +80,11 @@ class VibeRoundFacts {
   /// 退出码非零同样算进展：模型看到了真实错误才能修复。
   bool get progressed =>
       writes > 0 || reads > 0 || exitCodes.any((code) => code != null);
+
+  /// 开工阶段的表现：更新计划或成功列出目录。
+  ///
+  /// 只在最初 [kVibeSetupRounds] 轮内算作进展，之后仍要求写入或命令结果。
+  bool get settingUp => planUpdates > 0 || listings > 0;
 }
 
 /// 单次 send 内的循环守卫状态。
@@ -81,6 +94,7 @@ class VibeLoopGuard {
   final Set<String> _knownFiles = {};
   final Set<String> _writtenFiles = {};
   int _stalledRounds = 0;
+  int _rounds = 0;
 
   /// 拒绝重复调用，并返回拒绝原因；null 表示应继续执行。
   ///
@@ -129,7 +143,10 @@ class VibeLoopGuard {
   /// 写入被拒（冲突、先读后改、策略拒绝）算作真实进展：模型学到了新事实，
   /// 并会在下一轮改变做法，不能和"什么都没发生"混为一谈。
   String? endRound(VibeRoundFacts facts) {
-    if (facts.progressed || facts.errors.any(_isInformativeFailure)) {
+    final informational = facts.errors.any(_isInformativeFailure);
+    final settingUp = _rounds < kVibeSetupRounds && facts.settingUp;
+    _rounds++;
+    if (facts.progressed || informational || settingUp) {
       _stalledRounds = 0;
       return null;
     }

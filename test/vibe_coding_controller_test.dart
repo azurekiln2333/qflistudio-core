@@ -373,6 +373,77 @@ void main() {
     controller.dispose();
   });
 
+  test('lists the project root for . and an empty path', () async {
+    File(p.join(root.path, 'index.html')).writeAsStringSync('<!doctype html>');
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('l1', 'list_files', {'path': '.'}),
+        _toolCall('l2', 'list_files', {'path': ''}),
+        _toolCall('l3', 'list_files', <String, dynamic>{}),
+        _textReply('根目录看完了。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('先看根目录');
+    await settle(controller, VibePhase.succeeded);
+
+    final listings = controller.messages
+        .where((m) => m.tool?.toolName == 'list_files')
+        .map((m) => m.tool!)
+        .toList();
+    expect(listings, hasLength(3));
+    expect(listings.every((t) => t.status == VibeToolStatus.ok), isTrue);
+    expect(listings.every((t) => t.commandOutput == null), isTrue);
+
+    controller.dispose();
+  });
+
+  test('keeps a planning round alive inside the setup rounds', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('t1', 'todo', {
+          'items': [
+            {'text': '建 index.html', 'status': 'pending'},
+          ],
+        }),
+        _toolCall('l1', 'list_files', {'path': '.'}),
+        _toolCall('l2', 'list_files', {'path': '.'}),
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content': '<!doctype html><title>a</title>',
+        }),
+        _textReply('已创建 index.html。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做一个网站');
+    await settle(controller, VibePhase.succeeded);
+
+    expect(controller.lastError, isNull);
+    expect(relay.chatBodies, hasLength(5));
+    expect(File(p.join(root.path, 'index.html')).existsSync(), isTrue);
+
+    controller.dispose();
+  });
+
+  test('stops setup-only rounds once the setup budget is spent', () async {
+    // 前 3 轮只列目录算开工；第 4、5 轮仍只列目录，停滞数满才停。
+    final relay = _FakeRelay();
+    for (var i = 0; i < 5; i++) {
+      relay.chatReplies.add(_toolCall('l$i', 'list_files', {'path': '.'}));
+    }
+    relay.chatReplies.add(_textReply('看完了。'));
+    final controller = build(relay);
+
+    controller.send('一直看根目录');
+    await settle(controller, VibePhase.failed);
+
+    expect(controller.lastError, contains('没有进展'));
+    expect(relay.chatBodies, hasLength(5));
+
+    controller.dispose();
+  });
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {
