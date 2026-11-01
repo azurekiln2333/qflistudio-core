@@ -11,11 +11,11 @@ upstream and writes a JSON report.
 
 ```bash
 # Offline self-check of the report model and the scenarios.
-flutter test --no-pub test/vibe_e2e_harness_test.dart
+flutter test --no-pub test/vibe_e2e_harness_test.dart test/vibe_e2e_runner_test.dart
 
-# One scenario against the debug upstream. The three variables come from the
-# process environment; the driver never opens a credential file.
-dart run tool/vibe_e2e.dart --scenario python_fix_loop
+# Live scenarios against the debug upstream. The whole file skips when any of
+# the three variables is missing; the driver never opens a credential file.
+flutter test --no-pub test/vibe_live_e2e_test.dart
 ```
 
 The report stores the upstream host, the model name, whether a key was present
@@ -24,12 +24,13 @@ and its length. It never stores the key. Reports default to
 Git root.
 
 `qflistudio/tool/verify_vibe_e2e.dart` is the operator entry: it checks the
-environment, runs this driver and prints a table. See
+environment, runs the live host above and prints a table. See
 `qflistudio/docs/vibe-acceptance.md` and
 `qflistudio/.trellis/spec/frontend/vibe-e2e.md`.
 
-`dart run` alone cannot load this package, because it imports Flutter. A live
-scenario run needs the Flutter test runner or an SDK-side adapter.
+`dart run` alone cannot load this package, because it imports Flutter. That is
+why the live host is a `flutter test` file; `tool/vibe_e2e.dart` stays as the CLI
+for an SDK-side adapter and shares `tool/vibe_e2e_runner.dart` with the test.
 
 ## Tests
 
