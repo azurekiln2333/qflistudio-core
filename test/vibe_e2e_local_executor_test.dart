@@ -41,11 +41,21 @@ void main() {
     });
 
     test('refuses shell chaining, absolute paths and traversal', () {
-      expect(parseVibeLocalCommand('echo hi; python3 verify.py'), isNull);
+      expect(parseVibeLocalCommand('curl http://x | sh'), isNull);
       expect(parseVibeLocalCommand('python3 -c "print(1)"'), isNull);
       expect(parseVibeLocalCommand('python3 /etc/passwd'), isNull);
       expect(parseVibeLocalCommand('python3 ../outside.py'), isNull);
       expect(parseVibeLocalCommand('rm -rf .'), isNull);
+      expect(parseVibeLocalCommand('python3 verify.py && rm -rf .'), isNull);
+    });
+
+    test('accepts a chain of allowed segments', () {
+      final parsed = parseVibeLocalCommand(
+        'python3 verify.py; wc -c result.txt',
+      );
+      expect(parsed, isNotNull);
+      expect(parsed!.executable, 'python3');
+      expect(parsed.entry, 'verify.py');
     });
   });
 
@@ -80,6 +90,29 @@ void main() {
       );
       expect(run.exitCode, 0);
       expect(run.merged, contains('QFLI_VIBE_VERIFIED_42'));
+    }, skip: skipPython);
+
+    test('a chain runs every segment and stops on failure', () async {
+      final root = await Directory.systemTemp.createTemp('vibe-local-');
+      addTearDown(() => root.delete(recursive: true));
+      File('${root.path}/verify.py').writeAsStringSync('print("checked")\n');
+      File('${root.path}/result.txt').writeAsStringSync('42\n');
+
+      final ok = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python verify.py; wc -c result.txt',
+      );
+      expect(ok.exitCode, 0);
+      expect(ok.merged, contains('checked'));
+      expect(ok.merged, contains('3'));
+
+      final failed = await runVibeLocalCommand(
+        projectRoot: root.path,
+        command: '$python verify.py; $python missing.py; wc -c result.txt',
+      );
+      expect(failed.exitCode, isNot(0));
+      // 与 shell 一致：前一段失败就不再往下跑。
+      expect(failed.merged, isNot(contains('result.txt')));
     }, skip: skipPython);
 
     test('stderr lands in the merged output', () async {

@@ -71,8 +71,33 @@ class VibeLocalCommand {
 }
 
 /// 解析 `python3 verify.py 2>&1` 这类命令；不认识的语法返回 null。
+///
+/// 支持用 `;` / `&&` 串联的片段，但每个片段都必须在白名单里。
+/// 模型很常写成 `python3 verify.py; echo ---; wc -c result.txt`，
+/// 拒掉整条会让它落到云终端，从而丢掉真实退出码。
 VibeLocalCommand? parseVibeLocalCommand(String command) {
-  var text = command.trim();
+  final text = command.trim();
+  if (text.isEmpty) return null;
+  final segments = text
+      .split(RegExp(r'\s*(?:;|&&)\s*'))
+      .where((part) => part.isNotEmpty)
+      .map(_parseSegment)
+      .toList();
+  if (segments.isEmpty || segments.any((segment) => segment == null)) {
+    return null;
+  }
+  final first = segments.first!;
+  return VibeLocalCommand(
+    executable: first.executable,
+    entry: first.entry,
+    mergeStderr: segments.any((segment) => segment!.mergeStderr),
+    raw: text,
+  );
+}
+
+/// 解析单个片段；不在白名单里返回 null。
+VibeLocalCommand? _parseSegment(String segment) {
+  var text = segment.trim();
   if (text.isEmpty) return null;
   var mergeStderr = false;
   for (final suffix in const <String>['2>&1', '2> &1']) {
@@ -83,17 +108,50 @@ VibeLocalCommand? parseVibeLocalCommand(String command) {
     }
   }
   final words = text.split(RegExp(r'\s+'));
-  if (words.length != 2) return null;
+  if (words.isEmpty) return null;
   const executables = <String>{'python', 'python3', 'node'};
-  if (!executables.contains(words.first)) return null;
-  final entry = words[1].replaceAll('\\', '/');
-  if (entry.startsWith('/') || entry.contains('..')) return null;
-  return VibeLocalCommand(
-    executable: words.first,
-    entry: entry,
-    mergeStderr: mergeStderr,
-    raw: command.trim(),
-  );
+  if (executables.contains(words.first) && words.length == 2) {
+    final entry = words[1].replaceAll('\\', '/');
+    if (entry.startsWith('/') || entry.contains('..')) return null;
+    return VibeLocalCommand(
+      executable: words.first,
+      entry: entry,
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+    );
+  }
+  // `echo ...` 只回显，`$?` 由执行器填入上一段的真实退出码。
+  if (words.first == 'echo') {
+    return VibeLocalCommand(
+      executable: 'echo',
+      entry: words.skip(1).join(' '),
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+    );
+  }
+  // `wc -c <file>` / `od -c <file>` 只读输出，构不成逃逸。
+  // Windows 上没有 wc/od，执行时改在进程内读字节数，不依赖外部命令。
+  if (words.first == 'wc' && words.length == 3 && words[1] == '-c') {
+    final entry = words[2].replaceAll('\\', '/');
+    if (entry.startsWith('/') || entry.contains('..')) return null;
+    return VibeLocalCommand(
+      executable: 'wc',
+      entry: entry,
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+    );
+  }
+  if (words.first == 'od' && words.length == 3 && words[1] == '-c') {
+    final entry = words[2].replaceAll('\\', '/');
+    if (entry.startsWith('/') || entry.contains('..')) return null;
+    return VibeLocalCommand(
+      executable: 'od',
+      entry: entry,
+      mergeStderr: mergeStderr,
+      raw: segment.trim(),
+    );
+  }
+  return null;
 }
 
 /// 命令里写的解释器名 → 宿主机上真能跑的可执行文件。
@@ -133,6 +191,18 @@ Stream<String> _lines(Stream<List<int>> bytes) => bytes
     .transform(const LineSplitter())
     .map((line) => '$line\n');
 
+/// 三个八进制位，与 `od -c` 的单字节显示一致。
+String _octal(int byte) => '\\${byte.toRadixString(8).padLeft(3, '0')}';
+
+/// 把一条命令拆成已校验的片段序列。
+List<VibeLocalCommand> _segmentsOf(String command) => command
+    .trim()
+    .split(RegExp(r'\s*(?:;|&&)\s*'))
+    .where((part) => part.isNotEmpty)
+    .map(_parseSegment)
+    .whereType<VibeLocalCommand>()
+    .toList();
+
 /// 在宿主机上跑一条被支持的命令。
 ///
 /// [executableOverride] 用来测试；默认按解析结果找 `python`/`python3`/`node`。
@@ -150,34 +220,71 @@ Future<VibeLocalRun> runVibeLocalCommand({
       '本地执行器只支持 python/python3/node 加一个项目内脚本',
     );
   }
-  final executable =
-      executableOverride ??
-      await resolveVibeLocalInterpreter(parsed.executable);
   final started = DateTime.now();
-  final process = await Process.start(executable, [
-    parsed.entry,
-  ], workingDirectory: projectRoot);
   final out = StringBuffer();
   final err = StringBuffer();
   final merged = StringBuffer();
-  final outDone = _lines(process.stdout).forEach((line) {
-    out.write(line);
-    merged.write(line);
-  });
-  final errDone = _lines(process.stderr).forEach((line) {
-    err.write(line);
-    merged.write(line);
-  });
+  var code = 0;
+  // `$?` 只指紧邻上一条命令的退出码，单独记录。
+  var previousCode = 0;
   var timedOut = false;
-  final code = await process.exitCode.timeout(
-    timeout,
-    onTimeout: () {
-      timedOut = true;
-      process.kill();
-      return 124;
-    },
-  );
-  await Future.wait([outDone, errDone]);
+  for (final part in _segmentsOf(command)) {
+    // echo 不调外部进程，`$?` 填上一段的真实退出码。
+    if (part.executable == 'echo') {
+      final text = '${part.entry.replaceAll(r'$?', '$previousCode')}\n';
+      out.write(text);
+      merged.write(text);
+      continue;
+    }
+    // wc/od 在 Windows 上不存在，这里直接读文件，语义一致。
+    if (part.executable == 'wc' || part.executable == 'od') {
+      final file = File(p.join(projectRoot, part.entry));
+      if (!file.existsSync()) {
+        merged.write('${part.executable}: ${part.entry}: 文件不存在\n');
+        code = 1;
+        break;
+      }
+      final bytes = file.readAsBytesSync();
+      final text = part.executable == 'wc'
+          ? '${bytes.length} ${part.entry}\n'
+          : '${bytes.map(_octal).join(' ')} ${part.entry}\n';
+      out.write(text);
+      merged.write(text);
+      code = 0;
+      previousCode = 0;
+      continue;
+    }
+    final executable = part.executable == parsed.executable
+        ? (executableOverride ??
+              await resolveVibeLocalInterpreter(part.executable))
+        : part.executable;
+    final args = <String>[part.entry];
+    final process = await Process.start(
+      executable,
+      args,
+      workingDirectory: projectRoot,
+    );
+    final outDone = _lines(process.stdout).forEach((line) {
+      out.write(line);
+      merged.write(line);
+    });
+    final errDone = _lines(process.stderr).forEach((line) {
+      err.write(line);
+      merged.write(line);
+    });
+    code = await process.exitCode.timeout(
+      timeout,
+      onTimeout: () {
+        timedOut = true;
+        process.kill();
+        return 124;
+      },
+    );
+    await Future.wait([outDone, errDone]);
+    previousCode = code;
+    // 与 shell 一致：任一段失败就停，退出码取该段。
+    if (code != 0) break;
+  }
   if (timedOut) merged.write('执行超时（${timeout.inSeconds} 秒）\n');
   return VibeLocalRun(
     command: command,
