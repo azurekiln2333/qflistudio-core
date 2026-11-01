@@ -95,6 +95,10 @@ class VibeE2eScenarioResult {
     List<Map<String, Object?>>? tools,
     List<VibeE2eAssertion>? assertions,
     Map<String, Object?>? extra,
+    this.rounds = 0,
+    this.modelCalls = 0,
+    this.slowestCallMs,
+    this.slowestRoundMs,
   }) : tools = tools ?? const [],
        assertions = assertions ?? const [],
        extra = extra ?? const {};
@@ -107,6 +111,18 @@ class VibeE2eScenarioResult {
   final int durationMs;
   final String? lastError;
   final String? assistantReply;
+
+  /// 模型回合数：工具循环每轮一次调用。
+  final int rounds;
+
+  /// 真实发出的模型请求总数（含 `use_skill` 等内部重试）。
+  final int modelCalls;
+
+  /// 最慢的一次模型请求耗时，用于判断 524 风险。
+  final int? slowestCallMs;
+
+  /// 最慢的一轮（模型 + 工具）耗时；Cloudflare 的 524 以单请求 100 秒为线。
+  final int? slowestRoundMs;
 
   /// 仅 `skipped` 时填写：缺少哪个前置条件。
   final String? skipReason;
@@ -126,6 +142,10 @@ class VibeE2eScenarioResult {
     'status': status.value,
     'phase': phase,
     'durationMs': durationMs,
+    'rounds': rounds,
+    'modelCalls': modelCalls,
+    if (slowestCallMs != null) 'slowestCallMs': slowestCallMs,
+    if (slowestRoundMs != null) 'slowestRoundMs': slowestRoundMs,
     if (lastError != null) 'lastError': lastError,
     if (assistantReply != null) 'assistantReply': assistantReply,
     if (skipReason != null) 'skipReason': skipReason,

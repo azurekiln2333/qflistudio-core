@@ -264,10 +264,23 @@ void main() {
       expect(byName['style_written'], isFalse);
       expect(byName['html_references_assets'], isFalse);
 
+      // 只有引用、没有真实资产时，结构化检查必须报问题。
+      final htmlOnly = scenario.assertions!(outcome);
+      final htmlOnlyByName = {for (final a in htmlOnly) a.name: a};
+      expect(htmlOnlyByName['html_well_formed']!.ok, isFalse);
+      expect(htmlOnlyByName['html_assets_exist']!.detail, contains('index.html'));
+
       File(p.join(root.path, 'index.html')).writeAsStringSync(
+        '<!doctype html><html><head>'
         '<link rel="stylesheet" href="style.css">'
-        '<script src="app.js"></script>',
+        '</head><body>'
+        '<script src="app.js"></script>'
+        '</body></html>',
       );
+      File(p.join(root.path, 'style.css')).writeAsStringSync('body{}');
+      File(
+        p.join(root.path, 'app.js'),
+      ).writeAsStringSync('document.addEventListener("click", () {});');
       final passed = scenario.assertions!(
         VibeE2eScenarioOutcome(
           projectRoot: root.path,
@@ -277,7 +290,14 @@ void main() {
           changedFiles: const ['index.html', 'style.css', 'app.js'],
         ),
       );
-      expect(passed.every((assertion) => assertion.ok), isTrue);
+      final failed = passed.where((assertion) => !assertion.ok).toList();
+      expect(
+        failed,
+        isEmpty,
+        reason: failed
+            .map((assertion) => '${assertion.name}=${assertion.detail}')
+            .join(', '),
+      );
     });
 
     test('fix loop fails when the first run never really failed', () {

@@ -1,14 +1,14 @@
 /// 运行器冒烟：不依赖网络，只确认运行器对外形状、跳过语义与报告脱敏。
 ///
 /// 真实工具循环的验证在 `test/vibe_live_e2e_test.dart`（需要 `QFLI_DEBUG_*`）。
-/// 这里不伪造模型输出：控制器构造路径要等 B 补齐 `ApiClient.aiChat` 的 endpoint
-/// 参数后才能在本仓库编译通过。
 library;
 
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/services/ai_service.dart';
+import 'package:qfli_studio_core/vibe_coding/vibe_web_tools.dart'
+    show vibeWebToolsAvailable;
 
 import '../tool/vibe_e2e_report.dart';
 import '../tool/vibe_e2e_runner.dart';
@@ -41,7 +41,7 @@ void main() {
     expect(runtime, isNotNull);
     addTearDown(runtime!.close);
     expect(runtime.protocol, AiProtocol.chat);
-    expect(runtime.protocolId, 'chat_completions');
+    expect(runtime.protocolId, 'chat');
     expect(runtime.transport.endpoint.path, '/v1/chat/completions');
     expect(
       runtime.transport.endpoint.toString().contains(
@@ -76,17 +76,18 @@ void main() {
     expect(jsonEncode(json).contains(_env['QFLI_DEBUG_API_KEY']!), isFalse);
   });
 
-  test(
-    'search scenario reports why it skipped before the tools ship',
-    () async {
-      final runtime = VibeE2eRuntime.fromEnvironment(environment: _env)!;
-      addTearDown(runtime.close);
-      final search = vibeE2eScenarios.firstWhere((s) => s.key == 'web_search');
-      final result = await runVibeE2eScenario(search, runtime);
-      expect(result.status, VibeE2eStatus.skipped);
-      expect(result.skipReason, contains('检索工具'));
-    },
-  );
+  test('search scenario is no longer skipped by a missing tool', () {
+    final runtime = VibeE2eRuntime.fromEnvironment(
+      environment: _env,
+      searchToolsAvailable: false,
+    )!;
+    addTearDown(runtime.close);
+    // A 已把 web 工具接进控制器，只有离线产品才会关掉它们。
+    expect(vibeWebToolsAvailable, isTrue);
+    expect(runtime.hasSearchTools, isTrue);
+    final search = vibeE2eScenarios.firstWhere((s) => s.key == 'web_search');
+    expect(search.requiresSearchTools, isTrue);
+  });
 
   test('scenario table keeps its three keys', () {
     expect(vibeE2eScenarios.map((s) => s.key), [

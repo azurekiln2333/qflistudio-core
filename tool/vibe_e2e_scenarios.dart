@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
 
 import 'vibe_e2e_report.dart';
+import 'vibe_e2e_web_check.dart';
 
 /// 单个场景定义。`prepare` 在临时项目里写好夹具文件。
 class VibeE2eScenario {
@@ -182,6 +183,27 @@ final List<VibeE2eScenario> vibeE2eScenarios = [
           ),
           detail: 'index.html 的 link 与 script 引用',
         ),
+        // 解析真实 HTML：标签能否闭合、引用的 css/js 是否真实存在。
+        ...() {
+          final check = checkVibeHtml(outcome.projectRoot, 'index.html');
+          return [
+            VibeE2eAssertion(
+              name: 'html_well_formed',
+              ok: check.parsed,
+              detail: check.parsed ? '标签成对闭合' : check.problems.join('; '),
+            ),
+            VibeE2eAssertion(
+              name: 'html_assets_exist',
+              ok:
+                  check.ok &&
+                  check.stylesheets.isNotEmpty &&
+                  check.scripts.isNotEmpty,
+              detail: check.problems.isEmpty
+                  ? 'css ${check.stylesheets.length}、js ${check.scripts.length} 均存在'
+                  : check.problems.join('; '),
+            ),
+          ];
+        }(),
       ];
     },
   ),
@@ -289,6 +311,9 @@ List<Map<String, Object?>> vibeE2eToolEvidence(
       'status': call.status.name,
       'summary': call.summary,
       if (call.exitCode != null) 'exitCode': call.exitCode,
+      // 失败原因必须落盘，否则只能看到 status=error。
+      if (call.result != null && call.result!.isNotEmpty)
+        'result': _tail(call.result!, 1024),
       if (call.commandOutput != null)
         'output': _tail(call.commandOutput!, maxOutput),
     },
@@ -333,6 +358,8 @@ const Set<String> kVibeE2eAssertionNames = {
   'style_written',
   'script_written',
   'html_references_assets',
+  'html_well_formed',
+  'html_assets_exist',
   'runs_at_least_two',
   'first_run_failed',
   'last_run_passed',

@@ -12,18 +12,33 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:qfli_studio_core/interop/interop_runner.dart';
 import 'package:qfli_studio_core/services/ai_service.dart';
 import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
-import 'package:qfli_studio_core/vibe_coding/vibe_tools.dart'
-    show vibeToolSpecs;
+import 'package:qfli_studio_core/vibe_coding/vibe_web_tools.dart'
+    show vibeToolSpecsWithWeb, vibeWebToolsAvailable;
+import 'vibe_e2e_local_executor.dart';
 import 'vibe_e2e_report.dart';
 import 'vibe_e2e_scenarios.dart';
 import 'vibe_e2e_transport.dart';
+import 'vibe_e2e_web_check.dart';
 
 /// 验收会话用的令牌与传输不碰用户账号，这里只是一个非空占位。
 const String kVibeE2eFixtureToken = 'qfli-vibe-e2e-fixture';
+
+/// 在线终端用的令牌：来自环境变量，不是调试上游密钥。
+///
+/// `run_command` 走 `/api/terminal/exec/stream`，需要本站登录令牌。
+/// 缺它时场景会如实报出终端不可用，而不是伪造成功。
+const String kVibeE2eTerminalTokenVariable = 'QFLI_E2E_TERMINAL_TOKEN';
+
+/// 场景上报的额外开关变量名：把跳过的原因写明在报告里。
+/// 云终端缺令牌时报告里的说明；本机执行器不依赖它。
+const String kVibeE2eTerminalTokenMissing =
+    '云终端需要 QFLI_E2E_TERMINAL_TOKEN（本站登录令牌，不是调试上游密钥），'
+    '默认走本机执行器';
 
 /// 场景运行所需的环境：已就绪的调试上游传输。
 class VibeE2eRuntime {
@@ -32,12 +47,20 @@ class VibeE2eRuntime {
     required this.protocol,
     required this.credentials,
     this.searchToolsAvailable = false,
+    this.terminalToken,
   });
 
   final VibeDebugTransport transport;
   final AiProtocol protocol;
   final VibeE2eCredentials credentials;
   final bool searchToolsAvailable;
+
+  /// 在线终端令牌；为空时 `run_command` 会真实失败并如实上报。
+  final String? terminalToken;
+
+  /// 在线终端是否具备运行条件。
+  bool get hasTerminal =>
+      terminalToken != null && terminalToken!.trim().isNotEmpty;
 
   /// 用环境凭据构造运行器；变量缺失返回 null。
   ///
@@ -47,8 +70,10 @@ class VibeE2eRuntime {
     Map<String, String>? environment,
     bool searchToolsAvailable = false,
   }) {
-    final credentials = VibeE2eCredentials.fromEnvironment(environment);
+    final env = environment ?? Platform.environment;
+    final credentials = VibeE2eCredentials.fromEnvironment(env);
     if (credentials == null) return null;
+    final terminal = env[kVibeE2eTerminalTokenVariable]?.trim();
     return VibeE2eRuntime(
       transport: VibeDebugTransport(
         baseUrl: credentials.baseUrl,
@@ -59,15 +84,17 @@ class VibeE2eRuntime {
       protocol: protocol,
       credentials: credentials,
       searchToolsAvailable: searchToolsAvailable,
+      terminalToken: terminal == null || terminal.isEmpty ? null : terminal,
     );
   }
 
-  /// 报告里的协议名；与 [AiProtocol] 的 id 一致，便于对回设置页。
+  /// 报告里的协议名：直接使用设置页持久化的标识（`chat`/`responses`/`messages`）。
   String get protocolId => protocol.id;
 
   /// 当前工具表是否已带检索工具。
   bool get hasSearchTools =>
-      searchToolsAvailable || vibeE2eHasSearchTools(vibeToolSpecs());
+      searchToolsAvailable ||
+      (vibeWebToolsAvailable && vibeE2eHasSearchTools(vibeToolSpecsWithWeb()));
   void close() => transport.close();
 }
 
@@ -122,23 +149,50 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
   StudioProfile.current = null;
   final root = await Directory.systemTemp.createTemp('qfli-vibe-e2e-');
   final changed = <String>[];
-  final api = _TransportBackedApiClient(runtime.transport);
+  final terminalToken = runtime.terminalToken;
+  final api = _TransportBackedApiClient(
+    runtime.transport,
+    tokenOverride: terminalToken,
+  );
   VibeCodingController? controller;
   try {
     await scenario.prepare?.call(root.path);
     controller = VibeCodingController(
       api: api,
-      tokenProvider: () => kVibeE2eFixtureToken,
+      tokenProvider: () => terminalToken ?? kVibeE2eFixtureToken,
       projectRoot: root.path,
       projectName: 'Vibe E2E ${scenario.key}',
       language: scenario.language,
+      endpointProvider: () => AiEndpoint.direct(
+        baseUrl: runtime.credentials.baseUrl,
+        apiKey: runtime.credentials.apiKey,
+        model: runtime.credentials.model,
+        protocol: runtime.protocol,
+      ),
       onFileChanged: changed.add,
+      // 验收专用：run_command 改在宿主机真实执行，报告里记 executor=local。
+      interopRunner: InteropRunner(
+        transport: VibeLocalExecutionTransport(projectRoot: root.path),
+      ),
     );
     final active = controller;
     final finished = Completer<void>();
     var started = false;
+    // 实时采集每轮耗时：从用户请求开始，到该轮最后一个工具落定为止。
+    final roundDurations = <int>[];
+    var roundStart = DateTime.now();
+    var lastToolIndex = 0;
     void observe() {
       if (active.phase == VibePhase.running) started = true;
+      for (var i = lastToolIndex; i < active.messages.length; i++) {
+        final message = active.messages[i];
+        if (message.tool == null || message.pending) continue;
+        roundDurations.add(
+          DateTime.now().difference(roundStart).inMilliseconds,
+        );
+        roundStart = DateTime.now();
+        lastToolIndex = i + 1;
+      }
       if (!started || !active.canSend || finished.isCompleted) return;
       finished.complete();
     }
@@ -176,17 +230,46 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
       ...?scenario.assertions?.call(outcome),
     ];
     final passed = assertions.isNotEmpty && assertions.every((a) => a.ok);
+    // 轮数按真实助手回合计数：每个 assistant 回复（含工具调用）算一轮。
+    final rounds = active.messages
+        .where((message) => !message.isUser && message.tool == null)
+        .length;
+    // 单轮最长耗时：一轮含模型请求与工具执行，决定 524 风险。
+    final slowestRound = roundDurations.isEmpty
+        ? null
+        : roundDurations.reduce((a, b) => a > b ? a : b);
+    final extra = <String, Object?>{
+      ...await vibeE2eFileEvidence(root.path),
+      'roundDurationsMs': roundDurations,
+      'executor': kVibeE2eLocalExecutor,
+      'cloudTerminal': runtime.hasTerminal ? 'relay' : 'skipped',
+      'cloudTerminalReason': runtime.hasTerminal
+          ? '已配置本站登录令牌'
+          : kVibeE2eTerminalTokenMissing,
+      if (scenario.key == 'static_site') ...{
+        'htmlCheck': checkVibeHtml(root.path, 'index.html').toJson(),
+        'scriptLogic': vibeHtmlHasScriptLogic(
+          File(p.join(root.path, 'app.js')).existsSync()
+              ? File(p.join(root.path, 'app.js')).readAsStringSync()
+              : '',
+        ),
+      },
+    };
     return VibeE2eScenarioResult(
       key: scenario.key,
       status: passed ? VibeE2eStatus.passed : VibeE2eStatus.failed,
       phase: active.phase.name,
       durationMs: elapsed(),
+      rounds: rounds,
+      modelCalls: runtime.transport.callCount,
+      slowestCallMs: runtime.transport.slowestCall?.inMilliseconds,
+      slowestRoundMs: slowestRound,
       lastError: active.lastError,
       assistantReply: outcome.assistantReply,
       timeout: timedOut,
       tools: vibeE2eToolEvidence(toolCalls),
       assertions: assertions,
-      extra: await vibeE2eFileEvidence(root.path),
+      extra: extra,
     );
   } on Object catch (error, stack) {
     return VibeE2eScenarioResult(
@@ -214,7 +297,7 @@ Future<VibeE2eScenarioResult> runVibeE2eScenario(
     if (controller != null) {
       if (controller.canCancel) await controller.cancel();
       try {
-        await api.resetTerminal(kVibeE2eFixtureToken);
+        await api.resetTerminal(terminalToken ?? kVibeE2eFixtureToken);
       } on Object {
         // 会话回收失败不影响证据。
       }
@@ -267,14 +350,24 @@ String? vibeE2eGitRevision({String? workingDirectory}) {
   }
 }
 
-/// 只需要工具方法的最小 `ApiClient` 替身。
+/// 只实现验收所需两个通道的 `ApiClient` 替身。
 ///
-/// 生产 `ApiClient.aiChat` 走 `/api/ai/chat`；验收要直连调试上游，而控制器
-/// 只依赖这一个方法，因此这里做窄替身而不是改生产类。
+/// 模型回合直连调试上游，终端事件转发到生产 `terminalEvents`，因此
+/// `run_command` 的真实退出码与输出不打折扣。其余成员一律抛错。
 class _TransportBackedApiClient implements ApiClient {
-  _TransportBackedApiClient(this._transport);
+  _TransportBackedApiClient(
+    this._transport, {
+    ApiClient? relay,
+    this.tokenOverride,
+  }) : _relay = relay ?? ApiClient();
 
   final VibeDebugTransport _transport;
+
+  /// 真实在线终端（`/api/terminal/exec/stream`）。
+  final ApiClient _relay;
+
+  /// 终端令牌；为空时终端会如实报 401/不可用。
+  final String? tokenOverride;
 
   @override
   Future<AiChatResult> aiChat({
@@ -305,8 +398,35 @@ class _TransportBackedApiClient implements ApiClient {
   }
 
   @override
+  Stream<TerminalEvent> terminalEvents(
+    String token,
+    String command, {
+    List<Map<String, String>>? files,
+    Future<void>? abortTrigger,
+  }) => _relay.terminalEvents(
+    token,
+    command,
+    files: files,
+    abortTrigger: abortTrigger,
+  );
+
+  @override
+  Future<void> resetTerminal(String token) => _relay.resetTerminal(token);
+
+  @override
+  Future<Map<String, dynamic>> aiWebSearch(
+    String token,
+    String query, {
+    int limit = 8,
+  }) => _relay.aiWebSearch(token, query, limit: limit);
+
+  @override
+  Future<Map<String, dynamic>> aiWebFetch(String token, String url) =>
+      _relay.aiWebFetch(token, url);
+
+  @override
   dynamic noSuchMethod(Invocation invocation) =>
-      throw UnsupportedError('验收替身只实现 aiChat，调用了 ${invocation.memberName}');
+      throw UnsupportedError('验收替身不支持 ${invocation.memberName}');
 
   @override
   String toString() =>
