@@ -94,8 +94,7 @@ List<Map<String, dynamic>> vibeWebToolSpecs() => [
     'type': 'function',
     'function': {
       'name': 'web_search',
-      'description':
-          '在互联网上搜索资料，返回标题、链接和摘要。需要外部事实、最新信息或引用来源时使用。',
+      'description': '在互联网上搜索资料，返回标题、链接和摘要。需要外部事实、最新信息或引用来源时使用。',
       'parameters': {
         'type': 'object',
         'properties': {
@@ -110,8 +109,7 @@ List<Map<String, dynamic>> vibeWebToolSpecs() => [
     'type': 'function',
     'function': {
       'name': 'web_fetch',
-      'description':
-          '抓取一个公开网页并返回去掉标签的正文。用于阅读搜索结果里的具体页面。',
+      'description': '抓取一个公开网页并返回去掉标签的正文。用于阅读搜索结果里的具体页面。',
       'parameters': {
         'type': 'object',
         'properties': {
@@ -269,9 +267,7 @@ Future<VibeWebToolResult> _search(
     if (item is! Map) continue;
     final title = item['title'] is String ? item['title'] as String : '';
     final url = item['url'] is String ? item['url'] as String : '';
-    final snippet = item['snippet'] is String
-        ? item['snippet'] as String
-        : '';
+    final snippet = item['snippet'] is String ? item['snippet'] as String : '';
     if (url.isEmpty) continue;
     index++;
     lines.add(
@@ -570,10 +566,7 @@ Future<String> _directGet(
     }
     return response.body;
   }
-  throw const _DirectFailure(
-    'network',
-    '跳转次数超过 $kVibeDirectMaxRedirects 次',
-  );
+  throw const _DirectFailure('network', '跳转次数超过 $kVibeDirectMaxRedirects 次');
 }
 
 /// 协议与凭据的即时校验；跳转后也要重新调用。
@@ -615,10 +608,7 @@ Future<_DirectResponse> _directSend(
   try {
     final request = http.Request('GET', url)
       ..followRedirects = false
-      ..headers.addAll({
-        'user-agent': _browserUserAgent,
-        'accept': accept,
-      });
+      ..headers.addAll({'user-agent': _browserUserAgent, 'accept': accept});
     final streamed = await client.send(request).timeout(kVibeWebTimeout);
     final bytes = await streamed.stream
         .fold<BytesBuilder>(BytesBuilder(), (builder, chunk) {
@@ -717,7 +707,8 @@ VibeWebToolResult _formatPage({
 @visibleForTesting
 List<Map<String, String>> parseBingRss(String xml, int limit) {
   final results = <Map<String, String>>[];
-  for (final chunk in xml.split(RegExp(r'<item>', caseSensitive: false)).skip(1)) {
+  for (final chunk
+      in xml.split(RegExp(r'<item>', caseSensitive: false)).skip(1)) {
     final item = chunk.split(RegExp(r'</item>', caseSensitive: false)).first;
     final title = _stripTags(_pickTag(item, 'title'));
     final link = _decodeEntities(_pickTag(item, 'link')).trim();
@@ -775,18 +766,24 @@ String _stripTags(String value) {
   ).firstMatch(html);
   final title = titleMatch == null
       ? ''
-      : _decodeEntities(titleMatch.group(1) ?? '')
-            .replaceAll(RegExp(r'\s+'), ' ')
-            .trim();
+      : _decodeEntities(
+          titleMatch.group(1) ?? '',
+        ).replaceAll(RegExp(r'\s+'), ' ').trim();
   // 标题只算元数据，不能混进正文；head 里的剩余内容也一并去掉。
   final withoutHead = html.replaceAll(
     RegExp(r'<head[\s\S]*?</head>', caseSensitive: false),
     ' ',
   );
   final body = withoutHead
-      .replaceAll(RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
+      .replaceAll(
+        RegExp(r'<script[\s\S]*?</script>', caseSensitive: false),
+        ' ',
+      )
       .replaceAll(RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
-      .replaceAll(RegExp(r'<noscript[\s\S]*?</noscript>', caseSensitive: false), ' ')
+      .replaceAll(
+        RegExp(r'<noscript[\s\S]*?</noscript>', caseSensitive: false),
+        ' ',
+      )
       .replaceAll(RegExp(r'<!--[\s\S]*?-->'), ' ')
       .replaceAll(
         RegExp(r'</(p|div|li|h[1-6]|tr|br)>', caseSensitive: false),
@@ -873,6 +870,7 @@ Future<List<Map<String, String>>> fetchDirectRssForTest(
   );
   return parseBingRss(xml, kVibeWebMaxResults);
 }
+
 /// 直连抓取的可测入口：返回真实提取出的标题与正文。
 @visibleForTesting
 Future<({String title, String text})> fetchDirectPageForTest(

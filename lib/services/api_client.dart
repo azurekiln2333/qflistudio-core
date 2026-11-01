@@ -95,12 +95,12 @@ class ApiException implements Exception {
 
 class HuaweiLoginResult {
   const HuaweiLoginResult.signedIn(this.token, this.user)
-      : bindingId = null,
-        phoneAvailable = false;
+    : bindingId = null,
+      phoneAvailable = false;
 
   const HuaweiLoginResult.binding(this.bindingId, this.phoneAvailable)
-      : token = null,
-        user = null;
+    : token = null,
+      user = null;
 
   final String? token;
   final CommunityUser? user;
@@ -221,15 +221,16 @@ class ApiClient {
     final uri = ApiConfig.endpoint(path, query);
     try {
       // [abortTrigger] 完成时真正中断在途请求（取消、退出页面）。
-      final request = (abortTrigger == null
-              ? http.Request(method, uri)
-              : http.AbortableRequest(
-                  method,
-                  uri,
-                  abortTrigger: abortTrigger,
-                ))
-          ..followRedirects = false
-          ..headers.addAll(_headers(token: token));
+      final request =
+          (abortTrigger == null
+                ? http.Request(method, uri)
+                : http.AbortableRequest(
+                    method,
+                    uri,
+                    abortTrigger: abortTrigger,
+                  ))
+            ..followRedirects = false
+            ..headers.addAll(_headers(token: token));
       if (body != null) request.body = jsonEncode(body);
       final response = await _http
           .send(request)
@@ -260,6 +261,8 @@ class ApiClient {
         throw ApiException('服务响应异常，请稍后重试');
       }
       return data;
+    } on http.RequestAbortedException {
+      throw ApiException('请求已取消');
     } on SocketException catch (e) {
       throw ApiException('无法连接服务器：${e.message}');
     } on TimeoutException {
@@ -368,9 +371,7 @@ class ApiClient {
     );
   }
 
-  Future<HuaweiLoginResult> huaweiLogin(
-    String authorizationCode,
-  ) async {
+  Future<HuaweiLoginResult> huaweiLogin(String authorizationCode) async {
     final data =
         await _send(
               'POST',
@@ -383,7 +384,10 @@ class ApiClient {
       if (bindingId is! String || bindingId.isEmpty) {
         throw ApiException('华为绑定响应无效，请重新发起登录');
       }
-      return HuaweiLoginResult.binding(bindingId, data['phoneAvailable'] == true);
+      return HuaweiLoginResult.binding(
+        bindingId,
+        data['phoneAvailable'] == true,
+      );
     }
     return HuaweiLoginResult.signedIn(
       data['token'] as String,
@@ -391,23 +395,50 @@ class ApiClient {
     );
   }
 
-  Future<({String token, CommunityUser user})> skipHuaweiBinding(String bindingId) async {
-    final data = await _send('POST', '/api/auth/huawei/skip', body: {'bindingId': bindingId}) as Map<String, dynamic>;
-    return (token: data['token'] as String, user: CommunityUser.fromJson(data['user']));
+  Future<({String token, CommunityUser user})> skipHuaweiBinding(
+    String bindingId,
+  ) async {
+    final data =
+        await _send(
+              'POST',
+              '/api/auth/huawei/skip',
+              body: {'bindingId': bindingId},
+            )
+            as Map<String, dynamic>;
+    return (
+      token: data['token'] as String,
+      user: CommunityUser.fromJson(data['user']),
+    );
   }
 
   Future<({String token, CommunityUser user})> bindHuaweiAccount(
-    String bindingId, String username, String password, {
-    String? emailCode, String? totpCode, String? captchaId, String? captchaCode,
+    String bindingId,
+    String username,
+    String password, {
+    String? emailCode,
+    String? totpCode,
+    String? captchaId,
+    String? captchaCode,
   }) async {
-    final data = await _send('POST', '/api/auth/huawei/bind', body: {
-      'bindingId': bindingId, 'username': username, 'password': password,
-      'emailCode': ?emailCode,
-      'totpCode': ?totpCode,
-      'captchaId': ?captchaId,
-      'captchaCode': ?captchaCode,
-    }) as Map<String, dynamic>;
-    return (token: data['token'] as String, user: CommunityUser.fromJson(data['user']));
+    final data =
+        await _send(
+              'POST',
+              '/api/auth/huawei/bind',
+              body: {
+                'bindingId': bindingId,
+                'username': username,
+                'password': password,
+                'emailCode': ?emailCode,
+                'totpCode': ?totpCode,
+                'captchaId': ?captchaId,
+                'captchaCode': ?captchaCode,
+              },
+            )
+            as Map<String, dynamic>;
+    return (
+      token: data['token'] as String,
+      user: CommunityUser.fromJson(data['user']),
+    );
   }
 
   // ---- 用户 ----
@@ -531,18 +562,30 @@ class ApiClient {
 
   Future<List<DateTime>> checkinDays(String token, DateTime month) async {
     final value = '${month.year}-${month.month.toString().padLeft(2, '0')}';
-    final data = await _send('GET', '/api/users/me/checkins', token: token,
-        query: {'month': value}) as Map<String, dynamic>;
+    final data =
+        await _send(
+              'GET',
+              '/api/users/me/checkins',
+              token: token,
+              query: {'month': value},
+            )
+            as Map<String, dynamic>;
     return [
       for (final row in data['days'] as List? ?? const [])
         DateTime.parse((row as Map)['date'].toString()),
     ];
   }
 
-  Future<({int reward, bool duplicate, DailyTasksSnapshot snapshot})> reportTaskEvent(
-      String token, String key, String eventId, String day) async {
-    final data = await _send('POST', '/api/users/me/task-events', token: token,
-        body: {'key': key, 'eventId': eventId, 'day': day}) as Map<String, dynamic>;
+  Future<({int reward, bool duplicate, DailyTasksSnapshot snapshot})>
+  reportTaskEvent(String token, String key, String eventId, String day) async {
+    final data =
+        await _send(
+              'POST',
+              '/api/users/me/task-events',
+              token: token,
+              body: {'key': key, 'eventId': eventId, 'day': day},
+            )
+            as Map<String, dynamic>;
     return (
       reward: (data['reward'] as num?)?.toInt() ?? 0,
       duplicate: data['duplicate'] == true,
@@ -550,53 +593,119 @@ class ApiClient {
     );
   }
 
-  Future<({int points, List<Map<String, dynamic>> entries})> pointHistory(String token) async {
-    final data = await _send('GET', '/api/users/me/points', token: token) as Map<String, dynamic>;
-    return (points: (data['points'] as num).toInt(), entries: [
-      for (final row in data['entries'] as List? ?? const []) Map<String, dynamic>.from(row as Map),
-    ]);
+  Future<({int points, List<Map<String, dynamic>> entries})> pointHistory(
+    String token,
+  ) async {
+    final data =
+        await _send('GET', '/api/users/me/points', token: token)
+            as Map<String, dynamic>;
+    return (
+      points: (data['points'] as num).toInt(),
+      entries: [
+        for (final row in data['entries'] as List? ?? const [])
+          Map<String, dynamic>.from(row as Map),
+      ],
+    );
   }
 
-  Future<List<Map<String, dynamic>>> rewardItems(String token, {bool admin = false}) async {
-    final data = await _send('GET', admin ? '/api/users/admin/rewards' : '/api/users/me/rewards',
-        token: token) as Map<String, dynamic>;
-    return [for (final row in data['items'] as List? ?? const []) Map<String, dynamic>.from(row as Map)];
+  Future<List<Map<String, dynamic>>> rewardItems(
+    String token, {
+    bool admin = false,
+  }) async {
+    final data =
+        await _send(
+              'GET',
+              admin ? '/api/users/admin/rewards' : '/api/users/me/rewards',
+              token: token,
+            )
+            as Map<String, dynamic>;
+    return [
+      for (final row in data['items'] as List? ?? const [])
+        Map<String, dynamic>.from(row as Map),
+    ];
   }
 
-  Future<List<Map<String, dynamic>>> redemptions(String token, {bool admin = false}) async {
-    final data = await _send('GET', admin ? '/api/users/admin/redemptions' : '/api/users/me/redemptions',
-        token: token) as Map<String, dynamic>;
-    return [for (final row in data['items'] as List? ?? const []) Map<String, dynamic>.from(row as Map)];
+  Future<List<Map<String, dynamic>>> redemptions(
+    String token, {
+    bool admin = false,
+  }) async {
+    final data =
+        await _send(
+              'GET',
+              admin
+                  ? '/api/users/admin/redemptions'
+                  : '/api/users/me/redemptions',
+              token: token,
+            )
+            as Map<String, dynamic>;
+    return [
+      for (final row in data['items'] as List? ?? const [])
+        Map<String, dynamic>.from(row as Map),
+    ];
   }
 
   Future<int> redeem(String token, String id) async {
-    final data = await _send('POST', '/api/users/me/rewards/$id/redeem', token: token)
-        as Map<String, dynamic>;
+    final data =
+        await _send('POST', '/api/users/me/rewards/$id/redeem', token: token)
+            as Map<String, dynamic>;
     return (data['points'] as num).toInt();
   }
 
   Future<List<Map<String, dynamic>>> taskConfig(String token) async {
-    final data = await _send('GET', '/api/users/admin/tasks', token: token) as Map<String, dynamic>;
-    return [for (final row in data['items'] as List? ?? const []) Map<String, dynamic>.from(row as Map)];
+    final data =
+        await _send('GET', '/api/users/admin/tasks', token: token)
+            as Map<String, dynamic>;
+    return [
+      for (final row in data['items'] as List? ?? const [])
+        Map<String, dynamic>.from(row as Map),
+    ];
   }
 
-  Future<void> updateTaskConfig(String token, String key, int reward,
-      bool enabled, int targetCount) async {
-    await _send('PATCH', '/api/users/admin/tasks/$key', token: token,
-        body: {'reward': reward, 'enabled': enabled, 'targetCount': targetCount});
+  Future<void> updateTaskConfig(
+    String token,
+    String key,
+    int reward,
+    bool enabled,
+    int targetCount,
+  ) async {
+    await _send(
+      'PATCH',
+      '/api/users/admin/tasks/$key',
+      token: token,
+      body: {'reward': reward, 'enabled': enabled, 'targetCount': targetCount},
+    );
   }
 
-  Future<void> saveReward(String token, {String? id, required String title,
-      required String description, required int cost, required int stock, bool enabled = true}) async {
-    await _send(id == null ? 'POST' : 'PATCH',
-        id == null ? '/api/users/admin/rewards' : '/api/users/admin/rewards/$id', token: token,
-        body: {'title': title, 'description': description, 'cost': cost, 'stock': stock,
-          if (id != null) 'enabled': enabled});
+  Future<void> saveReward(
+    String token, {
+    String? id,
+    required String title,
+    required String description,
+    required int cost,
+    required int stock,
+    bool enabled = true,
+  }) async {
+    await _send(
+      id == null ? 'POST' : 'PATCH',
+      id == null ? '/api/users/admin/rewards' : '/api/users/admin/rewards/$id',
+      token: token,
+      body: {
+        'title': title,
+        'description': description,
+        'cost': cost,
+        'stock': stock,
+        if (id != null) 'enabled': enabled,
+      },
+    );
   }
 
   Future<void> fulfillRedemption(String token, String id) async {
-    await _send('PATCH', '/api/users/admin/redemptions/$id', token: token,
-        body: {'status': 'fulfilled'});
+    await _send(
+      'PATCH',
+      '/api/users/admin/redemptions/$id',
+      token: token,
+      body: {'status': 'fulfilled'},
+    );
   }
 
   // ---- 社区 ----
@@ -735,15 +844,28 @@ class ApiClient {
 
   static const _terminalTimeout = Duration(seconds: 110);
 
+  /// 终端执行流。
+  ///
+  /// [abortTrigger] 完成时中断在途 HTTP，取消才能真的停掉远程进程。
   Stream<TerminalEvent> terminalEvents(
     String token,
     String command, {
     List<Map<String, String>>? files,
+    Future<void>? abortTrigger,
   }) async* {
     _requireOnline();
     try {
       final request =
-          http.Request('POST', ApiConfig.endpoint('/api/terminal/exec/stream'))
+          (abortTrigger == null
+                ? http.Request(
+                    'POST',
+                    ApiConfig.endpoint('/api/terminal/exec/stream'),
+                  )
+                : http.AbortableRequest(
+                    'POST',
+                    ApiConfig.endpoint('/api/terminal/exec/stream'),
+                    abortTrigger: abortTrigger,
+                  ))
             ..followRedirects = false
             ..headers.addAll(_headers(token: token))
             ..headers['accept'] = 'application/x-ndjson'
@@ -787,9 +909,23 @@ class ApiClient {
         completed = event.type == TerminalEventType.result;
         yield event;
       }
-      if (!completed) throw ApiException('终端连接已中断，未收到执行结果');
+      if (!completed) {
+        // 中断（MockClient 与真实 AbortableRequest 都会先结束字节流）
+        // 不算终端故障：取消是预期路径，直接结束流。
+        var aborted = false;
+        abortTrigger?.then(
+          (_) => aborted = true,
+          onError: (_) => aborted = true,
+        );
+        await Future<void>.delayed(Duration.zero);
+        if (aborted) return;
+        throw ApiException('终端连接已中断，未收到执行结果');
+      }
     } on TimeoutException {
       throw ApiException('终端连接超时，请重试');
+    } on http.RequestAbortedException {
+      // 取消是预期路径：不向调用方谎报错误，直接结束流。
+      return;
     } on SocketException catch (error) {
       throw ApiException('无法连接终端：${error.message}');
     } on http.ClientException {
@@ -1079,8 +1215,7 @@ class ApiClient {
     final uri = Uri.parse(
       AiService.endpoint(endpoint.baseUrl, endpoint.protocol),
     );
-    if (!uri.hasAuthority ||
-        (uri.scheme != 'https' && uri.scheme != 'http')) {
+    if (!uri.hasAuthority || (uri.scheme != 'https' && uri.scheme != 'http')) {
       throw ApiException('AI 接口地址无效，需要 http 或 https');
     }
     final body = AiService.encodeRequest(
@@ -1089,18 +1224,15 @@ class ApiClient {
       messages: messages,
       tools: tools,
     );
-    final request = (abortTrigger == null
-            ? http.Request('POST', uri)
-            : http.AbortableRequest(
-                'POST',
-                uri,
-                abortTrigger: abortTrigger,
-              ))
-        ..followRedirects = false
-        ..headers.addAll(
-          AiService.headers(endpoint.protocol, apiKey: endpoint.apiKey),
-        )
-        ..body = jsonEncode(body);
+    final request =
+        (abortTrigger == null
+              ? http.Request('POST', uri)
+              : http.AbortableRequest('POST', uri, abortTrigger: abortTrigger))
+          ..followRedirects = false
+          ..headers.addAll(
+            AiService.headers(endpoint.protocol, apiKey: endpoint.apiKey),
+          )
+          ..body = jsonEncode(body);
     try {
       final response = await _http
           .send(request)
@@ -1192,7 +1324,8 @@ class ApiClient {
   }
 
   /// 校验并转换一次助手消息；两条链路共用。
-  static AiChatResult _decodeAiResult(Map<String, dynamic> data) {    final model = data['model'];
+  static AiChatResult _decodeAiResult(Map<String, dynamic> data) {
+    final model = data['model'];
     final message = data['message'];
     if (model is! String || model.isEmpty || message is! Map) {
       throw ApiException('AI 响应格式无效');
