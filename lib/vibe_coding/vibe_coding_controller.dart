@@ -633,7 +633,7 @@ class VibeCodingController extends ChangeNotifier {
           );
           guard.markWritten(result.relativePath);
           _onFileChanged?.call(result.relativePath);
-          final verify = _verificationHint(result.relativePath);
+          final verify = await _verificationHint(result.relativePath);
           return _ToolOutcome(
             status: VibeToolStatus.ok,
             summary:
@@ -697,66 +697,110 @@ class VibeCodingController extends ChangeNotifier {
     }
   }
 
-  /// 连接内自检脚本：解析本地 HTML 的真实结构。
+  /// 写入成功后的自检提示：网页类项目就地做真实结构检查。
   ///
-  /// 只读快照内的文件，没有任何外部依赖。
-  static const String _htmlCheckScript = r'''
-from html.parser import HTMLParser
-from pathlib import Path
-import sys
+  /// 不再让模型发一段 heredoc 脚本：那会撞上 run_command 的长度上限，
+  /// 把已经正确的页面判成失败。检查在本地完成，结果直接写进工具结果。
+  Future<String?> _verificationHint(String relativePath) async {
+    if (!relativePath.toLowerCase().endsWith('.html')) return null;
+    final report = await _checkHtml(relativePath);
+    return report;
+  }
 
-VOID = {'meta', 'link', 'br', 'img', 'input', 'hr', 'source'}
-
-
-class Checker(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.stack = []
-        self.errors = []
-        self.count = 0
-
-    def handle_starttag(self, tag, attrs):
-        self.count += 1
-        if tag not in VOID:
-            self.stack.append(tag)
-
-    def handle_endtag(self, tag):
-        if self.stack and self.stack[-1] == tag:
-            self.stack.pop()
-        elif tag in self.stack:
-            self.errors.append('</%s> 之前有未闭合标签' % tag)
-            while self.stack and self.stack.pop() != tag:
-                pass
-        else:
-            self.errors.append('多余的 </%s>' % tag)
-
-
-files = [Path('index.html')]
-files += sorted(p for p in Path('.').glob('*.css'))
-failed = False
-for path in files:
-    if not path.is_file() or path.stat().st_size == 0:
-        print('缺失或为空:', path)
-        failed = True
-        continue
-    print('文件:', path, path.stat().st_size, 'B')
-
-checker = Checker()
-if Path('index.html').is_file():
-    checker.feed(Path('index.html').read_text(encoding='utf-8'))
-if checker.errors or checker.stack:
-    print('标签问题:', checker.errors, '未闭合:', checker.stack)
-    failed = True
-else:
-    print('结构检查: OK，%d 个开始标签' % checker.count)
-sys.exit(1 if failed else 0)
-''';
-
-  /// 写入成功后的自检提示：网页类项目要跑真实结构检查。
-  String? _verificationHint(String relativePath) {
-    if (relativePath != 'index.html') return null;
-    return '接下来运行 run_command 验证页面结构：\n'
-        'python3 - <<\'PY\'\n$_htmlCheckScript${'PY'}';
+  /// 内置 HTML 结构检查：标签闭合、引用的本地文件是否存在。
+  ///
+  /// 只读当前项目，不调用命令行，也不依赖外部工具。
+  Future<String> _checkHtml(String relativePath) async {
+    final tagPattern = RegExp(
+      r'<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*?)(/?)>',
+      dotAll: true,
+    );
+    const voidTags = {
+      'meta',
+      'link',
+      'br',
+      'img',
+      'input',
+      'hr',
+      'source',
+      'area',
+      'base',
+      'col',
+      'embed',
+      'param',
+      'track',
+      'wbr',
+    };
+    final source = await _files.read(relativePath);
+    final stack = <String>[];
+    final problems = <String>[];
+    final refs = <String>[];
+    var openTags = 0;
+    for (final match in tagPattern.allMatches(source)) {
+      final closing = match.group(1) == '/';
+      final tag = match.group(2)!.toLowerCase();
+      if (closing) {
+        if (stack.isNotEmpty && stack.last == tag) {
+          stack.removeLast();
+        } else if (stack.contains(tag)) {
+          problems.add('</$tag> 之前有未闭合标签');
+          while (stack.isNotEmpty && stack.removeLast() != tag) {}
+        } else {
+          problems.add('多余的 </$tag>');
+        }
+        continue;
+      }
+      openTags++;
+      if (!voidTags.contains(tag) && match.group(4) != '/') stack.add(tag);
+      final attrs = match.group(3) ?? '';
+      if (tag == 'link' || tag == 'script' || tag == 'img') {
+        final attr = tag == 'link' ? 'href' : 'src';
+        final value = RegExp(
+          '$attr\\s*=\\s*["\']([^"\']+)["\']',
+        ).firstMatch(attrs)?.group(1);
+        if (value != null) refs.add(value.trim());
+      }
+    }
+    final buffer = StringBuffer('本地结构检查（$relativePath）：');
+    if (problems.isEmpty && stack.isEmpty) {
+      buffer.write('标签闭合正常，$openTags 个开始标签');
+    } else {
+      buffer.write('标签有问题');
+      if (problems.isNotEmpty) buffer.write('，${problems.join('；')}');
+      if (stack.isNotEmpty) buffer.write('，未闭合：${stack.join(', ')}');
+    }
+    final missing = <String>[];
+    final checked = <String>{};
+    for (final ref in refs) {
+      final lower = ref.toLowerCase();
+      if (lower.startsWith('http://') ||
+          lower.startsWith('https://') ||
+          lower.startsWith('data:') ||
+          lower.startsWith('//') ||
+          lower.startsWith('#')) {
+        continue;
+      }
+      if (!checked.add(ref)) continue;
+      try {
+        final absolute = _files.resolve(ref.split('?').first.split('#').first);
+        if (!File(absolute).existsSync()) missing.add(ref);
+      } on VibeToolException {
+        missing.add(ref);
+      }
+    }
+    if (refs.isNotEmpty) {
+      buffer.write(
+        missing.isEmpty
+            ? '；引用的 ${checked.length} 个本地文件都存在'
+            : '；缺少文件：${missing.join(', ')}',
+      );
+    }
+    if (problems.isNotEmpty || stack.isNotEmpty || missing.isNotEmpty) {
+      buffer.write('。先修好这些再用 run_command 验证。');
+    } else {
+      buffer.write('。结构自检已通过，无需再发检查脚本。');
+    }
+    return buffer.toString();
   }
 
   /// `web_search` / `web_fetch`：经服务端中转真实检索，结果原样交给模型。
@@ -837,7 +881,11 @@ sys.exit(1 if failed else 0)
       return _error('error', 'command 不能为空');
     }
     if (command.length > 2000) {
-      return _error('error', '命令超过 2000 字符');
+      return _error(
+        'error',
+        '命令超过 2000 字符。把检查逻辑用 write_file 写成项目里的文件，'
+            '再用一行短命令执行，例如 python3 check.py。',
+      );
     }
     // 先尝试跨应用运行：OHOS 上由兄弟应用用本地工具链编译并执行。
     // 返回 null 表示不适用（无桥接、入口不匹配、命令不属于该语法），

@@ -444,6 +444,95 @@ void main() {
     controller.dispose();
   });
 
+  test(
+    'checks a written page locally instead of asking for a script',
+    () async {
+      final relay = _FakeRelay()
+        ..chatReplies.addAll([
+          _toolCall('w1', 'write_file', {
+            'path': 'index.html',
+            'content':
+                '<!doctype html><html><head>'
+                '<link rel="stylesheet" href="styles.css"></head>'
+                '<body><h1>a</h1></body></html>',
+          }),
+          _toolCall('w2', 'write_file', {
+            'path': 'styles.css',
+            'content': 'h1{}',
+          }),
+          _textReply('页面已检查。'),
+        ]);
+      final controller = build(relay);
+
+      controller.send('做一个网站');
+      await settle(controller, VibePhase.succeeded);
+
+      final write = controller.messages.firstWhere(
+        (m) => m.tool?.toolName == 'write_file',
+      );
+      final text = relay.chatBodies[1]['messages'] as List;
+      final toolReply =
+          text.firstWhere(
+                (m) =>
+                    m is Map &&
+                    m['role'] == 'tool' &&
+                    '${m['content']}'.contains('结构'),
+              )
+              as Map;
+      expect('${toolReply['content']}', contains('标签闭合正常'));
+      expect(write.tool!.status, VibeToolStatus.ok);
+      // 不再要求模型发 heredoc 脚本。
+      expect('${toolReply['content']}', isNot(contains('python3')));
+      expect('${toolReply['content']}', isNot(contains('html.parser')));
+
+      controller.dispose();
+    },
+  );
+
+  test('reports a missing local reference in the write result', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content':
+              '<!doctype html><html><body>'
+              '<script src="app.js"></script></body></html>',
+        }),
+        _textReply('页面已写。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做页面');
+    await settle(controller, VibePhase.succeeded);
+
+    final body = relay.chatBodies[1]['messages'] as List;
+    final toolReply = body.lastWhere((m) => m is Map && m['role'] == 'tool');
+    expect('${(toolReply as Map)['content']}', contains('app.js'));
+    expect('${toolReply['content']}', contains('缺少文件'));
+
+    controller.dispose();
+  });
+
+  test('points a too long command at a script file', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('c1', 'run_command', {'command': 'echo ${'x' * 2100}'}),
+        _textReply('改短命令。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('跑检查');
+    await settle(controller, VibePhase.succeeded);
+
+    final run = controller.messages.firstWhere(
+      (m) => m.tool?.toolName == 'run_command',
+    );
+    expect(run.tool!.status, VibeToolStatus.error);
+    expect(run.tool!.result, contains('write_file'));
+
+    controller.dispose();
+  });
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {
