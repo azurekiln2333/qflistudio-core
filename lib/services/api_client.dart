@@ -7,7 +7,79 @@ import 'package:http/http.dart' as http;
 
 import '../community/models.dart';
 import '../config/api_config.dart';
+import 'ai_service.dart';
 import 'studio_profile.dart';
+
+/// AI 请求走哪条链路。
+///
+/// [relay] 用服务端密钥与固定模型，客户端只提交消息和工具。
+/// [direct] 直接用用户在设置里填的地址、密钥、模型和协议，密钥只在本机内存。
+enum AiRoute { relay, direct }
+
+/// 一次 AI 调用的连接参数。[AiEndpoint.relay] 忽略除 [protocol] 之外的字段。
+class AiEndpoint {
+  const AiEndpoint.relay({this.protocol = AiProtocol.chat})
+    : route = AiRoute.relay,
+      baseUrl = '',
+      apiKey = '',
+      model = '';
+
+  const AiEndpoint.direct({
+    required this.baseUrl,
+    required this.apiKey,
+    required this.model,
+    this.protocol = AiProtocol.chat,
+  }) : route = AiRoute.direct;
+
+  final AiRoute route;
+  final String baseUrl;
+  final String apiKey;
+  final String model;
+  final AiProtocol protocol;
+
+  /// 是否具备直连所需的必要参数；中转链路恒为 true。
+  bool get isUsable => switch (route) {
+    AiRoute.relay => true,
+    AiRoute.direct => baseUrl.trim().isNotEmpty && model.trim().isNotEmpty,
+  };
+
+  /// 日志安全的描述：不含地址细节，也不含密钥。
+  @override
+  String toString() => switch (route) {
+    AiRoute.relay => 'AiEndpoint.relay(${protocol.id})',
+    AiRoute.direct => 'AiEndpoint.direct(${protocol.id})',
+  };
+}
+
+/// 一次 AI 回合的结果。中转与直连返回同一形状，调用方无需分支。
+class AiChatResult {
+  const AiChatResult({
+    required this.model,
+    required this.content,
+    required this.rawMessage,
+    this.usage,
+  });
+
+  final String model;
+
+  /// 助手文本；只有工具调用时可能为空。
+  final String content;
+
+  /// 原样保留的助手消息（含 [tool_calls]），用于下一轮对话。
+  final Map<String, dynamic> rawMessage;
+
+  final Map<String, dynamic>? usage;
+
+  /// 原样保留的工具调用，顺序即服务端返回顺序。
+  List<Map<String, dynamic>> get toolCalls {
+    final calls = rawMessage['tool_calls'];
+    if (calls is! List) return const [];
+    return [
+      for (final call in calls)
+        if (call is Map) Map<String, dynamic>.from(call),
+    ];
+  }
+}
 
 /// API 调用异常：message 为用户可读文案。
 class ApiException implements Exception {
@@ -143,13 +215,21 @@ class ApiClient {
     Map<String, Object>? query,
     String? token,
     Duration? timeout,
+    Future<void>? abortTrigger,
   }) async {
     _requireOnline();
     final uri = ApiConfig.endpoint(path, query);
     try {
-      final request = http.Request(method, uri)
-        ..followRedirects = false
-        ..headers.addAll(_headers(token: token));
+      // [abortTrigger] 完成时真正中断在途请求（取消、退出页面）。
+      final request = (abortTrigger == null
+              ? http.Request(method, uri)
+              : http.AbortableRequest(
+                  method,
+                  uri,
+                  abortTrigger: abortTrigger,
+                ))
+          ..followRedirects = false
+          ..headers.addAll(_headers(token: token));
       if (body != null) request.body = jsonEncode(body);
       final response = await _http
           .send(request)
@@ -937,6 +1017,202 @@ class ApiClient {
     } on ApiException {
       return false;
     }
+  }
+
+  // ---- AI 编程助手 ----
+
+  /// 服务端默认 60 s，这里留出转接与网络余量。
+  static const _aiTimeout = Duration(seconds: 90);
+
+  /// 一次模型回合。
+  ///
+  /// [endpoint] 为空或为 relay 时走服务端转接 `/api/ai/chat`（需登录令牌）。
+  /// direct 时直接用用户配置的地址、密钥、模型与协议直连上游，不经过本站。
+  /// 两条链路返回同一内部形状，[VibeCodingController] 无需分支。
+  ///
+  /// [abortTrigger] 完成时真正终止在途 HTTP 请求。
+  Future<AiChatResult> aiChat({
+    required String token,
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    Future<void>? abortTrigger,
+    AiEndpoint? endpoint,
+  }) async {
+    final target = endpoint ?? const AiEndpoint.relay();
+    if (target.route == AiRoute.direct) {
+      return _aiChatDirect(
+        target,
+        messages: messages,
+        tools: tools,
+        abortTrigger: abortTrigger,
+      );
+    }
+    final data =
+        await _send(
+              'POST',
+              '/api/ai/chat',
+              token: token,
+              timeout: _aiTimeout,
+              abortTrigger: abortTrigger,
+              body: {'messages': messages, 'tools': ?tools},
+            )
+            as Map<String, dynamic>;
+    return _decodeAiResult(data);
+  }
+
+  /// 直连上游：编码、发送、解码均由 [AiService] 完成。
+  ///
+  /// 离线产品在这里被策略拦下，不构造任何请求。密钥不进入异常文案。
+  Future<AiChatResult> _aiChatDirect(
+    AiEndpoint endpoint, {
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    Future<void>? abortTrigger,
+  }) async {
+    _requireOnline();
+    if (!endpoint.isUsable) {
+      throw ApiException(
+        '请先在 AI 接口设置中填写地址与模型',
+        details: const {'code': 'AI_NOT_CONFIGURED'},
+      );
+    }
+    final uri = Uri.parse(
+      AiService.endpoint(endpoint.baseUrl, endpoint.protocol),
+    );
+    if (!uri.hasAuthority ||
+        (uri.scheme != 'https' && uri.scheme != 'http')) {
+      throw ApiException('AI 接口地址无效，需要 http 或 https');
+    }
+    final body = AiService.encodeRequest(
+      protocol: endpoint.protocol,
+      model: endpoint.model.trim(),
+      messages: messages,
+      tools: tools,
+    );
+    final request = (abortTrigger == null
+            ? http.Request('POST', uri)
+            : http.AbortableRequest(
+                'POST',
+                uri,
+                abortTrigger: abortTrigger,
+              ))
+        ..followRedirects = false
+        ..headers.addAll(
+          AiService.headers(endpoint.protocol, apiKey: endpoint.apiKey),
+        )
+        ..body = jsonEncode(body);
+    try {
+      final response = await _http
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(_aiTimeout);
+      final text = utf8.decode(response.bodyBytes);
+      if (response.statusCode >= 300) {
+        throw ApiException(
+          _aiErrorMessage(response.statusCode, text),
+          statusCode: response.statusCode,
+        );
+      }
+      final decoded = text.isEmpty ? null : jsonDecode(text);
+      if (decoded is! Map<String, dynamic>) {
+        throw ApiException('AI 接口返回了无法解析的内容');
+      }
+      return _decodeAiResult({
+        'model': endpoint.model.trim(),
+        'message': AiService.decodeReply(endpoint.protocol, decoded),
+      });
+    } on SocketException {
+      throw ApiException('无法连接 AI 接口，请检查地址与网络');
+    } on TimeoutException {
+      throw ApiException('AI 接口请求超时');
+    } on http.RequestAbortedException {
+      throw ApiException('请求已取消', details: const {'code': 'ABORTED'});
+    } on HandshakeException {
+      throw ApiException('无法建立安全连接，请检查设备时间或稍后重试');
+    } on http.ClientException {
+      throw ApiException('暂时无法连接 AI 接口，请检查网络后重试');
+    } on FormatException {
+      throw ApiException('AI 接口返回了无法解析的内容');
+    } on AiException catch (error) {
+      throw ApiException(error.message);
+    }
+  }
+
+  /// 上游错误体 → 用户可读文案。不回显响应头，也不回显请求中的密钥。
+  static String _aiErrorMessage(int status, String text) {
+    var message = 'AI 接口错误（$status）';
+    var detail = '';
+    try {
+      final data = jsonDecode(text);
+      if (data is Map && data['error'] is Map) {
+        final error = data['error'] as Map;
+        if (error['message'] is String) detail = error['message'] as String;
+      } else if (data is Map && data['error'] is String) {
+        detail = data['error'] as String;
+      } else if (data is Map && data['message'] is String) {
+        detail = data['message'] as String;
+      }
+    } on FormatException {
+      detail = '';
+    }
+    if (detail.trim().isNotEmpty) message = '$message：${detail.trim()}';
+    return message;
+  }
+
+  /// 联网检索：服务端代理搜索，密钥只在服务端。
+  ///
+  /// 返回 `{provider, results:[{title,url,snippet}]}`。
+  Future<Map<String, dynamic>> aiWebSearch(
+    String token,
+    String query, {
+    int limit = 8,
+  }) async {
+    return await _send(
+          'POST',
+          '/api/ai/web_search',
+          token: token,
+          timeout: const Duration(seconds: 30),
+          body: {'query': query, 'limit': limit},
+        )
+        as Map<String, dynamic>;
+  }
+
+  /// 联网抓取：服务端做 SSRF 校验与正文提取。
+  ///
+  /// 返回 `{url, title, text, truncated}`。
+  Future<Map<String, dynamic>> aiWebFetch(String token, String url) async {
+    return await _send(
+          'POST',
+          '/api/ai/web_fetch',
+          token: token,
+          timeout: const Duration(seconds: 30),
+          body: {'url': url},
+        )
+        as Map<String, dynamic>;
+  }
+
+  /// 校验并转换一次助手消息；两条链路共用。
+  static AiChatResult _decodeAiResult(Map<String, dynamic> data) {    final model = data['model'];
+    final message = data['message'];
+    if (model is! String || model.isEmpty || message is! Map) {
+      throw ApiException('AI 响应格式无效');
+    }
+    final raw = Map<String, dynamic>.from(message);
+    final content = raw['content'];
+    final calls = raw['tool_calls'];
+    if (raw['role'] != 'assistant' ||
+        (content != null && content is! String) ||
+        (calls != null && calls is! List) ||
+        (content == null && (calls == null || (calls as List).isEmpty))) {
+      throw ApiException('AI 响应格式无效');
+    }
+    final usage = data['usage'];
+    return AiChatResult(
+      model: model,
+      content: content is String ? content : '',
+      rawMessage: raw,
+      usage: usage is Map ? Map<String, dynamic>.from(usage) : null,
+    );
   }
 }
 

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/app_paths.dart';
+import '../services/ai_service.dart';
 import '../editor/highlight_import.dart';
 import '../editor/textmate_grammar.dart';
 import '../editor/editor_fonts.dart';
@@ -115,6 +116,12 @@ class SettingsStore extends ChangeNotifier {
   String aiApiKey = '';
   String aiModel = '';
 
+  /// AI 接口协议：chat / responses / messages。
+  ///
+  /// 旧设置文件没有这个字段，读取时回落到 [AiProtocol.chat]，
+  /// 与引入本字段前的行为一致，无需破坏性迁移。
+  AiProtocol aiProtocol = AiProtocol.chat;
+
   bool get loaded => _loaded;
 
   Future<void> load() async {
@@ -183,6 +190,7 @@ class SettingsStore extends ChangeNotifier {
           aiBaseUrl = data['aiBaseUrl'] as String? ?? aiBaseUrl;
           aiApiKey = data['aiApiKey'] as String? ?? aiApiKey;
           aiModel = data['aiModel'] as String? ?? aiModel;
+          aiProtocol = AiProtocol.parse(data['aiProtocol'] as String?);
           customFileExts = [
             for (final e in (data['customFileExts'] as List? ?? []))
               e as String,
@@ -241,6 +249,7 @@ class SettingsStore extends ChangeNotifier {
       'aiBaseUrl': aiBaseUrl,
       'aiApiKey': aiApiKey,
       'aiModel': aiModel,
+      'aiProtocol': aiProtocol.id,
       'customFileExts': customFileExts,
       'backupEnabled': backupEnabled,
       'symbolBars': symbolBars,
@@ -378,10 +387,12 @@ class SettingsStore extends ChangeNotifier {
     required String baseUrl,
     required String apiKey,
     required String model,
+    AiProtocol? protocol,
   }) async {
     aiBaseUrl = baseUrl;
     aiApiKey = apiKey;
     aiModel = model;
+    aiProtocol = protocol ?? aiProtocol;
     await _persist();
     notifyListeners();
   }

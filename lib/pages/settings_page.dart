@@ -155,7 +155,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         subtitle: Text(
                           settings.aiModel.isEmpty
                               ? '连接你自己的 AI 服务与密钥'
-                              : settings.aiModel,
+                              : '${settings.aiModel} · ${settings.aiProtocol.label}',
                         ),
                         trailing: const Icon(Icons.chevron_right),
                         onTap: () => editAiSettings(context, settings),

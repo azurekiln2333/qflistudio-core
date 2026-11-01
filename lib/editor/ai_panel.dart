@@ -9,7 +9,9 @@ import '../store/settings_store.dart';
 import 'editor_fonts.dart';
 
 /// 打开 AI 设置对话框并在确认后保存到 [SettingsStore]。
-/// 接口地址 / API Key / 模型全部支持自定义（任何 OpenAI 兼容服务）。
+/// 接口地址 / 协议 / API Key / 模型全部支持自定义。
+///
+/// 对话框单列、可滚动且限制最大宽度，手机窄屏下不会溢出。
 Future<void> editAiSettings(
   BuildContext context,
   SettingsStore settings,
@@ -17,82 +19,123 @@ Future<void> editAiSettings(
   final baseUrl = TextEditingController(text: settings.aiBaseUrl);
   final apiKey = TextEditingController(text: settings.aiApiKey);
   final model = TextEditingController(text: settings.aiModel);
-  bool? saved;
-  String? savedBaseUrl;
-  String? savedApiKey;
-  String? savedModel;
+  var protocol = settings.aiProtocol;
+  _AiSettingsResult? saved;
   try {
-    saved = await showDialog<bool>(
+    saved = await showDialog<_AiSettingsResult>(
       context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        title: const Text('AI 接口设置'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: baseUrl,
-                decoration: const InputDecoration(
-                  labelText: '接口地址（OpenAI 兼容）',
-                  helperText:
-                      '如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1',
-                  prefixIcon: Icon(Icons.dns_outlined),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          scrollable: true,
+          title: const Text('AI 接口设置'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('接口协议'),
+                const SizedBox(height: 8),
+                // 手机宽度下自动换行，不压缩横向可用空间。
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final option in AiProtocol.values)
+                      ChoiceChip(
+                        label: Text(option.label),
+                        selected: protocol == option,
+                        onSelected: (_) => setState(() => protocol = option),
+                      ),
+                  ],
                 ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: apiKey,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'API Key（本地服务可留空）',
-                  prefixIcon: Icon(Icons.key_outlined),
+                const SizedBox(height: 8),
+                Text(
+                  '请求端点：${AiService.endpoint(baseUrl.text.trim().isEmpty ? 'https://example.com' : baseUrl.text.trim(), protocol)}',
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: model,
-                decoration: const InputDecoration(
-                  labelText: '模型名称',
-                  helperText:
-                      '如 deepseek-chat / glm-4-flash / qwen2.5-coder:7b',
-                  prefixIcon: Icon(Icons.memory_outlined),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: baseUrl,
+                  keyboardType: TextInputType.url,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: '接口地址',
+                    helperText:
+                        '如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1',
+                    prefixIcon: Icon(Icons.dns_outlined),
+                  ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 16),
+                TextField(
+                  controller: apiKey,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'API Key（本地服务可留空）',
+                    prefixIcon: Icon(Icons.key_outlined),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: model,
+                  decoration: const InputDecoration(
+                    labelText: '模型名称',
+                    helperText:
+                        '如 deepseek-chat / glm-4-flash / qwen2.5-coder:7b',
+                    prefixIcon: Icon(Icons.memory_outlined),
+                  ),
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(
+                _AiSettingsResult(
+                  baseUrl: baseUrl.text.trim(),
+                  apiKey: apiKey.text.trim(),
+                  model: model.text.trim(),
+                  protocol: protocol,
+                ),
+              ),
+              child: const Text('保存'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
-    if (saved == true) {
-      savedBaseUrl = baseUrl.text.trim();
-      savedApiKey = apiKey.text.trim();
-      savedModel = model.text.trim();
-    }
   } finally {
     baseUrl.dispose();
     apiKey.dispose();
     model.dispose();
   }
-  if (saved == true) {
+  if (saved != null) {
     await settings.saveAi(
-      baseUrl: savedBaseUrl!,
-      apiKey: savedApiKey!,
-      model: savedModel!,
+      baseUrl: saved.baseUrl,
+      apiKey: saved.apiKey,
+      model: saved.model,
+      protocol: saved.protocol,
     );
   }
+}
+
+/// 对话框返回值：只在用户确认后构造；密钥不进入任何日志。
+class _AiSettingsResult {
+  const _AiSettingsResult({
+    required this.baseUrl,
+    required this.apiKey,
+    required this.model,
+    required this.protocol,
+  });
+
+  final String baseUrl;
+  final String apiKey;
+  final String model;
+  final AiProtocol protocol;
 }
 
 /// AI 助手面板（编辑器底部）：流式对话 + 生成代码一键保存为项目文件。
