@@ -148,7 +148,9 @@ class VibeLoopGuard {
   ///
   /// 写入被拒（冲突、先读后改、策略拒绝）算作真实进展：模型学到了新事实，
   /// 并会在下一轮改变做法，不能和"什么都没发生"混为一谈。
-  String? endRound(VibeRoundFacts facts) {
+  /// [wroteEarlier] 表示本次 send 早先已成功写入文件。停止原因因此不再
+  /// 声称“没有写入”，那会与磁盘事实矛盾。
+  String? endRound(VibeRoundFacts facts, {bool wroteEarlier = false}) {
     final informational = facts.errors.any(_isInformativeFailure);
     final settingUp = _rounds < kVibeSetupRounds && facts.settingUp;
     _rounds++;
@@ -158,9 +160,11 @@ class VibeLoopGuard {
     }
     _stalledRounds++;
     if (_stalledRounds < kVibeNoProgressRounds) return null;
-    final detail = facts.errors.isEmpty
-        ? '本轮没有成功写入文件，也没有取得命令结果。'
-        : '最近失败：${facts.errors.last}';
+    final detail = facts.errors.isNotEmpty
+        ? '最近失败：${facts.errors.last}'
+        : wroteEarlier
+        ? '文件已写好，后续只是在重复查看。'
+        : '本轮没有成功写入文件，也没有取得命令结果。';
     return '连续 $_stalledRounds 轮没有进展，已停止。$detail';
   }
 

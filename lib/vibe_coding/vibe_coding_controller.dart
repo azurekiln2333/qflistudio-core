@@ -410,7 +410,7 @@ class VibeCodingController extends ChangeNotifier {
         if (_terminalUnavailable) {
           if (_wroteCleanThisSend) {
             _appendMessage(
-              VibeMessage(isUser: false, text: '已写入文件，命令验证因终端未登录未执行。'),
+              VibeMessage(isUser: false, text: '已写入文件，命令验证因终端不可用未执行。'),
             );
             _finalizeOpenPlan(failed: false);
             _finish(VibePhase.succeeded);
@@ -420,8 +420,21 @@ class VibeCodingController extends ChangeNotifier {
           _fail('终端不可用（未登录或登录已过期），无法运行命令验证');
           return;
         }
-        final stalled = guard.endRound(facts);
+        final stalled = guard.endRound(
+          facts,
+          wroteEarlier: _wroteCleanThisSend,
+        );
         if (stalled != null) {
+          // 文件已经写好了，后面几轮只是回顾与核对。此时停下没意义，
+          // 直接让模型收尾，并把整次 send 判成功。
+          if (_wroteCleanThisSend) {
+            _appendMessage(
+              VibeMessage(isUser: false, text: '文件已写入，本次任务已收尾。请直接用中文总结完成的工作。'),
+            );
+            _finalizeOpenPlan(failed: false);
+            _finish(VibePhase.succeeded);
+            return;
+          }
           _finalizeOpenPlan(failed: true);
           _fail(stalled);
           return;

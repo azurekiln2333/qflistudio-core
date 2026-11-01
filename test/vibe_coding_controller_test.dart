@@ -573,7 +573,7 @@ void main() {
     expect(run.tool!.status, VibeToolStatus.error);
     expect(run.tool!.result, contains('未登录'));
     expect(
-      controller.messages.any((m) => m.text.contains('命令验证因终端未登录未执行')),
+      controller.messages.any((m) => m.text.contains('命令验证因终端不可用未执行')),
       isTrue,
     );
     expect(controller.lastError, isNull);
@@ -677,7 +677,7 @@ void main() {
 
     expect(controller.lastError, isNull);
     expect(
-      controller.messages.any((m) => m.text.contains('命令验证因终端未登录未执行')),
+      controller.messages.any((m) => m.text.contains('命令验证因终端不可用未执行')),
       isTrue,
     );
 
@@ -717,6 +717,50 @@ void main() {
     await settle(controller, VibePhase.failed);
 
     expect(controller.lastError, contains('终端不可用'));
+
+    controller.dispose();
+  });
+
+  test('keeps a written site alive through read-only rounds', () async {
+    // messages 协议的真实序列：写完三份文件，再 todo、再列目录，然后不动了。
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content':
+              '<!doctype html><html><head>'
+              '<link rel="stylesheet" href="styles.css"></head>'
+              '<body><h1>a</h1></body></html>',
+        }),
+        _toolCall('w2', 'write_file', {
+          'path': 'styles.css',
+          'content': 'h1{}',
+        }),
+        _toolCall('w3', 'write_file', {'path': 'app.js', 'content': 'void 0;'}),
+        _toolCall('t1', 'todo', {
+          'items': [
+            {'text': '写 index.html', 'status': 'done'},
+            {'text': '写样式', 'status': 'done'},
+            {'text': '写脚本', 'status': 'done'},
+            {'text': '自检', 'status': 'pending'},
+          ],
+        }),
+        _toolCall('l1', 'list_files', {'path': '.'}),
+        _toolCall('l2', 'list_files', {'path': '.'}),
+        _toolCall('l3', 'list_files', {'path': '.'}),
+        _textReply('网站已写好。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做一个网站');
+    await settle(controller, VibePhase.succeeded);
+
+    expect(controller.lastError, isNull);
+    expect(controller.messages.any((m) => m.text.contains('本次任务已收尾')), isTrue);
+    // 提示不得声称没有写入：磁盘上三份文件都已在。
+    expect(File(p.join(root.path, 'index.html')).existsSync(), isTrue);
+    expect(File(p.join(root.path, 'styles.css')).existsSync(), isTrue);
+    expect(File(p.join(root.path, 'app.js')).existsSync(), isTrue);
 
     controller.dispose();
   });
