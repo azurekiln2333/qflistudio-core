@@ -659,6 +659,68 @@ void main() {
     controller.dispose();
   });
 
+  test('finishes successfully when the terminal cannot connect', () async {
+    final relay = _FakeRelay()
+      ..terminalDrops = true
+      ..chatReplies.addAll([
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content': '<!doctype html><html><body><h1>a</h1></body></html>',
+        }),
+        _toolCall('c1', 'run_command', {'command': 'python3 check.py'}),
+        _textReply('页面已写好。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做一个网站');
+    await settle(controller, VibePhase.succeeded);
+
+    expect(controller.lastError, isNull);
+    expect(
+      controller.messages.any((m) => m.text.contains('命令验证因终端未登录未执行')),
+      isTrue,
+    );
+
+    controller.dispose();
+  });
+
+  test('finishes successfully when the terminal gateway fails', () async {
+    final relay = _FakeRelay()
+      ..terminalStatus = 502
+      ..chatReplies.addAll([
+        _toolCall('w1', 'write_file', {
+          'path': 'index.html',
+          'content': '<!doctype html><html><body><h1>a</h1></body></html>',
+        }),
+        _toolCall('c1', 'run_command', {'command': 'python3 check.py'}),
+        _textReply('页面已写好。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('做一个网站');
+    await settle(controller, VibePhase.succeeded);
+
+    expect(controller.lastError, isNull);
+
+    controller.dispose();
+  });
+
+  test('fails when the terminal times out with nothing written', () async {
+    final relay = _FakeRelay()
+      ..terminalDrops = true
+      ..chatReplies.add(
+        _toolCall('c1', 'run_command', {'command': 'python3 check.py'}),
+      );
+    final controller = build(relay);
+
+    controller.send('跑检查');
+    await settle(controller, VibePhase.failed);
+
+    expect(controller.lastError, contains('终端不可用'));
+
+    controller.dispose();
+  });
+
   test('stops after two rounds without progress', () async {
     final relay = _FakeRelay();
     for (var i = 0; i < 2; i++) {
@@ -1049,6 +1111,14 @@ class _FakeRelay {
           );
           return response;
         }
+        if (terminalDrops) {
+          // 模拟安全连接建立失败：连接直接断开，没有结果帧。
+          return http.StreamedResponse(
+            Stream.error(const SocketException('无法建立终端安全连接')),
+            200,
+            headers: {'content-type': 'application/x-ndjson'},
+          );
+        }
         final run = terminalRuns.removeAt(0);
         final lines = run.map((e) => '${jsonEncode(e)}\n').join();
         return http.StreamedResponse(
@@ -1116,6 +1186,7 @@ class _FakeRelay {
   final authorizations = <String?>[];
   StreamController<List<int>>? holdTerminal;
   int? terminalStatus;
+  bool terminalDrops = false;
   final searchQueries = <String>[];
   Completer<void>? holdDelete;
   int deleteCalls = 0;

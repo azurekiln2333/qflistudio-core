@@ -1083,7 +1083,7 @@ class VibeCodingController extends ChangeNotifier {
                 final message = error is ApiException
                     ? error.message
                     : '终端连接失败：$error';
-                if (_isTerminalAuthFailure(error, message)) {
+                if (_isTerminalUnavailable(error)) {
                   _terminalUnavailable = true;
                   finish(
                     _ToolOutcome(
@@ -1114,12 +1114,17 @@ class VibeCodingController extends ChangeNotifier {
                 return;
               }
               if (!sawResult) {
+                // 流正常结束却没给出退出码：同样属于终端不可用。
+                _terminalUnavailable = true;
                 finish(
                   _ToolOutcome(
                     status: VibeToolStatus.error,
                     summary: '终端未返回执行结果',
-                    modelText: '终端连接中断，未收到真实执行结果',
+                    modelText:
+                        'error(auth): 终端不可用（未返回执行结果）。'
+                        '不要重试 run_command，直接说明未能运行验证。',
                     output: _combine(stdout.value, stderr.value),
+                    code: 'auth',
                   ),
                 );
                 return;
@@ -1309,15 +1314,34 @@ class VibeCodingController extends ChangeNotifier {
     _ => '准备执行',
   };
 
-  /// 终端认证失败：未登录、登录过期或令牌被拒。
+  /// 终端不可用：没拿到退出码，且失败出在终端链路本身。
   ///
-  /// 这类失败重试也没用，必须让模型停下并如实说明。
-  static bool _isTerminalAuthFailure(Object error, String message) {
-    if (error is ApiException &&
-        (error.statusCode == 401 || error.statusCode == 403)) {
-      return true;
+  /// 分类先看类型：[ApiException] 说明请求没走到命令，属于传输或认证层，
+  /// 重试也改变不了。状态码 401/403/408/5xx 同理。
+  /// 文案只做兜底，覆盖不抛异常或抛非 [ApiException] 的情形。
+  static bool _isTerminalUnavailable(Object error) {
+    if (error is ApiException) {
+      final status = error.statusCode;
+      if (status == null) return true;
+      return status == 401 || status == 403 || status == 408 || status >= 500;
     }
-    const hints = ['未登录', '登录已过期', '登录过期', '需要登录', '重新登录', 'unauthorized'];
+    final message = error is String ? error : '$error';
+    const hints = [
+      '未登录',
+      '登录已过期',
+      '登录过期',
+      '需要登录',
+      '重新登录',
+      'unauthorized',
+      '安全连接',
+      '连接超时',
+      '连接已中断',
+      '无法连接终端',
+      '网络错误',
+      'socket',
+      'handshake',
+      'timeout',
+    ];
     final lower = message.toLowerCase();
     return hints.any((hint) => lower.contains(hint.toLowerCase()));
   }
