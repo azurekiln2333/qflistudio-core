@@ -2085,12 +2085,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// Run is one button, so the decision must happen before the button's own
   /// path starts:
   ///
-  ///   - a receiver the probe confirmed  -> cross-app compile and run;
-  ///   - a receiver the probe reports missing -> the path is unchanged, and the
-  ///     existing runner decides (local, then the online terminal);
-  ///   - a receiver the probe cannot confirm -> still unchanged, because a
-  ///     confident switch into another app the user may not have installed is
-  ///     worse than the path that already works.
+  ///   - probe `installed` -> cross-app compile and run;
+  ///   - probe `missing`   -> unchanged path, with the install hint;
+  ///   - probe `unknown`   -> unchanged path, with one hint that says why the
+  ///     answer was unconfirmed. A confident switch into another app the user
+  ///     may not have installed is worse than the path that already works.
   Future<InteropTarget?> _answeringSiblingApp(String? entryFile) async {
     final runner = StudioProfile.current?.interopRunner;
     final target = _interopTargetFor(entryFile);
@@ -2099,17 +2098,22 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final probe = await runner.probe(target.language);
     if (!mounted) return null;
     if (probe.isInstalled) return target;
-    if (probe.status == InteropProbeStatus.unknown && mounted) {
-      // The user still gets a way to try, from the menu, where the wording can
-      // explain why Studio is unsure.
-      _showSnack(
-        probe.diagnostic ??
-            '无法确认 ${target.productName} 是否已安装，已在更多菜单保留「在 '
-                '${target.productName} 中运行」。',
-      );
+    if (probe.status == InteropProbeStatus.unknown) {
+      // One hint per editor session, not one per tap: the user asked once, the
+      // answer will not change until the app or the device does.
+      if (!_interopProbeHintShown) {
+        _interopProbeHintShown = true;
+        _terminalKey.currentState?.appendSystem(
+          '${probe.diagnostic ?? '无法确认 ${target.productName} 是否已安装'}，'
+          '本次在 Studio 原有路径运行。可在更多菜单选择「运行（${target.productName}）」重试。',
+        );
+      }
     }
     return null;
   }
+
+  /// Whether the unconfirmed-probe hint was already shown in this session.
+  bool _interopProbeHintShown = false;
 
   /// Compiles and runs the open project inside the sibling app that owns the
   /// toolchain.

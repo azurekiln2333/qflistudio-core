@@ -92,7 +92,7 @@ void main() {
       ).firstMatch(transport);
       expect(call, isNotNull, reason: 'no channel call for $method');
       final start = call!.end;
-      final close = transport.indexOf('\)', start);
+      final close = transport.indexOf(')', start);
       expect(close, greaterThan(start), reason: 'unterminated $method call');
       final block = transport.substring(start, close);
       final keys = RegExp(r"'([A-Za-z][A-Za-z0-9]*)'\s*:").allMatches(block);
@@ -161,6 +161,49 @@ void main() {
       ]) {
         expect(bridge, contains(key));
       }
+    });
+
+    test('the probe uses a start, not a bundle query', () {
+      // `GET_BUNDLE_INFO` is a system permission. On a device the query failed
+      // with 8521226 and the probe could only ever answer "unknown", so the
+      // check must stay on the start outcome. The comment may still name the
+      // permission; the call must not exist.
+      expect(bridge, isNot(contains('getBundleInfoSync')));
+      expect(bridge, isNot(contains('getBundleInfo(')));
+      expect(bridge, isNot(contains('getBundleInfoForSelfSync')));
+      expect(bridge, isNot(contains("import { bundleManager }")));
+      expect(bridge, contains('startAbility'));
+    });
+
+    test('the probe names both start errors that mean not installed', () {
+      // 16000001: ability does not exist. 16000003: bundle does not exist.
+      expect(bridge, contains('16000001'));
+      expect(bridge, contains('16000003'));
+    });
+
+    test('the probe asks for an analyze that runs no compiler', () {
+      final probeBody = RegExp(
+        r'async function probeByStart[\s\S]*?\n}',
+      ).firstMatch(bridge);
+      expect(probeBody, isNotNull, reason: 'probeByStart is gone or renamed');
+      final body = probeBody!.group(0)!;
+      expect(body, contains("'action'") );
+      expect(body, contains("'analyze'"));
+      expect(body, contains("'payloadDirectory'"));
+    });
+
+    test('no bundle permission is declared or needed', () {
+      final module = read(
+        'qflistudio',
+        p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
+      );
+      expect(module, isNot(contains('GET_BUNDLE_INFO')));
+      final strings = read(
+        'qflistudio',
+        p.join('ohos', 'entry', 'src', 'main', 'resources', 'base', 'element',
+            'string.json'),
+      );
+      expect(strings, isNot(contains('bundle_info_reason')));
     });
 
     test('the Dart reader accepts exactly the keys the bridge reports', () {
