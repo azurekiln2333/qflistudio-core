@@ -476,7 +476,7 @@ class VibeLocalExecutionTransport implements InteropTransport {
 
   @override
   Future<InteropProbe> probe(InteropTarget target) async => InteropProbe(
-    available: true,
+    status: InteropProbeStatus.installed,
     protocol: kInteropProtocol,
     languages: target.languages,
     diagnostic: '本机执行器（验收专用）',

@@ -356,14 +356,11 @@ VibeE2eReport buildVibeE2eReport({
 }) => VibeE2eReport(
   generatedAt: generatedAt,
   environment: runtime == null
-      ? {
-          'protocol': 'backend_default',
-          'keyPresent': false,
-          'missing':
-              'QFLI_DEBUG_BASE_URL / QFLI_DEBUG_API_KEY / QFLI_DEBUG_MODEL',
-        }
+      ? {'protocol': 'backend_default', 'keyPresent': false}
       : runtime.credentials.redacted(protocol: runtime.protocolId),
-  scenarios: scenarios,
+  // 报告会落盘并可能贴进工单：写入前把具体环境变量名脱敏，
+  // 避免“报告不能出现敏感片段”的校验失败。
+  scenarios: [for (final scenario in scenarios) scenario.redacted()],
   driverRevision: driverRevision,
 );
 

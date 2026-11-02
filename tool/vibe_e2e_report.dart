@@ -141,6 +141,28 @@ class VibeE2eScenarioResult {
 
   bool get ok => status == VibeE2eStatus.passed;
 
+  /// 报告副本：把具体环境变量名换成泛称。
+  ///
+  /// `skipReason` 在控制台要能直接告诉开发者缺哪个变量，所以保留原名；
+  /// 报告会落盘并可能贴进工单，写入前必须脱敏。
+  VibeE2eScenarioResult redacted() => VibeE2eScenarioResult(
+    key: key,
+    status: status,
+    phase: phase,
+    durationMs: durationMs,
+    lastError: lastError,
+    assistantReply: assistantReply,
+    skipReason: skipReason?.replaceAll('QFLI_DEBUG_', '调试上游'),
+    timeout: timeout,
+    tools: tools,
+    assertions: assertions,
+    extra: extra,
+    rounds: rounds,
+    modelCalls: modelCalls,
+    slowestCallMs: slowestCallMs,
+    slowestRoundMs: slowestRoundMs,
+  );
+
   Map<String, Object?> toJson() => {
     'key': key,
     'status': status.value,
