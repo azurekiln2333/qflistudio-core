@@ -100,13 +100,20 @@ void main() {
       expect(find.text('编辑器'), findsOneWidget);
     });
 
-    testWidgets('networked keeps the AI assistant section', (tester) async {
+    testWidgets('networked hides the custom endpoint by default', (
+      tester,
+    ) async {
       StudioProfile.current = fixture.profileFor(offlineOnly: false);
       await _mountProfile(tester, fixture.stores);
       await _openSettings(tester);
 
-      expect(find.text('AI 助手'), findsOneWidget);
-      expect(find.text('个人 AI 接口'), findsOneWidget);
+      // 正式版只走官方转发（整改任务书 §3-W3）：个人 AI 接口分组
+      // 默认不出现，只有产品档位显式 allowCustomAiEndpoint 时才显示。
+      expect(find.text('AI 助手'), findsNothing);
+      expect(find.text('个人 AI 接口'), findsNothing);
+      // 其余分组不受影响。
+      expect(find.text('外观与体验'), findsOneWidget);
+      expect(find.text('数据与存储'), findsOneWidget);
     });
   });
 }

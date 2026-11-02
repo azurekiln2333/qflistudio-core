@@ -76,6 +76,7 @@ class VibeMessage {
     required this.text,
     this.tool,
     this.pending = false,
+    this.aiGenerated = false,
   });
 
   final bool isUser;
@@ -87,13 +88,24 @@ class VibeMessage {
   /// 该条目是否仍在进行。
   final bool pending;
 
-  VibeMessage copyWith({String? text, VibeToolCall? tool, bool? pending}) =>
-      VibeMessage(
-        isUser: isUser,
-        text: text ?? this.text,
-        tool: tool ?? this.tool,
-        pending: pending ?? this.pending,
-      );
+  /// 该条文本是否由 AI 生成（服务端 `aiGenerated`）。
+  ///
+  /// 用户消息与工具结果恒为 false；只有模型回复会为 true，界面据此
+  /// 在回复下方显示“内容由AI生成”（整改任务书 §3-W3、§4 第 9 条）。
+  final bool aiGenerated;
+
+  VibeMessage copyWith({
+    String? text,
+    VibeToolCall? tool,
+    bool? pending,
+    bool? aiGenerated,
+  }) => VibeMessage(
+    isUser: isUser,
+    text: text ?? this.text,
+    tool: tool ?? this.tool,
+    pending: pending ?? this.pending,
+    aiGenerated: aiGenerated ?? this.aiGenerated,
+  );
 }
 
 /// 一次 send 的默认工具轮数上限；控制器按任务规模放宽到

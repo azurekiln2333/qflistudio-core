@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../services/ai_file_header.dart';
 import '../services/ai_service.dart';
+import '../services/studio_profile.dart';
 import '../store/settings_store.dart';
 import 'editor_fonts.dart';
 
@@ -172,13 +174,20 @@ class AiPanel extends StatefulWidget {
 }
 
 class _ChatMessage {
-  _ChatMessage.user(this.content) : isUser = true, generating = false;
+  _ChatMessage.user(this.content)
+    : isUser = true,
+      generating = false,
+      aiGenerated = false;
   _ChatMessage.assistant(this.content, {this.generating = false})
-    : isUser = false;
+    : isUser = false,
+      aiGenerated = true;
 
   final bool isUser;
   String content;
   bool generating;
+
+  /// 助手回复恒由 AI 生成（§3-W3），界面据此显示“内容由AI生成”。
+  final bool aiGenerated;
 }
 
 class AiPanelState extends State<AiPanel> {
@@ -191,6 +200,13 @@ class AiPanelState extends State<AiPanel> {
   bool get _configured =>
       widget.settings.aiBaseUrl.trim().isNotEmpty &&
       widget.settings.aiModel.trim().isNotEmpty;
+
+  /// 是否提供“自定义 AI 接口”设置。
+  ///
+  /// 鸿蒙正式版只走服务端官方转发（整改任务书 §3-W3、§4 第 9 条），
+  /// 由 `StudioProfile.allowCustomAiEndpoint` 决定，页面不自己判断平台。
+  bool get _customEndpointAllowed =>
+      StudioProfile.current?.allowCustomAiEndpoint == true;
 
   String get _systemPrompt =>
       '你是 QFLIStudio+ 内置的 AI 编程助手，运行在移动端代码编辑器中。'
@@ -264,6 +280,9 @@ class AiPanelState extends State<AiPanel> {
   }
 
   /// 把 AI 代码块保存为项目内文件（路径安全校验）。
+  ///
+  /// 写入前按目标语言的注释语法加一行 AI 生成标识（§3-W3）；没有注释
+  /// 语法的类型（如 .json）原样保存，并告知用户原因。
   Future<void> _saveBlock(AiSegment block) async {
     var relative = block.path;
     if (relative == null || relative.isEmpty) {
@@ -280,9 +299,10 @@ class AiPanelState extends State<AiPanel> {
       return;
     }
     final fullPath = p.join(widget.projectPath, relative);
+    final marked = addAiGeneratedHeader(relative, block.code ?? '');
     try {
       await File(fullPath).parent.create(recursive: true);
-      await File(fullPath).writeAsString(block.code ?? '', flush: true);
+      await File(fullPath).writeAsString(marked.content, flush: true);
     } on FileSystemException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -291,9 +311,15 @@ class AiPanelState extends State<AiPanel> {
       return;
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('已保存 $relative')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          marked.inserted
+              ? '已保存 $relative（已加 AI 生成标识）'
+              : '已保存 $relative（${marked.reason}）',
+        ),
+      ),
+    );
     widget.onFileCreated?.call(fullPath);
   }
 
@@ -389,7 +415,9 @@ class AiPanelState extends State<AiPanel> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    widget.settings.aiModel.isEmpty
+                    !_customEndpointAllowed
+                        ? 'AI 助手 · 官方转发'
+                        : widget.settings.aiModel.isEmpty
                         ? 'AI 助手（未配置接口）'
                         : 'AI 助手 · ${widget.settings.aiModel}',
                     maxLines: 1,
@@ -399,17 +427,18 @@ class AiPanelState extends State<AiPanel> {
                     ),
                   ),
                 ),
-                IconButton(
-                  tooltip: 'AI 接口设置',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 36,
-                    height: 36,
+                if (_customEndpointAllowed)
+                  IconButton(
+                    tooltip: 'AI 接口设置',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 36,
+                      height: 36,
+                    ),
+                    padding: EdgeInsets.zero,
+                    onPressed: () => editAiSettings(context, widget.settings),
+                    icon: const Icon(Icons.settings_outlined, size: 18),
                   ),
-                  padding: EdgeInsets.zero,
-                  onPressed: () => editAiSettings(context, widget.settings),
-                  icon: const Icon(Icons.settings_outlined, size: 18),
-                ),
                 IconButton(
                   tooltip: '收起',
                   visualDensity: VisualDensity.compact,
@@ -443,7 +472,7 @@ class AiPanelState extends State<AiPanel> {
             child: _messages.isEmpty
                 ? Center(
                     child: Text(
-                      _configured
+                      _configured || !_customEndpointAllowed
                           ? '描述你想生成的代码或文件，例如：\n"写一个 Python 脚本，读取 numbers.txt 里的数字求平均值"'
                           : '先点右上角 ⚙ 配置 AI 接口（支持 DeepSeek / 智谱 /\nKimi / Ollama 等任何 OpenAI 兼容接口）',
                       textAlign: TextAlign.center,
@@ -557,6 +586,27 @@ class AiPanelState extends State<AiPanel> {
                   segment.text!,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
+            if (message.aiGenerated)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.auto_awesome_outlined,
+                      size: 12,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '内容由AI生成',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (message.generating)
               Padding(
                 padding: const EdgeInsets.only(top: 6),

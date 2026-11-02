@@ -159,10 +159,44 @@ String vibeToolLabel(String toolName) => switch (toolName) {
   'run_command' => '运行命令',
   'todo' => '更新计划',
   'use_skill' => '使用技能',
-  'web_search' => '联网搜索',
   'web_fetch' => '抓取网页',
   _ => toolName,
 };
+
+/// AI 生成内容的标识文案（整改任务书 §3-W3、§4 第 9 条）。
+///
+/// 只在模型回复下方显示；用户消息和工具结果不标。
+const String kAiGeneratedLabel = '内容由AI生成';
+
+/// 一句话标识：一个图标加文字，窄屏也不会折行到不可读。
+class AiGeneratedBadge extends StatelessWidget {
+  const AiGeneratedBadge({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.auto_awesome_outlined,
+            size: 12,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            kAiGeneratedLabel,
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 /// One conversation entry: a user bubble, assistant prose, or a tool call.
 class VibeMessageTile extends StatelessWidget {
@@ -214,6 +248,8 @@ class VibeMessageTile extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
               ),
+            if (message.aiGenerated && message.text.trim().isNotEmpty)
+              const AiGeneratedBadge(),
             if (message.pending)
               Padding(
                 padding: const EdgeInsets.only(top: 6),

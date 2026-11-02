@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../community/models.dart';
 import '../config/api_config.dart';
+import '../config/client_platform.dart';
 import 'ai_service.dart';
 import 'studio_profile.dart';
 
@@ -58,6 +59,7 @@ class AiChatResult {
     required this.content,
     required this.rawMessage,
     this.usage,
+    this.aiGenerated = true,
   });
 
   final String model;
@@ -69,6 +71,12 @@ class AiChatResult {
   final Map<String, dynamic> rawMessage;
 
   final Map<String, dynamic>? usage;
+
+  /// 该回复是否由 AI 生成，客户端据此显示“内容由AI生成”。
+  ///
+  /// 服务端 `/api/ai/chat` 现在返回 `aiGenerated: true`（整改任务书 §3-W2）。
+  /// 缺字段时按“是 AI”处理：这条链路上的回复本来就来自模型，宁可多标。
+  final bool aiGenerated;
 
   /// 原样保留的工具调用，顺序即服务端返回顺序。
   List<Map<String, dynamic>> get toolCalls {
@@ -196,6 +204,7 @@ class ApiClient {
 
   Map<String, String> _headers({String? token}) => {
     'content-type': 'application/json',
+    'x-client-platform': ClientPlatform.header,
     if (token != null) 'authorization': 'Bearer $token',
   };
 
@@ -840,6 +849,54 @@ class ApiClient {
     return Comment.fromJson(data['comment'] as Map<String, dynamic>);
   }
 
+  /// 举报帖子、评论或用户（contracts.md C 节）。
+  ///
+  /// 返回 `{id, status}`。`targetType` 只接受 `post` / `comment` / `user`，
+  /// 其余值在本地就拒绝，不让无效请求打到服务端。
+  Future<({String id, String status})> report({
+    required String token,
+    required String targetType,
+    required String targetId,
+    required String reason,
+  }) async {
+    if (!const {'post', 'comment', 'user'}.contains(targetType)) {
+      throw ApiException('举报目标类型无效');
+    }
+    final data =
+        await _send(
+              'POST',
+              '/api/reports',
+              token: token,
+              body: {
+                'targetType': targetType,
+                'targetId': targetId,
+                'reason': reason,
+              },
+            )
+            as Map<String, dynamic>;
+    final id = data['id'];
+    if (id is! String || id.isEmpty) throw ApiException('举报响应无效');
+    return (id: id, status: data['status'] as String? ?? 'pending');
+  }
+
+  // ---- 账号 ----
+
+  /// 永久注销当前账号（contracts.md C 节）。
+  ///
+  /// 只有在用户二次确认后调用；[confirm] 固定为契约里的确认词。
+  /// 成功后服务端立即吊销本账号全部会话，调用方必须清本地登录态。
+  Future<void> deactivateAccount(
+    String token, {
+    String confirm = 'DEACTIVATE',
+  }) async {
+    await _send(
+      'POST',
+      '/api/users/me/deactivate',
+      token: token,
+      body: {'confirm': confirm},
+    );
+  }
+
   // ---- 在线终端 ----
 
   static const _terminalTimeout = Duration(seconds: 110);
@@ -1232,6 +1289,7 @@ class ApiClient {
           ..headers.addAll(
             AiService.headers(endpoint.protocol, apiKey: endpoint.apiKey),
           )
+          ..headers['x-client-platform'] = ClientPlatform.header
           ..body = jsonEncode(body);
     try {
       final response = await _http
@@ -1345,6 +1403,7 @@ class ApiClient {
       content: content is String ? content : '',
       rawMessage: raw,
       usage: usage is Map ? Map<String, dynamic>.from(usage) : null,
+      aiGenerated: data['aiGenerated'] != false,
     );
   }
 }

@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../interop/interop_runner.dart';
+import '../services/ai_file_header.dart';
 import '../services/api_client.dart';
 import 'vibe_loop_guard.dart';
 import 'vibe_models.dart';
@@ -161,7 +162,7 @@ class VibeCodingController extends ChangeNotifier {
   final Set<String> _seenQueries = {};
   final Set<String> _seenUrls = {};
 
-  /// 本次 send 成功的搜索次数，用于提醒模型开始总结。
+  /// 本次 send 成功的抓取次数，用于提醒模型开始总结。
   int _searchCount = 0;
 
   /// 本次 send 内是否有成功的写入，且内置 HTML 检查未报错。
@@ -231,8 +232,7 @@ class VibeCodingController extends ChangeNotifier {
   /// 取消在途模型请求和终端执行；返回时本轮已停止并完成终端清理。
   Future<void> cancel() async {
     if (!canCancel) return;
-    _cancelRequested = true;
-    _phase = VibePhase.cancelling;
+    _cancelRequested = true;    _phase = VibePhase.cancelling;
     _notify();
     final abort = _abort;
     if (abort != null && !abort.isCompleted) abort.complete();
@@ -349,7 +349,11 @@ class VibeCodingController extends ChangeNotifier {
         _history.add(assistant);
         if (reply.content.trim().isNotEmpty) {
           _appendMessage(
-            VibeMessage(isUser: false, text: reply.content.trim()),
+            VibeMessage(
+              isUser: false,
+              text: reply.content.trim(),
+              aiGenerated: reply.aiGenerated,
+            ),
           );
         }
         if (parsed.isEmpty) {
@@ -483,6 +487,9 @@ class VibeCodingController extends ChangeNotifier {
   }
 
   /// 本轮工具列表。离线专属产品不暴露联网工具。
+  ///
+  /// `web_search` 已下线（整改任务书 §3-W3）：联网搜索的唯一上游是未披露的
+  /// 第三方，而§1 允许的第三方只有华为、深度求索和云厂商。`web_fetch` 保留。
   List<Map<String, dynamic>> _toolSpecs() =>
       vibeWebToolsAvailable ? vibeToolSpecsWithWeb() : vibeToolSpecs();
 
@@ -677,9 +684,12 @@ class VibeCodingController extends ChangeNotifier {
               ? guard.rejectUnreadWrite(_files.relative(_files.resolve(path)))
               : null;
           if (unread != null) return _error('unread', unread);
+          // AI 写入的文件必须在开头留一行“本文件由 AI 生成”（§3-W3）。
+          // 标识按目标语言的注释语法插入；没有注释语法的类型原样写入。
+          final marked = addAiGeneratedHeader(path, content);
           final result = await _files.write(
             path,
-            content,
+            marked.content,
             createOnly: args['createOnly'] == true,
           );
           guard.markWritten(result.relativePath);
@@ -696,6 +706,7 @@ class VibeCodingController extends ChangeNotifier {
             modelText:
                 '${result.created ? '已创建' : '已写入'} ${result.relativePath}'
                 '（${result.bytes} B）'
+                '${marked.inserted ? '，已加上 AI 生成标识' : '，${marked.reason}'}'
                 '${result.backupPath == null ? '' : '，原文件已备份'}'
                 '${verify == null ? '' : '\n$verify'}',
             writtenPath: result.relativePath,
@@ -732,7 +743,6 @@ class VibeCodingController extends ChangeNotifier {
           return _updatePlan(args);
         case 'use_skill':
           return _useSkill(args);
-        case 'web_search':
         case 'web_fetch':
           return await _runWebTool(name, args);
         default:
@@ -857,7 +867,7 @@ class VibeCodingController extends ChangeNotifier {
     return buffer.toString();
   }
 
-  /// `web_search` / `web_fetch`：经服务端中转真实检索，结果原样交给模型。
+  /// `web_fetch`：经服务端中转真实抓取，结果原样交给模型。
   Future<_ToolOutcome> _runWebTool(
     String name,
     Map<String, dynamic> args,
@@ -879,10 +889,8 @@ class VibeCodingController extends ChangeNotifier {
     if (result == null) return _error('error', '未知联网工具：$name');
     var fresh = 0;
     if (result.ok) {
-      // 只有带回新查询或新网址才算进展，重复搜索不推任务向前。
-      final query = '${args['query'] ?? args['url'] ?? ''}'
-          .trim()
-          .toLowerCase();
+      // 只有带回新网址才算进展，重复抓取不推任务向前。
+      final query = '${args['url'] ?? ''}'.trim().toLowerCase();
       final dedupeKey = '$name|$query';
       final newQuery = query.isNotEmpty && _seenQueries.add(dedupeKey);
       final urls = RegExp(
@@ -890,11 +898,11 @@ class VibeCodingController extends ChangeNotifier {
       ).allMatches(result.modelText).map((m) => m.group(0)!).toList();
       final newUrls = urls.where(_seenUrls.add).length;
       if (newQuery || newUrls > 0) fresh = 1;
-      if (name == 'web_search' && result.ok) _searchCount++;
+      if (result.ok) _searchCount++;
     }
     var text = result.modelText;
-    if (result.ok && _searchCount >= 3 && name == 'web_search') {
-      text = '$text\n\n信息已足够，请直接用中文总结并列出来源网址，不要继续搜索。';
+    if (result.ok && _searchCount >= 3) {
+      text = '$text\n\n信息已足够，请直接用中文总结并列出所用来源网址，不要继续抓取。';
     }
     return _ToolOutcome(
       status: result.ok ? VibeToolStatus.ok : VibeToolStatus.error,
@@ -1020,9 +1028,13 @@ class VibeCodingController extends ChangeNotifier {
   }
 
   Future<_ToolOutcome> _runCommandInTerminal(String command, int index) async {
+    // 先置位再等待：快照收集期间终端会话已经算“用过”，
+    // 否则取消落在这段窗口里就回收不到会话，下一任务会抢同一个终端。
+    _usedTerminal = true;
     final token = _tokenProvider();
     if (token == null || token.isEmpty) {
       _terminalUnavailable = true;
+      _usedTerminal = false;
       return _error(
         'auth',
         '终端不可用（未登录）。不要重试 run_command，'
@@ -1033,9 +1045,13 @@ class VibeCodingController extends ChangeNotifier {
     try {
       snapshot = await VibeProjectSnapshot.collect(_files.projectRoot);
     } on VibeToolException catch (error) {
+      _usedTerminal = false;
       return _error(error.code, error.message);
+    }    if (_cancelRequested) {
+      // 终端会话已经占过位（`_usedTerminal`），取消要走回收，否则下一任务会
+      // 抢同一个会话；这里不能把占位清掉，交给 cancel() 统一处理。
+      return _cancelledOutcome();
     }
-    if (_cancelRequested) return _cancelledOutcome();
 
     final stdout = _TailBuffer(kVibeMaxCommandTailChars);
     final stderr = _TailBuffer(kVibeMaxCommandTailChars);
@@ -1163,7 +1179,6 @@ class VibeCodingController extends ChangeNotifier {
       return _error('terminal', error.message);
     }
     _terminalSubscription = subscription;
-    _usedTerminal = true;
     final outcome = await result.future;
     // 取消时 abortTrigger 已中断 HTTP；此处不阻塞等待流关闭。
     unawaited(subscription.cancel());
@@ -1191,10 +1206,11 @@ class VibeCodingController extends ChangeNotifier {
 7. 工具失败时读取真实错误，修复后重新运行，直到验证通过或确认无法继续。
 8. 网页类交付物的完成标准：list_files 能看到全部文件，且 run_command 的结构检查通过。
 9. 同一个失败命令连续报错时，先 read_file 看当前内容，不要盲目重试。
-10. 用过 web_search 或 web_fetch 时，最终回答必须列出所用来源：
+10. 用过 web_fetch 时，最终回答必须列出所用来源：
     每条一行，写标题和完整网址，例如“- 标题 — https://example.com/a”。
     只引用工具实际返回过的网址，逐字照抄，不得编造或补全。
     工具没返回可用结果时，直接说明查不到，不要编造来源。
+    联网搜索工具已下线，不要声称自己搜过网。
 回答用中文，简洁说明改动内容和真实验证结果。''';
 
   int _appendMessage(VibeMessage message) {
