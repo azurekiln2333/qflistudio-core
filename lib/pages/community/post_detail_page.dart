@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../community/community_widgets.dart';
 import '../../community/models.dart';
+import '../../community/moderation_feedback.dart';
 import '../../services/api_client.dart';
 import '../../services/share_service.dart';
 import '../../store/auth_store.dart';
@@ -90,9 +91,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
         );
       });
     } on ApiException catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ModerationFeedback.describe(e).text)),
+      );
     }
   }
 
@@ -118,6 +119,58 @@ class _PostDetailPageState extends State<PostDetailPage> {
   void _setReplyTo(Comment comment) {
     setState(() => _replyTo = comment);
     FocusScope.of(context).unfocus();
+  }
+
+  /// 举报入口：未登录先提示登录，登录后弹固定理由单。
+  ///
+  /// 理由用固定选项而不是自由文本：审核员看到的是可统计的类别，
+  /// 用户也不会把“重复填写”当成门槛。
+  Future<void> _report({
+    required String targetType,
+    required String targetId,
+    required String targetLabel,
+  }) async {
+    final token = widget.auth.token;
+    if (token == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先登录后再举报')));
+      return;
+    }
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('举报$targetLabel'),
+        children: [
+          for (final option in kReportReasonLabels.entries)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(context).pop(option.key),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(option.value),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (reason == null || !mounted) return;
+    try {
+      await ApiClient.instance.report(
+        token: token,
+        targetType: targetType,
+        targetId: targetId,
+        reason: reason,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('举报已提交，我们会尽快复核')));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ModerationFeedback.describe(e).text)),
+      );
+    }
   }
 
   Future<void> _sendComment() async {
@@ -146,9 +199,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
       await _load();
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ModerationFeedback.describe(e).text)),
+      );
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -222,6 +275,15 @@ class _PostDetailPageState extends State<PostDetailPage> {
         title: Text(post.type == 'tutorial' ? '教程详情' : '讨论详情'),
         actions: [
           IconButton(
+            tooltip: '举报',
+            onPressed: () => _report(
+              targetType: 'post',
+              targetId: post.id,
+              targetLabel: '这篇内容',
+            ),
+            icon: const Icon(Icons.flag_outlined),
+          ),
+          IconButton(
             tooltip: '分享',
             onPressed: _share,
             icon: const Icon(Icons.share_outlined),
@@ -249,6 +311,23 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
+                if (post.isPending)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        const ModerationPendingBadge(),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '内容正在审核，仅你和管理员可见',
+                            style: Theme.of(context).textTheme.labelSmall
+                                ?.copyWith(color: scheme.onSurfaceVariant),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 Row(
                   children: [
                     Expanded(
@@ -318,6 +397,11 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   comments: _comments,
                   onReply: _setReplyTo,
                   currentUserId: widget.auth.user?.id,
+                  onReport: (comment) => _report(
+                    targetType: 'comment',
+                    targetId: comment.id,
+                    targetLabel: '这条评论',
+                  ),
                 ),
                 const SizedBox(height: 80),
               ],

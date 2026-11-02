@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../community/models.dart';
+import '../../community/moderation_feedback.dart';
 import '../../services/api_client.dart';
 import '../../store/auth_store.dart';
 
@@ -100,10 +101,11 @@ class _PublishPageState extends State<PublishPage> {
         tags: _tags,
       );
       if (!mounted) return;
+      // 先审后发开启时服务端只会返回 pending，公示文案必须与之区分。
       Navigator.of(context).pop(true);
     } on ApiException catch (e) {
       setState(() {
-        _error = e.message;
+        _error = ModerationFeedback.describe(e).text;
         _publishing = false;
       });
     }

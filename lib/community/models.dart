@@ -78,6 +78,47 @@ class UserGrowth {
   };
 }
 
+/// 帖子 / 评论的审核状态（contracts.md C 节）。
+///
+/// `pending` 只在作者与管理员可见，客户端显示“审核中”；
+/// `rejected` 是被审核拒绝、不对外展示的内容。
+const String kModerationStatusPublished = 'published';
+const String kModerationStatusPending = 'pending';
+const String kModerationStatusRejected = 'rejected';
+
+/// 内容是否仍在审核队列中。缺字段与未知值都当作已发布，
+/// 避免把正常内容标成审核中。
+bool isModerationPending(String status) => status == kModerationStatusPending;
+
+/// 举报目标的类型（contracts.md C 节）。
+///
+/// 服务端按这两个词区分帖子与评论，客户端也只发这两个词。
+const String kReportTargetPost = 'post';
+const String kReportTargetComment = 'comment';
+
+// 举报理由。发的是稳定的英文键，展示用中文标签。
+const String kReportReasonSpam = 'advertising';
+const String kReportReasonPorn = 'porn';
+const String kReportReasonIllegal = 'illegal';
+const String kReportReasonAbuse = 'abuse';
+const String kReportReasonFraud = 'fraud';
+const String kReportReasonRights = 'rights';
+const String kReportReasonOther = 'other';
+
+/// 举报理由的固定选项：键 → 用户看到的中文。
+///
+/// 用固定选项而不是自由文本：审核员看到的是可统计的类别，
+/// 用户也不会把“重复填写”当成门槛。
+const Map<String, String> kReportReasonLabels = {
+  kReportReasonIllegal: '违法违规内容',
+  kReportReasonPorn: '色情低俗',
+  kReportReasonSpam: '广告引流',
+  kReportReasonFraud: '诈骗或欺诈',
+  kReportReasonRights: '侵犯权益',
+  kReportReasonAbuse: '人身攻击',
+  kReportReasonOther: '其他',
+};
+
 class Zone {
   const Zone({required this.id, required this.key, required this.name});
 
@@ -128,6 +169,7 @@ class Post {
     required this.commentCount,
     required this.liked,
     required this.createdAt,
+    this.status = kModerationStatusPublished,
   });
 
   final String id;
@@ -144,6 +186,11 @@ class Post {
   final bool liked;
   final String createdAt;
 
+  /// `published` | `pending` | `rejected`；服务端未下发时按已发布处理。
+  final String status;
+
+  bool get isPending => isModerationPending(status);
+
   static Post fromJson(Map<String, dynamic> j) => Post(
     id: j['id'] as String,
     type: j['type'] as String,
@@ -158,6 +205,7 @@ class Post {
     commentCount: (j['commentCount'] as num?)?.toInt() ?? 0,
     liked: j['liked'] as bool? ?? false,
     createdAt: j['createdAt'] as String? ?? '',
+    status: j['status'] as String? ?? kModerationStatusPublished,
   );
 }
 
@@ -169,6 +217,7 @@ class Comment {
     required this.parentId,
     required this.author,
     required this.children,
+    this.status = kModerationStatusPublished,
   });
 
   final String id;
@@ -178,12 +227,18 @@ class Comment {
   final PostAuthor author;
   final List<Comment> children;
 
+  /// `published` | `pending` | `rejected`；服务端未下发时按已发布处理。
+  final String status;
+
+  bool get isPending => isModerationPending(status);
+
   static Comment fromJson(Map<String, dynamic> j) => Comment(
     id: j['id'] as String,
     content: j['content'] as String? ?? '',
     createdAt: j['createdAt'] as String? ?? '',
     parentId: j['parentId'] as String?,
     author: PostAuthor.fromJson(j['author'] as Map<String, dynamic>),
+    status: j['status'] as String? ?? kModerationStatusPublished,
     children: [
       for (final c in (j['children'] as List? ?? []))
         Comment.fromJson(c as Map<String, dynamic>),
@@ -221,20 +276,35 @@ class TaskInfo {
   );
 
   Map<String, dynamic> toJson() => {
-    'key': key, 'eventKey': eventKey, 'label': label, 'done': done,
-    'reward': reward, 'progress': progress, 'target': target,
+    'key': key,
+    'eventKey': eventKey,
+    'label': label,
+    'done': done,
+    'reward': reward,
+    'progress': progress,
+    'target': target,
   };
 
   TaskInfo withProgress(int value) => TaskInfo(
-    key: key, eventKey: eventKey, label: label, done: done,
-    reward: reward, progress: value, target: target,
+    key: key,
+    eventKey: eventKey,
+    label: label,
+    done: done,
+    reward: reward,
+    progress: value,
+    target: target,
   );
 }
 
 class DailyTasksSnapshot {
-  const DailyTasksSnapshot({required this.day, required this.checkedToday,
-    required this.streak, required this.points, required this.growth,
-    required this.tasks});
+  const DailyTasksSnapshot({
+    required this.day,
+    required this.checkedToday,
+    required this.streak,
+    required this.points,
+    required this.growth,
+    required this.tasks,
+  });
 
   final String day;
   final bool checkedToday;
@@ -259,8 +329,11 @@ class DailyTasksSnapshot {
       );
 
   Map<String, dynamic> toJson() => {
-    'day': day, 'checkedToday': checkedToday, 'streak': streak,
-    'points': points, 'growth': growth.toJson(),
+    'day': day,
+    'checkedToday': checkedToday,
+    'streak': streak,
+    'points': points,
+    'growth': growth.toJson(),
     'tasks': [for (final task in tasks) task.toJson()],
   };
 }

@@ -191,6 +191,10 @@ class PostCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (post.isPending) ...[
+                    const ModerationPendingBadge(compact: true),
+                    const SizedBox(width: 6),
+                  ],
                   Expanded(
                     child: Text(
                       post.zoneName,
@@ -266,16 +270,20 @@ class PostCard extends StatelessWidget {
 }
 
 /// 评论树（含嵌套回复），回调 [onReply] 携带被回复的评论 id。
+///
+/// [onReport] 为 null 时不提供举报入口（例如未登录的浏览者）。
 class CommentTree extends StatelessWidget {
   const CommentTree({
     super.key,
     required this.comments,
     required this.onReply,
+    this.onReport,
     this.currentUserId,
   });
 
   final List<Comment> comments;
   final ValueChanged<Comment> onReply;
+  final ValueChanged<Comment>? onReport;
   final String? currentUserId;
 
   @override
@@ -298,10 +306,44 @@ class CommentTree extends StatelessWidget {
           _CommentNode(
             comment: c,
             onReply: onReply,
+            onReport: onReport,
             currentUserId: currentUserId,
             depth: 0,
           ),
       ],
+    );
+  }
+}
+
+/// 审核中标签：`pending` 内容只有作者和管理员能看到，读的人必须知道它还没公开。
+class ModerationPendingBadge extends StatelessWidget {
+  const ModerationPendingBadge({super.key, this.compact = false});
+
+  /// 紧凑模式用于列表卡片，只显示文字不带图标。
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final style = Theme.of(
+      context,
+    ).textTheme.labelSmall?.copyWith(color: scheme.onTertiaryContainer);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: scheme.tertiaryContainer,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!compact) ...[
+            Icon(Icons.hourglass_top, size: 12, color: style?.color),
+            const SizedBox(width: 4),
+          ],
+          Text('审核中', style: style),
+        ],
+      ),
     );
   }
 }
@@ -312,10 +354,12 @@ class _CommentNode extends StatelessWidget {
     required this.onReply,
     required this.currentUserId,
     required this.depth,
+    this.onReport,
   });
 
   final Comment comment;
   final ValueChanged<Comment> onReply;
+  final ValueChanged<Comment>? onReport;
   final String? currentUserId;
   final int depth;
 
@@ -353,6 +397,21 @@ class _CommentNode extends StatelessWidget {
                           ),
                       ],
                     ),
+                    if (comment.isPending)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Row(
+                          children: [
+                            const ModerationPendingBadge(),
+                            const SizedBox(width: 6),
+                            Text(
+                              '仅你和管理员可见',
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(color: scheme.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
                     Text(
                       comment.content,
                       style: Theme.of(context).textTheme.bodyMedium,
@@ -367,6 +426,17 @@ class _CommentNode extends StatelessWidget {
                           onPressed: () => onReply(comment),
                           child: const Text('回复'),
                         ),
+                        if (onReport != null)
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                              ),
+                              minimumSize: const Size(0, 28),
+                            ),
+                            onPressed: () => onReport!(comment),
+                            child: const Text('举报'),
+                          ),
                         Text(
                           comment.createdAt,
                           style: Theme.of(context).textTheme.labelSmall
@@ -384,6 +454,7 @@ class _CommentNode extends StatelessWidget {
               _CommentNode(
                 comment: child,
                 onReply: onReply,
+                onReport: onReport,
                 currentUserId: currentUserId,
                 depth: depth + 1,
               ),
