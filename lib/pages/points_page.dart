@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,9 +10,24 @@ import '../services/app_paths.dart';
 import '../store/auth_store.dart';
 
 class PointsPage extends StatefulWidget {
-  const PointsPage({super.key, required this.auth});
+  const PointsPage({
+    super.key,
+    required this.auth,
+    this.client,
+    this.clock,
+    this.cacheDirectory,
+  });
 
   final AuthStore auth;
+
+  /// API 入口；为空时使用线上单例。测试可注入隔离的客户端。
+  final ApiClient? client;
+
+  /// 今日日期来源；为空时取 [DateTime.now]。测试据此固定缓存日期。
+  final DateTime Function()? clock;
+
+  /// 缓存目录；为空时使用应用存储目录。返回 null 关闭磁盘缓存。
+  final Future<String?> Function()? cacheDirectory;
 
   @override
   State<PointsPage> createState() => _PointsPageState();
@@ -23,7 +39,10 @@ class _PointsPageState extends State<PointsPage> {
   List<Map<String, dynamic>> _ledger = [];
   List<Map<String, dynamic>> _orders = [];
   List<Map<String, dynamic>> _adminOrders = [];
-  bool _loading = true;
+  bool _loadingLedger = true;
+  bool _loadingItems = true;
+  bool _loadingOrders = true;
+  bool _loadingAdminOrders = true;
   bool _redeeming = false;
   String? _error;
   File? _cacheFile;
@@ -31,8 +50,9 @@ class _PointsPageState extends State<PointsPage> {
 
   bool get _admin => widget.auth.user?.isAdmin == true;
   int get _availablePoints => widget.auth.user?.points ?? _points;
+  ApiClient get _api => widget.client ?? ApiClient.instance;
   String get _today {
-    final now = DateTime.now();
+    final now = (widget.clock ?? DateTime.now)();
     return '${now.year}-${now.month.toString().padLeft(2, '0')}'
         '-${now.day.toString().padLeft(2, '0')}';
   }
@@ -40,12 +60,62 @@ class _PointsPageState extends State<PointsPage> {
   @override
   void initState() {
     super.initState();
+    // 余额与角色会随刷新/登录变化，页面必须跟着重建：
+    // 兑换按钮的可用态和管理员页签都依赖 auth。
+    widget.auth.addListener(_onAuthChanged);
+    _tokenForData = widget.auth.token;
     WidgetsBinding.instance.addPostFrameCallback((_) => _restoreCache());
+  }
+
+  @override
+  void didUpdateWidget(PointsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.auth != widget.auth) {
+      oldWidget.auth.removeListener(_onAuthChanged);
+      widget.auth.addListener(_onAuthChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.auth.removeListener(_onAuthChanged);
+    super.dispose();
+  }
+
+  void _onAuthChanged() {
+    if (!mounted) return;
+    final token = widget.auth.token;
+    // 换了账号（或从登出回到登录）就要重新拉数据：
+    // 否则页面还显示上一个账号的余额与明细。
+    if (token != _tokenForData) {
+      _resetSections();
+      if (token != null) unawaited(_load(force: true));
+    }
+    setState(() {});
+  }
+
+  /// 数据属于哪个账号的令牌；用于识别账号切换。
+  String? _tokenForData;
+
+  void _resetSections() {
+    _tokenForData = widget.auth.token;
+    _loadingLedger = true;
+    _loadingItems = true;
+    _loadingOrders = true;
+    _loadingAdminOrders = true;
+    _ledger = [];
+    _items = [];
+    _orders = [];
+    _adminOrders = [];
+    _cachedDay = null;
   }
 
   Future<void> _restoreCache() async {
     final userId = widget.auth.user?.id;
-    final root = await AppPaths.storageDirectory();
+    final cacheDirectory = widget.cacheDirectory;
+    final root = cacheDirectory == null
+        ? await AppPaths.storageDirectory()
+        : await cacheDirectory();
     if (root != null && userId != null) {
       _cacheFile = File(p.join(root, 'points_$userId.json'));
       try {
@@ -60,7 +130,6 @@ class _PointsPageState extends State<PointsPage> {
             _ledger = _cachedRows(data['ledger']);
             _orders = _cachedRows(data['orders']);
             _adminOrders = _cachedRows(data['adminOrders']);
-            _loading = false;
           });
         }
       } on Object {
@@ -96,38 +165,75 @@ class _PointsPageState extends State<PointsPage> {
     }
   }
 
-  Future<void> _load({bool force = false}) async {
+  /// [skipPointsSync] 用于兑换后的刷新：余额刚刚由兑换结果写入，
+  /// 再次回写会重复调 `updatePoints`（磁盘失败时还会重复报错）。
+  Future<void> _load({bool force = false, bool skipPointsSync = false}) async {
     final token = widget.auth.token;
     if (token == null) return;
     if (!force && _cachedDay == _today) return;
-    final startingPoints = widget.auth.user?.points;
     try {
-      final history = await ApiClient.instance.pointHistory(token);
-      final items = await ApiClient.instance.rewardItems(token, admin: _admin);
-      final orders = await ApiClient.instance.redemptions(token);
-      final adminOrders = _admin
-          ? await ApiClient.instance.redemptions(token, admin: true)
-          : <Map<String, dynamic>>[];
-      if (!mounted || widget.auth.token != token) return;
-      setState(() {
-        _points = history.points;
-        _ledger = history.entries;
-        _items = items;
-        _orders = orders;
-        _adminOrders = adminOrders;
-        _cachedDay = _today;
-        _error = null;
-        _loading = false;
-      });
-      if (widget.auth.user?.points == startingPoints) {
-        await widget.auth.updatePoints(points: history.points);
-      }
+      // 各区块独立完成：兑换列表慢或失败，积分明细照样可看。
+      // 每个 future 自己收尾，不能用一个 await 把其它区块挡在后面。
+      Future<void> track(Future<void> work) => work;
+
+      await Future.wait([
+        track(() async {
+          final history = await _api.pointHistory(token);
+          if (!mounted || widget.auth.token != token) return;
+          setState(() {
+            _points = history.points;
+            _ledger = history.entries;
+            _loadingLedger = false;
+          });
+          // 只在服务端余额与本地不同时回写：相同就不必动磁盘，
+          // 盘写失败也就没有机会把一次干净的加载变成异常。
+          if (!skipPointsSync &&
+              widget.auth.user?.points != history.points) {
+            try {
+              await widget.auth.updatePoints(points: history.points);
+            } on Object {
+              // 写盘失败不影响页面展示：余额已来自服务端。
+            }
+          }
+        }()),
+        track(() async {
+          final items = await _api.rewardItems(token, admin: _admin);
+          if (!mounted || widget.auth.token != token) return;
+          setState(() {
+            _items = items;
+            _loadingItems = false;
+            _cachedDay = _today;
+            _error = null;
+          });
+        }()),
+        track(() async {
+          final orders = await _api.redemptions(token);
+          if (!mounted || widget.auth.token != token) return;
+          setState(() {
+            _orders = orders;
+            _loadingOrders = false;
+          });
+        }()),
+        if (_admin)
+          track(() async {
+            final adminOrders = await _api.redemptions(token, admin: true);
+            if (!mounted || widget.auth.token != token) return;
+            setState(() {
+              _adminOrders = adminOrders;
+              _loadingAdminOrders = false;
+            });
+          }()),
+      ]);
       await _persistCache();
     } on ApiException catch (error) {
       if (mounted) {
         setState(() {
           _error = error.message;
-          _loading = false;
+          // 失败不能把其它区块一直停在转圈上。
+          _loadingLedger = false;
+          _loadingItems = false;
+          _loadingOrders = false;
+          _loadingAdminOrders = false;
         });
       }
     }
@@ -171,20 +277,34 @@ class _PointsPageState extends State<PointsPage> {
       if (mounted) setState(() => _redeeming = false);
       return;
     }
+    final token = widget.auth.token!;
     try {
-      final token = widget.auth.token!;
-      final points = await ApiClient.instance.redeem(
-        token,
-        item['id'] as String,
+      final points = await _api.redeem(token, item['id'] as String);
+      // 请求在途时可能已经换了账号：旧账号的响应不能改写新账号的余额、
+      // 不能弹提示，也不能触发刷新。
+      if (!mounted || widget.auth.token != token) return;
+      var localSaveFailed = false;
+      try {
+        await widget.auth.updatePoints(points: points);
+      } on Object {
+        // 服务端已经完成兑换；写盘失败时余额已在内存中生效，
+        // 不能把兑换判为失败，但要告诉用户去刷新。
+        localSaveFailed = true;
+      }
+      if (!mounted || widget.auth.token != token) return;
+      setState(() => _points = points);
+      _message(
+        localSaveFailed ? '兑换已提交，但本地积分保存失败，请稍后刷新' : '兑换已提交',
       );
-      await widget.auth.updatePoints(points: points);
-      if (mounted) setState(() => _points = points);
-      _message('兑换已提交');
-      await _load(force: true);
+      // 兑换改变了库存、明细与订单，即使写盘失败也要刷新。
+      await _load(force: true, skipPointsSync: true);
     } on ApiException catch (error) {
+      if (!mounted || widget.auth.token != token) return;
       _message(error.message);
     } finally {
-      if (mounted) setState(() => _redeeming = false);
+      if (mounted && widget.auth.token == token) {
+        setState(() => _redeeming = false);
+      }
     }
   }
 
@@ -276,7 +396,7 @@ class _PointsPageState extends State<PointsPage> {
       return;
     }
     try {
-      await ApiClient.instance.saveReward(
+      await _api.saveReward(
         widget.auth.token!,
         id: item?['id'] as String?,
         title: name,
@@ -311,7 +431,7 @@ class _PointsPageState extends State<PointsPage> {
     );
     if (confirmed != true) return;
     try {
-      await ApiClient.instance.fulfillRedemption(
+      await _api.fulfillRedemption(
         widget.auth.token!,
         order['id'] as String,
       );
@@ -398,16 +518,25 @@ class _PointsPageState extends State<PointsPage> {
                 ),
               ),
             Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : TabBarView(
-                      children: [
-                        _rewardList(),
-                        _ledgerList(),
-                        _orderList(_orders),
-                        if (_admin) _orderList(_adminOrders, admin: true),
-                      ],
-                    ),
+              // 每个页签各自反映自己的数据状态：兑换列表还在路上时，
+              // 积分明细仍然可读，不给整页一个转圈。
+              child: TabBarView(
+                children: [
+                  _loadingItems
+                      ? const Center(child: CircularProgressIndicator())
+                      : _rewardList(),
+                  _loadingLedger
+                      ? const Center(child: CircularProgressIndicator())
+                      : _ledgerList(),
+                  _loadingOrders
+                      ? const Center(child: CircularProgressIndicator())
+                      : _orderList(_orders),
+                  if (_admin)
+                    _loadingAdminOrders
+                        ? const Center(child: CircularProgressIndicator())
+                        : _orderList(_adminOrders, admin: true),
+                ],
+              ),
             ),
           ],
         ),
@@ -419,12 +548,14 @@ class _PointsPageState extends State<PointsPage> {
     onRefresh: () => _load(force: true),
     child: _items.isEmpty
         ? ListView(
+            key: const PageStorageKey('points-rewards'),
             children: const [
               SizedBox(height: 80),
               Center(child: Text('暂无可兑换项')),
             ],
           )
         : ListView.builder(
+            key: const PageStorageKey('points-rewards'),
             itemCount: _items.length,
             padding: const EdgeInsets.all(12),
             itemBuilder: (context, index) {
@@ -465,12 +596,14 @@ class _PointsPageState extends State<PointsPage> {
     onRefresh: () => _load(force: true),
     child: _ledger.isEmpty
         ? ListView(
+            key: const PageStorageKey('points-ledger'),
             children: const [
               SizedBox(height: 80),
               Center(child: Text('暂无积分记录')),
             ],
           )
         : ListView.builder(
+            key: const PageStorageKey('points-ledger'),
             itemCount: _ledger.length,
             itemBuilder: (context, index) {
               final entry = _ledger[index];
