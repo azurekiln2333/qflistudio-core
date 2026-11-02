@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../config/agreement_config.dart';
 import '../../community/models.dart';
 import '../../services/api_client.dart';
+import '../../services/ohos_safe_area.dart';
 import '../../store/auth_store.dart';
 import 'account_login_page.dart';
 import 'agreement_page.dart';
@@ -36,6 +37,7 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void initState() {
     super.initState();
+    OhosSafeArea.ensureListening();
     unawaited(_loadAnonymousPhone());
   }
 
@@ -115,11 +117,13 @@ class _LoginPageState extends State<LoginPage> {
         if (login.bindingId != null) {
           if (!mounted) return;
           final signedIn = await Navigator.of(context).push<bool>(
-            MaterialPageRoute(builder: (_) => AccountLoginPage(
-              auth: widget.auth,
-              bindingId: login.bindingId,
-              phoneAvailable: login.phoneAvailable,
-            )),
+            MaterialPageRoute(
+              builder: (_) => AccountLoginPage(
+                auth: widget.auth,
+                bindingId: login.bindingId,
+                phoneAvailable: login.phoneAvailable,
+              ),
+            ),
           );
           if (signedIn == true && mounted) Navigator.of(context).pop(true);
           return;
@@ -128,7 +132,9 @@ class _LoginPageState extends State<LoginPage> {
       } on ApiException catch (e) {
         final challengeId = e.details['challengeId'];
         final factor = e.details['factor'];
-        if (e.statusCode != 428 || challengeId is! String || factor is! String) {
+        if (e.statusCode != 428 ||
+            challengeId is! String ||
+            factor is! String) {
           rethrow;
         }
         if (!mounted) return;
@@ -169,172 +175,188 @@ class _LoginPageState extends State<LoginPage> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isOhos = defaultTargetPlatform == TargetPlatform.ohos;
+    // On HarmonyOS the account is created only through Huawei one-tap login,
+    // so alternate sign-in entries (and the registration form behind them)
+    // are not offered there.
+    final showPasswordLogin = !isOhos;
 
     return Scaffold(
       appBar: AppBar(),
       body: SafeArea(
         child: Align(
           alignment: Alignment.topCenter,
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Center(
-                    child: Image.asset(
-                      'assets/app_icon.png',
-                      width: 80,
-                      height: 80,
-                      cacheWidth: (80 * MediaQuery.devicePixelRatioOf(context))
-                          .round(),
-                    ),
-                  ),
-                  const SizedBox(height: 22),
-                  Text(
-                    '欢迎回到 QFLIStudio+',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 32),
-                  SizedBox(
-                    height: 42,
-                    child: _loadingPhone
-                        ? const Center(
-                            child: SizedBox.square(
-                              dimension: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            ),
-                          )
-                        : Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  _anonymousPhone ?? '未获取到脱敏手机号',
-                                  style: Theme.of(context).textTheme.titleLarge
-                                      ?.copyWith(fontWeight: FontWeight.w600),
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              if (_anonymousPhone == null)
-                                IconButton(
-                                  tooltip: '重新读取手机号',
-                                  onPressed: _busy ? null : _loadAnonymousPhone,
-                                  icon: const Icon(Icons.refresh, size: 20),
-                                  visualDensity: VisualDensity.compact,
-                                  constraints: const BoxConstraints.tightFor(
-                                    width: 36,
-                                    height: 36,
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                ),
-                            ],
-                          ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    '设备展示号码（仅供参考）',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  if (_phoneError != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      _phoneError!,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: scheme.error),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                  const SizedBox(height: 26),
-                  if (isOhos)
-                    SizedBox(
-                      height: 52,
-                      child: HuaweiQuickLoginView(
-                        agreementAccepted: _agreementAccepted,
-                        onAuthorizationCode: _completeHuaweiLogin,
-                        onError: _showHuaweiLoginError,
-                      ),
-                    )
-                  else
-                    Text(
-                      '华为账号一键登录仅支持鸿蒙设备',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  const SizedBox(height: 18),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Checkbox.adaptive(
-                        value: _agreementAccepted,
-                        onChanged: _busy
-                            ? null
-                            : (accepted) => setState(
-                                () => _agreementAccepted = accepted ?? false,
-                              ),
-                      ),
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Wrap(
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              const Text('我已阅读并同意'),
-                              _agreementLink('用户协议', userAgreementUrl),
-                              const Text('、'),
-                              _agreementLink('隐私政策', privacyPolicyUrl),
-                              const Text('及'),
-                              _agreementLink(
-                                '华为账号用户认证协议',
-                                huaweiAuthenticationAgreementUrl,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  const Divider(),
-                  TextButton.icon(
-                    onPressed: _busy ? null : _openOtherLogin,
-                    icon: const Icon(Icons.key_outlined),
-                    label: const Text('其他方式登录'),
-                  ),
-                  if (_loginError != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      _loginError!,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: scheme.error),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                  if (_busy) ...[
-                    const SizedBox(height: 14),
-                    const Center(
-                      child: SizedBox.square(
-                        dimension: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+          child: OhosSafeAreaBuilder(
+            builder: (context, topInset) => SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(24, 28 + topInset, 24, 24),
+              child: buildContent(context, scheme, isOhos, showPasswordLogin),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget buildContent(
+    BuildContext context,
+    ColorScheme scheme,
+    bool isOhos,
+    bool showPasswordLogin,
+  ) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: Image.asset(
+              'assets/app_icon.png',
+              width: 80,
+              height: 80,
+              cacheWidth: (80 * MediaQuery.devicePixelRatioOf(context)).round(),
+            ),
+          ),
+          const SizedBox(height: 22),
+          Text(
+            '欢迎回到 QFLIStudio+',
+            style: Theme.of(context).textTheme.headlineSmall,
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 32),
+          SizedBox(
+            height: 42,
+            child: _loadingPhone
+                ? const Center(
+                    child: SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          _anonymousPhone ?? '未获取到脱敏手机号',
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                          textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (_anonymousPhone == null)
+                        IconButton(
+                          tooltip: '重新读取手机号',
+                          onPressed: _busy ? null : _loadAnonymousPhone,
+                          icon: const Icon(Icons.refresh, size: 20),
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 36,
+                            height: 36,
+                          ),
+                          padding: EdgeInsets.zero,
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '设备展示号码（仅供参考）',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+            textAlign: TextAlign.center,
+          ),
+          if (_phoneError != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              _phoneError!,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.error),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          const SizedBox(height: 26),
+          if (isOhos)
+            SizedBox(
+              height: 52,
+              child: HuaweiQuickLoginView(
+                agreementAccepted: _agreementAccepted,
+                onAuthorizationCode: _completeHuaweiLogin,
+                onError: _showHuaweiLoginError,
+              ),
+            )
+          else
+            Text(
+              '华为账号一键登录仅支持鸿蒙设备',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+              textAlign: TextAlign.center,
+            ),
+          const SizedBox(height: 18),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Checkbox.adaptive(
+                value: _agreementAccepted,
+                onChanged: _busy
+                    ? null
+                    : (accepted) => setState(
+                        () => _agreementAccepted = accepted ?? false,
+                      ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Text('我已阅读并同意'),
+                      _agreementLink('用户协议', userAgreementUrl),
+                      const Text('、'),
+                      _agreementLink('隐私政策', privacyPolicyUrl),
+                      const Text('及'),
+                      _agreementLink(
+                        '华为账号用户认证协议',
+                        huaweiAuthenticationAgreementUrl,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (showPasswordLogin) ...[
+            const Divider(),
+            TextButton.icon(
+              onPressed: _busy ? null : _openOtherLogin,
+              icon: const Icon(Icons.key_outlined),
+              label: const Text('其他方式登录'),
+            ),
+          ],
+          if (_loginError != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _loginError!,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.error),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          if (_busy) ...[
+            const SizedBox(height: 14),
+            const Center(
+              child: SizedBox.square(
+                dimension: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

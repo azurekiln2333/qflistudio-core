@@ -2,13 +2,19 @@ import 'package:flutter/material.dart';
 
 import '../../community/models.dart';
 import '../../services/api_client.dart';
+import '../../services/ohos_safe_area.dart';
 import '../../store/auth_store.dart';
 import 'register_page.dart';
 import 'captcha_dialog.dart';
 import 'second_factor_dialog.dart';
 
 class AccountLoginPage extends StatefulWidget {
-  const AccountLoginPage({super.key, required this.auth, this.bindingId, this.phoneAvailable = false});
+  const AccountLoginPage({
+    super.key,
+    required this.auth,
+    this.bindingId,
+    this.phoneAvailable = true,
+  });
 
   final AuthStore auth;
   final String? bindingId;
@@ -19,6 +25,7 @@ class AccountLoginPage extends StatefulWidget {
 }
 
 class _AccountLoginPageState extends State<AccountLoginPage> {
+  static const _noPhoneMessage = '请使用已绑定手机号的华为账号';
   final _username = TextEditingController();
   final _password = TextEditingController();
   String? _factor;
@@ -31,6 +38,12 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
   bool _busy = false;
   bool _obscurePassword = true;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    OhosSafeArea.ensureListening();
+  }
 
   @override
   void dispose() {
@@ -54,6 +67,10 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
 
   Future<void> _submit() async {
     if (_busy) return;
+    if (widget.bindingId != null && !widget.phoneAvailable) {
+      setState(() => _error = _noPhoneMessage);
+      return;
+    }
     final username = _username.text.trim();
     if (username.isEmpty || _password.text.isEmpty) {
       setState(() => _error = '请输入用户名和密码');
@@ -95,16 +112,21 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
       }
       final result = widget.bindingId == null
           ? await ApiClient.instance.login(
-              username, _password.text,
+              username,
+              _password.text,
               emailCode: _factor == 'email' ? _verificationCode : null,
               totpCode: _factor == 'totp' ? _verificationCode : null,
-              captchaId: _captchaId, captchaCode: _captchaCode,
+              captchaId: _captchaId,
+              captchaCode: _captchaCode,
             )
           : await ApiClient.instance.bindHuaweiAccount(
-              widget.bindingId!, username, _password.text,
+              widget.bindingId!,
+              username,
+              _password.text,
               emailCode: _factor == 'email' ? _verificationCode : null,
               totpCode: _factor == 'totp' ? _verificationCode : null,
-              captchaId: _captchaId, captchaCode: _captchaCode,
+              captchaId: _captchaId,
+              captchaCode: _captchaCode,
             );
       await widget.auth.signIn(result.token, result.user);
       if (mounted) Navigator.of(context).pop(true);
@@ -143,7 +165,10 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
 
   Future<void> _skipBinding() async {
     if (_busy || widget.bindingId == null) return;
-    setState(() { _busy = true; _error = null; });
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
     try {
       ({String token, CommunityUser user}) result;
       try {
@@ -151,14 +176,22 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
       } on ApiException catch (e) {
         final challengeId = e.details['challengeId'];
         final factor = e.details['factor'];
-        if (e.statusCode != 428 || challengeId is! String || factor is! String) rethrow;
+        if (e.statusCode != 428 || challengeId is! String || factor is! String) {
+          rethrow;
+        }
         if (!mounted) return;
         final code = await showDialog<String>(
           context: context,
-          builder: (_) => SecondFactorDialog(factor: factor, emailMasked: e.details['emailMasked'] as String?),
+          builder: (_) => SecondFactorDialog(
+            factor: factor,
+            emailMasked: e.details['emailMasked'] as String?,
+          ),
         );
         if (code == null || !mounted) return;
-        result = await ApiClient.instance.completeHuaweiLogin(challengeId, code);
+        result = await ApiClient.instance.completeHuaweiLogin(
+          challengeId,
+          code,
+        );
       }
       await widget.auth.signIn(result.token, result.user);
       if (mounted) Navigator.of(context).pop(true);
@@ -183,13 +216,20 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // Without a verified phone number the account cannot use online services,
+    // so neither skipping the binding (which would create such an account)
+    // nor binding is offered.
+    final blockedByPhone = widget.bindingId != null && !widget.phoneAvailable;
+    final topInset = OhosSafeArea.topInset(context);
 
     return Scaffold(
-      appBar: AppBar(title: Text(widget.bindingId == null ? '账号密码登录' : '绑定已有账号')),
+      appBar: AppBar(
+        title: Text(widget.bindingId == null ? '账号密码登录' : '绑定已有账号'),
+      ),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.fromLTRB(24, 24 + topInset, 24, 24),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 420),
               child: Column(
@@ -204,7 +244,9 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
                   const SizedBox(height: 28),
                   if (widget.bindingId != null) ...[
                     Text(
-                      widget.phoneAvailable
+                      blockedByPhone
+                          ? _noPhoneMessage
+                          : widget.phoneAvailable
                           ? '华为手机号未匹配到已验证的已有账号。验证账号后即可绑定并登录。'
                           : '华为未提供可匹配的完整手机号。验证已有账号后即可绑定并登录。',
                       textAlign: TextAlign.center,
@@ -264,15 +306,21 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
                   ],
                   const SizedBox(height: 20),
                   FilledButton(
-                    onPressed: _busy ? null : _submit,
-                    child: Text(_busy ? '处理中…' : widget.bindingId == null ? '登录' : '绑定并登录'),
+                    onPressed: _busy || blockedByPhone ? null : _submit,
+                    child: Text(
+                      _busy
+                          ? '处理中…'
+                          : widget.bindingId == null
+                          ? '登录'
+                          : '绑定并登录',
+                    ),
                   ),
                   if (widget.bindingId == null)
                     TextButton(
                       onPressed: _busy ? null : _openRegister,
                       child: const Text('没有账号？注册'),
                     )
-                  else
+                  else if (!blockedByPhone)
                     TextButton(
                       onPressed: _busy ? null : _skipBinding,
                       child: const Text('跳过，创建新账号'),
