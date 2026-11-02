@@ -455,7 +455,9 @@ class _HomeTabState extends State<HomeTab>
                           children: [
                             Icon(Icons.folder_open_outlined, size: 20),
                             SizedBox(width: 12),
-                            Text(l10n.addExistingProject),
+                            // 窄视口（以及系统字体放大）下菜单文字会超宽，
+                            // 用 Flexible 包住让它们换行，而不是溢出报错。
+                            Flexible(child: Text(l10n.addExistingProject)),
                           ],
                         ),
                       ),
@@ -467,7 +469,7 @@ class _HomeTabState extends State<HomeTab>
                           children: [
                             Icon(Icons.cloud_upload_outlined, size: 20),
                             SizedBox(width: 12),
-                            Text(l10n.newCloudProject),
+                            Flexible(child: Text(l10n.newCloudProject)),
                           ],
                         ),
                       ),
@@ -477,7 +479,7 @@ class _HomeTabState extends State<HomeTab>
                         children: [
                           Icon(Icons.folder_delete_outlined, size: 20),
                           SizedBox(width: 12),
-                          Text(l10n.removeMissingProjects),
+                          Flexible(child: Text(l10n.removeMissingProjects)),
                         ],
                       ),
                     ),

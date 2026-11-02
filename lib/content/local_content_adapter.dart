@@ -111,6 +111,12 @@ abstract final class LocalContentAdapter {
     if (key != null && key != StudioProductCatalog.qfliStudioKey) {
       return ContentFilter.forProduct(key);
     }
+    // 主 App 自己没有课程：它的目录是各语言产品发布内容的合集，
+    // 所以不能按 `language`（`qflistudio`）过滤，否则什么都不剩。
+    // 语言筛选由页面上的筛选器交给用户。
+    if (key == StudioProductCatalog.qfliStudioKey) {
+      return const ContentFilter();
+    }
     return ContentFilter(language: language);
   }
 

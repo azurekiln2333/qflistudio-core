@@ -69,6 +69,8 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
       appBar: AppBar(
+        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
+        centerTitle: false,
         title: Text(
           l10n.tutorial,
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
@@ -170,7 +172,13 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
     final allowed = key == null || key == StudioProductCatalog.qfliStudioKey
         ? null
         : ContentProductTypes.byProduct[key];
-    return (store?.items ?? bundled)
+    final all = store?.items ?? bundled;
+    // 主 App 自己没有课程：返回各语言产品的合集，交给页面筛选器，
+    // 不能按 `widget.language`（`qflistudio`）再筛一遍。
+    if (key == StudioProductCatalog.qfliStudioKey) {
+      return all.toList(growable: false);
+    }
+    return all
         .where(
           (example) => allowed == null
               ? (example.language.isEmpty ? example.type : example.language)
@@ -187,6 +195,7 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
       appBar: AppBar(
+        centerTitle: false,
         title: Text(
           l10n.examples,
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
