@@ -267,6 +267,45 @@ class EditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 文件被 AI 工具或外部程序改写后，重新从磁盘读取。
+  ///
+  /// 干净緩冲区直接替换；有未保存修改时拒绝，否则会把用户刚敲的内容丢掉。
+  /// 内容未变时不替换 `codeLines` 引用，选区与滚动位置自然保留。
+  Future<String?> reloadFromDisk(OpenFile open) async {
+    if (_disposed) return 'Editor closed';
+    if (open.readOnly) return '历史快照只读';
+    if (open.dirty) return '文件有未保存的修改，未自动重新加载';
+    final file = File(open.path);
+    try {
+      final stat = await file.stat();
+      if (_disposed || !files.contains(open)) return null;
+      if (stat.type != FileSystemEntityType.file) return '文件不存在';
+      if (stat.size > maxFileSize) {
+        return '文件超过 2 MB，暂不支持在编辑器中打开';
+      }
+      final bytes = await file.readAsBytes();
+      if (_disposed || !files.contains(open)) return null;
+      if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
+      final encoding = TextCodec.detect(bytes);
+      final content = TextCodec.byName(encoding).decode(bytes);
+      // 磁盘上的内容与当前一致：保持同一个 codeLines 引用，
+      // re_editor 就不会重建行模型，光标也不动。
+      if (content == open.controller.text) {
+        open.modifiedAt = stat.modified;
+        return null;
+      }
+      open.encoding = encoding;
+      open.modifiedAt = stat.modified;
+      open.controller.text = content;
+      open.lastChangedText = content;
+      open.dirty = false;
+      notifyListeners();
+      return null;
+    } on FileSystemException catch (e) {
+      return '无法读取文件：${e.message}';
+    }
+  }
+
   void focusCurrent() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final open = current;
