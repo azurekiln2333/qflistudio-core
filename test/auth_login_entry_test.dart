@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/pages/auth/account_login_page.dart';
 import 'package:qfli_studio_core/pages/auth/login_page.dart';
+import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/ohos_safe_area.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 
@@ -120,7 +121,8 @@ void main() {
     );
     await _pumpHostAnswer(tester);
 
-    expect(find.text('跳过，创建新账号'), findsNothing);
+    // 网关在没有已验证手机号时拒绝绑定，也不允许用 skip 建号。
+    expect(find.text('新建账号'), findsNothing);
     expect(find.text('绑定并登录'), findsOneWidget);
     expect(find.text('请使用已绑定手机号的华为账号'), findsOneWidget);
 
@@ -128,7 +130,7 @@ void main() {
     expect(button.onPressed, isNull);
   });
 
-  testWidgets('Binding page with a phone number still offers skipping', (
+  testWidgets('Binding page offers binding and account creation', (
     tester,
   ) async {
     _answerSafeAreaChannel();
@@ -144,7 +146,9 @@ void main() {
     );
     await _pumpHostAnswer(tester);
 
-    expect(find.text('跳过，创建新账号'), findsOneWidget);
+    // Skip is the only way a new user creates an account, so it stays.
+    expect(find.text('新建账号'), findsOneWidget);
+    expect(find.text('绑定并登录'), findsOneWidget);
     final button = tester.widget<FilledButton>(find.byType(FilledButton));
     expect(button.onPressed, isNotNull);
   });
@@ -189,4 +193,35 @@ void main() {
       expect(pageTop.top, greaterThanOrEqualTo(28 + 44));
     });
   });
+
+  group('Huawei rejections', () {
+    final phoneRequired = ApiException(
+      '请使用已绑定手机号的华为账号',
+      statusCode: 403,
+      details: {'errorKey': 'huawei.phone_required'},
+    );
+
+    test('a missing phone number shows the server guidance', () {
+      expect(LoginPage.loginErrorMessage(phoneRequired), '请使用已绑定手机号的华为账号');
+    });
+
+    test('an empty server message still explains what to do', () {
+      final bare = ApiException(
+        ' ',
+        statusCode: 403,
+        details: {'errorKey': 'huawei.phone_required'},
+      );
+      expect(LoginPage.loginErrorMessage(bare), '请使用已绑定手机号的华为账号');
+    });
+
+    test('other rejections keep the server message', () {
+      final other = ApiException(
+        '华为账号授权失败',
+        statusCode: 400,
+        details: {'errorKey': 'huawei.invalid_code'},
+      );
+      expect(LoginPage.loginErrorMessage(other), '华为账号授权失败');
+    });
+  });
 }
+

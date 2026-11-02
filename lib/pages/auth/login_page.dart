@@ -20,6 +20,23 @@ class LoginPage extends StatefulWidget {
 
   final AuthStore auth;
 
+  /// No verified phone number: the fallback text when the server sends none.
+  static const String _phoneRequiredMessage = '请使用已绑定手机号的华为账号';
+
+  /// 一键登录失败时的文案。
+  ///
+  /// 网关在没有已验证手机号时直接拒绝一键登录，服务端转发为
+  /// 403 `huawei.phone_required`（contracts.md C 节）。这种情况给出绑定引导，
+  /// 而不是把服务端的原始错误码摆给用户看。空文案时用本地提示兜底。
+  static String loginErrorMessage(ApiException error) {
+    final errorKey = error.details['errorKey'];
+    if (errorKey == 'huawei.phone_required') {
+      final message = error.message.trim();
+      return message.isEmpty ? _phoneRequiredMessage : message;
+    }
+    return error.message;
+  }
+
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
@@ -154,7 +171,7 @@ class _LoginPageState extends State<LoginPage> {
       await widget.auth.signIn(result.token, result.user);
       if (mounted) Navigator.of(context).pop(true);
     } on ApiException catch (e) {
-      if (mounted) setState(() => _loginError = e.message);
+      if (mounted) setState(() => _loginError = LoginPage.loginErrorMessage(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }

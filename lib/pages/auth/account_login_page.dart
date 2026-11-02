@@ -176,7 +176,9 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
       } on ApiException catch (e) {
         final challengeId = e.details['challengeId'];
         final factor = e.details['factor'];
-        if (e.statusCode != 428 || challengeId is! String || factor is! String) {
+        if (e.statusCode != 428 ||
+            challengeId is! String ||
+            factor is! String) {
           rethrow;
         }
         if (!mounted) return;
@@ -323,7 +325,7 @@ class _AccountLoginPageState extends State<AccountLoginPage> {
                   else if (!blockedByPhone)
                     TextButton(
                       onPressed: _busy ? null : _skipBinding,
-                      child: const Text('跳过，创建新账号'),
+                      child: const Text('新建账号'),
                     ),
                   if (_busy) ...[
                     const SizedBox(height: 8),
