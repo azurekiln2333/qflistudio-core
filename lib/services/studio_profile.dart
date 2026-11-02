@@ -120,6 +120,8 @@ class StudioProfile {
     this.runtimeKind = 'unavailable',
     this.runtimeStatus = 'unavailable',
     this.supportedFileExtensions = const [],
+    this.clientVersion = '1.0.0',
+    this.allowCustomAiEndpoint = false,
   }) : offlineOnly = offlineOnly ?? isOffline;
 
   /// 档位标识，同时用于项目元数据里记录「由哪个 App 创建」。
@@ -239,6 +241,19 @@ class StudioProfile {
 
   /// File types that the declared runtime handles.
   final List<String> supportedFileExtensions;
+
+  /// Version reported in the `X-Client-Platform` header, e.g. `1.0.0`.
+  ///
+  /// The server records it as the login platform (compliance §3-W3). Keep it
+  /// in sync with the app's `pubspec.yaml` version when a shell releases.
+  final String clientVersion;
+
+  /// Whether the UI offers a user-configured AI endpoint.
+  ///
+  /// Off by default: the released HarmonyOS build routes AI only through the
+  /// official server relay, because the disclosure lists DeepSeek forwarded by
+  /// our own server and nothing else. Desktop and debug products may opt in.
+  final bool allowCustomAiEndpoint;
 
   /// Product-owned offline content source. Null keeps the shared catalog.
   ///

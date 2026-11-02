@@ -157,6 +157,18 @@ class AuthStore extends ChangeNotifier {
     if (token != null) unawaited(_revokeSession(token));
   }
 
+  /// 清空本地登录态，**不**联系服务端。
+  ///
+  /// 用于两条路径：注销成功（服务端已吊销全部会话）和撤回隐私政策同意。
+  /// 两条都不该再调 `/api/auth/logout`：前者令牌已失效，后者要在停止处理
+  /// 个人信息的前提下结束登录。
+  Future<void> clearLocalData() async {
+    _token = null;
+    _user = null;
+    await _persist();
+    notifyListeners();
+  }
+
   Future<void> _revokeSession(String token) async {
     try {
       await ApiClient.instance.logout(token);

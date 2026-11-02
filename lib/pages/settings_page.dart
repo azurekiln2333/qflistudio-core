@@ -1,10 +1,12 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../config/agreement_config.dart';
 import '../editor/ai_panel.dart';
+import '../services/account_erasure_service.dart';
 import '../services/app_backup_service.dart';
 import '../services/app_paths.dart';
 import '../services/file_backup.dart';
@@ -14,6 +16,7 @@ import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
 import '../widgets/settings_section.dart';
+import 'auth/agreement_page.dart';
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
 import '../editor/editor_fonts.dart';
@@ -50,6 +53,185 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _disposed = false;
 
   SettingsStore get settings => widget.settings;
+
+  AuthStore? get _auth => widget.auth;
+
+  /// 账户与隐私分组只在能真正生效时出现。
+  ///
+  /// 离线产品没有账号，也不联网，没有可撤回的同意；显示一个禁用入口
+  /// 比没有入口更让人困惑。
+  bool get _showsAccountSection =>
+      widget.auth != null && StudioProfile.current?.offlineOnly != true;
+
+  /// 是否提供“个人 AI 接口”入口。
+  ///
+  /// 鸿蒙正式版只走官方转发（§3-W3、§4 第 9 条）：披露的第三方只有深度求索，
+  /// 且必须经本公司服务器转发。产品档位不开就是不显示，界面不自己判断平台。
+  bool get _customAiEndpointAllowed =>
+      StudioProfile.current?.allowCustomAiEndpoint == true;
+
+  /// “账户与隐私”：协议入口、撤回同意、注销账号（§3-W3）。
+  ///
+  /// 从主界面进入不超过 4 次点击：主界面 → 我的 → 设置 → 本分组，
+  /// 所以三个入口都在这一屏直接可见，不再嵌二级页面。
+  Widget _accountSection(BuildContext context) {
+    final auth = _auth!;
+    return SettingsSection(
+      title: '账户与隐私',
+      children: [
+        ListTile(
+          leading: const Icon(Icons.description_outlined),
+          title: const Text('用户协议'),
+          subtitle: Text(userAgreementAvailable ? '查看并阅读' : '暂未发布，等待托管地址'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _openAgreement('用户协议', userAgreementUrl),
+        ),
+        ListTile(
+          leading: const Icon(Icons.privacy_tip_outlined),
+          title: const Text('隐私政策'),
+          subtitle: Text(privacyPolicyAvailable ? '查看并阅读' : '暂未发布，等待托管地址'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _openAgreement('隐私政策', privacyPolicyUrl),
+        ),
+        ListTile(
+          leading: const Icon(Icons.undo_outlined),
+          title: const Text('撤回隐私政策同意'),
+          subtitle: const Text('停止处理个人信息，并退出登录'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: auth.isLoggedIn ? _withdrawConsent : null,
+          enabled: auth.isLoggedIn,
+        ),
+        ListTile(
+          leading: Icon(
+            Icons.person_off_outlined,
+            color: Theme.of(context).colorScheme.error,
+          ),
+          title: Text(
+            '注销账号',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+          subtitle: const Text('永久删除账号与本站个人数据，不可恢复'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: auth.isLoggedIn ? _deactivateAccount : null,
+          enabled: auth.isLoggedIn,
+        ),
+      ],
+    );
+  }
+
+  void _openAgreement(String title, String url) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => AgreementPage(title: title, url: url),
+      ),
+    );
+  }
+
+  /// 撤回隐私政策同意。
+  ///
+  /// 优先调用鸿蒙隐私托管的撤回接口（`qflistudio/platform.requestPrivacyWithdraw`）；
+  /// 宿主没有该接口时（旧版鸿蒙或其他平台），清本地数据、退出登录，
+  /// 并提示用户到系统设置里撤回。两条路径都不再发送任何请求。
+  Future<void> _withdrawConsent() async {
+    final auth = _auth!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('撤回隐私政策同意'),
+        content: const Text(
+          '撤回后将停止处理你的个人信息，并退出登录。\n'
+          '已完成注销的账号不会被恢复；如需继续使用，需要重新同意隐私政策后再登录。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认撤回'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    var hosted = false;
+    try {
+      final result = await const MethodChannel(
+        'qflistudio/platform',
+      ).invokeMethod<bool>('requestPrivacyWithdraw');
+      hosted = result == true;
+    } on MissingPluginException {
+      // 宿主没有隐私托管：走本地分支。
+    } on PlatformException {
+      // 撤回接口报错也走本地分支，用户至少要能退出登录。
+    }
+
+    await auth.clearLocalData();
+    if (!mounted) return;
+    _showMessage(
+      hosted ? '已撤回隐私政策同意，并退出登录' : '已退出登录并清除本地登录信息。请在系统设置 → 隐私中撤回对华为隐私政策的授权。',
+    );
+  }
+
+  /// 注销账号：二次确认后调接口，成功后清本地登录态（§4 第 7 条）。
+  Future<void> _deactivateAccount() async {
+    final auth = _auth!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: const Text('永久注销账号'),
+        content: const Text(
+          '注销会立即且不可恢复地：\n'
+          '· 删除账号与本站个人数据（帖文、评论、云项目、终端数据）\n'
+          '· 吊销所有设备上的登录状态\n'
+          '· 审计日志保留 365 天，其中的个人标识已去标识化\n\n'
+          '如果只是想暂停使用，请选择取消，改为退出登录。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('继续注销'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    // 第二次确认：输入确认词，避免误触就删掉账号。
+    final typed = await _askErasureConfirmation();
+    if (typed != AccountErasureService.confirmWord) return;
+    if (!mounted) return;
+
+    _setBusy('正在注销账号…');
+    final result = await AccountErasureService().erase(auth);
+    _clearBusy();
+    if (!mounted) return;
+    if (result.succeeded) {
+      _showMessage('账号已永久注销');
+    } else {
+      _showMessage(result.message ?? '注销失败，请稍后重试');
+    }
+  }
+
+  Future<String?> _askErasureConfirmation() {
+    // 控制器归对话框自己管：用 whenComplete 释放会在退场动画期间
+    // 就被销毁，输入框重建时会拿到已释放的控制器。
+    return showDialog<String>(
+      context: context,
+      builder: (context) => const _ErasureConfirmDialog(),
+    );
+  }
 
   @override
   void dispose() {
@@ -145,7 +327,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ],
                 ),
-                if (widget.showAi)
+                if (widget.showAi && _customAiEndpointAllowed)
                   SettingsSection(
                     title: 'AI 助手',
                     children: [
@@ -162,6 +344,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ],
                   ),
+                if (_showsAccountSection) _accountSection(context),
                 SettingsSection(
                   title: '数据与存储',
                   children: [
@@ -188,9 +371,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ListTile(
                       leading: const Icon(Icons.file_upload_outlined),
                       title: const Text('导出全部数据'),
-                      subtitle: const Text(
-                        '打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份',
-                      ),
+                      subtitle: const Text('打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份'),
                       trailing: const Icon(Icons.chevron_right),
                       enabled: _busyLabel == null,
                       onTap: _busyLabel == null ? _exportAllData : null,
@@ -198,9 +379,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ListTile(
                       leading: const Icon(Icons.file_download_outlined),
                       title: const Text('导入全部数据'),
-                      subtitle: const Text(
-                        '校验后暂存，下次启动应用时替换当前数据（不可撤销）',
-                      ),
+                      subtitle: const Text('校验后暂存，下次启动应用时替换当前数据（不可撤销）'),
                       trailing: const Icon(Icons.chevron_right),
                       enabled: _busyLabel == null,
                       onTap: _busyLabel == null ? _importAllData : null,
@@ -317,9 +496,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       if (await AppBackupService.hasPendingRestore()) {
         final pending = await AppBackupService.pendingRestoreInfo();
-        _showMessage(
-          '已有待应用的恢复（${pending?.createdAt.toLocal() ?? ''}），请先重启应用',
-        );
+        _showMessage('已有待应用的恢复（${pending?.createdAt.toLocal() ?? ''}），请先重启应用');
         return;
       }
       final picked = await PickerService.pickDocument(
@@ -423,5 +600,68 @@ class _SettingsPageState extends State<SettingsPage> {
   static Future<String?> _backupPath() async {
     final base = await AppPaths.storageDirectory();
     return base == null ? null : p.join(base, FileBackup.dirName);
+  }
+}
+
+/// 注销账号的第二道确认：必须原样输入确认词。
+///
+/// 输入控制器属于对话框自身的 State，随对话框一起销毁。
+class _ErasureConfirmDialog extends StatefulWidget {
+  const _ErasureConfirmDialog();
+
+  @override
+  State<_ErasureConfirmDialog> createState() => _ErasureConfirmDialogState();
+}
+
+class _ErasureConfirmDialogState extends State<_ErasureConfirmDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_controller.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('确认注销'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('请输入 ${AccountErasureService.confirmWord} 以确认永久注销：'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _controller,
+            autofocus: true,
+            textCapitalization: TextCapitalization.characters,
+            decoration: const InputDecoration(
+              labelText: '确认词',
+              hintText: AccountErasureService.confirmWord,
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: colors.error,
+            foregroundColor: colors.onError,
+          ),
+          onPressed: _submit,
+          child: const Text('注销账号'),
+        ),
+      ],
+    );
   }
 }
