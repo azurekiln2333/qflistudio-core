@@ -108,13 +108,14 @@ abstract final class LocalContentAdapter {
 
   static ContentFilter _filter({required String language, String? productKey}) {
     final key = productKey?.trim().toLowerCase();
+    final lang = language.trim().toLowerCase();
     if (key != null && key != StudioProductCatalog.qfliStudioKey) {
       return ContentFilter.forProduct(key);
     }
-    // 主 App 自己没有课程：它的目录是各语言产品发布内容的合集，
-    // 所以不能按 `language`（`qflistudio`）过滤，否则什么都不剩。
-    // 语言筛选由页面上的筛选器交给用户。
-    if (key == StudioProductCatalog.qfliStudioKey) {
+    // 主 App 自己没有课程：它的目录是各语言产品发布内容的合集。
+    // 只有调用方拿不出来内容语言时才不过滤。`language` 等于产品 id
+    // 就是这种情况；否则（如 java 页面传 'java'）照常按语言过滤。
+    if (key == StudioProductCatalog.qfliStudioKey && lang == key) {
       return const ContentFilter();
     }
     return ContentFilter(language: language);

@@ -173,9 +173,10 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
         ? null
         : ContentProductTypes.byProduct[key];
     final all = store?.items ?? bundled;
-    // 主 App 自己没有课程：返回各语言产品的合集，交给页面筛选器，
-    // 不能按 `widget.language`（`qflistudio`）再筛一遍。
-    if (key == StudioProductCatalog.qfliStudioKey) {
+    // 主 App 自己没有课程：`language` 等于产品 id 时返回各语言产品的合集，
+    // 交给页面筛选器。语言产品页面传的是内容语言，照常再筛一遍。
+    if (key == StudioProductCatalog.qfliStudioKey &&
+        widget.language.trim().toLowerCase() == key) {
       return all.toList(growable: false);
     }
     return all

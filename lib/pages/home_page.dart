@@ -101,10 +101,12 @@ class _HomePageState extends State<HomePage> {
           child: _buildPage(
             this.context,
             index,
-            // Content tabs fall back to their local variants for an offline-only
-            // product, which is the one case where the community feed (a server
-            // feature) must not be reachable.
-            profile?.offlineOnly == true,
+            // Content tabs fall back to their local variants when the product
+            // has a bundled content source, and for every offline-only product.
+            // A networked product still ships its own catalog and must read it
+            // from assets rather than from the server.
+            profile?.offlineOnly == true ||
+                profile?.contentRepositoryFactory != null,
             profile,
           ),
           builder: (context, selected, child) =>
