@@ -6,47 +6,9 @@ import 'python_topics.dart';
 
 /// Exports authored programs without changing shared aggregate assets.
 Future<void> main(List<String> args) async {
-  final units = <Map<String, Object?>>[];
-  for (final topic in pythonTopics) {
-    units.add({
-      'id': '${topic.exampleId}:authored',
-      'topic': topic.id,
-      'kind': 'authored-main',
-      'code': topic.code,
-      'expectedOutput': topic.output,
-      'inputFixtures': {
-        ...topic.inputFixtures,
-        if (topic.input != null) 'stdin': topic.input!,
-      },
-      'runtime': topic.runtime.name,
-      'hasBehaviorCheck': true,
-    });
-    for (var i = 0; i < topic.tasks.length; i++) {
-      final task = topic.tasks[i];
-      units.add({
-        'id': '${topic.tutorialId}:answer-${i + 1}',
-        'topic': topic.id,
-        'kind': 'exercise-answer',
-        'prompt': task.prompt,
-        'answer': task.answer,
-        'validation': task.validation,
-        'code': '${task.answer}\n${task.validation}',
-        'expectedOutput': task.output,
-        'inputFixtures': {
-          ...task.inputFixtures,
-          if (task.input != null) 'stdin': task.input!,
-        },
-        'runtime': topic.runtime.name,
-        'hasBehaviorCheck':
-            task.output != null || task.validation.trim().isNotEmpty,
-      });
-    }
-  }
-  final mismatches = <String>[];
-  final assetDigests = <String, String>{};
-  if (args.length == 2 && args.last == '--shipped') {
-    _addShipped(units, mismatches, assetDigests);
-  }
+  final (units, mismatches, assetDigests) = buildInventory(
+    includeShipped: args.length == 2 && args.last == '--shipped',
+  );
   final payload = const JsonEncoder.withIndent('  ').convert({
     'schemaVersion': 1,
     'origin': args.length == 2
@@ -66,10 +28,60 @@ Future<void> main(List<String> args) async {
   }
   final output = File(args.first);
   await output.parent.create(recursive: true);
-  await output.writeAsString('$payload\n');
-  stdout.writeln(
+  await output.writeAsString('$payload\n');  stdout.writeln(
     'Exported ${units.length} units from ${pythonTopics.length} topics.',
   );
+}
+
+/// 按现有模型生成清单。
+///
+/// 抽出来是为了能脱离文件系统直接测试；返回值的三项分别对应
+/// 单元列表、与已发布资产的差异、已读资产的摘要。
+(
+  List<Map<String, Object?>>,
+  List<String>,
+  Map<String, String>,
+)
+buildInventory({bool includeShipped = false}) {
+  final units = <Map<String, Object?>>[];
+  for (final topic in pythonTopics) {
+    units.add({
+      'id': '${topic.exampleId}:authored',
+      'topic': topic.id,
+      'kind': 'authored-main',
+      'code': topic.code,
+      'expectedOutput': topic.output,
+      // `PythonTopic` 只有原始 stdin；没有按用例拆开的夹具。
+      'inputFixtures': {
+        if (topic.input != null) 'stdin': topic.input!,
+      },
+      'runtime': topic.runtime.name,
+      'hasBehaviorCheck': true,
+    });
+    for (var i = 0; i < topic.tasks.length; i++) {
+      final task = topic.tasks[i];
+      units.add({
+        'id': '${topic.tutorialId}:answer-${i + 1}',
+        'topic': topic.id,
+        'kind': 'exercise-answer',
+        'prompt': task.prompt,
+        'hint': task.hint,
+        'answer': task.answer,
+        // `PythonTask` 只有题目、提示、参考答案三项，没有校验脚本与夹具。
+        'code': task.answer,
+        'expectedOutput': null,
+        'inputFixtures': <String, String>{},
+        'runtime': topic.runtime.name,
+        'hasBehaviorCheck': false,
+      });
+    }
+  }
+  final mismatches = <String>[];
+  final assetDigests = <String, String>{};
+  if (includeShipped) {
+    _addShipped(units, mismatches, assetDigests);
+  }
+  return (units, mismatches, assetDigests);
 }
 
 void _addShipped(
@@ -191,8 +203,10 @@ void _addShipped(
         compare('$id prompt', raw?['prompt'], expected.prompt);
         compare('$id hint', raw?['hint'], expected.hint);
         compare('$id answer', raw?['answer'], expected.answer);
-        compare('$id validation', raw?['validation'], expected.validation);
-        compare('$id output', raw?['expectedOutput'], expected.output);
+        // `PythonTask` 只有题目、提示、参考答案三项，没有校验脚本与预期输出。
+        // 比对侧照旧读已发布字段，作者侧按空值比对。
+        compare('$id validation', raw?['validation'], null);
+        compare('$id output', raw?['expectedOutput'], null);
         compare(
           '$id fixtures',
           raw?['inputFixtures'],
