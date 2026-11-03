@@ -7,9 +7,10 @@
 ///   标识行因此插在 shebang 之后，而不是第 1 行。
 /// - **XML 声明**（`<?xml`）与 **编码声明**（`-*- coding:`、`# coding:`）
 ///   同样受“必须是第一行”或“必须在前两行”的约束，标识行也插在它们之后。
-/// - **没有注释语法的类型**（`.json`、`.csv`、`.txt`、`.md` 之外的纯数据）
-///   不插入任何内容：往 JSON 里塞一行注释会让文件直接解析失败，
-///   改了内容却报错比不加标识更糟。调用方据此在界面提示原因。
+/// - **没有注释语法的类型**（`.json`、`.csv`、`.txt` 等纯数据）
+///   标识写进同目录的说明文件 `<文件名>.ai-generated`。
+///   正文保持原样，JSON 解析器看不到注释；
+///   删掉说明文件就删掉了标识，不碰数据。
 library;
 
 /// 标识文案。
@@ -136,15 +137,34 @@ const Map<String, AiCommentSyntax> aiCommentSyntaxByFileName = {
 class AiGeneratedHeaderResult {
   const AiGeneratedHeaderResult.inserted(this.content)
     : inserted = true,
-      reason = null;
+      reason = null,
+      _sidecar = null;
+
   const AiGeneratedHeaderResult.skipped(this.content, this.reason)
-    : inserted = false;
+    : inserted = false,
+      _sidecar = null;
+
+  /// 标识写不进正文，改写到说明文件。
+  ///
+  /// [content] 是正文原文，[_sidecar] 是说明文件的内容。
+  /// 调用方先写正文，再写 [sidecarContent] 到 [sidecarName]。
+  const AiGeneratedHeaderResult.sidecar(this.content, String this._sidecar)
+    : inserted = true,
+      reason = null;
 
   final String content;
   final bool inserted;
 
-  /// 未插入的原因，供界面提示（例如“JSON 没有注释语法”）。
+  /// 未插入的原因，供界面提示。
   final String? reason;
+
+  final String? _sidecar;
+
+  /// 说明文件的内容；标识已写进正文时为 null。
+  String? get sidecarContent => _sidecar;
+
+  /// 标识写在正文内，还是写进说明文件。
+  bool get inBody => _sidecar == null;
 }
 
 /// 需要保持在前面的首行特征。
@@ -168,18 +188,33 @@ AiCommentSyntax? aiCommentSyntaxFor(String path) {
   return aiCommentSyntaxByExtension[name.substring(dot + 1)];
 }
 
+/// 说明文件的后缀：`data.json` → `data.json.ai-generated`。
+const String kAiGeneratedSidecarSuffix = '.ai-generated';
+
+/// [path] 对应的说明文件路径。
+String aiGeneratedSidecarPath(String path) =>
+    path.replaceAll('\\', '/') + kAiGeneratedSidecarSuffix;
+
+/// 说明文件的内容：一行标识，一项原始路径。
+String aiGeneratedSidecarContent(String path) =>
+    '# $kAiGeneratedFileNote\n原始文件：${path.replaceAll('\\', '/')}\n';
+
 /// 给 [content] 插入 AI 标识行；已标识过的文件保持不变。
 ///
 /// 幂等：文件里已经出现 [kAiGeneratedFileNote] 时原样返回（[inserted] 仍为 true，
 /// 因为标识确实存在）。
+///
+/// 没有注释语法的类型返回 [AiGeneratedHeaderResult.sidecar]。
+/// 此时 [content] 未改，标识要写到 [aiGeneratedSidecarPath] 指定的说明文件。
 AiGeneratedHeaderResult addAiGeneratedHeader(String path, String content) {
   final syntax = aiCommentSyntaxFor(path);
   if (syntax == null) {
-    final name = path.replaceAll('\\', '/').split('/').last;
-    final extension = name.contains('.') ? name.split('.').last : name;
-    return AiGeneratedHeaderResult.skipped(
+    if (content.contains(kAiGeneratedFileNote)) {
+      return AiGeneratedHeaderResult.inserted(content);
+    }
+    return AiGeneratedHeaderResult.sidecar(
       content,
-      '$extension 文件没有注释语法，已按原样保存（未加 AI 标识）',
+      aiGeneratedSidecarContent(path),
     );
   }
   if (content.contains(kAiGeneratedFileNote)) {
@@ -214,5 +249,20 @@ AiGeneratedHeaderResult addAiGeneratedHeader(String path, String content) {
 }
 
 /// 完整路径版本的便捷方法，供保存前调用。
+///
+/// 验证：正文总是带标识，或旁边总有说明文件。
 String addAiGeneratedHeaderOrOriginal(String path, String content) =>
     addAiGeneratedHeader(path, content).content;
+
+/// 写入标识：正文能带就写正文，否则写说明文件。
+///
+/// [write] 负责落盘。说明文件写失败会抛出异常，调用方要把失败告诉用户。
+Future<void> applyAiGeneratedMark(
+  String path,
+  AiGeneratedHeaderResult marked, {
+  required Future<void> Function(String target, String body) write,
+}) async {
+  final sidecar = marked.sidecarContent;
+  if (sidecar == null) return;
+  await write(aiGeneratedSidecarPath(path), sidecar);
+}

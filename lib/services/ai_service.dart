@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'api_client.dart';
+
 /// AI 回复中的一段内容：纯文本或代码块。
 class AiSegment {
   const AiSegment.text(this.text)
@@ -666,6 +668,31 @@ abstract final class AiService {
     } on FormatException {
       throw AiException('AI 接口返回了无法解析的内容');
     }
+  }
+
+  /// 官方转发：经本公司服务器 `/api/ai/chat` 请求。
+  ///
+  /// 正式版只走这条链路（整改任务书 §3-W3、§4 第 9 条）。
+  /// [send] 由调用方提供已登录令牌，负责真正发出请求。
+  /// 服务端一次返回完整回复，这里按段产出，保持调用方统一的流接口。
+  /// 失败时把 [ApiException] 换成 [AiException]，文案取服务端 message。
+  static Stream<String> relayChat({
+    required List<({String role, String content})> messages,
+    required Future<AiChatResult> Function(List<Map<String, dynamic>>) send,
+    String? systemPrompt,
+  }) async* {
+    final history = <Map<String, dynamic>>[
+      if (systemPrompt != null && systemPrompt.isNotEmpty)
+        {'role': 'system', 'content': systemPrompt},
+      for (final m in messages) {'role': m.role, 'content': m.content},
+    ];
+    final AiChatResult result;
+    try {
+      result = await send(history);
+    } on ApiException catch (e) {
+      throw AiException(e.message);
+    }
+    if (result.content.isNotEmpty) yield result.content;
   }
 
   /// 错误响应体 → 用户可读文案。不回显响应头或密钥。

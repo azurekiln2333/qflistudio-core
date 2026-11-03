@@ -1,6 +1,8 @@
 @TestOn('vm')
 library;
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/services/ai_file_header.dart';
 
@@ -95,23 +97,56 @@ void main() {
   });
 
   group('languages without comment syntax', () {
-    test('JSON is written unchanged and says why', () {
+    test('JSON keeps its bytes and gets a sidecar note', () {
       const original = '{"a": 1}';
       final result = addAiGeneratedHeader('data.json', original);
-      expect(result.inserted, isFalse);
-      expect(result.content, original);
-      expect(result.reason, isNotNull);
-      expect(result.reason, contains('json'));
+      expect(result.inserted, isTrue);
       // The promise that matters: the file still parses.
-      expect(result.content.trim(), original);
+      expect(result.content, original);
+      expect(result.inBody, isFalse);
+      expect(result.sidecarContent, contains(kAiGeneratedFileNote));
+      expect(result.sidecarContent, contains('data.json'));
+      expect(jsonDecode(result.content), {'a': 1});
     });
 
-    test('csv, txt and unknown extensions are also left alone', () {
+    test('the sidecar path is the file name plus the suffix', () {
+      expect(aiGeneratedSidecarPath('data.json'), 'data.json.ai-generated');
+      expect(
+        aiGeneratedSidecarPath('src\\data\\rows.csv'),
+        'src/data/rows.csv.ai-generated',
+      );
+    });
+
+    test('csv, txt and unknown extensions also get a sidecar', () {
       for (final path in ['a.csv', 'a.txt', 'NOTICE']) {
         final result = addAiGeneratedHeader(path, 'x,y\n');
-        expect(result.inserted, isFalse, reason: path);
+        expect(result.inserted, isTrue, reason: path);
         expect(result.content, 'x,y\n', reason: path);
+        expect(result.inBody, isFalse, reason: path);
+        expect(result.sidecarContent, isNotNull, reason: path);
       }
+    });
+
+    test('a file that already carries the note needs no sidecar', () {
+      final original = '{"note": "$kAiGeneratedFileNote"}';
+      final result = addAiGeneratedHeader('data.json', original);
+      expect(result.content, original);
+      expect(result.sidecarContent, isNull);
+    });
+
+    test('applyAiGeneratedMark writes the sidecar only when needed', () async {
+      final written = <String, String>{};
+      Future<void> write(String target, String body) async {
+        written[target] = body;
+      }
+
+      final marked = addAiGeneratedHeader('data.json', '{}');
+      await applyAiGeneratedMark('data.json', marked, write: write);
+      expect(written.keys, ['data.json.ai-generated']);
+
+      final body = addAiGeneratedHeader('a.py', 'print(1)\n');
+      await applyAiGeneratedMark('a.py', body, write: write);
+      expect(written.keys, ['data.json.ai-generated']);
     });
   });
 

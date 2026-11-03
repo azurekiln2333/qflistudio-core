@@ -6,7 +6,9 @@ import 'package:path/path.dart' as p;
 
 import '../services/ai_file_header.dart';
 import '../services/ai_service.dart';
+import '../services/api_client.dart';
 import '../services/studio_profile.dart';
+import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import 'editor_fonts.dart';
 
@@ -148,11 +150,31 @@ class AiPanel extends StatefulWidget {
     required this.projectName,
     required this.language,
     required this.settings,
+    this.auth,
     this.onClose,
     this.onCollapseChanged,
     this.onFileCreated,
     this.compact = false,
   });
+
+  /// 本次请求的 AI 连接参数。
+  ///
+  /// 不允许自定义接口时恒为服务端转发，已保存的旧地址与协议一律忽略。
+  /// 只隐藏设置入口不够：升级前存下的自定义地址仍会生效（§4 第 9 条）。
+  static AiEndpoint endpointFor(SettingsStore settings) {
+    if (StudioProfile.current?.allowCustomAiEndpoint != true) {
+      return const AiEndpoint.relay();
+    }
+    final baseUrl = settings.aiBaseUrl.trim();
+    final model = settings.aiModel.trim();
+    if (baseUrl.isEmpty || model.isEmpty) return const AiEndpoint.relay();
+    return AiEndpoint.direct(
+      baseUrl: baseUrl,
+      apiKey: settings.aiApiKey,
+      model: model,
+      protocol: settings.aiProtocol,
+    );
+  }
 
   final String projectPath;
   final String projectName;
@@ -160,6 +182,9 @@ class AiPanel extends StatefulWidget {
 
   /// AI 接口配置（接口地址/密钥/模型）。
   final SettingsStore settings;
+
+  /// 登录状态；官方转发需要令牌。为空时只允许直连产品。
+  final AuthStore? auth;
 
   final VoidCallback? onClose;
   final ValueChanged<bool>? onCollapseChanged;
@@ -197,9 +222,13 @@ class AiPanelState extends State<AiPanel> {
   bool _generating = false;
   bool _collapsed = false;
 
+  /// 是否具备发送条件。
+  ///
+  /// 只走官方转发时不依赖接口地址与模型：转发由服务端决定模型。
   bool get _configured =>
-      widget.settings.aiBaseUrl.trim().isNotEmpty &&
-      widget.settings.aiModel.trim().isNotEmpty;
+      !_customEndpointAllowed ||
+      (widget.settings.aiBaseUrl.trim().isNotEmpty &&
+          widget.settings.aiModel.trim().isNotEmpty);
 
   /// 是否提供“自定义 AI 接口”设置。
   ///
@@ -242,14 +271,32 @@ class AiPanelState extends State<AiPanel> {
 
     final assistant = _messages.last;
     final buffer = StringBuffer();
+    final endpoint = AiPanel.endpointFor(widget.settings);
     try {
-      await for (final piece in AiService.chat(
-        baseUrl: widget.settings.aiBaseUrl,
-        apiKey: widget.settings.aiApiKey,
-        model: widget.settings.aiModel,
-        messages: requestMessages,
-        systemPrompt: _systemPrompt,
-      )) {
+      final pieces = endpoint.route == AiRoute.direct
+          ? AiService.chat(
+              baseUrl: endpoint.baseUrl,
+              apiKey: endpoint.apiKey,
+              model: endpoint.model,
+              protocol: endpoint.protocol,
+              messages: requestMessages,
+              systemPrompt: _systemPrompt,
+            )
+          : AiService.relayChat(
+              messages: requestMessages,
+              systemPrompt: _systemPrompt,
+              send: (history) {
+                final token = widget.auth?.token;
+                if (token == null || token.isEmpty) {
+                  throw ApiException('AI 助手需要登录后使用官方转发');
+                }
+                return ApiClient.instance.aiChat(
+                  token: token,
+                  messages: history,
+                );
+              },
+            );
+      await for (final piece in pieces) {
         buffer.write(piece);
         if (mounted) {
           setState(() => assistant.content = buffer.toString());
@@ -281,8 +328,9 @@ class AiPanelState extends State<AiPanel> {
 
   /// 把 AI 代码块保存为项目内文件（路径安全校验）。
   ///
-  /// 写入前按目标语言的注释语法加一行 AI 生成标识（§3-W3）；没有注释
-  /// 语法的类型（如 .json）原样保存，并告知用户原因。
+  /// 写入前按目标语言的注释语法加一行 AI 生成标识（§3-W3）。
+  /// 没有注释语法的类型（如 .json）正文保持原样，
+  /// 标识写到同名说明文件 `<文件名>.ai-generated`。
   Future<void> _saveBlock(AiSegment block) async {
     var relative = block.path;
     if (relative == null || relative.isEmpty) {
@@ -303,6 +351,15 @@ class AiPanelState extends State<AiPanel> {
     try {
       await File(fullPath).parent.create(recursive: true);
       await File(fullPath).writeAsString(marked.content, flush: true);
+      await applyAiGeneratedMark(
+        relative,
+        marked,
+        write: (target, body) async {
+          final file = File(p.join(widget.projectPath, target));
+          await file.parent.create(recursive: true);
+          await file.writeAsString(body, flush: true);
+        },
+      );
     } on FileSystemException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -314,9 +371,9 @@ class AiPanelState extends State<AiPanel> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          marked.inserted
+          marked.inBody
               ? '已保存 $relative（已加 AI 生成标识）'
-              : '已保存 $relative（${marked.reason}）',
+              : '已保存 $relative（已在 ${aiGeneratedSidecarPath(relative)} 标注 AI 生成）',
         ),
       ),
     );

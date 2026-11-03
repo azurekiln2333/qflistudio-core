@@ -371,6 +371,25 @@ class VibeProjectFiles {
     );
   }
 
+  /// 写入 AI 生成标识的说明文件（无注释语法的类型）。
+  ///
+  /// 说明文件与正文同目录、同名加 `.ai-generated`。
+  /// 路径仍走同样的越界检查，写失败不推翻已成功的正文写入。
+  Future<String?> writeAiMarkSidecar({
+    required String path,
+    required String content,
+  }) async {
+    final absolute = resolve(path);
+    final file = File(absolute);
+    try {
+      await file.parent.create(recursive: true);
+      await file.writeAsString(content, flush: true);
+    } on FileSystemException {
+      return null;
+    }
+    return relative(absolute);
+  }
+
   /// 同一物理路径串行执行；键在 Windows 上不区分大小写。
   static Future<T> _withPathQueue<T>(
     String absolute,

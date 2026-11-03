@@ -692,6 +692,7 @@ class VibeCodingController extends ChangeNotifier {
             marked.content,
             createOnly: args['createOnly'] == true,
           );
+          final sidecar = await _writeAiMark(result.relativePath, marked);
           guard.markWritten(result.relativePath);
           _onFileChanged?.call(result.relativePath);
           final verify = await _verificationHint(result.relativePath);
@@ -702,13 +703,13 @@ class VibeCodingController extends ChangeNotifier {
             status: VibeToolStatus.ok,
             summary:
                 '${result.created ? '已创建' : '已写入'} '
-                '${result.relativePath} · ${result.bytes} B',
+                '${result.relativePath} · ${result.bytes} B$sidecar',
             modelText:
                 '${result.created ? '已创建' : '已写入'} ${result.relativePath}'
                 '（${result.bytes} B）'
-                '${marked.inserted ? '，已加上 AI 生成标识' : '，${marked.reason}'}'
+                '${marked.inBody ? '，已加上 AI 生成标识' : ''}'
                 '${result.backupPath == null ? '' : '，原文件已备份'}'
-                '${verify == null ? '' : '\n$verify'}',
+                '${verify == null ? '' : '\n$verify'}$sidecar',
             writtenPath: result.relativePath,
           );
         case 'edit_file':
@@ -731,10 +732,25 @@ class VibeCodingController extends ChangeNotifier {
           );
           guard.markWritten(result.relativePath);
           _onFileChanged?.call(result.relativePath);
+          // edit_file 同样要留标识：改过的文件也是 AI 写的（§3-W3）。
+          final editMark = addAiGeneratedHeader(
+            result.relativePath,
+            await _files.read(result.relativePath),
+          );
+          if (editMark.content != await _files.read(result.relativePath)) {
+            await _files.write(result.relativePath, editMark.content);
+            _onFileChanged?.call(result.relativePath);
+          }
+          final editSidecar = await _writeAiMark(
+            result.relativePath,
+            editMark,
+          );
           return _ToolOutcome(
             status: VibeToolStatus.ok,
-            summary: '已替换 ${result.relativePath} · ${result.bytes} B',
-            modelText: '已替换 ${result.relativePath}（${result.bytes} B），原文件已备份',
+            summary: '已替换 ${result.relativePath} · ${result.bytes} B$editSidecar',
+            modelText:
+                '已替换 ${result.relativePath}（${result.bytes} B），原文件已备份'
+                '$editSidecar',
             writtenPath: result.relativePath,
           );
         case 'run_command':
@@ -759,6 +775,26 @@ class VibeCodingController extends ChangeNotifier {
     } on FileSystemException catch (error) {
       return _error('error', '文件操作失败：${error.message}');
     }
+  }
+
+  /// 写入结果的补充说明：标识是否落到说明文件。
+  ///
+  /// 带注释语法的类型标识已在正文，返回空串。
+  /// 说明文件写失败时返回提示，不推翻已成功的正文写入。
+  Future<String> _writeAiMark(
+    String path,
+    AiGeneratedHeaderResult marked,
+  ) async {
+    final sidecar = marked.sidecarContent;
+    if (sidecar == null) return '';
+    final written = await _files.writeAiMarkSidecar(
+      path: aiGeneratedSidecarPath(path),
+      content: sidecar,
+    );
+    if (written == null) {
+      return '，但 AI 标识说明文件写入失败';
+    }
+    return '，已在 $written 标注 AI 生成';
   }
 
   /// 写入成功后的自检提示：网页类项目就地做真实结构检查。

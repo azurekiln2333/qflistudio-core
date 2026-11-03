@@ -3106,6 +3106,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                               projectName: widget.project.name,
                               language: widget.project.language,
                               settings: widget.settings,
+                              auth: widget.auth,
                               compact: aiCompact,
                               onCollapseChanged: (collapsed) {
                                 if (mounted) {

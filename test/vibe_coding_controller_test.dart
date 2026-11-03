@@ -145,6 +145,65 @@ void main() {
     },
   );
 
+  test('a JSON write keeps the file parseable and marks it alongside', () async {
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('c1', 'write_file', {
+          'path': 'data/config.json',
+          'content': '{"name":"demo"}\n',
+        }),
+        _textReply('已写入 data/config.json。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('创建一份配置');
+    await settle(controller, VibePhase.succeeded);
+
+    // 正文可以照常解析，标识在同名说明文件里。
+    final body = File(
+      p.join(root.path, 'data', 'config.json'),
+    ).readAsStringSync();
+    expect(jsonDecode(body), {'name': 'demo'});
+    expect(body, isNot(contains('本文件由 AI 生成')));
+    final note = File(
+      p.join(root.path, 'data', 'config.json.ai-generated'),
+    ).readAsStringSync();
+    expect(note, contains('本文件由 AI 生成'));
+    expect(note, contains('data/config.json'));
+
+    final tool = controller.messages.firstWhere((m) => m.tool != null).tool!;
+    expect(tool.status, VibeToolStatus.ok);
+    expect(tool.result, contains('data/config.json.ai-generated'));
+
+    controller.dispose();
+  });
+
+  test('edit_file also leaves the AI note on the changed file', () async {
+    final target = File(p.join(root.path, 'src', 'main.py'));
+    await target.parent.create(recursive: true);
+    await target.writeAsString('print("old")\n');
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _toolCall('r1', 'read_file', {'path': 'src/main.py'}),
+        _toolCall('c1', 'edit_file', {
+          'path': 'src/main.py',
+          'oldText': 'print("old")',
+          'newText': 'print("new")',
+        }),
+        _textReply('已修改 src/main.py。'),
+      ]);
+    final controller = build(relay);
+
+    controller.send('把输出改成 new');
+    await settle(controller, VibePhase.succeeded);
+
+    final body = target.readAsStringSync();
+    expect(body, startsWith('# 本文件由 AI 生成\n'));
+    expect(body, contains('print("new")'));
+
+    controller.dispose();
+  });
+
   test('runs failure -> real error -> fix -> rerun', () async {
     final relay = _FakeRelay()
       ..chatReplies.addAll([
@@ -182,7 +241,10 @@ void main() {
     expect(failure['content'], contains('退出码：1'));
     expect(failure['content'], contains('ZeroDivisionError'));
 
-    expect(File(p.join(root.path, 'main.py')).readAsStringSync(), 'print(1)\n');
+    expect(
+      File(p.join(root.path, 'main.py')).readAsStringSync(),
+      '# 本文件由 AI 生成\nprint(1)\n',
+    );
     final tools = controller.messages
         .where((m) => m.tool != null)
         .map((m) => m.tool!)
@@ -816,7 +878,10 @@ void main() {
     expect(tools[0].status, VibeToolStatus.error);
     expect(tools[0].result, contains('先 read_file'));
     expect(tools[2].status, VibeToolStatus.ok);
-    expect(File(p.join(root.path, 'main.py')).readAsStringSync(), 'x = 3\n');
+    expect(
+      File(p.join(root.path, 'main.py')).readAsStringSync(),
+      '# 本文件由 AI 生成\nx = 3\n',
+    );
 
     controller.dispose();
   });
