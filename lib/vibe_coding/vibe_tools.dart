@@ -63,13 +63,28 @@ class VibeProjectFiles {
     this.maxReadBytes = 256 * 1024,
     this.maxWriteBytes = 256 * 1024,
     this.maxListEntries = 400,
-    this.shouldWrite,
-  }) : projectRoot = p.normalize(p.absolute(projectRoot));
+    bool Function(String absolutePath)? shouldWrite,
+  }) : projectRoot = p.normalize(p.absolute(projectRoot)),
+       _shouldWrite = shouldWrite;
 
   /// 落入最终提交点的编辑器保护：返回 false 时拒绝覆盖。
   ///
   /// 在路径锁内、冲突复查和备份之后、真正写盘之前调用。
-  final bool Function(String absolutePath)? shouldWrite;
+  /// 会话层用 [addWriteGuard] 再叠一层路径租约。
+  bool Function(String absolutePath)? _shouldWrite;
+
+  bool Function(String absolutePath)? get shouldWrite => _shouldWrite;
+
+  /// 叠加一条写盘保护；多条按「全部通过才放行」组合。
+  ///
+  /// 会话层用它把路径租约接到既有的 `shouldWrite` 钩子上，
+  /// 不改变编辑器原有的脏缓冲保护。
+  void addWriteGuard(bool Function(String absolutePath) guard) {
+    final previous = _shouldWrite;
+    _shouldWrite = previous == null
+        ? guard
+        : (path) => previous(path) && guard(path);
+  }
 
   final String projectRoot;
   final int maxReadBytes;

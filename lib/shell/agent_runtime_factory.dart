@@ -9,6 +9,7 @@ import '../session/agent_session.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
+import '../vibe_coding/agent_request_scheduler.dart';
 import '../vibe_coding/vibe_agent_facade.dart';
 
 AgentRuntime? _cached;
@@ -25,11 +26,10 @@ Future<AgentRuntime> studioAgentRuntime({
   if (_cached case final cached?) return cached;
 
   final base = await AppPaths.storageDirectory();
-  final sessions = FileAgentSessionStore(
-    root: Directory(
-      base == null ? 'agent_sessions' : p.join(base, 'agent_sessions'),
-    ),
+  final sessionsRoot = Directory(
+    base == null ? 'agent_sessions' : p.join(base, 'agent_sessions'),
   );
+  final sessions = FileAgentSessionStore(root: sessionsRoot);
   await sessions.load();
 
   Project? find(String projectId) {
@@ -50,6 +50,10 @@ Future<AgentRuntime> studioAgentRuntime({
       return project.language.isNotEmpty ? project.language : project.type;
     },
     configuredModel: () => settings.aiModel,
+    // 并发上限 2，与服务端 QFLI_AI_CONCURRENCY 默认值一致。
+    scheduler: AgentRequestScheduler(),
+    // 模型目录缓存与索引同目录，重启后仍然有效。
+    cacheDir: sessionsRoot,
   );
   _cached = runtime;
   return runtime;

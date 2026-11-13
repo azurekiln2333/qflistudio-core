@@ -1227,6 +1227,9 @@ class ApiClient {
   /// 服务端默认 60 s，这里留出转接与网络余量。
   static const _aiTimeout = Duration(seconds: 90);
 
+  /// 模型目录的超时。列表只是选择器的装饰，不能拖住会话打开。
+  static const _aiModelsTimeout = Duration(seconds: 8);
+
   /// 一次模型回合。
   ///
   /// [endpoint] 为空或为 relay 时走服务端转接 `/api/ai/chat`（需登录令牌）。
@@ -1287,7 +1290,12 @@ class ApiClient {
     final target = endpoint ?? const AiEndpoint.relay();
     if (target.route == AiRoute.direct) return const [];
     final data =
-        await _send('GET', '/api/ai/models', token: token, timeout: _aiTimeout)
+        await _send(
+              'GET',
+              '/api/ai/models',
+              token: token,
+              timeout: _aiModelsTimeout,
+            )
             as Map<String, dynamic>;
     final list = data['data'];
     if (list is! List) return const [];

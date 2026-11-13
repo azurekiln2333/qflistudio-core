@@ -5,13 +5,18 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../interop/interop_runner.dart';
 import '../services/api_client.dart';
+import '../session/agent_perf.dart';
 import '../session/agent_session.dart';
+import 'agent_request_scheduler.dart';
+import 'project_write_leases.dart';
 import 'vibe_coding_controller.dart';
 
 /// 写操作权限。
@@ -284,10 +289,14 @@ class VibeAgentFacade extends AgentFacade {
     VibeProjectFiles? files,
     InteropRunner? interopRunner,
     List<Map<String, Object?>> restoredMessages = const [],
-    List<Map<String, Object?>> restoredHistory = const [],
+    bool hasEarlier = false,
+    AgentRequestScheduler? scheduler,
+    ProjectWriteLeases? leases,
   }) : _store = store,
        _meta = meta,
        _tokenProvider = tokenProvider,
+       _leases = leases,
+       _hasEarlier = hasEarlier,
        _controller = VibeCodingController(
          api: api,
          tokenProvider: tokenProvider,
@@ -301,30 +310,69 @@ class VibeAgentFacade extends AgentFacade {
          writeApproval: null,
        ) {
     _controller.writeApprovalHook = _handleApproval;
-    if (restoredHistory.isNotEmpty) {
-      _controller.restoreHistory(restoredHistory);
+    _controller.requestScheduler = scheduler;
+    _controller.schedulerKey = meta.id;
+    // 路径租约接到既有的 shouldWrite 钩子上：被别的会话占着时拒绝覆盖。
+    if (_leases case final leases?) {
+      _controller.files.addWriteGuard(
+        (absolute) => !leases.isHeldByOther(meta.id, absolute),
+      );
     }
     final restored = <AgentMessageView>[];
     for (final entry in restoredMessages) {
       final view = AgentMessageView.fromJson(entry);
       if (view != null) restored.add(view);
     }
-    _views = restored;
+    _restored = List.unmodifiable(restored);
+    // 尾部页本来就在盘上，不需要再写一次。
+    _persistedCount = restored.length;
+    _nextMessageId = restored.length;
     _controller.addListener(_sync);
     _lastPhase = _controller.phase;
   }
 
   final AgentSessionStore _store;
   final String? Function() _tokenProvider;
+  final ProjectWriteLeases? _leases;
   final VibeCodingController _controller;
 
   AgentSessionMeta _meta;
-  List<AgentMessageView> _views = const [];
+
+  /// 打开会话时读到的尾部消息；[loadEarlier] 往前面加。
+  List<AgentMessageView> _restored = const [];
+
+  /// 本次运行产生的消息；由控制器投影而来。
+  List<AgentMessageView> _runViews = const [];
+
   AgentPermissionMode _permission = AgentPermissionMode.askEveryWrite;
   AgentWriteApproval? _pendingApproval;
   Completer<bool>? _pendingCompleter;
   String? _lastUserText;
   VibePhase _lastPhase = VibePhase.idle;
+
+  /// 已经写给存储的消息条数（含尾部页）。
+  int _persistedCount = 0;
+
+  /// 消息 id 序号；重新打开会话时从已有条数继续，避免和旧 id 撞车。
+  int _nextMessageId = 0;
+
+  /// 控制器消息下标 → 会话内稳定 id。
+  final Map<int, String> _idByIndex = {};
+
+  /// 同步段先给界面的用户消息；控制器接管后清空。
+  AgentMessageView? _optimistic;
+
+  bool _starting = false;
+
+  /// 用户在「已显示反馈、还没真正开始」的窗口里点了停止。
+  bool _cancelBeforeStart = false;
+  bool _hasEarlier;
+  bool _loadingEarlier = false;
+  bool _historyLoaded = false;
+  bool _disposed = false;
+
+  /// 本轮占着的写路径；本轮结束、取消、销毁时释放。
+  final Set<String> _heldPaths = {};
 
   /// 持久化串行队列：上一次写完再写下一次，避免同文件并发。
   Future<void> _persistChain = Future<void>.value();
@@ -334,11 +382,16 @@ class VibeAgentFacade extends AgentFacade {
   String get sessionId => _meta.id;
 
   @override
-  List<AgentMessageView> get messages => List.unmodifiable(_views);
+  List<AgentMessageView> get messages => List.unmodifiable([
+    ..._restored,
+    ..._runViews,
+    ?_optimistic,
+  ]);
 
   @override
   AgentRunState get state {
     if (_pendingApproval != null) return AgentRunState.awaitingApproval;
+    if (_starting) return AgentRunState.running;
     return switch (_controller.phase) {
       VibePhase.running => AgentRunState.running,
       VibePhase.cancelling => AgentRunState.cancelling,
@@ -349,6 +402,117 @@ class VibeAgentFacade extends AgentFacade {
 
   @override
   String? get lastError => _controller.lastError;
+
+  @override
+  AgentErrorInfo? get lastErrorInfo {
+    final api = _controller.lastApiError;
+    final message = _controller.lastError;
+    if (api == null) {
+      if (message == null) return null;
+      return AgentErrorInfo(
+        kind: _kindOfMessage(message),
+        detail: message,
+      );
+    }
+    return AgentErrorInfo(
+      kind: _kindOf(api),
+      statusCode: api.statusCode,
+      detail: api.message,
+    );
+  }
+
+  @override
+  String? get activity => _controller.activity;
+
+  @override
+  bool get hasEarlier => _hasEarlier;
+
+  @override
+  Future<void> loadEarlier() async {
+    if (!_hasEarlier || _loadingEarlier) return;
+    final first = _restored.isNotEmpty ? _restored.first.id : null;
+    if (first == null) {
+      _hasEarlier = false;
+      notifyListeners();
+      return;
+    }
+    _loadingEarlier = true;
+    try {
+      final page = await _store.readBefore(
+        _meta.id,
+        beforeId: first,
+        limit: 60,
+      );
+      final earlier = <AgentMessageView>[];
+      for (final entry in page.messages) {
+        final view = AgentMessageView.fromJson(entry);
+        if (view != null) earlier.add(view);
+      }
+      if (earlier.isNotEmpty) {
+        _restored = [...earlier, ..._restored];
+        // 这些消息早就在盘上了。
+        _persistedCount += earlier.length;
+      }
+      _hasEarlier = page.hasEarlier;
+    } on Object {
+      // 读不到就保持现状，用户可以再点一次。
+    } finally {
+      _loadingEarlier = false;
+      notifyListeners();
+    }
+  }
+
+  /// HTTP 异常 → 界面文案分类。
+  static AgentErrorKind _kindOf(ApiException error) {
+    final code = error.details['code'];
+    if (code is String) {
+      switch (code) {
+        case 'AI_NOT_CONFIGURED':
+          return AgentErrorKind.notConfigured;
+        case 'RATE_LIMITED':
+          return AgentErrorKind.rateLimited;
+        case 'UNAUTHORIZED':
+          return AgentErrorKind.loginExpired;
+        case 'TIMEOUT':
+          return AgentErrorKind.timeout;
+        case 'OFFLINE':
+        case 'NETWORK':
+          return AgentErrorKind.offline;
+      }
+    }
+    switch (error.statusCode) {
+      case 401:
+        return AgentErrorKind.loginExpired;
+      case 429:
+        return AgentErrorKind.rateLimited;
+      case 503:
+        if (error.message.contains('AI 服务未配置')) {
+          return AgentErrorKind.notConfigured;
+        }
+    }
+    return _kindOfMessage(error.message);
+  }
+
+  /// 只有文案时的退路：按关键词归类。
+  static AgentErrorKind _kindOfMessage(String message) {
+    if (message.contains('AI 服务未配置') || message.contains('未配置')) {
+      return AgentErrorKind.notConfigured;
+    }
+    if (message.contains('登录') &&
+        (message.contains('过期') || message.contains('请先'))) {
+      return AgentErrorKind.loginExpired;
+    }
+    if (message.contains('频繁') || message.contains('429')) {
+      return AgentErrorKind.rateLimited;
+    }
+    if (message.contains('超时')) return AgentErrorKind.timeout;
+    if (message.contains('网络') ||
+        message.contains('无法连接') ||
+        message.contains('连接')) {
+      return AgentErrorKind.offline;
+    }
+    return AgentErrorKind.unknown;
+  }
 
   /// 最近一次会话保存失败的原因；保存正常时为 null。
   String? get persistError => _persistError;
@@ -392,16 +556,57 @@ class VibeAgentFacade extends AgentFacade {
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
     final body = text.trim();
     if (body.isEmpty) return;
+    final feedbackWatch = Stopwatch()..start();
     _permission = permission;
     _lastUserText = body;
+    _cancelBeforeStart = false;
     _controller.configureModel(
       modelId: modelId,
       reasoningEffort: reasoningEffort,
     );
-    await _maybeRetitle(body);
-    _controller.send(_compose(body, _resolveAttachments(attachedPaths)));
+    final composed = _compose(body, _resolveAttachments(attachedPaths));
+    // 同步段：这一帧就要看到用户消息和运行状态。这里不做任何磁盘 I/O。
+    _optimistic = AgentMessageView(
+      id: 'pending-user',
+      role: 'user',
+      text: composed,
+    );
+    _starting = true;
+    notifyListeners();
+    // 「发送到出现用户消息」的耗时，不含网络与磁盘。
+    agentPerf('send.feedback', feedbackWatch.elapsedMilliseconds);
+    try {
+      // 历史推迟到第一次发送时才读：打开会话不需要它。
+      await _ensureHistoryLoaded();
+    } finally {
+      _optimistic = null;
+      _starting = false;
+    }
+    if (_disposed || _cancelBeforeStart) {
+      _cancelBeforeStart = false;
+      return;
+    }
+    _controller.send(composed);
     _sync();
+    // 标题只是列表的装饰，不能拖住发送。
+    unawaited(_maybeRetitle(body));
     unawaited(_persist());
+  }
+
+  /// 恢复模型历史；只做一次。
+  ///
+  /// 读不到历史不影响发送：最多少一点上下文。
+  Future<void> _ensureHistoryLoaded() async {
+    if (_historyLoaded) return;
+    _historyLoaded = true;
+    try {
+      final history = await _store.readHistory(_meta.id);
+      if (history.isNotEmpty && !_disposed) {
+        _controller.restoreHistory(history);
+      }
+    } on Object {
+      // 历史缺失不阻塞发送。
+    }
   }
 
   /// 把附件分成项目内和项目外两组。
@@ -436,7 +641,14 @@ class VibeAgentFacade extends AgentFacade {
     _pendingApproval = null;
     _pendingCompleter = null;
     if (completer != null && !completer.isCompleted) completer.complete(false);
+    if (_starting) {
+      // 还没进入控制器：记下来，send 恢复后不再启动本轮。
+      _cancelBeforeStart = true;
+      _starting = false;
+      _optimistic = null;
+    }
     await _controller.cancel();
+    _releaseLeases();
     _sync();
   }
 
@@ -449,23 +661,46 @@ class VibeAgentFacade extends AgentFacade {
 
   @override
   void dispose() {
+    _disposed = true;
     final completer = _pendingCompleter;
     if (completer != null && !completer.isCompleted) completer.complete(false);
+    _releaseLeases();
     _controller.removeListener(_sync);
     _controller.dispose();
     super.dispose();
   }
 
+  /// 本轮占着的写路径全部释放。
+  void _releaseLeases() {
+    final leases = _leases;
+    if (leases == null) return;
+    leases.releaseAll(_meta.id);
+    _heldPaths.clear();
+  }
+
   /// 写盘前的权限判定；返回 null 放行，返回字符串作为拒绝原因。
+  ///
+  /// 放行前先取路径租约：同一个文件被另一个运行中的会话占着时，后到的得到
+  /// 冲突，文件不会被覆盖。
   Future<String?> _handleApproval(VibeWriteRequest request) async {
     switch (_permission) {
       case AgentPermissionMode.readOnly:
         return '当前是只读模式，不允许写入。切换到“每次询问”或“自动接受”后再试';
       case AgentPermissionMode.autoAcceptEdits:
-        return null;
       case AgentPermissionMode.askEveryWrite:
         break;
     }
+    final leases = _leases;
+    if (leases != null) {
+      final lease = leases.acquire(
+        sessionId: _meta.id,
+        sessionLabel: _meta.title,
+        path: request.path,
+      );
+      if (!lease.granted) return lease.conflict;
+      _heldPaths.add(request.path);
+    }
+    if (_permission == AgentPermissionMode.autoAcceptEdits) return null;
     final completer = Completer<bool>();
     _pendingApproval = AgentWriteApproval(
       path: request.path,
@@ -476,20 +711,26 @@ class VibeAgentFacade extends AgentFacade {
     final allowed = await completer.future;
     _pendingApproval = null;
     _pendingCompleter = null;
+    if (!allowed) {
+      leases?.release(_meta.id, request.path);
+      _heldPaths.remove(request.path);
+    }
     notifyListeners();
     return allowed ? null : '用户拒绝了这次写入';
   }
 
   /// 把控制器状态搬到视图层，并在本轮结束时落盘。
   void _sync() {
-    final next = <AgentMessageView>[];
     final source = _controller.messages;
+    _idByIndex.removeWhere((index, _) => index >= source.length);
+    final next = <AgentMessageView>[];
     for (var index = 0; index < source.length; index++) {
       final message = source[index];
       final tool = message.tool;
+      final id = _idByIndex.putIfAbsent(index, () => 'm${_nextMessageId++}');
       next.add(
         AgentMessageView(
-          id: 'm$index',
+          id: id,
           role: tool != null ? 'tool' : (message.isUser ? 'user' : 'assistant'),
           text: tool != null ? (tool.result ?? '') : message.text,
           toolName: tool?.toolName,
@@ -503,14 +744,23 @@ class VibeAgentFacade extends AgentFacade {
         ),
       );
     }
-    _views = next;
+    if (source.isNotEmpty) {
+      // 控制器已接管用户消息，乐观条目下台。
+      _optimistic = null;
+      _starting = false;
+    }
+    _runViews = next;
     final phase = _controller.phase;
     final settled = phase != VibePhase.running && phase != VibePhase.cancelling;
     final wasRunning =
         _lastPhase == VibePhase.running || _lastPhase == VibePhase.cancelling;
     _lastPhase = phase;
     notifyListeners();
-    if (settled && wasRunning) unawaited(_persist());
+    if (settled && (wasRunning || _heldPaths.isNotEmpty)) {
+      // 本轮结束：释放路径租约，再收尾落盘。
+      _releaseLeases();
+      unawaited(_persist());
+    }
   }
 
   Future<void> _persist() {
@@ -520,14 +770,17 @@ class VibeAgentFacade extends AgentFacade {
     return next;
   }
 
+  /// 只追加还没写过的消息，再写一份历史快照。
   Future<void> _writeTranscript() async {
     try {
-      await _store.write(
+      final views = [..._restored, ..._runViews];
+      for (var index = _persistedCount; index < views.length; index++) {
+        await _store.appendMessage(_meta.id, _persistable(views[index]));
+      }
+      _persistedCount = views.length;
+      await _store.writeHistory(
         _meta.id,
-        AgentTranscript(
-          messages: [for (final view in _views) view.toJson()],
-          history: _controller.history,
-        ),
+        _persistableHistory(_controller.history),
       );
       final meta = _store.metaOf(_meta.id);
       if (meta != null) _meta = meta;
@@ -537,6 +790,47 @@ class VibeAgentFacade extends AgentFacade {
       _persistError = '会话保存失败：$error';
       notifyListeners();
     }
+  }
+
+  /// 工具输出落盘前截断到 8 KB；完整输出只在内存里，不写文件。
+  ///
+  /// 视图里的工具条目只是摘要，真正的完整输出在模型历史的 `tool` 条目里，
+  /// 所以两处都截。
+  static const int _maxPersistedToolChars = 8 * 1024;
+
+  static List<Map<String, Object?>> _persistableHistory(
+    List<Map<String, dynamic>> history,
+  ) => [
+    for (final entry in history)
+      if (entry['role'] == 'tool' &&
+          entry['content'] is String &&
+          (entry['content'] as String).length > _maxPersistedToolChars)
+        {
+          ...entry,
+          'content':
+              '…（已截断，只保留最后 8 KB）\n'
+              '${(entry['content'] as String).substring((entry['content'] as String).length - _maxPersistedToolChars)}',
+        }
+      else
+        Map<String, Object?>.from(entry),
+  ];
+
+  static Map<String, Object?> _persistable(AgentMessageView view) {
+    if (view.role != 'tool' || view.text.length <= _maxPersistedToolChars) {
+      return view.toJson();
+    }
+    final tail = view.text.substring(
+      view.text.length - _maxPersistedToolChars,
+    );
+    return AgentMessageView(
+      id: view.id,
+      role: view.role,
+      text: '…（已截断，只保留最后 8 KB）\n$tail',
+      toolName: view.toolName,
+      isError: view.isError,
+      changedPaths: view.changedPaths,
+      aiGenerated: view.aiGenerated,
+    ).toJson();
   }
 
   /// 第一条消息决定会话标题，用户改名后不再覆盖。
@@ -562,7 +856,11 @@ class VibeAgentFacade extends AgentFacade {
   }
 }
 
-/// 应用级实现：模型目录、技能索引、打开会话。
+/// 应用级实现：模型目录、技能索引、会话注册表。
+///
+/// 一个会话一个实例，按 `sessionId` 复用。切换会话只是换一个实例显示，
+/// 不会停掉原来那个。空闲且已读的实例超过 [maxIdleFacades] 时销毁最久未用的；
+/// 运行中的永不销毁。
 class VibeAgentRuntime implements AgentRuntime {
   VibeAgentRuntime({
     required ApiClient api,
@@ -575,6 +873,10 @@ class VibeAgentRuntime implements AgentRuntime {
     VibeProjectFiles Function(String projectRoot)? filesFactory,
     InteropRunner? Function(String projectId)? interopRunnerOf,
     String Function()? configuredModel,
+    AgentRequestScheduler? scheduler,
+    Directory? cacheDir,
+    this.maxIdleFacades = 8,
+    this.pageSize = 60,
   }) : _api = api,
        _tokenProvider = tokenProvider,
        _sessions = sessions,
@@ -584,7 +886,19 @@ class VibeAgentRuntime implements AgentRuntime {
        _onlineAllowed = onlineAllowed,
        _filesFactory = filesFactory,
        _interopRunnerOf = interopRunnerOf,
-       _configuredModel = configuredModel;
+       _configuredModel = configuredModel,
+       _scheduler = scheduler ?? AgentRequestScheduler(),
+       _cacheDir = cacheDir {
+    _sessions.addListener(_onSessionsChanged);
+  }
+
+  /// 空闲且已读的实例上限。
+  final int maxIdleFacades;
+
+  /// 打开会话时读多少条尾部消息。
+  final int pageSize;
+
+  static const Duration _modelsTtl = Duration(minutes: 10);
 
   final ApiClient _api;
   final String? Function() _tokenProvider;
@@ -596,39 +910,81 @@ class VibeAgentRuntime implements AgentRuntime {
   final VibeProjectFiles Function(String projectRoot)? _filesFactory;
   final InteropRunner? Function(String projectId)? _interopRunnerOf;
   final String Function()? _configuredModel;
+  final AgentRequestScheduler _scheduler;
+  final Directory? _cacheDir;
+
+  final Map<String, VibeAgentFacade> _facades = {};
+  final Map<String, DateTime> _lastUsed = {};
+  final Map<String, AgentLiveStatus> _lastStatus = {};
+  final Set<String> _active = {};
+  final Set<String> _unread = {};
+  final Set<String> _failedUnread = {};
+  final Map<String, ProjectWriteLeases> _leasesByRoot = {};
+
+  List<AgentModelOption>? _memoryModels;
+  DateTime? _memoryModelsAt;
+
+  final ValueNotifier<int> _liveTick = ValueNotifier<int>(0);
 
   @override
   AgentSessionStore get sessions => _sessions;
-
-  // 并行会话的注册表由 pi-B 在返工阶段实现。下面是能编译的占位。
-  final ValueNotifier<int> _liveTick = ValueNotifier<int>(0);
 
   @override
   Listenable get liveChanges => _liveTick;
 
   @override
-  AgentLiveStatus statusOf(String sessionId) => AgentLiveStatus.idle;
+  AgentLiveStatus statusOf(String sessionId) {
+    final facade = _facades[sessionId];
+    if (facade == null) return AgentLiveStatus.idle;
+    if (_scheduler.isWaiting(sessionId)) return AgentLiveStatus.queued;
+    return switch (facade.state) {
+      AgentRunState.running || AgentRunState.cancelling =>
+        AgentLiveStatus.running,
+      AgentRunState.awaitingApproval => AgentLiveStatus.awaitingApproval,
+      AgentRunState.failed => _failedUnread.contains(sessionId)
+          ? AgentLiveStatus.failed
+          : AgentLiveStatus.idle,
+      AgentRunState.idle => _unread.contains(sessionId)
+          ? AgentLiveStatus.finishedUnread
+          : AgentLiveStatus.idle,
+    };
+  }
 
   @override
-  AgentFacade? liveFacade(String sessionId) => null;
+  AgentFacade? liveFacade(String sessionId) => _facades[sessionId];
 
   @override
-  void markSeen(String sessionId) {}
+  void markSeen(String sessionId) {
+    final changed =
+        _unread.remove(sessionId) | _failedUnread.remove(sessionId);
+    if (changed) _liveTick.value++;
+  }
 
   @override
-  Future<void> cancelAll() async {}
+  Future<void> cancelAll() async {
+    for (final facade in _facades.values.toList()) {
+      if (facade.state == AgentRunState.running ||
+          facade.state == AgentRunState.awaitingApproval ||
+          facade.state == AgentRunState.cancelling) {
+        await facade.cancel();
+      }
+    }
+    _scheduler.cancelWaiting();
+  }
 
   @override
   Future<List<AgentModelOption>> models() async {
     final token = _tokenProvider();
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
+    final cached = await _readModelsCache();
+    if (cached != null) return cached;
     try {
       final list = await _api.aiModels(
         token: token,
         endpoint: _endpointProvider?.call(),
       );
       if (list.isNotEmpty) {
-        return [
+        final options = [
           for (final model in list)
             AgentModelOption(
               id: model.id,
@@ -636,8 +992,10 @@ class VibeAgentRuntime implements AgentRuntime {
               reasoningEfforts: model.reasoningEfforts,
             ),
         ];
+        await _writeModelsCache(options);
+        return options;
       }
-    } on ApiException {
+    } on Object {
       // 目录接口不可用时退回设置里的单个模型，不让选择器变成硬错误。
     }
     final fallback = _configuredModel?.call().trim() ?? '';
@@ -662,13 +1020,20 @@ class VibeAgentRuntime implements AgentRuntime {
   Future<AgentFacade> open(String projectId, String sessionId) async {
     final token = _tokenProvider();
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
+    final live = _facades[sessionId];
+    if (live != null) {
+      _lastUsed[sessionId] = DateTime.now();
+      return live;
+    }
+    final watch = Stopwatch()..start();
     final meta = _sessions.metaOf(sessionId);
     if (meta == null) {
       throw ArgumentError.value(sessionId, 'sessionId', '会话不存在');
     }
     final root = _projectRootOf(projectId);
-    final transcript = await _sessions.read(sessionId);
-    return VibeAgentFacade(
+    // 只读尾部一页：打开会话不等网络，也不解析全文。
+    final page = await _sessions.readTail(sessionId, limit: pageSize);
+    final facade = VibeAgentFacade(
       api: _api,
       tokenProvider: _tokenProvider,
       store: _sessions,
@@ -680,8 +1045,182 @@ class VibeAgentRuntime implements AgentRuntime {
       onlineAllowed: _onlineAllowed,
       files: _filesFactory?.call(root),
       interopRunner: _interopRunnerOf?.call(projectId),
-      restoredMessages: transcript.messages,
-      restoredHistory: transcript.history,
+      restoredMessages: page.messages,
+      hasEarlier: page.hasEarlier,
+      scheduler: _scheduler,
+      leases: _leasesFor(root),
     );
+    _facades[sessionId] = facade;
+    _lastUsed[sessionId] = DateTime.now();
+    facade.addListener(() => _onFacadeChanged(sessionId));
+    _lastStatus[sessionId] = statusOf(sessionId);
+    agentPerf('session.open', watch.elapsedMilliseconds);
+    _evictIfNeeded();
+    return facade;
+  }
+
+  /// 某个项目的路径租约表；同项目根的会话共用一份。
+  ProjectWriteLeases _leasesFor(String root) {
+    final key = root.isEmpty ? '' : p.normalize(p.absolute(root));
+    return _leasesByRoot.putIfAbsent(
+      key,
+      () => ProjectWriteLeases(projectRoot: key),
+    );
+  }
+
+  void _onFacadeChanged(String sessionId) {
+    final facade = _facades[sessionId];
+    if (facade == null) return;
+    final state = facade.state;
+    final isActive =
+        state == AgentRunState.running ||
+        state == AgentRunState.awaitingApproval ||
+        state == AgentRunState.cancelling;
+    if (isActive) {
+      _active.add(sessionId);
+      _unread.remove(sessionId);
+      _failedUnread.remove(sessionId);
+    } else if (_active.remove(sessionId)) {
+      // 后台刚结束：失败进「失败未读」，其余进「完成未读」。
+      if (state == AgentRunState.failed) {
+        _failedUnread.add(sessionId);
+      } else if (state == AgentRunState.idle) {
+        _unread.add(sessionId);
+      }
+    }
+    final next = statusOf(sessionId);
+    if (_lastStatus[sessionId] == next) return;
+    _lastStatus[sessionId] = next;
+    _liveTick.value++;
+  }
+
+  /// 销毁空闲且已读的旧实例，直到不超过上限。
+  void _evictIfNeeded() {
+    while (_facades.length > maxIdleFacades) {
+      String? victim;
+      DateTime? oldest;
+      for (final entry in _facades.entries) {
+        final id = entry.key;
+        if (_active.contains(id)) continue;
+        if (statusOf(id) != AgentLiveStatus.idle) continue;
+        final used = _lastUsed[id] ?? DateTime.fromMillisecondsSinceEpoch(0);
+        if (oldest == null || used.isBefore(oldest)) {
+          oldest = used;
+          victim = id;
+        }
+      }
+      if (victim == null) return;
+      _destroy(victim);
+    }
+  }
+
+  void _destroy(String sessionId) {
+    final facade = _facades.remove(sessionId);
+    _lastUsed.remove(sessionId);
+    _lastStatus.remove(sessionId);
+    _active.remove(sessionId);
+    _unread.remove(sessionId);
+    _failedUnread.remove(sessionId);
+    facade?.dispose();
+  }
+
+  /// 会话被删除：先停掉再销毁实例。
+  void _onSessionsChanged() {
+    for (final id in _facades.keys.toList()) {
+      if (_sessions.metaOf(id) != null) continue;
+      final facade = _facades[id];
+      if (facade == null) continue;
+      if (facade.state != AgentRunState.idle) {
+        unawaited(
+          facade.cancel().whenComplete(() {
+            _destroy(id);
+            _liveTick.value++;
+          }),
+        );
+      } else {
+        _destroy(id);
+        _liveTick.value++;
+      }
+    }
+  }
+
+  File? get _modelsCacheFile {
+    final dir = _cacheDir;
+    if (dir == null) return null;
+    return File(p.join(dir.path, 'models_cache.json'));
+  }
+
+  /// 缓存顺次：内存，盘，都不新鲜返回 null。
+  Future<List<AgentModelOption>?> _readModelsCache() async {
+    final now = DateTime.now();
+    final at = _memoryModelsAt;
+    final memory = _memoryModels;
+    if (memory != null && at != null && now.difference(at) < _modelsTtl) {
+      return memory;
+    }
+    final file = _modelsCacheFile;
+    if (file == null) return null;
+    try {
+      if (!await file.exists()) return null;
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! Map) return null;
+      final fetched = DateTime.tryParse('${decoded['fetchedAt'] ?? ''}');
+      if (fetched == null || now.difference(fetched) >= _modelsTtl) return null;
+      final list = decoded['models'];
+      if (list is! List) return null;
+      final models = <AgentModelOption>[];
+      for (final entry in list) {
+        if (entry is! Map) continue;
+        final id = entry['id'];
+        if (id is! String || id.isEmpty) continue;
+        final efforts = entry['reasoning_efforts'];
+        models.add(
+          AgentModelOption(
+            id: id,
+            label: entry['label'] is String ? entry['label'] as String : id,
+            reasoningEfforts: efforts is List
+                ? [
+                    for (final effort in efforts)
+                      if (effort is String) effort,
+                  ]
+                : const [],
+          ),
+        );
+      }
+      if (models.isEmpty) return null;
+      _memoryModels = models;
+      _memoryModelsAt = fetched;
+      return models;
+    } on Object {
+      // 缓存坏了就当没有。
+      return null;
+    }
+  }
+
+  Future<void> _writeModelsCache(List<AgentModelOption> models) async {
+    final now = DateTime.now();
+    _memoryModels = models;
+    _memoryModelsAt = now;
+    final file = _modelsCacheFile;
+    if (file == null) return;
+    try {
+      await file.parent.create(recursive: true);
+      await file.writeAsString(
+        jsonEncode({
+          'fetchedAt': now.toIso8601String(),
+          'models': [
+            for (final model in models)
+              {
+                'id': model.id,
+                'label': model.label,
+                'reasoning_efforts': model.reasoningEfforts,
+              },
+          ],
+        }),
+        flush: true,
+      );
+    } on Object {
+      // 写缓存失败不影响本次结果。
+    }
   }
 }
