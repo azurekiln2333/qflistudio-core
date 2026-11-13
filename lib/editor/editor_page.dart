@@ -4,7 +4,8 @@ import 'dart:io';
 import 'package:qfli_studio_core/editor/editor_page_diag.dart';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
@@ -59,7 +60,6 @@ import 'ai_panel.dart';
 import 'open_performance.dart';
 import '../interop/interop_run_dialog.dart';
 import '../interop/interop_targets.dart';
-import '../interop/interop_transport.dart';
 
 enum _BottomPanel {
   none,
@@ -155,6 +155,7 @@ class EditorPage extends StatefulWidget {
     this.workspaceStore,
     this.onWorkspaceSaved,
     this.onProjectSelected,
+    this.onOpenAgent,
   });
 
   final Project project;
@@ -192,6 +193,12 @@ class EditorPage extends StatefulWidget {
 
   /// Lets the retained owner open external projects as standalone sessions.
   final ValueChanged<Project>? onProjectSelected;
+
+  /// 打开工作台的对话流。
+  ///
+  /// 非空时编辑器内的 AI 入口改为调用它，应用内只保留一个 AI 入口
+  /// （design.md §4 第 12 条）。为空时保留原有的内嵌 AI 面板。
+  final VoidCallback? onOpenAgent;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -334,8 +341,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _analysis.addListener(_onAnalysisChanged);
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
     OpenPerformance.mark('EditorPage initState');
-    // One probe so the Run label can name the sibling app before the first tap.
-    unawaited(_refreshRunButtonProduct());
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
@@ -2029,37 +2034,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   /// Tooltip for the Run button.
   ///
-  /// The label names the sibling app when one answers, so the user can see
-  /// where the button will run the project before pressing it. The decision is
-  /// async, so the answer is cached from the last probe and refreshed on the
-  /// next Run; before the first answer the plain label shows.
+  /// The label names the sibling app that owns the entry file's toolchain, so
+  /// the user can see where the button will run the project before pressing
+  /// it. The name comes from the static target map on purpose: probing here
+  /// would start the sibling app in the foreground on every project open,
+  /// which reads as a crash to the user. A missing app is reported honestly
+  /// when Run is actually pressed.
   String get _runButtonTooltip {
-    final product = _runButtonProduct;
+    final target = _interopTargetFor(_entryFileOf(
+      _editor.current?.projectRootPath ?? widget.project.path,
+    ));
+    final product = target?.productName;
     if (product == null) return '运行（长按运行当前文件）';
     return '运行（在 $product 中，长按运行当前文件）';
-  }
-
-  /// Product name of the sibling app a Run tap would use, when cached.
-  String? _runButtonProduct;
-
-  Future<void> _refreshRunButtonProduct() async {
-    final runner = StudioProfile.current?.interopRunner;
-    final entry = _entryFileOf(
-      _editor.current?.projectRootPath ?? widget.project.path,
-    );
-    final target = _interopTargetFor(entry);
-    if (runner == null || target == null) {
-      if (_runButtonProduct != null && mounted) {
-        setState(() => _runButtonProduct = null);
-      }
-      return;
-    }
-    final probe = await runner.probe(target.language);
-    if (!mounted) return;
-    final product = probe.isInstalled ? target.productName : null;
-    if (product != _runButtonProduct) {
-      setState(() => _runButtonProduct = product);
-    }
   }
 
   /// The device app that owns this project's toolchain, or null when none does.
@@ -2090,30 +2077,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   ///   - probe `unknown`   -> unchanged path, with one hint that says why the
   ///     answer was unconfirmed. A confident switch into another app the user
   ///     may not have installed is worse than the path that already works.
-  Future<InteropTarget?> _answeringSiblingApp(String? entryFile) async {
-    final runner = StudioProfile.current?.interopRunner;
+  /// The device app that owns this project's toolchain, or null when none does.
+  ///
+  /// The entry file decides: a project can hold several files and only one of
+  /// them names a toolchain. An entry that matches no receiver must produce no
+  /// menu item, because an action that can only fail is worse than none.
+  ///
+  /// No probe here on purpose. The probe is a real ability start: it pulls the
+  /// sibling app to the foreground, which pushes Studio into the background,
+  /// and a background application may not start another application's UI
+  /// ability — the run sent right after the probe was refused with error 201
+  /// whenever the sibling app had not exited yet. A missing app is reported
+  /// honestly by the start itself (`app_missing` → install hint).
+  Future<InteropTarget?> _answeringSiblingApp(String? entryFile) {
     final target = _interopTargetFor(entryFile);
-    if (runner == null || target == null) return null;
-    if (p.extension(entryFile!).toLowerCase() == '.html') return null;
-    final probe = await runner.probe(target.language);
-    if (!mounted) return null;
-    if (probe.isInstalled) return target;
-    if (probe.status == InteropProbeStatus.unknown) {
-      // One hint per editor session, not one per tap: the user asked once, the
-      // answer will not change until the app or the device does.
-      if (!_interopProbeHintShown) {
-        _interopProbeHintShown = true;
-        _terminalKey.currentState?.appendSystem(
-          '${probe.diagnostic ?? '无法确认 ${target.productName} 是否已安装'}，'
-          '本次在 Studio 原有路径运行。可在更多菜单选择「运行（${target.productName}）」重试。',
-        );
-      }
+    if (target == null ||
+        p.extension(entryFile!).toLowerCase() == '.html') {
+      return Future<InteropTarget?>.value();
     }
-    return null;
+    return Future<InteropTarget?>.value(target);
   }
-
-  /// Whether the unconfirmed-probe hint was already shown in this session.
-  bool _interopProbeHintShown = false;
 
   /// Compiles and runs the open project inside the sibling app that owns the
   /// toolchain.
@@ -2157,16 +2140,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       _showSnack('没有支持该项目入口的配套应用');
       return;
     }
-    // An explicit request from the menu runs even when the probe is unsure: the
-    // start call fails honestly and the dialog shows the real reason.
-    final probe = await runner.probe(target.language);
-    if (!mounted) return;
-    if (probe.status == InteropProbeStatus.missing) {
-      _showSnack(
-        probe.diagnostic ?? InteropTargets.installHint(target.language),
-      );
-      return;
-    }
+    // An explicit request from the menu runs even without a probe: probing
+    // would pull the sibling app to the foreground and get the real start
+    // refused with error 201. A missing app is reported by the start itself.
     final code = await showInteropRunDialog(
       context: context,
       projectRoot: projectPath,
@@ -2184,6 +2160,99 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         project: active?.ownerProjectName ?? widget.project.name,
       ),
     );
+  }
+
+  bool get _canRunBackground {
+    final runner = StudioProfile.current?.backgroundInteropRunner;
+    if (defaultTargetPlatform != TargetPlatform.ohos ||
+        runner == null || !runner.isSupported) {
+      return false;
+    }
+    final entry = _entryFileOf(
+      _editor.current?.projectRootPath ?? widget.project.path,
+    );
+    return entry != null && p.extension(entry).toLowerCase() == '.java';
+  }
+
+  /// Explicit experiment: owns a terminal session without changing normal Run.
+  Future<void> _runInBackgroundSiblingApp() async {
+    final runner = StudioProfile.current?.backgroundInteropRunner;
+    if (runner == null || !_canRunBackground) return;
+    if (_runningProject || _runningFileTool || _debugger.busy ||
+        _terminalKey.currentState?.hasRunningWork == true) {
+      _showSnack('请先停止当前运行任务');
+      return;
+    }
+    final active = _editor.current;
+    if (active != null && _isOrphaned(active)) {
+      _showSnack('项目已移除，请先导出未保存的改动');
+      return;
+    }
+    final projectPath = active?.projectRootPath ?? widget.project.path;
+    final entry = _entryFileOf(projectPath);
+    if (!Directory(projectPath).existsSync() || entry == null ||
+        !_runSourceWithin(projectPath, entry)) {
+      _showSnack('项目入口已不可用');
+      return;
+    }
+    bool hasUnsavedFiles() => _editor.files.any(
+      (open) => p.equals(open.projectRootPath, projectPath) && open.dirty,
+    );
+    if (hasUnsavedFiles()) {
+      _showSnack('请先保存项目中的文件');
+      return;
+    }
+    setState(() {
+      _runningProject = true;
+      _terminalCreated = true;
+      _closeTerminalWhenIdle = false;
+      _terminalCollapsed = false;
+      _bottomPanel = _BottomPanel.terminal;
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    final pane = _terminalKey.currentState;
+    if (pane == null) {
+      setState(() => _runningProject = false);
+      return;
+    }
+    try {
+      if (pane.busy) return;
+      pane.showLocal();
+      pane.beginPreparation('后台运行（实验）· 无感调用验证中');
+      if (hasUnsavedFiles() || (active != null && _isOrphaned(active))) {
+        pane.appendSystem('项目或源文件已更改，请确认后重新运行');
+        return;
+      }
+      final run = await runner.run(
+        projectRoot: projectPath,
+        language: 'java',
+        entryFile: entry,
+      );
+      if (!mounted || !pane.mounted) {
+        await run.cancel?.call();
+        return;
+      }
+      pane.finishPreparation();
+      final code = await pane.attachOutput(
+        title: '后台运行（实验）· ${p.basename(entry)}',
+        stdout: run.stdout,
+        stderr: run.stderr,
+        exitCode: run.exitCode,
+        cancel: run.cancel,
+        onOutput: _recordProgramOutput,
+        onExit: _recordProgramExit,
+      );
+      unawaited(LocalStatsService.instance.recordRun(
+        succeeded: code == 0,
+        project: active?.ownerProjectName ?? widget.project.name,
+      ));
+    } catch (error) {
+      if (mounted && pane.mounted) pane.appendSystem('后台运行失败：$error');
+    } finally {
+      if (pane.mounted) pane.finishPreparation();
+      if (mounted) setState(() => _runningProject = false);
+    }
   }
 
   /// Runs the project in the online terminal instead of a sibling app.
@@ -2510,6 +2579,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         unawaited(_recoverOrphanedFile());
                                       case 'interop_run':
                                         unawaited(_runInSiblingApp());
+                                      case 'interop_background_run':
+                                        unawaited(_runInBackgroundSiblingApp());
                                       case 'run_online':
                                         unawaited(_runProjectOnline());
                                       case 'close_editor':
@@ -2560,12 +2631,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ),
                                         );
                                       case 'ai':
-                                        setState(
-                                          () => _bottomPanel =
-                                              _bottomPanel == _BottomPanel.ai
-                                              ? _BottomPanel.none
-                                              : _BottomPanel.ai,
-                                        );
+                                        final openAgent =
+                                            widget.onOpenAgent;
+                                        if (openAgent != null) {
+                                          openAgent();
+                                        } else {
+                                          setState(
+                                            () => _bottomPanel =
+                                                _bottomPanel ==
+                                                    _BottomPanel.ai
+                                                ? _BottomPanel.none
+                                                : _BottomPanel.ai,
+                                          );
+                                        }
                                       case 'online_terminal':
                                         unawaited(_openOnlineTerminal());
                                       case 'git':
@@ -2650,6 +2728,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             Flexible(
                                               child: Text('另存为…（项目不可用）'),
                                             ),
+                                          ],
+                                        ),
+                                      ),
+                                    if (_canRunBackground)
+                                      PopupMenuItem(
+                                        value: 'interop_background_run',
+                                        enabled: !_runningProject &&
+                                            !_runningFileTool &&
+                                            !_debugger.busy &&
+                                            _terminalKey.currentState
+                                                ?.hasRunningWork != true,
+                                        child: const Row(
+                                          children: [
+                                            Icon(Icons.notifications_outlined,
+                                                size: 20),
+                                            SizedBox(width: 12),
+                                            Flexible(child: Text('后台运行（实验）')),
                                           ],
                                         ),
                                       ),
@@ -3013,119 +3108,133 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                   listenable: _editor,
                   builder: (context, _) {
                     _syncTabControllerIfNeeded();
-                    return Column(
+                    // Wide layout: the file tree owns one horizontal slot and the
+                    // full body height, and the editor's bottom panels live
+                    // inside the right-hand column. A panel therefore cannot
+                    // stretch underneath the sidebar.
+                    //
+                    // The plain `Column` below does not need overflow handling:
+                    // every panel height is clamped to `maxPanelHeight`, which
+                    // already reserves `minEditorHeight` for the editor, and at
+                    // most one panel is visible at a time. The terminal stays
+                    // `Offstage` while another panel is selected, and the rest
+                    // are keyed off `_bottomPanel`.
+                    return Row(
+                      key: const ValueKey('editor-body-wide'),
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Expanded(
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              if (wide && !focusMode) ...[
-                                ClipRect(
-                                  child: AnimatedAlign(
-                                    duration: const Duration(milliseconds: 200),
-                                    curve: Curves.easeOutCubic,
-                                    alignment: Alignment.centerLeft,
-                                    widthFactor: sidebarVisible ? 1.0 : 0.0,
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(
-                                        _cardMargin,
-                                      ),
-                                      child: SizedBox(
-                                        width: _sidebarWidth,
-                                        child: _buildExplorerCard(context),
-                                      ),
-                                    ),
-                                  ),
+                        if (wide && !focusMode)
+                          ClipRect(
+                            child: AnimatedAlign(
+                              duration: const Duration(milliseconds: 200),
+                              curve: Curves.easeOutCubic,
+                              alignment: Alignment.centerLeft,
+                              widthFactor: sidebarVisible ? 1.0 : 0.0,
+                              child: Padding(
+                                padding: const EdgeInsets.all(_cardMargin),
+                                child: SizedBox(
+                                  key: const ValueKey('editor-sidebar-slot'),
+                                  width: _sidebarWidth,
+                                  child: _buildExplorerCard(context),
                                 ),
-                              ],
-                              Expanded(child: _buildEditorArea(context)),
-                            ],
-                          ),
-                        ),
-                        if (_terminalCreated)
-                          Offstage(
-                            // Hide the terminal entirely when the body cannot host
-                            // both a useful terminal and the editor's minimum, so
-                            // the code view never collapses to zero height.
-                            //
-                            // Never while the prompt holds focus: hiding it would
-                            // detach the caret's element and close the keyboard
-                            // the user is typing on. In that window the editor
-                            // gives up height instead (the `Expanded` above
-                            // shrinks), which is the lesser loss.
-                            offstage:
-                                _bottomPanel != _BottomPanel.terminal ||
-                                (!_terminalInputHasFocus &&
-                                    bodyHeight -
-                                            (bodyHeight <
-                                                    TerminalPanelMetrics
-                                                        .collapsedTotalHeight
-                                                ? bodyHeight
-                                                : TerminalPanelMetrics
-                                                      .collapsedTotalHeight) <
-                                        minEditorHeight),
-                            child: _buildTerminalPanel(
-                              terminalPanelHeight: terminalPanelHeight,
-                              maxPanelHeight: maxPanelHeight,
-                              collapsedPanelHeight: collapsedPanelHeight,
-                              compactPanel: compactPanel,
-                            ),
-                          ),
-                        if ({
-                              _BottomPanel.debug,
-                              _BottomPanel.output,
-                              _BottomPanel.debugConsole,
-                              _BottomPanel.ports,
-                            }.contains(_bottomPanel) &&
-                            bodyHeight >= minEditorHeight + 96)
-                          SizedBox(
-                            height: maxPanelHeight
-                                .clamp(96.0, 300.0)
-                                .toDouble(),
-                            child: _buildActivityPanel(),
-                          ),
-                        if (_bottomPanel == _BottomPanel.problems &&
-                            bodyHeight >= minEditorHeight + 48)
-                          SizedBox(
-                            height: maxPanelHeight
-                                .clamp(48.0, 240.0)
-                                .toDouble(),
-                            child: EditorProblemsPanel(
-                              analysis: _analysis,
-                              onClose: () => setState(
-                                () => _bottomPanel = _BottomPanel.none,
                               ),
                             ),
                           ),
-                        if (_bottomPanel == _BottomPanel.ai && bodyHeight >= 36)
-                          AnimatedContainer(
-                            duration: const Duration(milliseconds: 150),
-                            height: aiPanelHeight,
-                            child: AiPanel(
-                              projectPath: widget.project.path,
-                              projectName: widget.project.name,
-                              language: widget.project.language,
-                              settings: widget.settings,
-                              auth: widget.auth,
-                              compact: aiCompact,
-                              onCollapseChanged: (collapsed) {
-                                if (mounted) {
-                                  setState(() => _aiCollapsed = collapsed);
-                                }
-                              },
-                              onClose: () {
-                                if (mounted) {
-                                  setState(() {
-                                    _bottomPanel = _BottomPanel.none;
-                                    _aiCollapsed = false;
-                                  });
-                                }
-                              },
-                              onFileCreated: (path) {
-                                _editor.openPath(path);
-                              },
-                            ),
+                        Expanded(
+                          child: Column(
+                            key: const ValueKey('editor-right-column'),
+                            children: [
+                              Expanded(child: _buildEditorArea(context)),
+                              if (_terminalCreated)
+                                Offstage(
+                                  // Hide the terminal entirely when the body
+                                  // cannot host both a useful terminal and the
+                                  // editor's minimum, so the code view never
+                                  // collapses to zero height.
+                                  //
+                                  // Never while the prompt holds focus: hiding
+                                  // it would detach the caret's element and
+                                  // close the keyboard the user is typing on.
+                                  // In that window the editor gives up height
+                                  // instead (the `Expanded` above shrinks),
+                                  // which is the lesser loss.
+                                  offstage:
+                                      _bottomPanel != _BottomPanel.terminal ||
+                                      (!_terminalInputHasFocus &&
+                                          bodyHeight -
+                                                  (bodyHeight <
+                                                          TerminalPanelMetrics
+                                                              .collapsedTotalHeight
+                                                      ? bodyHeight
+                                                      : TerminalPanelMetrics
+                                                            .collapsedTotalHeight) <
+                                              minEditorHeight),
+                                  child: _buildTerminalPanel(
+                                    terminalPanelHeight: terminalPanelHeight,
+                                    maxPanelHeight: maxPanelHeight,
+                                    collapsedPanelHeight: collapsedPanelHeight,
+                                    compactPanel: compactPanel,
+                                  ),
+                                ),
+                              if ({
+                                    _BottomPanel.debug,
+                                    _BottomPanel.output,
+                                    _BottomPanel.debugConsole,
+                                    _BottomPanel.ports,
+                                  }.contains(_bottomPanel) &&
+                                  bodyHeight >= minEditorHeight + 96)
+                                SizedBox(
+                                  height: maxPanelHeight
+                                      .clamp(96.0, 300.0)
+                                      .toDouble(),
+                                  child: _buildActivityPanel(),
+                                ),
+                              if (_bottomPanel == _BottomPanel.problems &&
+                                  bodyHeight >= minEditorHeight + 48)
+                                SizedBox(
+                                  height: maxPanelHeight
+                                      .clamp(48.0, 240.0)
+                                      .toDouble(),
+                                  child: EditorProblemsPanel(
+                                    analysis: _analysis,
+                                    onClose: () => setState(
+                                      () => _bottomPanel = _BottomPanel.none,
+                                    ),
+                                  ),
+                                ),
+                              if (_bottomPanel == _BottomPanel.ai &&
+                                  bodyHeight >= 36)
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 150),
+                                  height: aiPanelHeight,
+                                  child: AiPanel(
+                                    projectPath: widget.project.path,
+                                    projectName: widget.project.name,
+                                    language: widget.project.language,
+                                    settings: widget.settings,
+                                    auth: widget.auth,
+                                    compact: aiCompact,
+                                    onCollapseChanged: (collapsed) {
+                                      if (mounted) {
+                                        setState(() => _aiCollapsed = collapsed);
+                                      }
+                                    },
+                                    onClose: () {
+                                      if (mounted) {
+                                        setState(() {
+                                          _bottomPanel = _BottomPanel.none;
+                                          _aiCollapsed = false;
+                                        });
+                                      }
+                                    },
+                                    onFileCreated: (path) {
+                                      _editor.openPath(path);
+                                    },
+                                  ),
+                                ),
+                            ],
                           ),
+                        ),
                       ],
                     );
                   },

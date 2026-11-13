@@ -290,6 +290,7 @@ class InteropRequest {
     required this.action,
     required this.callerBundle,
     required this.bridgeAction,
+    this.sessionToken = '',
     List<InteropPayloadFile> files = const [],
     this.stdin = '',
     this.timeoutMs = 60000,
@@ -303,6 +304,14 @@ class InteropRequest {
   final InteropAction action;
   final String callerBundle;
   final String bridgeAction;
+
+  /// Random per-run secret echoed by every response event.
+  ///
+  /// Response events cross as broadcast common events that any application
+  /// can publish, so the event parameters alone prove nothing. The receiver
+  /// copies this token from the request into every event, and the caller
+  /// drops events whose token does not match the one it generated.
+  final String sessionToken;
   final List<InteropPayloadFile> files;
   final String stdin;
   final int timeoutMs;
@@ -322,6 +331,7 @@ class InteropRequest {
     return <String, String>{
       'protocol': protocol,
       'sessionId': sessionId,
+      'sessionToken': sessionToken,
       'language': language,
       'entry': entry,
       'action': action.wire,
@@ -365,6 +375,7 @@ class InteropRequest {
     final request = InteropRequest(
       protocol: read('protocol'),
       sessionId: read('sessionId'),
+      sessionToken: read('sessionToken'),
       language: read('language'),
       entry: read('entry'),
       action: action,
@@ -386,6 +397,12 @@ class InteropRequest {
       );
     }
     InteropSession.validate(sessionId);
+    if (!RegExp(r'^[A-Za-z0-9]{16,64}$').hasMatch(sessionToken)) {
+      throw const InteropException(
+        InteropErrorCode.badRequest,
+        '会话令牌必须是 16-64 个字母或数字',
+      );
+    }
     if (language.isEmpty) {
       throw const InteropException(InteropErrorCode.badRequest, '缺少语言');
     }

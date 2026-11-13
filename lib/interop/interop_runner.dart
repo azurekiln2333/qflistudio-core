@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
@@ -123,6 +124,7 @@ class InteropRunner {
 
     final request = InteropRequest(
       sessionId: InteropSession.create(),
+      sessionToken: _sessionToken(),
       language: target.language,
       entry: entry,
       action: InteropAction.run,
@@ -135,7 +137,6 @@ class InteropRunner {
         InteropLimits.maxTimeoutMs,
       ),
     );
-
     final stdoutController = StreamController<String>();
     final stderrController = StreamController<String>();
     final exit = Completer<int>();
@@ -183,7 +184,18 @@ class InteropRunner {
             emit(true, _errorText(event));
             finish(event.exitCode ?? _errorExitCode(event.code));
           case InteropEventKind.done:
-            // The receiver streams complete chunks, so nothing is appended.
+            // A `done` text is the receiver's closing note, not program
+            // output. The background route streams real stdout and stderr, so
+            // its closing note belongs in the diagnostic stream; the shared
+            // foreground receiver aggregates the run into one frame, so its
+            // text is all the output there is and stays on stdout.
+            if (event.text.isNotEmpty) {
+              if (started.stop != null) {
+                emit(true, event.text);
+              } else {
+                emit(false, event.text);
+              }
+            }
             finish(event.exitCode ?? 1);
         }
       },
@@ -211,9 +223,22 @@ class InteropRunner {
       stderr: stderrController.stream,
       exitCode: exit.future,
       cancel: () async {
-        await started.cancel();
-        emit(false, '已请求停止跨应用运行。');
-        finish(130);
+        if (exit.isCompleted) return;
+        final stop = started.stop;
+        if (stop == null) {
+          // The foreground receiver has no start method that reports a real
+          // process stop, so its cancel is a request and the exit code says
+          // exactly that. Never promote it to a confirmed cancellation.
+          await started.cancel();
+          emit(false, '已请求停止跨应用运行。');
+          finish(130);
+          return;
+        }
+        // A stop the receiver never acknowledged is a diagnostic, not a
+        // cancellation: emit its own code instead of inventing 130.
+        final outcome = await stop();
+        emit(true, outcome.message);
+        finish(outcome.exitCode);
       },
     );
   }
@@ -238,6 +263,7 @@ class InteropRunner {
     if (entry != null && !files.any((file) => file.path == entry)) return null;
     final request = InteropRequest(
       sessionId: InteropSession.create(),
+      sessionToken: _sessionToken(),
       language: target.language,
       entry: entry ?? '',
       action: parsed.action,
@@ -279,6 +305,14 @@ class InteropRunner {
     if (!p.isWithin(root, entry)) return null;
     final relative = p.relative(entry, from: root).replaceAll('\\', '/');
     return InteropPath.isValid(relative) ? relative : null;
+  }
+
+  /// A fresh per-run secret for the response-event token check.
+  static String _sessionToken() {
+    final random = Random.secure();
+    return List<String>.generate(24, (_) {
+      return random.nextInt(16).toRadixString(16);
+    }).join();
   }
 
   static String _errorText(InteropEvent event) {

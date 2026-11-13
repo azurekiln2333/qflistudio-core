@@ -431,6 +431,7 @@ void main() {
       expect(specs.map((s) => (s['function'] as Map)['name']).toList(), [
         'list_files',
         'read_file',
+        'search_text',
         'write_file',
         'edit_file',
         'run_command',

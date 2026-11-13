@@ -408,6 +408,8 @@ class _TransportBackedApiClient implements ApiClient {
     List<Map<String, dynamic>>? tools,
     Future<void>? abortTrigger,
     AiEndpoint? endpoint,
+    String? model,
+    String? reasoningEffort,
   }) async {
     // 控制器当前不传 endpoint；传了 relay 说明有人把它接回了生产链路。
     final target = endpoint ?? const AiEndpoint.relay();

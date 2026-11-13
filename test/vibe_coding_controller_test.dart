@@ -93,8 +93,8 @@ void main() {
       expect(first.containsKey('model'), isFalse);
       expect(first.containsKey('apiKey'), isFalse);
       expect((first['messages'] as List).first['role'], 'system');
-      // 7 local tools + web_fetch; web_search is retired (整改任务书 §3-W3).
-      expect((first['tools'] as List), hasLength(8));
+      // 8 local tools + web_fetch; web_search is retired (整改任务书 §3-W3).
+      expect((first['tools'] as List), hasLength(9));
       expect(relay.authorizations.first, 'Bearer local-token');
 
       // Round two must contain the full assistant tool call and its tool reply.
@@ -145,38 +145,41 @@ void main() {
     },
   );
 
-  test('a JSON write keeps the file parseable and marks it alongside', () async {
-    final relay = _FakeRelay()
-      ..chatReplies.addAll([
-        _toolCall('c1', 'write_file', {
-          'path': 'data/config.json',
-          'content': '{"name":"demo"}\n',
-        }),
-        _textReply('已写入 data/config.json。'),
-      ]);
-    final controller = build(relay);
+  test(
+    'a JSON write keeps the file parseable and marks it alongside',
+    () async {
+      final relay = _FakeRelay()
+        ..chatReplies.addAll([
+          _toolCall('c1', 'write_file', {
+            'path': 'data/config.json',
+            'content': '{"name":"demo"}\n',
+          }),
+          _textReply('已写入 data/config.json。'),
+        ]);
+      final controller = build(relay);
 
-    controller.send('创建一份配置');
-    await settle(controller, VibePhase.succeeded);
+      controller.send('创建一份配置');
+      await settle(controller, VibePhase.succeeded);
 
-    // 正文可以照常解析，标识在同名说明文件里。
-    final body = File(
-      p.join(root.path, 'data', 'config.json'),
-    ).readAsStringSync();
-    expect(jsonDecode(body), {'name': 'demo'});
-    expect(body, isNot(contains('本文件由 AI 生成')));
-    final note = File(
-      p.join(root.path, 'data', 'config.json.ai-generated'),
-    ).readAsStringSync();
-    expect(note, contains('本文件由 AI 生成'));
-    expect(note, contains('data/config.json'));
+      // 正文可以照常解析，标识在同名说明文件里。
+      final body = File(
+        p.join(root.path, 'data', 'config.json'),
+      ).readAsStringSync();
+      expect(jsonDecode(body), {'name': 'demo'});
+      expect(body, isNot(contains('本文件由 AI 生成')));
+      final note = File(
+        p.join(root.path, 'data', 'config.json.ai-generated'),
+      ).readAsStringSync();
+      expect(note, contains('本文件由 AI 生成'));
+      expect(note, contains('data/config.json'));
 
-    final tool = controller.messages.firstWhere((m) => m.tool != null).tool!;
-    expect(tool.status, VibeToolStatus.ok);
-    expect(tool.result, contains('data/config.json.ai-generated'));
+      final tool = controller.messages.firstWhere((m) => m.tool != null).tool!;
+      expect(tool.status, VibeToolStatus.ok);
+      expect(tool.result, contains('data/config.json.ai-generated'));
 
-    controller.dispose();
-  });
+      controller.dispose();
+    },
+  );
 
   test('edit_file also leaves the AI note on the changed file', () async {
     final target = File(p.join(root.path, 'src', 'main.py'));
@@ -1105,7 +1108,11 @@ void main() {
       var finished = false;
       final cancelled = controller.cancel().whenComplete(() => finished = true);
       // 等运行循环退出并进入会话回收。
-      for (var i = 0; i < 300 && controller.phase != VibePhase.cancelling; i++) {
+      for (
+        var i = 0;
+        i < 300 && controller.phase != VibePhase.cancelling;
+        i++
+      ) {
         await Future<void>.delayed(const Duration(milliseconds: 2));
       }
       // 内核还在跑时，任何新任务都会抢同一个终端会话。

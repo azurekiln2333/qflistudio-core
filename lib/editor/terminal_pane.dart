@@ -672,6 +672,18 @@ class TerminalPaneState extends State<TerminalPane> {
     _notifyRunningWorkChanged();
   }
 
+  /// Selects a local owner for an explicitly local streamed run.
+  void showLocal() {
+    if (!mounted || _preparing) return;
+    final index = _sessions.indexWhere((session) => !session.online);
+    if (index < 0) {
+      _newSession();
+    } else {
+      _selectSession(index);
+    }
+    expand();
+  }
+
   Future<void> showOnline({bool initialize = true}) async {
     if (!mounted || _preparing) return;
     if (!widget.onlineEnabled) return;

@@ -101,6 +101,7 @@ class StudioProfile {
     required this.templates,
     this.runner,
     this.interopRunner,
+    this.backgroundInteropRunner,
     this.codeAnalyzer,
     this.debugger,
     this.webPreviewFactory,
@@ -148,6 +149,10 @@ class StudioProfile {
   /// installed: [InteropRunner.probe] decides that, and the editor shows an
   /// install hint when the probe fails.
   final InteropRunner? interopRunner;
+
+  /// Separate experimental OHOS Java path. Null hides its explicit menu action.
+  /// Ordinary Run continues to use [interopRunner].
+  final InteropRunner? backgroundInteropRunner;
 
   /// Optional product-owned offline syntax checker for unsaved editor buffers.
   /// Null means no checker is installed; it never falls back to running code.

@@ -250,4 +250,131 @@ void main() {
       expect(kVibeBuiltInSkillLanguages.containsKey('web-research'), isTrue);
     });
   });
+
+  group('user level skills', () {
+    Directory makeUserDir() {
+      final dir = Directory.systemTemp.createTempSync('vibe-user-skills-');
+      addTearDown(() {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      return dir;
+    }
+
+    void writeUserSkill(Directory dir, String name, String text) {
+      final file = File(p.join(dir.path, name, 'SKILL.md'));
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(text);
+    }
+
+    test('a user skill cannot override a project skill', () async {
+      final userDir = makeUserDir();
+      writeUserSkill(
+        userDir,
+        'shared',
+        '---\nname: shared\ndescription: from user\n---\nuser body\n',
+      );
+      writeUserSkill(
+        userDir,
+        'personal',
+        '---\nname: personal\ndescription: 我的技能\n---\nbody\n',
+      );
+      writeSkill(
+        '.qfli/skills/one/SKILL.md',
+        '---\nname: shared\ndescription: from project\n---\nproject body\n',
+      );
+
+      final library = VibeSkillLibrary(
+        projectRoot: root.path,
+        bundle: _FakeAssets(const {}),
+        userSkillsDir: userDir.path,
+      );
+      final skills = await library.load();
+
+      expect(
+        skills.firstWhere((skill) => skill.name == 'shared').description,
+        'from project',
+      );
+      final personal = skills.firstWhere((skill) => skill.name == 'personal');
+      expect(personal.description, '我的技能');
+      expect(personal.source, VibeSkillSource.user.label);
+    });
+
+    test('a user skill overrides a built-in but not a project skill', () async {
+      final userDir = makeUserDir();
+      writeUserSkill(
+        userDir,
+        'bug-fix-loop',
+        '---\nname: bug-fix-loop\ndescription: from user\n---\nuser body\n',
+      );
+
+      final library = VibeSkillLibrary(
+        projectRoot: root.path,
+        bundle: _FakeAssets({
+          'assets/skills/bug-fix-loop/SKILL.md':
+              '---\nname: bug-fix-loop\ndescription: built in\n---\nbody\n',
+        }),
+        userSkillsDir: userDir.path,
+      );
+      final skills = await library.load();
+
+      expect(
+        skills.firstWhere((skill) => skill.name == 'bug-fix-loop').description,
+        'from user',
+      );
+    });
+
+    test('a project skill overrides a built-in of the same name', () async {
+      writeSkill(
+        '.qfli/skills/custom/SKILL.md',
+        '---\nname: bug-fix-loop\ndescription: from project\n---\nbody\n',
+      );
+
+      final library = VibeSkillLibrary(
+        projectRoot: root.path,
+        bundle: _FakeAssets({
+          'assets/skills/bug-fix-loop/SKILL.md':
+              '---\nname: bug-fix-loop\ndescription: built in\n---\nbody\n',
+        }),
+        includeUserSkills: false,
+      );
+      final skills = await library.load();
+
+      expect(
+        skills.firstWhere((skill) => skill.name == 'bug-fix-loop').description,
+        'from project',
+      );
+    });
+
+    test('can be turned off for embedded hosts', () async {
+      final userDir = makeUserDir();
+      writeUserSkill(
+        userDir,
+        'mine',
+        '---\nname: mine\ndescription: 隐藏\n---\nbody\n',
+      );
+
+      final library = VibeSkillLibrary(
+        projectRoot: root.path,
+        bundle: _FakeAssets(const {}),
+        userSkillsDir: userDir.path,
+        includeUserSkills: false,
+      );
+
+      expect(
+        (await library.load()).map((skill) => skill.name),
+        isNot(contains('mine')),
+      );
+    });
+
+    test('resolves the home directory without guessing', () {
+      final dir = VibeSkillLibrary.defaultUserSkillsDir();
+      final home =
+          Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+      if (home == null || home.trim().isEmpty) {
+        expect(dir, isNull);
+      } else {
+        expect(dir, p.join(home.trim(), '.qfli', 'skills'));
+      }
+    });
+  });
 }

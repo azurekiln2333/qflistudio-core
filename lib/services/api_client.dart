@@ -89,6 +89,16 @@ class AiChatResult {
   }
 }
 
+/// 可用模型；[reasoningEfforts] 为空表示不提供推理强度选择。
+class AiModelInfo {
+  const AiModelInfo({required this.id, this.reasoningEfforts = const []});
+
+  final String id;
+
+  /// 服务端声明的推理强度选项；空列表表示该模型不支持或未声明。
+  final List<String> reasoningEfforts;
+}
+
 /// API 调用异常：message 为用户可读文案。
 class ApiException implements Exception {
   ApiException(this.message, {this.statusCode, this.details = const {}});
@@ -1224,20 +1234,28 @@ class ApiClient {
   /// 两条链路返回同一内部形状，[VibeCodingController] 无需分支。
   ///
   /// [abortTrigger] 完成时真正终止在途 HTTP 请求。
+  /// [model] 为空时沿用设置或服务端默认；[reasoningEffort] 只在客户端显式
+  /// 选择时下发，默认为 null，不改变现有行为。
   Future<AiChatResult> aiChat({
     required String token,
     required List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     Future<void>? abortTrigger,
     AiEndpoint? endpoint,
+    String? model,
+    String? reasoningEffort,
   }) async {
     final target = endpoint ?? const AiEndpoint.relay();
+    final requested = model?.trim() ?? '';
+    final effort = reasoningEffort?.trim() ?? '';
     if (target.route == AiRoute.direct) {
       return _aiChatDirect(
         target,
         messages: messages,
         tools: tools,
         abortTrigger: abortTrigger,
+        model: requested.isEmpty ? null : requested,
+        reasoningEffort: effort.isEmpty ? null : effort,
       );
     }
     final data =
@@ -1247,10 +1265,49 @@ class ApiClient {
               token: token,
               timeout: _aiTimeout,
               abortTrigger: abortTrigger,
-              body: {'messages': messages, 'tools': ?tools},
+              body: {
+                'messages': messages,
+                'tools': ?tools,
+                'model': ?(requested.isEmpty ? null : requested),
+                'reasoning_effort': ?(effort.isEmpty ? null : effort),
+              },
             )
             as Map<String, dynamic>;
     return _decodeAiResult(data);
+  }
+
+  /// 可用模型列表；[endpoint] 为直连时返回空列表。
+  ///
+  /// 直连模式下游地址与模型由用户自己填，没有统一的目录接口，
+  /// 这里不探测也不猜，调用方回退到设置里的单个模型。
+  Future<List<AiModelInfo>> aiModels({
+    required String token,
+    AiEndpoint? endpoint,
+  }) async {
+    final target = endpoint ?? const AiEndpoint.relay();
+    if (target.route == AiRoute.direct) return const [];
+    final data =
+        await _send('GET', '/api/ai/models', token: token, timeout: _aiTimeout)
+            as Map<String, dynamic>;
+    final list = data['data'];
+    if (list is! List) return const [];
+    final models = <AiModelInfo>[];
+    for (final entry in list) {
+      if (entry is! Map) continue;
+      final id = entry['id'];
+      if (id is! String || id.trim().isEmpty) continue;
+      final efforts = <String>[];
+      final raw = entry['reasoning_efforts'];
+      if (raw is List) {
+        for (final effort in raw) {
+          if (effort is String && effort.trim().isNotEmpty) {
+            efforts.add(effort.trim());
+          }
+        }
+      }
+      models.add(AiModelInfo(id: id.trim(), reasoningEfforts: efforts));
+    }
+    return models;
   }
 
   /// 直连上游：编码、发送、解码均由 [AiService] 完成。
@@ -1261,6 +1318,8 @@ class ApiClient {
     required List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     Future<void>? abortTrigger,
+    String? model,
+    String? reasoningEffort,
   }) async {
     _requireOnline();
     if (!endpoint.isUsable) {
@@ -1277,9 +1336,10 @@ class ApiClient {
     }
     final body = AiService.encodeRequest(
       protocol: endpoint.protocol,
-      model: endpoint.model.trim(),
+      model: model ?? endpoint.model.trim(),
       messages: messages,
       tools: tools,
+      reasoningEffort: reasoningEffort,
     );
     final request =
         (abortTrigger == null
@@ -1308,7 +1368,7 @@ class ApiClient {
         throw ApiException('AI 接口返回了无法解析的内容');
       }
       return _decodeAiResult({
-        'model': endpoint.model.trim(),
+        'model': model ?? endpoint.model.trim(),
         'message': AiService.decodeReply(endpoint.protocol, decoded),
       });
     } on SocketException {

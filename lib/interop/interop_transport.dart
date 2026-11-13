@@ -10,9 +10,11 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'interop_protocol.dart';
 import 'interop_targets.dart';
+import 'interop_zip.dart';
 
 /// Result of asking a receiver whether it is installed and capable.
 ///
@@ -77,6 +79,7 @@ class InteropLaunch {
     required this.request,
     required this.events,
     required this.cancel,
+    this.stop,
   });
 
   final InteropRequest request;
@@ -86,7 +89,36 @@ class InteropLaunch {
   final Stream<InteropEvent> events;
 
   /// Asks the receiver to stop. Safe to call after the stream closed.
+  ///
+  /// A transport that can prove the stop returns a terminal outcome through
+  /// [stop] instead. [InteropRunner] prefers [stop] so it does not report a
+  /// stop the receiver never confirmed.
   final Future<void> Function() cancel;
+
+  /// Confirmed stop: completes after the receiver's own terminal event.
+  ///
+  /// Null means this transport cannot confirm a stop, and its [cancel] is
+  /// only a request. The background route always supplies this.
+  final Future<InteropStop> Function()? stop;
+}
+
+/// The receiver's own answer to a stop request.
+///
+/// [confirmed] is true only when the receiver's terminal event arrived inside
+/// the acknowledgement budget. A local timeout, a local failure, or a stop the
+/// receiver never answered is a diagnostic, not a cancellation.
+class InteropStop {
+  const InteropStop({
+    required this.exitCode,
+    required this.message,
+    this.confirmed = true,
+  });
+
+  final int exitCode;
+
+  /// The receiver's terminal text, or the reason no answer arrived.
+  final String message;
+  final bool confirmed;
 }
 
 /// What the Dart side needs from the platform.
@@ -164,7 +196,12 @@ class MethodChannelInteropTransport implements InteropTransport {
     } on MissingPluginException {
       return const InteropProbe.missing('跨应用通道未注册。');
     } on PlatformException catch (error) {
-      return InteropProbe.missing(error.message ?? error.code);
+      // A registered channel answered a PlatformException: the bridge exists
+      // and refused this probe. Calling that "missing" would tell the user to
+      // install an app that is already answering.
+      return InteropProbe.unknown(
+        error.message ?? '无法确认配套应用是否可用（${error.code}）。',
+      );
     }
   }
 
@@ -182,9 +219,22 @@ class MethodChannelInteropTransport implements InteropTransport {
     // Build the launch parameters first: validation throws here, before any
     // ability is started, so a malformed request never reaches another app.
     final parameters = request.toLaunchParameters();
+    // The payload crosses as one zip under a file-URI read grant. Dart writes
+    // it into the shared sandbox cache; the bridge only grants the URI.
+    parameters['zipPath'] = await writePayloadZip(
+      cacheDirectory: (await getTemporaryDirectory()).path,
+      sessionId: request.sessionId,
+      files: request.files,
+    );
+    // A frame can arrive with the platform's number type instead of the
+    // protocol's string form, so the two integer fields are normalized here
+    // before the strict decoder reads them. The bridge publishes `seq` and
+    // `exitCode` as strings today, so this only covers an engine that hands
+    // them back as numbers; a non-integral value stays a number and is still
+    // rejected.
     final stream = events.receiveBroadcastStream().map(
       (raw) => InteropEvent.fromLaunchParameters(
-        Map<String, Object?>.from(raw as Map),
+        interopWireMap(Map<String, Object?>.from(raw as Map)),
       ),
     );
     try {
@@ -275,4 +325,35 @@ class UnavailableInteropTransport implements InteropTransport {
     InteropTarget target,
     InteropRequest request,
   ) async => throw InteropException(InteropErrorCode.appMissing, reason);
+}
+
+/// Numeric fields the protocol declares as integers.
+///
+/// Only these two keys are normalized; payload text and nested maps are never
+/// rewritten.
+const Set<String> _integerWireFields = <String>{'seq', 'exitCode'};
+
+/// Normalizes the platform shape of the protocol's numeric fields.
+///
+/// The OHOS engine delivers channel numbers as `double`, so an integral `1.0`
+/// would stringify as `"1.0"` and be rejected by the strict integer reader in
+/// `InteropEvent.fromLaunchParameters`. Only a finite, exactly integral value is
+/// converted. A fractional, NaN or infinite value is passed through unchanged
+/// so the strict reader still rejects it; this function never invents a valid
+/// event and never touches anything but `seq` and `exitCode`.
+Map<String, Object?> interopWireMap(Map<String, Object?> raw) {
+  final out = <String, Object?>{};
+  raw.forEach((key, value) {
+    out[key] = _integerWireFields.contains(key) ? _asWireInteger(value) : value;
+  });
+  return out;
+}
+
+Object? _asWireInteger(Object? value) {
+  if (value is! double || !value.isFinite) return value;
+  if (value != value.roundToDouble()) return value;
+  // Beyond 2^53 a `double` no longer names one integer exactly, so it stays a
+  // double and the strict reader rejects it.
+  if (value.abs() > 9007199254740992) return value;
+  return value.toInt();
 }

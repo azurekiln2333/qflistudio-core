@@ -7,13 +7,13 @@ import 'api_client.dart';
 /// AI 回复中的一段内容：纯文本或代码块。
 class AiSegment {
   const AiSegment.text(this.text)
-      : isCode = false,
-        code = null,
-        lang = null,
-        path = null;
+    : isCode = false,
+      code = null,
+      lang = null,
+      path = null;
   const AiSegment.code(this.code, {this.lang, this.path})
-      : isCode = true,
-        text = null;
+    : isCode = true,
+      text = null;
 
   final bool isCode;
   final String? text;
@@ -79,7 +79,10 @@ abstract final class AiService {
   /// - 已含目标路径（如 `/chat/completions`）：原样使用，支持完整自定义端点。
   /// - 以 `/v1` 结尾：追加协议路径。
   /// - 其余：追加 `/v1` 加协议路径。
-  static String endpoint(String baseUrl, [AiProtocol protocol = AiProtocol.chat]) {
+  static String endpoint(
+    String baseUrl, [
+    AiProtocol protocol = AiProtocol.chat,
+  ]) {
     var base = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     if (base.isEmpty) return base;
     final lowered = base.toLowerCase();
@@ -115,15 +118,30 @@ abstract final class AiService {
   ///
   /// 输入消息只含 `role`、`content`、`tool_calls`、`tool_call_id`，
   /// 与 `/api/ai/chat` 接受的结构一致。
+  ///
+  /// [reasoningEffort] 只在 Chat 与 Responses 协议下发 `reasoning_effort`。
+  /// Anthropic Messages 没有等价字段，传了也不写，避免猜一个不存在的参数。
   static Map<String, dynamic> encodeRequest({
     required AiProtocol protocol,
     required String model,
     required List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     int? maxTokens,
+    String? reasoningEffort,
   }) => switch (protocol) {
-    AiProtocol.chat => _encodeChat(model, messages, tools, maxTokens),
-    AiProtocol.responses => _encodeResponses(model, messages, tools),
+    AiProtocol.chat => _encodeChat(
+      model,
+      messages,
+      tools,
+      maxTokens,
+      reasoningEffort,
+    ),
+    AiProtocol.responses => _encodeResponses(
+      model,
+      messages,
+      tools,
+      reasoningEffort,
+    ),
     AiProtocol.messages => _encodeMessages(model, messages, tools, maxTokens),
   };
 
@@ -144,6 +162,14 @@ abstract final class AiService {
   static bool isEventStream(String? contentType) =>
       contentType != null && contentType.contains('text/event-stream');
 
+  /// 推理强度的统一清洗：只接受短参数值，其余当未设置。
+  static String? _effort(String? value) {
+    final effort = value?.trim().toLowerCase() ?? '';
+    if (effort.isEmpty || effort.length > 16) return null;
+    if (!RegExp(r'^[a-z][a-z0-9_-]*$').hasMatch(effort)) return null;
+    return effort;
+  }
+
   // ---- OpenAI Chat ----
 
   static Map<String, dynamic> _encodeChat(
@@ -151,6 +177,7 @@ abstract final class AiService {
     List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     int? maxTokens,
+    String? reasoningEffort,
   ) => <String, dynamic>{
     'model': model,
     'messages': [
@@ -159,6 +186,7 @@ abstract final class AiService {
     ],
     if (tools != null && tools.isNotEmpty) 'tools': tools,
     'max_tokens': ?maxTokens,
+    'reasoning_effort': ?_effort(reasoningEffort),
   };
 
   static Map<String, dynamic> _chatMessage(
@@ -179,9 +207,7 @@ abstract final class AiService {
     }
     final calls = message['tool_calls'];
     if (allowToolCalls && calls is List && calls.isNotEmpty) {
-      out['tool_calls'] = [
-        for (final call in calls) _openAiCall(call),
-      ];
+      out['tool_calls'] = [for (final call in calls) _openAiCall(call)];
     }
     return out;
   }
@@ -193,7 +219,9 @@ abstract final class AiService {
         : const <String, dynamic>{};
     final id = map['id'];
     return {
-      'id': id is String && id.isNotEmpty ? id : _synthesizeId(function['name']),
+      'id': id is String && id.isNotEmpty
+          ? id
+          : _synthesizeId(function['name']),
       'type': 'function',
       'function': {
         'name': function['name'] is String ? function['name'] as String : '',
@@ -249,6 +277,7 @@ abstract final class AiService {
     String model,
     List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
+    String? reasoningEffort,
   ) {
     final system = <String>[];
     final input = <Map<String, dynamic>>[];
@@ -298,10 +327,9 @@ abstract final class AiService {
       'input': input,
       if (system.isNotEmpty) 'instructions': system.join('\n\n'),
       'store': false,
+      'reasoning_effort': ?_effort(reasoningEffort),
       if (tools != null && tools.isNotEmpty)
-        'tools': [
-          for (final tool in tools) _responsesTool(tool),
-        ],
+        'tools': [for (final tool in tools) _responsesTool(tool)],
     };
   }
 
@@ -315,8 +343,7 @@ abstract final class AiService {
       'name': function['name'],
       if (function['description'] is String)
         'description': function['description'],
-      if (function['parameters'] is Map)
-        'parameters': function['parameters'],
+      if (function['parameters'] is Map) 'parameters': function['parameters'],
     };
   }
 
@@ -434,9 +461,7 @@ abstract final class AiService {
       if (system.isNotEmpty) 'system': system.join('\n\n'),
       'messages': merged,
       if (tools != null && tools.isNotEmpty)
-        'tools': [
-          for (final tool in tools) _messagesTool(tool),
-        ],
+        'tools': [for (final tool in tools) _messagesTool(tool)],
     };
   }
 
@@ -547,19 +572,19 @@ abstract final class AiService {
       final close = content.indexOf('```', bodyStart);
       if (close < 0) {
         // 未闭合：剩余内容都算代码。
-        segments.add(AiSegment.code(
-          content.substring(bodyStart),
-          lang: lang,
-          path: path,
-        ));
+        segments.add(
+          AiSegment.code(content.substring(bodyStart), lang: lang, path: path),
+        );
         cursor = content.length;
         break;
       }
-      segments.add(AiSegment.code(
-        content.substring(bodyStart, close),
-        lang: lang,
-        path: path,
-      ));
+      segments.add(
+        AiSegment.code(
+          content.substring(bodyStart, close),
+          lang: lang,
+          path: path,
+        ),
+      );
       cursor = close + 3;
     }
     if (cursor < content.length) {
@@ -597,16 +622,18 @@ abstract final class AiService {
       final request = await HttpClient()
           .postUrl(uri)
           .timeout(const Duration(seconds: 20));
-      for (final entry
-          in headers(protocol, apiKey: apiKey).entries) {
+      for (final entry in headers(protocol, apiKey: apiKey).entries) {
         request.headers.set(entry.key, entry.value);
       }
       final body = streaming
-          ? {...encodeRequest(
-              protocol: protocol,
-              model: model.trim(),
-              messages: history,
-            ), 'stream': true}
+          ? {
+              ...encodeRequest(
+                protocol: protocol,
+                model: model.trim(),
+                messages: history,
+              ),
+              'stream': true,
+            }
           : encodeRequest(
               protocol: protocol,
               model: model.trim(),

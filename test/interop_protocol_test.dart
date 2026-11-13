@@ -162,8 +162,10 @@ InteropRequest _request({
   int timeoutMs = 30000,
   String protocol = kInteropProtocol,
   String sessionId = 'qfli-test-session',
+  String sessionToken = 'testtoken0123456789abcdef',
 }) => InteropRequest(
   sessionId: sessionId,
+  sessionToken: sessionToken,
   language: 'java',
   entry: entry,
   action: action,
@@ -190,6 +192,7 @@ void main() {
     test('empty string', () {
       final request = InteropRequest(
         sessionId: 'qfli-test-session',
+        sessionToken: 'testtoken0123456789abcdef',
         language: 'java',
         entry: 'a.txt',
         action: InteropAction.analyze,
@@ -208,6 +211,7 @@ void main() {
       // encoder output for this one file.
       final request = InteropRequest(
         sessionId: 'qfli-test-session',
+        sessionToken: 'testtoken0123456789abcdef',
         language: 'java',
         entry: 'a.txt',
         action: InteropAction.analyze,

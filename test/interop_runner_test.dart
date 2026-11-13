@@ -16,6 +16,7 @@ class _FakeTransport implements InteropTransport {
     this.events = const <InteropEvent>[],
     this.startError,
     this.supported = true,
+    this.stopOutcome,
   });
 
   final List<InteropEvent> events;
@@ -25,6 +26,8 @@ class _FakeTransport implements InteropTransport {
   InteropRequest? lastRequest;
   InteropTarget? lastTarget;
   bool cancelled = false;
+  /// When set, the transport can prove its stop and reports this outcome.
+  final InteropStop? stopOutcome;
 
   @override
   bool get isSupported => supported;
@@ -55,6 +58,12 @@ class _FakeTransport implements InteropTransport {
       cancel: () async {
         cancelled = true;
       },
+      stop: stopOutcome == null
+          ? null
+          : () async {
+              cancelled = true;
+              return stopOutcome!;
+            },
     );
   }
 }
@@ -363,6 +372,8 @@ void main() {
           _event(1, InteropEventKind.accepted, text: '已接收'),
         ],
       );
+      // A transport that cannot confirm a stop keeps the legacy request path.
+      expect(transport.stopOutcome, isNull);
       final run = await InteropRunner(transport: transport).run(
         projectRoot: root.path,
         language: 'java',
@@ -371,6 +382,33 @@ void main() {
       await run.cancel?.call();
       expect(transport.cancelled, isTrue);
       expect(await run.exitCode, 130);
+    });
+
+    test('a confirming transport reports its own stop, not 130', () async {
+      final root = await _project(<String, String>{
+        'src/Main.java': 'class Main {}',
+      });
+      addTearDown(() => root.delete(recursive: true));
+      final transport = _FakeTransport(
+        events: <InteropEvent>[
+          _event(1, InteropEventKind.accepted, text: '已接收'),
+        ],
+        stopOutcome: const InteropStop(
+          exitCode: kInteropNotRunExitCode,
+          message: '未收到后台运行的停止确认。',
+          confirmed: false,
+        ),
+      );
+      final run = await InteropRunner(transport: transport).run(
+        projectRoot: root.path,
+        language: 'java',
+        entryFile: p.join(root.path, 'src', 'Main.java'),
+      );
+      final err = run.stderr.toList();
+      await run.cancel?.call();
+      // An unacknowledged stop must not be promoted to a clean cancellation.
+      expect(await run.exitCode, kInteropNotRunExitCode);
+      expect((await err).join(), contains('停止确认'));
     });
 
     test('an unsupported platform refuses without a transport call', () async {

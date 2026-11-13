@@ -38,6 +38,24 @@ class VibeWriteResult {
   final String? backupPath;
 }
 
+/// 一条文本搜索结果。
+class VibeSearchMatch {
+  const VibeSearchMatch({
+    required this.path,
+    required this.line,
+    required this.text,
+  });
+
+  /// 相对项目根的路径，分隔符统一为 `/`。
+  final String path;
+
+  /// 行号，从 1 起。
+  final int line;
+
+  /// 命中的整行内容，已去除首尾空白并截断。
+  final String text;
+}
+
 /// 项目内文件访问。一个会话共用一个实例，以便记录已读内容。
 class VibeProjectFiles {
   VibeProjectFiles({
@@ -57,6 +75,17 @@ class VibeProjectFiles {
   final int maxReadBytes;
   final int maxWriteBytes;
   final int maxListEntries;
+
+  /// 单次搜索最多返回的条数，模型可用参数调小。
+  static const int maxSearchResults = 200;
+  static const int defaultMaxSearchResults = 50;
+
+  /// 单次搜索最多扫描的文件数，避免大仓库卡住一轮。
+  static const int maxSearchFiles = 400;
+
+  /// 搜索词长度上限与单行展示上限。
+  static const int maxSearchPatternChars = 200;
+  static const int maxSearchLineChars = 240;
 
   static const String backupDirName = 'vibe-backups';
   static const Set<String> _protectedSegments = {'.qfli', '.git'};
@@ -85,7 +114,88 @@ class VibeProjectFiles {
   static bool _isExcluded(String name) =>
       _excludedDirs.contains(name.toLowerCase());
 
+  /// 读取白名单里的项目外附件上限，避免一次附加几百个路径。
+  static const int maxReadOnlyFiles = 64;
+
   final Map<String, String> _knownContent = {};
+
+  /// 本会话可读的项目外附件（规范化绝对路径）。
+  ///
+  /// 只影响 [read]：写入、编辑、列目录、搜索仍然只能落在项目根内。
+  final Set<String> _readOnlyFiles = {};
+
+  /// 已登记的可读附件。
+  Set<String> get readOnlyFiles => Set.unmodifiable(_readOnlyFiles);
+
+  /// 登记一批只读附件（工作区里其他项目的文件）。
+  ///
+  /// 路径必须能规范化为绝对路径；项目内路径不需要登记。无效条目直接跳过，
+  /// 不报错——选择器给出的路径里混一个不可用的，不该拦住整次发送。
+  void allowReadOnlyFiles(Iterable<String> paths) {
+    for (final raw in paths) {
+      if (_readOnlyFiles.length >= maxReadOnlyFiles) return;
+      final normalized = _normalizeReadOnlyPath(raw);
+      if (normalized != null) _readOnlyFiles.add(normalized);
+    }
+  }
+
+  String? _normalizeReadOnlyPath(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty || trimmed.contains('\u0000')) return null;
+    if (!p.isAbsolute(trimmed)) return null;
+    final normalized = p.normalize(trimmed);
+    // 项目内的文件走原有相对路径约束即可，不进白名单。
+    if (p.equals(normalized, projectRoot) ||
+        p.isWithin(projectRoot, normalized)) {
+      return null;
+    }
+    return normalized;
+  }
+
+  /// 白名单命中时返回可读的绝对路径；未命中返回 null。
+  ///
+  /// 命中后仍要重新校验：必须是普通文件、不能是符号链接，也不能经由链接
+  /// 逃到别处。登记到读取之间文件可能被换掉，所以校验放在读取时。
+  String? _readOnlyTarget(String rawPath) {
+    if (_readOnlyFiles.isEmpty) return null;
+    final trimmed = rawPath.trim();
+    if (trimmed.isEmpty || trimmed.contains('\u0000')) return null;
+    if (!p.isAbsolute(trimmed)) return null;
+    final candidate = p.normalize(trimmed);
+    if (!_readOnlyFiles.contains(candidate)) return null;
+    final type = FileSystemEntity.typeSync(candidate, followLinks: false);
+    if (type == FileSystemEntityType.notFound) {
+      throw const VibeToolException('文件不存在', code: 'not_found');
+    }
+    if (type != FileSystemEntityType.file) {
+      throw const VibeToolException('附件必须是普通文件，不允许目录或链接', code: 'escape');
+    }
+    final String real;
+    try {
+      real = File(candidate).resolveSymbolicLinksSync();
+    } on FileSystemException {
+      throw const VibeToolException('无法解析附件路径', code: 'escape');
+    }
+    if (!p.equals(real, candidate)) {
+      throw const VibeToolException('附件路径包含符号链接，已拒绝', code: 'escape');
+    }
+    return candidate;
+  }
+
+  /// 读取时的实际路径：项目内走原有约束，项目外只接受白名单附件。
+  String _readablePath(String rawPath) =>
+      _readOnlyTarget(rawPath) ?? resolve(rawPath);
+
+  /// 读取路径的展示名：项目内用相对路径，白名单附件用绝对路径。
+  ///
+  /// 先读成功再调，避免未验证的路径被当成可读。
+  String displayPathForRead(String rawPath) {
+    final raw = rawPath.trim();
+    if (p.isAbsolute(raw) && _readOnlyFiles.contains(p.normalize(raw))) {
+      return p.normalize(raw).replaceAll('\\', '/');
+    }
+    return relative(resolve(rawPath));
+  }
 
   /// 跨实例的写入队列，按物理路径串行化。
   static final Map<String, Future<void>> _pathQueues = {};
@@ -229,9 +339,117 @@ class VibeProjectFiles {
     return entries;
   }
 
+  /// 在项目内搜索文本，按行返回命中的位置。
+  ///
+  /// 只搜目录内真实文件：跳过隐藏项、符号链接、依赖与构建目录，
+  /// 不跟随链接，单个文件超过读取上限时跳过。二进制或非 UTF-8 文件
+  /// 直接跳过，不让一个不可读文件拖垮整次搜索。
+  Future<List<VibeSearchMatch>> searchText(
+    String pattern, {
+    String? path,
+    int maxResults = defaultMaxSearchResults,
+    bool regex = false,
+    bool caseSensitive = false,
+  }) async {
+    final needle = pattern.trim();
+    if (needle.isEmpty) {
+      throw const VibeToolException('搜索内容不能为空');
+    }
+    if (needle.length > maxSearchPatternChars) {
+      throw const VibeToolException('搜索内容过长，最多 200 字符');
+    }
+    final limit = maxResults <= 0
+        ? defaultMaxSearchResults
+        : (maxResults > maxSearchResults ? maxSearchResults : maxResults);
+    final RegExp matcher;
+    if (regex) {
+      try {
+        matcher = RegExp(needle, caseSensitive: caseSensitive);
+      } on FormatException {
+        throw const VibeToolException('正则表达式无效');
+      }
+    } else {
+      matcher = RegExp(RegExp.escape(needle), caseSensitive: caseSensitive);
+    }
+
+    final start = path == null || isProjectRootPath(path)
+        ? projectRoot
+        : resolve(path);
+    final type = FileSystemEntity.typeSync(start);
+    if (type == FileSystemEntityType.notFound) {
+      throw const VibeToolException('路径不存在', code: 'not_found');
+    }
+    final files = <File>[];
+    if (type == FileSystemEntityType.file) {
+      files.add(File(start));
+    } else if (type == FileSystemEntityType.directory) {
+      Future<void> walk(Directory directory) async {
+        final children = await directory.list(followLinks: false).toList();
+        children.sort((a, b) => a.path.compareTo(b.path));
+        for (final entity in children) {
+          final name = p.basename(entity.path);
+          if (name.startsWith('.')) continue;
+          if (entity is Link) continue;
+          if (entity is Directory) {
+            if (_isExcluded(name)) continue;
+            await walk(entity);
+          } else if (entity is File) {
+            if (files.length >= maxSearchFiles) return;
+            files.add(entity);
+          }
+        }
+      }
+
+      await walk(Directory(start));
+    } else {
+      throw const VibeToolException('目标不是文件或目录');
+    }
+
+    final matches = <VibeSearchMatch>[];
+    for (final file in files) {
+      if (matches.length >= limit) break;
+      final int length;
+      try {
+        length = await file.length();
+      } on FileSystemException {
+        continue;
+      }
+      if (length > maxReadBytes) continue;
+      final String text;
+      try {
+        text = _decodeText(await file.readAsBytes());
+      } on VibeToolException {
+        continue;
+      } on FileSystemException {
+        continue;
+      }
+      final lines = text.split('\n');
+      for (var index = 0; index < lines.length; index++) {
+        if (matches.length >= limit) break;
+        final line = lines[index];
+        if (!matcher.hasMatch(line)) continue;
+        matches.add(
+          VibeSearchMatch(
+            path: relative(file.path),
+            line: index + 1,
+            text: _shortLine(line),
+          ),
+        );
+      }
+    }
+    return matches;
+  }
+
+  static String _shortLine(String line) {
+    final flat = line.replaceAll('\r', '').trimRight();
+    return flat.length <= maxSearchLineChars
+        ? flat
+        : '${flat.substring(0, maxSearchLineChars)}…';
+  }
+
   /// 读取文本文件并记录内容，后续写入据此检测并发变化。
   Future<String> read(String path) async {
-    final absolute = resolve(path);
+    final absolute = _readablePath(path);
     final file = File(absolute);
     if (!await file.exists()) {
       throw const VibeToolException('文件不存在', code: 'not_found');
@@ -589,6 +807,34 @@ List<Map<String, dynamic>> vibeToolSpecs() => [
           'path': {'type': 'string', 'description': '文件相对路径'},
         },
         'required': ['path'],
+        'additionalProperties': false,
+      },
+    },
+  },
+  {
+    'type': 'function',
+    'function': {
+      'name': 'search_text',
+      'description': '在项目文本文件里搜索内容，返回 路径:行号: 内容。不区分大小写，可用正则。',
+      'parameters': {
+        'type': 'object',
+        'properties': {
+          'pattern': {'type': 'string', 'description': '要查找的文本或正则'},
+          'path': {'type': 'string', 'description': '搜索范围，相对目录或文件，省略表示项目根目录'},
+          'maxResults': {
+            'type': 'integer',
+            'description': '返回条数上限，默认 50，最大 200',
+          },
+          'regex': {
+            'type': 'boolean',
+            'description': 'pattern 是否按正则解析，默认 false',
+          },
+          'caseSensitive': {
+            'type': 'boolean',
+            'description': '是否区分大小写，默认 false',
+          },
+        },
+        'required': ['pattern'],
         'additionalProperties': false,
       },
     },

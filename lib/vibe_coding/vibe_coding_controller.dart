@@ -54,7 +54,7 @@ export 'vibe_rules.dart'
         kVibeMaxRulesChars,
         kVibeRuleFiles;
 export 'vibe_tools.dart'
-    show VibeProjectFiles, VibeToolException, VibeWriteResult;
+    show VibeProjectFiles, VibeSearchMatch, VibeToolException, VibeWriteResult;
 
 /// 技能与计划的可替换来源；测试可注入固定实现。
 abstract interface class VibeAgentContext {
@@ -80,6 +80,31 @@ class VibeProjectAgentContext implements VibeAgentContext {
   Future<String> rules() async => loadVibeRules(projectRoot);
 }
 
+/// 一次写盘审批请求。
+///
+/// 控制器在真正写盘前把请求交给宿主（会话层、界面）。返回 null 放行，
+/// 返回字符串则作为拒绝原因写回工具结果。
+class VibeWriteRequest {
+  const VibeWriteRequest({
+    required this.path,
+    required this.summary,
+    required this.isCreate,
+    required this.bytes,
+  });
+
+  /// 相对项目根的路径。
+  final String path;
+
+  /// 直接可显示的改动摘要。
+  final String summary;
+
+  /// 是否新建文件（目标原本不存在）。
+  final bool isCreate;
+
+  /// 写入内容的字节数。
+  final int bytes;
+}
+
 /// 编辑器集成使用的会话对象；UI 只读 [phase]、[messages] 等状态。
 class VibeCodingController extends ChangeNotifier {
   VibeCodingController({
@@ -97,6 +122,10 @@ class VibeCodingController extends ChangeNotifier {
     VibeAgentContext? context,
     AiEndpoint Function()? endpointProvider,
     InteropRunner? interopRunner,
+    Future<String?> Function(VibeWriteRequest request)? writeApproval,
+    List<Map<String, dynamic>>? restoredHistory,
+    String? modelId,
+    String? reasoningEffort,
   }) : _api = api,
        _tokenProvider = tokenProvider,
        _projectName = projectName,
@@ -109,8 +138,14 @@ class VibeCodingController extends ChangeNotifier {
        _maxRounds = maxRounds,
        _context = context,
        _endpointProvider = endpointProvider,
-       _interop = interopRunner {
+       _interop = interopRunner,
+       _modelId = modelId,
+       _reasoningEffort = reasoningEffort {
+    writeApprovalHook = writeApproval;
     _history.add({'role': 'system', 'content': _systemPrompt()});
+    if (restoredHistory != null && restoredHistory.isNotEmpty) {
+      _history.addAll(_sanitizeHistory(restoredHistory));
+    }
   }
 
   final ApiClient _api;
@@ -130,6 +165,15 @@ class VibeCodingController extends ChangeNotifier {
 
   /// 跨应用运行器；为 null 时只走在线终端。
   final InteropRunner? _interop;
+
+  /// 写盘前审批；为 null 时不经审批直接写（现有编辑器集成保持原行为）。
+  ///
+  /// 会话层可在构造后替换，每次写盘都读当前值。
+  Future<String?> Function(VibeWriteRequest request)? writeApprovalHook;
+
+  /// 本轮指定的模型与推理强度；为 null 时沿用设置或服务端默认。
+  String? _modelId;
+  String? _reasoningEffort;
 
   late final VibeAgentContext _agent =
       _context ??
@@ -186,6 +230,36 @@ class VibeCodingController extends ChangeNotifier {
 
   int get maxRounds => _maxRounds ?? kVibeMaxRoundBudget;
   String? get lastError => _lastError;
+
+  /// 已发生的模型对话历史（含 system）：会话层用它做持久化。
+  ///
+  /// 未完成的 tool_calls 与对应 tool 回复以配对形式存在；一次 send 结束后
+  /// 才适合保存。内容可能含项目文件片段，不得写入日志。
+  List<Map<String, dynamic>> get history => List.unmodifiable(_history);
+
+  /// 指定后续 send 使用的模型与推理强度；null 则回到默认。
+  ///
+  /// 推理强度只对支持的模型生效，服务端未放行时会被拒绝。
+  void configureModel({String? modelId, String? reasoningEffort}) {
+    _modelId = modelId;
+    _reasoningEffort = reasoningEffort;
+  }
+
+  /// 登记本会话可读的项目外附件（只读，不能写、编辑、搜索）。
+  void allowReadOnlyFiles(Iterable<String> paths) =>
+      _files.allowReadOnlyFiles(paths);
+
+  /// 恢复已有会话的模型历史（会话层在构造后调用）。
+  ///
+  /// 只收 `user` / `assistant` / 配对的 `tool`；其余条目丢弃。
+  void restoreHistory(Iterable<Map<String, Object?>> entries) {
+    final restored = _sanitizeHistory([
+      for (final entry in entries) Map<String, dynamic>.from(entry),
+    ]);
+    if (restored.isEmpty) return;
+    _history.addAll(restored);
+  }
+
   bool get canSend =>
       _phase != VibePhase.running && _phase != VibePhase.cancelling;
   bool get canCancel => _phase == VibePhase.running;
@@ -232,7 +306,8 @@ class VibeCodingController extends ChangeNotifier {
   /// 取消在途模型请求和终端执行；返回时本轮已停止并完成终端清理。
   Future<void> cancel() async {
     if (!canCancel) return;
-    _cancelRequested = true;    _phase = VibePhase.cancelling;
+    _cancelRequested = true;
+    _phase = VibePhase.cancelling;
     _notify();
     final abort = _abort;
     if (abort != null && !abort.isCompleted) abort.complete();
@@ -301,6 +376,8 @@ class VibeCodingController extends ChangeNotifier {
             tools: _toolSpecs(),
             abortTrigger: _abort?.future,
             endpoint: _endpointProvider?.call(),
+            model: _modelId,
+            reasoningEffort: _reasoningEffort,
           );
         } on ApiException catch (error) {
           if (_cancelRequested || _disposed) {
@@ -579,6 +656,9 @@ class VibeCodingController extends ChangeNotifier {
           commandOutput: outcome.output,
           exitCode: outcome.exitCode,
           plan: outcome.plan,
+          changedPaths: outcome.writtenPath == null
+              ? const []
+              : [outcome.writtenPath!],
         ),
       ),
     );
@@ -666,12 +746,12 @@ class VibeCodingController extends ChangeNotifier {
         case 'read_file':
           final path = _requiredString(args, 'path');
           final content = await _files.read(path);
-          guard.markRead(_files.relative(_files.resolve(path)));
+          // 项目内用相对路径，项目外附件用绝对路径；两者都不会命中写入。
+          final display = _files.displayPathForRead(path);
+          guard.markRead(display);
           return _ToolOutcome(
             status: VibeToolStatus.ok,
-            summary:
-                '${_files.relative(_files.resolve(path))} · '
-                '${utf8.encode(content).length} B',
+            summary: '$display · ${utf8.encode(content).length} B',
             modelText: content.isEmpty ? '文件为空' : content,
             readPath: path,
           );
@@ -679,6 +759,16 @@ class VibeCodingController extends ChangeNotifier {
           final path = _requiredString(args, 'path');
           final content = args['content'];
           if (content is! String) return _error('error', 'content 必须是字符串');
+          final denied = await _approveWrite(
+            path: path,
+            summary:
+                '${_isExisting(path) ? '覆盖' : '新建'} $path'
+                '（${utf8.encode(content).length} B）',
+            bytes: utf8.encode(content).length,
+          );
+          if (denied != null) {
+            return _error('permission', denied, conflict: true);
+          }
           final unread =
               guard.existedAtStart(_files.relative(_files.resolve(path)))
               ? guard.rejectUnreadWrite(_files.relative(_files.resolve(path)))
@@ -719,6 +809,16 @@ class VibeCodingController extends ChangeNotifier {
           if (oldText is! String || newText is! String) {
             return _error('error', 'oldText 与 newText 必须是字符串');
           }
+          final denied = await _approveWrite(
+            path: path,
+            summary:
+                '替换 $path 中的 ${utf8.encode(oldText).length} B '
+                '为 ${utf8.encode(newText).length} B',
+            bytes: utf8.encode(newText).length,
+          );
+          if (denied != null) {
+            return _error('permission', denied, conflict: true);
+          }
           final unread =
               guard.existedAtStart(_files.relative(_files.resolve(path)))
               ? guard.rejectUnreadWrite(_files.relative(_files.resolve(path)))
@@ -741,18 +841,18 @@ class VibeCodingController extends ChangeNotifier {
             await _files.write(result.relativePath, editMark.content);
             _onFileChanged?.call(result.relativePath);
           }
-          final editSidecar = await _writeAiMark(
-            result.relativePath,
-            editMark,
-          );
+          final editSidecar = await _writeAiMark(result.relativePath, editMark);
           return _ToolOutcome(
             status: VibeToolStatus.ok,
-            summary: '已替换 ${result.relativePath} · ${result.bytes} B$editSidecar',
+            summary:
+                '已替换 ${result.relativePath} · ${result.bytes} B$editSidecar',
             modelText:
                 '已替换 ${result.relativePath}（${result.bytes} B），原文件已备份'
                 '$editSidecar',
             writtenPath: result.relativePath,
           );
+        case 'search_text':
+          return await _searchText(args);
         case 'run_command':
           return await _runCommand(args, index);
         case 'todo':
@@ -775,6 +875,79 @@ class VibeCodingController extends ChangeNotifier {
     } on FileSystemException catch (error) {
       return _error('error', '文件操作失败：${error.message}');
     }
+  }
+
+  /// 写盘前审批：返回 null 放行，返回字符串则为拒绝原因。
+  ///
+  /// 取消与 dispose 会同时结束等待，避免宿主忘了回复时整轮卡死。
+  Future<String?> _approveWrite({
+    required String path,
+    required String summary,
+    required int bytes,
+  }) async {
+    final hook = writeApprovalHook;
+    if (hook == null) return null;
+    final request = VibeWriteRequest(
+      path: path,
+      summary: summary,
+      isCreate: !_isExisting(path),
+      bytes: bytes,
+    );
+    final abort = _abort;
+    if (abort == null) return hook(request);
+    final decision = hook(request);
+    final winner = await Future.any<Object?>([
+      decision,
+      abort.future.then<Object?>((_) => const _WriteCancelled()),
+    ]);
+    if (winner is _WriteCancelled) return '已取消写入';
+    return winner as String?;
+  }
+
+  /// 目标是否已存在；路径不合法时当作不存在，后续会绕回路径校验。
+  bool _isExisting(String path) {
+    try {
+      return File(_files.resolve(path)).existsSync();
+    } on VibeToolException {
+      return false;
+    }
+  }
+
+  /// `search_text`：在项目内按行搜索，返回 路径:行号: 内容。
+  Future<_ToolOutcome> _searchText(Map<String, dynamic> args) async {
+    final pattern = _requiredString(args, 'pattern');
+    final rawLimit = args['maxResults'];
+    if (rawLimit != null && rawLimit is! int) {
+      return _error('error', 'maxResults 必须是整数');
+    }
+    final rawPath = args['path'];
+    if (rawPath != null && rawPath is! String) {
+      return _error('error', 'path 必须是字符串');
+    }
+    final matches = await _files.searchText(
+      pattern,
+      path: rawPath as String?,
+      maxResults: rawLimit as int? ?? VibeProjectFiles.defaultMaxSearchResults,
+      regex: args['regex'] == true,
+      caseSensitive: args['caseSensitive'] == true,
+    );
+    if (matches.isEmpty) {
+      return const _ToolOutcome(
+        status: VibeToolStatus.ok,
+        summary: '没有匹配',
+        modelText: '没有匹配的行',
+      );
+    }
+    final text = matches
+        .map((match) => '${match.path}:${match.line}: ${match.text}')
+        .join('\n');
+    return _ToolOutcome(
+      status: VibeToolStatus.ok,
+      summary: '${matches.length} 处匹配',
+      modelText: text,
+      // 搜到东西算一次进展，否则守卫会把纯检索的一轮当成停滞。
+      listedDirs: 1,
+    );
   }
 
   /// 写入结果的补充说明：标识是否落到说明文件。
@@ -1083,7 +1256,8 @@ class VibeCodingController extends ChangeNotifier {
     } on VibeToolException catch (error) {
       _usedTerminal = false;
       return _error(error.code, error.message);
-    }    if (_cancelRequested) {
+    }
+    if (_cancelRequested) {
       // 终端会话已经占过位（`_usedTerminal`），取消要走回收，否则下一任务会
       // 抢同一个会话；这里不能把占位清掉，交给 cancel() 统一处理。
       return _cancelledOutcome();
@@ -1323,6 +1497,79 @@ class VibeCodingController extends ChangeNotifier {
       ..addAll(kept);
   }
 
+  /// 恢复历史时只保留协议合法的完整轮次。
+  ///
+  /// 丢掉 system 行、孤立的 tool 回复，以及尾部没有答完的 tool_calls 组，
+  /// 避免会话重启后第一轮就被上游拒绕。
+  static List<Map<String, dynamic>> _sanitizeHistory(
+    Iterable<Map<String, dynamic>> entries,
+  ) {
+    final kept = <Map<String, dynamic>>[];
+    final pending = <String>{};
+    for (final entry in entries) {
+      final role = entry['role'];
+      if (role == 'tool') {
+        final id = entry['tool_call_id'];
+        if (id is! String || !pending.remove(id)) continue;
+        kept.add({
+          'role': 'tool',
+          'tool_call_id': id,
+          'content': entry['content'] is String ? entry['content'] : '',
+        });
+        continue;
+      }
+      if (role == 'assistant') {
+        final calls = entry['tool_calls'];
+        final ids = <String>[];
+        if (calls is List) {
+          for (final call in calls) {
+            final id = call is Map ? call['id'] : null;
+            if (id is String && id.isNotEmpty) ids.add(id);
+          }
+        }
+        final content = entry['content'];
+        final sanitized = <String, dynamic>{
+          'role': 'assistant',
+          'content': content is String ? content : null,
+        };
+        if (ids.isNotEmpty && calls is List) {
+          sanitized['tool_calls'] = calls;
+        }
+        kept.add(sanitized);
+        pending.addAll(ids);
+        continue;
+      }
+      if (role == 'user') {
+        final content = entry['content'];
+        if (content is! String || content.trim().isEmpty) continue;
+        kept.add({'role': 'user', 'content': content});
+      }
+    }
+    // 从尾部裁掉没答完的一组，连同它的 assistant 消息。
+    while (pending.isNotEmpty && kept.isNotEmpty) {
+      final last = kept.removeLast();
+      if (last['role'] == 'tool') {
+        pending.remove(last['tool_call_id']);
+        continue;
+      }
+      final calls = last['tool_calls'];
+      if (calls is List) {
+        for (final call in calls) {
+          final id = call is Map ? call['id'] : null;
+          if (id is String) pending.remove(id);
+        }
+      }
+    }
+    if (kept.length > 60) {
+      var start = kept.length - 60;
+      while (start < kept.length && kept[start]['role'] == 'tool') {
+        start++;
+      }
+      return kept.sublist(start);
+    }
+    return kept;
+  }
+
   static String _requiredString(Map<String, dynamic> args, String key) {
     final value = args[key];
     if (value is! String || value.trim().isEmpty) {
@@ -1428,6 +1675,10 @@ class VibeCodingController extends ChangeNotifier {
     modelText: 'error(cancelled): 用户取消了执行',
     code: 'cancelled',
   );
+}
+
+class _WriteCancelled {
+  const _WriteCancelled();
 }
 
 class _ParsedCall {

@@ -1,7 +1,8 @@
-/// 项目技能加载：解析 SKILL.md、组合提示词索引、按需返回正文。
+/// 技能目录与现有代理生态兼容：用户目录 `~/.qfli/skills`、项目内 `.qfli/skills`、
+/// `.claude/skills`、`.agents/skills`，外加随包发布的内置技能。提示词里只放名称与描述。
 ///
-/// 技能目录与现有代理生态兼容：项目内 `.qfli/skills`、`.claude/skills`、
-/// `.agents/skills`，外加随包发布的内置技能。提示词里只放名称与描述。
+/// 来源优先级（低 → 高）：内置 < 用户级 < 项目级。同名技能后者覆盖前者；
+/// 同一来源内部则先出现者胜出。
 library;
 
 import 'dart:convert';
@@ -35,6 +36,7 @@ class VibeSkill {
 
 /// 技能来源，决定去重顺序与是否受项目语言过滤。
 enum VibeSkillSource {
+  user('用户技能'),
   projectQfli('.qfli/skills'),
   claude('.claude/skills'),
   agents('.agents/skills'),
@@ -160,13 +162,32 @@ class VibeSkillLibrary {
     AssetBundle? bundle,
     this.maxEntries = kVibeMaxSkillEntries,
     this.maxIndexChars = kVibeMaxSkillIndexChars,
-  }) : _bundle = bundle ?? rootBundle;
+    String? userSkillsDir,
+    this.includeUserSkills = true,
+  }) : _bundle = bundle ?? rootBundle,
+       _userSkillsDir = userSkillsDir;
 
   final String projectRoot;
   final String language;
   final AssetBundle _bundle;
   final int maxEntries;
   final int maxIndexChars;
+
+  /// 显式指定的用户级技能目录；为 null 时按 [defaultUserSkillsDir] 推算。
+  final String? _userSkillsDir;
+
+  /// 是否读用户级目录；嵌入式或测试可关掉。
+  final bool includeUserSkills;
+
+  /// 用户级技能目录：`$HOME/.qfli/skills`。
+  ///
+  /// 没有 HOME（部分移动端）时返回 null，不报错也不猜路径。
+  static String? defaultUserSkillsDir() {
+    final home =
+        Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+    if (home == null || home.trim().isEmpty) return null;
+    return p.join(home.trim(), '.qfli', 'skills');
+  }
 
   static const List<String> builtInAssetDirs = [
     'assets/skills/web-app-scaffold/SKILL.md',
@@ -180,25 +201,48 @@ class VibeSkillLibrary {
   /// 测试用：清空内置技能缓存。
   static void resetBuiltInCache() => _builtInCache = null;
 
-  /// 按顺序发现技能；同名技能只保留最先出现的来源。
+  /// 按来源优先级发现技能。内置最低，项目级最高。
   Future<List<VibeSkill>> load() async {
-    final found = <String, VibeSkill>{};
-    void add(VibeSkill skill) => found.putIfAbsent(skill.name, () => skill);
-
+    final builtIn = <String, VibeSkill>{};
+    for (final skill in await _builtIns()) {
+      if (!_languageAccepts(skill.name)) continue;
+      builtIn.putIfAbsent(skill.name, () => skill);
+    }
+    final user = await _collect(_userDirs(), VibeSkillSource.user);
+    final project = <String, VibeSkill>{};
     for (final dir in _projectDirs()) {
       final source = _sourceFor(dir);
       if (source == null) continue;
       for (final skill in await _readDirectory(dir, source)) {
-        add(skill);
+        project.putIfAbsent(skill.name, () => skill);
       }
     }
-    for (final skill in await _builtIns()) {
-      if (!_languageAccepts(skill.name)) continue;
-      add(skill);
-    }
-    final list = found.values.toList()
+    final merged = <String, VibeSkill>{};
+    merged.addAll(builtIn);
+    merged.addAll(user);
+    merged.addAll(project);
+    final list = merged.values.toList()
       ..sort((a, b) => a.name.compareTo(b.name));
     return list.length <= maxEntries ? list : list.sublist(0, maxEntries);
+  }
+
+  Future<Map<String, VibeSkill>> _collect(
+    List<String> dirs,
+    VibeSkillSource source,
+  ) async {
+    final found = <String, VibeSkill>{};
+    for (final dir in dirs) {
+      for (final skill in await _readDirectory(dir, source)) {
+        found.putIfAbsent(skill.name, () => skill);
+      }
+    }
+    return found;
+  }
+
+  List<String> _userDirs() {
+    if (!includeUserSkills) return const [];
+    final dir = _userSkillsDir ?? defaultUserSkillsDir();
+    return dir == null ? const [] : [dir];
   }
 
   List<String> _projectDirs() => [

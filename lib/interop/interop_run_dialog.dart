@@ -10,6 +10,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'interop_protocol.dart';
 import 'interop_runner.dart';
 import 'interop_targets.dart';
 
@@ -101,12 +102,32 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
   Future<void> _start() async {
     if (_started) return;
     _started = true;
-    final run = await widget.runner.run(
-      projectRoot: widget.projectRoot,
-      language: widget.language,
-      entryFile: widget.entryFile,
-      timeout: widget.timeout,
-    );
+    final InteropRun run;
+    try {
+      run = await widget.runner.run(
+        projectRoot: widget.projectRoot,
+        language: widget.language,
+        entryFile: widget.entryFile,
+        timeout: widget.timeout,
+      ).timeout(
+        widget.timeout + const Duration(seconds: 10),
+        onTimeout: () {
+          // A start that neither completes nor throws (a hung bridge call, a
+          // lost event stream) must not hold the dialog open forever.
+          throw const InteropException(
+            InteropErrorCode.transportFailure,
+            '跨应用启动超时，请重试或改用在线终端。',
+          );
+        },
+      );
+    } on InteropException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _lines.add(error.message);
+        _exitCode = kInteropNotRunExitCode;
+      });
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _run = run;

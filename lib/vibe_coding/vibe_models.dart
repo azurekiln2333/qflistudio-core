@@ -12,6 +12,7 @@ enum VibeToolStatus { running, ok, error, conflict }
 const Set<String> kVibeToolNames = {
   'list_files',
   'read_file',
+  'search_text',
   'write_file',
   'edit_file',
   'run_command',
@@ -31,6 +32,7 @@ class VibeToolCall {
     this.commandOutput,
     this.exitCode,
     this.plan,
+    this.changedPaths = const [],
   });
 
   final String id;
@@ -50,6 +52,11 @@ class VibeToolCall {
   /// todo 调用提交的计划快照；其余工具为 null。
   final List<VibePlanItem>? plan;
 
+  /// 本次调用成功写入的相对路径；未写入时为空。
+  ///
+  /// 供上层（会话记录、改动列表）取真实结果，不用解析展示文案。
+  final List<String> changedPaths;
+
   bool get isRunning => status == VibeToolStatus.running;
 
   VibeToolCall copyWith({
@@ -58,6 +65,7 @@ class VibeToolCall {
     String? commandOutput,
     int? exitCode,
     List<VibePlanItem>? plan,
+    List<String>? changedPaths,
   }) => VibeToolCall(
     id: id,
     toolName: toolName,
@@ -67,6 +75,7 @@ class VibeToolCall {
     commandOutput: commandOutput ?? this.commandOutput,
     exitCode: exitCode ?? this.exitCode,
     plan: plan ?? this.plan,
+    changedPaths: changedPaths ?? this.changedPaths,
   );
 }
 

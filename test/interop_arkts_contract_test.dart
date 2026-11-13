@@ -189,7 +189,7 @@ void main() {
       final body = probeBody!.group(0)!;
       expect(body, contains("'action'") );
       expect(body, contains("'analyze'"));
-      expect(body, contains("'payloadDirectory'"));
+      expect(body, contains("'payloadUri'"));
     });
 
     test('no bundle permission is declared or needed', () {
@@ -250,13 +250,16 @@ void main() {
       }
     });
 
-    test('sends the terminal events the Dart transport waits for', () {
+    test('delivers one terminal event carrying the aggregated output', () {
+      // Streaming several events is impossible: each bridge start hands the
+      // foreground back to Studio and the system then refuses the next start
+      // from the now-background receiver, so the run crosses as one done or
+      // error whose text holds the whole output.
       expect(source, contains("'done'"));
       expect(source, contains("'error'"));
-      expect(source, contains("'stdout'"));
-      expect(source, contains("'stderr'"));
-      expect(source, contains("'progress'"));
-      expect(source, contains("'accepted'"));
+      expect(source, contains('formatAggregate'));
+      expect(source, contains('OUTPUT_TAIL_BYTES'));
+      expect(source, isNot(contains("'progress'")));
     });
 
     test('the module exports the ability the Studio target names', () {
