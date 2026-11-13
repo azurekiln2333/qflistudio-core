@@ -88,11 +88,14 @@ class _ComposerCardState extends State<ComposerCard> {
       oldWidget.state.removeListener(_onStateChanged);
       widget.state.addListener(_onStateChanged);
       _input.text = widget.state.text;
+      // 换会话后新的状态可能还没轮到模型列表：按当前列表补一次，否则卡片退回
+      //「默认模型」并丢掉推理强度（D1、D2）。
+      _syncDefaultSelection();
     }
     if (!identical(oldWidget.models, widget.models)) _syncDefaultSelection();
   }
 
-  /// 模型列表到达后选定一个具体模型。
+  /// 模型列表到达或换会话后，保证选中一个具体模型。
   ///
   /// 没有选中模型时无从判断它支不支持推理强度，选择器就只能是猜的。因此这里
   /// 定下第一项（列表由服务端排序），推理强度跟着取该模型的第一档。

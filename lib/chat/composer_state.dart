@@ -21,10 +21,15 @@ class ComposerState extends ChangeNotifier {
     ComposerDefaultsStore? defaults,
     String? projectId,
     String? projectRoot,
+    String? modelId,
+    String? reasoningEffort,
   }) : _permission = permission,
        _defaults = defaults,
        _projectId = projectId,
-       _projectRoot = projectRoot;
+       _projectRoot = projectRoot,
+       _modelId = modelId,
+       // 没有模型就没有推理强度：避免把 A 模型的档位发给空选择。
+       _reasoningEffort = modelId == null ? null : reasoningEffort;
 
   ComposerDefaultsStore? _defaults;
   String? _projectId;

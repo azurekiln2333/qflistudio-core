@@ -413,6 +413,58 @@ void main() {
       await unmount(tester);
     });
 
+    testWidgets('D1/D2 切换会话后模型名和推理强度不丢', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final first = await store.create('p1', title: '会话一');
+      final second = await store.create('p1', title: '会话二');
+      final runtime = runtimeFor(
+        store,
+        models: const [
+          AgentModelOption(
+            id: 'model-a',
+            label: 'Model A',
+            reasoningEfforts: ['low', 'high'],
+          ),
+          AgentModelOption(
+            id: 'model-b',
+            label: 'Model B',
+            reasoningEfforts: ['medium', 'max'],
+          ),
+        ],
+      );
+      runtime.facades[first.id] = FakeAgentFacade(sessionId: first.id);
+      runtime.facades[second.id] = FakeAgentFacade(sessionId: second.id);
+
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: first.id),
+      );
+      await settle(tester);
+
+      // 会话一：选第二个模型，再把推理强度调到第二档。
+      await tester.tap(find.byKey(const ValueKey('composer-model')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Model B').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('composer-reasoning')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('max').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Model B'), findsOneWidget);
+      expect(find.text('max'), findsOneWidget);
+
+      // 切到会话二：模型名和推理强度仍然显示，不退回「默认模型」。
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: second.id),
+      );
+      await settle(tester);
+      expect(find.text('Model B'), findsOneWidget);
+      expect(find.text('max'), findsOneWidget);
+      expect(find.text('默认模型'), findsNothing);
+
+      await unmount(tester);
+    });
+
     testWidgets('D3 模型加载中显示加载态，且不影响会话与发送', (tester) async {
       final auth = await loggedIn();
       final store = MemoryAgentSessionStore();

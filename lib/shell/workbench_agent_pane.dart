@@ -95,11 +95,25 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
     return _composers.putIfAbsent(sessionId, _createComposer);
   }
 
-  ComposerState _createComposer() => ComposerState(
-    defaults: widget.composerDefaults,
-    projectId: widget.project.id,
-    projectRoot: widget.project.path,
-  );
+  /// 新建会话的输入卡片。
+  ///
+  /// 模型选择按项目记住（design.md §11.6），所以同一项目里的新会话沿用已打开
+  /// 会话的选择；一个都没打开时用模型列表的第一项。不这两个来源做种子，新会话
+  /// 会回到「默认模型」并丢掉推理强度（D1、D2）。
+  ComposerState _createComposer() {
+    final sibling = _composers.isEmpty ? _newComposer : _composers.values.last;
+    final fallback = _models.isEmpty ? null : _models.first;
+    final efforts = fallback?.reasoningEfforts ?? const <String>[];
+    return ComposerState(
+      permission: sibling?.permission ?? AgentPermissionMode.askEveryWrite,
+      defaults: widget.composerDefaults,
+      projectId: widget.project.id,
+      projectRoot: widget.project.path,
+      modelId: sibling?.modelId ?? fallback?.id,
+      reasoningEffort:
+          sibling?.reasoningEffort ?? (efforts.isEmpty ? null : efforts.first),
+    );
+  }
 
   /// 有进展：正在跑、正在收尾，或者这一条刚发出去还没回应。
   bool get _working {
