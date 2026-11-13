@@ -60,6 +60,16 @@ import 'ai_panel.dart';
 import 'open_performance.dart';
 import '../interop/interop_run_dialog.dart';
 import '../interop/interop_targets.dart';
+import '../layout/breakpoints.dart';
+import '../shell/login_gate.dart';
+import '../shell/workbench_state.dart';
+import '../chat/composer_state.dart';
+import '../vibe_coding/vibe_agent_facade.dart';
+import 'agent/agent_dock.dart';
+import 'agent/agent_pane_switcher.dart';
+import 'agent/editor_agent_host.dart';
+import 'agent/editor_sidebar_tabs.dart';
+import 'agent/session_list_view.dart';
 
 enum _BottomPanel {
   none,
@@ -155,7 +165,9 @@ class EditorPage extends StatefulWidget {
     this.workspaceStore,
     this.onWorkspaceSaved,
     this.onProjectSelected,
-    this.onOpenAgent,
+    this.agentRuntime,
+    this.composerDefaults,
+    this.agentEnabled = false,
   });
 
   final Project project;
@@ -194,11 +206,23 @@ class EditorPage extends StatefulWidget {
   /// Lets the retained owner open external projects as standalone sessions.
   final ValueChanged<Project>? onProjectSelected;
 
-  /// 打开工作台的对话流。
+  /// 打开 Agent 面板的运行时。
   ///
-  /// 非空时编辑器内的 AI 入口改为调用它，应用内只保留一个 AI 入口
-  /// （design.md §4 第 12 条）。为空时保留原有的内嵌 AI 面板。
-  final VoidCallback? onOpenAgent;
+  /// 为空时在第一次展开 Agent 面板时解析应用级单例；测试注入用。
+  /// agent 嵌在本页内，不另开页面（design.md §11.1）。
+  final AgentRuntime? agentRuntime;
+
+  /// 按项目记住的模型 / 推理强度 / 权限模式（design.md §4 第 9 条）。
+  ///
+  /// 为空时用文件实现；测试注入内存实现，避开目录探测定时器。
+  final ComposerDefaultsStore? composerDefaults;
+
+  /// 是否把 agent 嵌入本页。
+  ///
+  /// 默认关闭：直接构造 `EditorPage` 的地方行为与基线完全一致（菜单「AI 助手」
+  /// 打开旧面板，没有 agent 入口、分段和右栏）。宿主 `retained_editor_host`
+  /// 负责按产品策略打开，见 design.md §11.2。
+  final bool agentEnabled;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -259,6 +283,27 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _aiCollapsed = false;
   _BottomPanel _bottomPanel = _BottomPanel.none;
   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
+
+  /// agent 宿主：持有侧边栏分段、主体分段和对话流收起状态。
+  ///
+  /// 离线产品为 null，页面上不出现任何 agent 控件。
+  EditorAgentHost? _agentHost;
+
+  /// 输入卡片的选择记忆。构造不触 IO，磁盘读写延到首次读取。
+  ///
+  /// 文件实现按实例缓存整张表，多实例会互相覆盖，故全应用共用一个。
+  static final ComposerDefaultsStore _sharedComposerDefaults =
+      FileComposerDefaultsStore();
+
+  late final ComposerDefaultsStore _composerDefaults =
+      widget.composerDefaults ?? _sharedComposerDefaults;
+
+  /// 编辑器列与 Agent 面板的保活 key。
+  ///
+  /// 跨断点时两者在两套布局之间移动，[GlobalKey] 让同一份 Element（连同
+  /// 终端会话、输入卡片草稿）原地迁移而不重建。
+  final GlobalKey _editorColumnKey = GlobalKey(debugLabel: 'editor-column');
+  final GlobalKey _agentPaneKey = GlobalKey(debugLabel: 'editor-agent-pane');
 
   /// Mirror of the terminal prompt's focus state, kept in sync by
   /// [_onTerminalInputFocusChanged].
@@ -340,6 +385,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _debugger.addListener(_onDebuggerChanged);
     _analysis.addListener(_onAnalysisChanged);
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
+    if (widget.agentEnabled && EditorAgentHost.supported) {
+      final host = EditorAgentHost(
+        project: widget.project,
+        auth: widget.auth,
+        store: widget.store,
+        settings: widget.settings,
+        runtime: widget.agentRuntime,
+      );
+      host.addListener(_onAgentHostChanged);
+      _agentHost = host;
+    }
     OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
     _editor.addListener(_onEditorChanged);
@@ -792,6 +848,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   @override
   void dispose() {
     widget.retainedVisibility?.removeListener(_onRetainedVisibilityChanged);
+    _agentHost?.removeListener(_onAgentHostChanged);
+    _agentHost?.dispose();
+    _agentHost = null;
     _hiddenViews.clear();
     // TEMP-DIAG (remove after device verification).
     FocusManager.instance.removeListener(_diagFocus);
@@ -1253,6 +1312,191 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   void _closeDrawer() {
     _scaffoldKey.currentState?.closeDrawer();
   }
+
+  // ---- Agent 面板 ----
+
+  void _onAgentHostChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 展开 Agent 面板：宽屏展开右栏，中屏与窄屏切到 Agent 分段。
+  ///
+  /// 同时是「第一次展开」，运行时就从这里开始解析。
+  void _showAgentPanel() {
+    final host = _agentHost;
+    if (host == null) return;
+    host.activate();
+    final layout = layoutOf(MediaQuery.sizeOf(context).width);
+    if (layout == WorkbenchLayout.wide) {
+      host.state.setAgentPaneCollapsed(false);
+    } else {
+      host.state.showMainPane(MainPane.agent);
+      // 记下「展开过」：窗口拉宽后直接就是展开的对话流。
+      host.state.setAgentPaneCollapsed(false);
+    }
+  }
+
+  /// 收起宽屏右栏。
+  void _collapseAgentPanel() {
+    final host = _agentHost;
+    if (host == null) return;
+    host.state.setAgentPaneCollapsed(true);
+  }
+
+  /// 切侧边栏分段。窄屏同时打开抽屉。
+  void _showSidebarSection(SidebarSection section) {
+    final host = _agentHost;
+    if (host == null) return;
+    host.activate();
+    setState(() => _explorerVisible = true);
+    host.state.showSidebarSection(section);
+    if (layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.narrow) {
+      _scaffoldKey.currentState?.openDrawer();
+    }
+  }
+
+  /// 新建会话并把它放到 Agent 面板上。
+  Future<void> _createAgentSession() async {
+    final host = _agentHost;
+    final runtime = host?.runtime;
+    if (host == null || runtime == null) return;
+    final meta = await runtime.sessions.create(widget.project.id);
+    if (!mounted) return;
+    _selectAgentSession(meta.id);
+  }
+
+  /// 点选会话：Agent 面板显示它，窄屏切分段并关抽屉。
+  void _selectAgentSession(String sessionId) {
+    final host = _agentHost;
+    if (host == null) return;
+    host.selectSession(sessionId);
+    final layout = layoutOf(MediaQuery.sizeOf(context).width);
+    if (layout == WorkbenchLayout.wide) {
+      host.state.setAgentPaneCollapsed(false);
+    } else {
+      host.state.showMainPane(MainPane.agent);
+      host.state.setAgentPaneCollapsed(false);
+      if (layout == WorkbenchLayout.narrow) _closeDrawer();
+    }
+  }
+
+  /// 宽屏右栏的收起宽度。
+  static const double _agentRailWidth = 48;
+
+  /// Agent 面板是否已经展开。
+  bool get _agentPanelActive {
+    final host = _agentHost;
+    if (host == null) return false;
+    if (layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide) {
+      return !host.state.agentPaneCollapsed;
+    }
+    return host.state.mainPane == MainPane.agent;
+  }
+
+  /// 后台待确认或失败的会话数，用于顶栏角标。
+  int _agentBadgeCount() {
+    final runtime = _agentHost?.runtime;
+    if (runtime == null) return 0;
+    var count = 0;
+    for (final meta in runtime.sessions.sessionsOf(widget.project.id)) {
+      final status = runtime.statusOf(meta.id);
+      if (status == AgentLiveStatus.awaitingApproval ||
+          status == AgentLiveStatus.failed) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /// 宽屏右栏：展开时是会话框，收起时只剩竖条。
+  ///
+  /// 收起时对话流仍在树上（只是不画），所以恢复后草稿和消息都在。
+  Widget _buildAgentDockStack(
+    EditorAgentHost? host, {
+    required bool collapsed,
+    required Widget? pane,
+  }) {
+    if (host == null) return const SizedBox.shrink();
+    final runtime = host.runtime;
+    final content = runtime == null
+        ? (pane ?? const SizedBox.shrink())
+        : LoginGateScope(
+            auth: widget.auth,
+            child: AgentDock(
+              runtime: runtime,
+              state: host.state,
+              onCollapse: _collapseAgentPanel,
+              onCreateSession: _createAgentSession,
+              child: pane ?? const SizedBox.shrink(),
+            ),
+          );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: Breakpoints.agentPaneWidth,
+          child: Offstage(
+            offstage: collapsed,
+            child: content,
+          ),
+        ),
+        if (collapsed)
+          AgentDockRail(
+            onExpand: _showAgentPanel,
+            badgeCount: _agentBadgeCount(),
+          ),
+      ],
+    );
+  }
+
+  /// 侧边栏：「文件 | 会话」。没有 agent 时只有文件树。
+  ///
+  /// 分段固定在侧边栏顶部、文件树卡片之上，抽屉里用的是同一个组件。
+  Widget _buildSidebar(BuildContext context, {VoidCallback? onFileOpened}) {
+    final files = _buildExplorerCard(context, onFileOpened: onFileOpened);
+    final host = _agentHost;
+    if (host == null) return files;
+    final runtime = host.runtime;
+    return EditorSidebarTabs(
+      state: host.state,
+      files: files,
+      // 未激活时也给出「会话」分段，点它才开始解析运行时。
+      sessionsLoading: runtime == null,
+      onSectionChanged: _showSidebarSection,
+      sessions: runtime == null
+          ? null
+          : SessionListView(
+              runtime: runtime,
+              state: host.state,
+              projectId: widget.project.id,
+              onSelect: _selectAgentSession,
+              onCreate: _createAgentSession,
+            ),
+    );
+  }
+
+  /// Agent 面板本体。运行时还没解析好时显示等待或错误。
+  ///
+  /// 外面包 [LoginGateScope]：输入卡片的登录门控需要一个能读到登录态的
+  /// 作用域，编辑器页现在是唯一的提供者。
+  Widget _buildAgentPane(EditorAgentHost host) => LoginGateScope(
+    auth: widget.auth,
+    child: EditorAgentPane(
+      key: _agentPaneKey,
+      project: widget.project,
+      runtime: host.runtime,
+      auth: widget.auth,
+      settings: widget.settings,
+      sessionId: host.state.sessionId,
+      onSessionOpened: _selectAgentSession,
+      error: host.error,
+      onRetry: host.activate,
+      composerDefaults: _composerDefaults,
+    ),
+  );
 
   // ---- 编辑动作 ----
 
@@ -2478,6 +2722,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                if (_agentHost case final host?)
+                                  AgentEntryButton(
+                                    host: host,
+                                    active: _agentPanelActive,
+                                    onPressed: _showAgentPanel,
+                                  ),
                                 if (widget.onMinimize != null)
                                   IconButton(
                                     tooltip: '暂时收起编辑器',
@@ -2631,10 +2881,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ),
                                         );
                                       case 'ai':
-                                        final openAgent =
-                                            widget.onOpenAgent;
-                                        if (openAgent != null) {
-                                          openAgent();
+                                        // agent 打开时应用内只有一个 AI 入口，
+                                        // 菜单直接开 Agent 面板；否则维持旧面板。
+                                        if (_agentHost != null) {
+                                          _showAgentPanel();
                                         } else {
                                           setState(
                                             () => _bottomPanel =
@@ -2996,6 +3246,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ],
                                         ),
                                       ),
+
                                     if (StudioProfile.current?.offlineOnly !=
                                         true)
                                       const PopupMenuItem(
@@ -3031,7 +3282,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     child: SafeArea(
                       child: Padding(
                         padding: const EdgeInsets.all(_cardMargin),
-                        child: _buildExplorerCard(
+                        child: _buildSidebar(
                           context,
                           onFileOpened: _closeDrawer,
                         ),
@@ -3119,7 +3370,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     // most one panel is visible at a time. The terminal stays
                     // `Offstage` while another panel is selected, and the rest
                     // are keyed off `_bottomPanel`.
-                    return Row(
+                    final layout = layoutOf(MediaQuery.sizeOf(context).width);
+                    final agentHost = _agentHost;
+                    final agentEnabled = agentHost != null && !focusMode;
+                    final agentCollapsed =
+                        agentHost?.state.agentPaneCollapsed ?? true;
+                    final agentPane = agentEnabled
+                        ? _buildAgentPane(agentHost)
+                        : null;
+                    final body = Row(
                       key: const ValueKey('editor-body-wide'),
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
@@ -3135,13 +3394,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                 child: SizedBox(
                                   key: const ValueKey('editor-sidebar-slot'),
                                   width: _sidebarWidth,
-                                  child: _buildExplorerCard(context),
+                                  child: _buildSidebar(context),
                                 ),
                               ),
                             ),
                           ),
                         Expanded(
-                          child: Column(
+                          child: KeyedSubtree(key: _editorColumnKey, child: Column(
                             key: const ValueKey('editor-right-column'),
                             children: [
                               Expanded(child: _buildEditorArea(context)),
@@ -3233,10 +3492,36 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                   ),
                                 ),
                             ],
-                          ),
+                          )),
                         ),
+                        if (agentEnabled && layout == WorkbenchLayout.wide)
+                          SizedBox(
+                            width: agentCollapsed
+                                ? _agentRailWidth
+                                : Breakpoints.agentPaneWidth,
+                            child: _buildAgentDockStack(
+                              agentHost,
+                              collapsed: agentCollapsed,
+                              pane: agentPane,
+                            ),
+                          ),
                       ],
                     );
+                    if (agentEnabled && layout != WorkbenchLayout.wide) {
+                      return AgentPaneSwitcher(
+                        state: agentHost.state,
+                        editor: body,
+                        agent: agentPane!,
+                        onPaneSelected: (pane) {
+                          if (pane == MainPane.agent) {
+                            agentHost.activate();
+                            agentHost.state.setAgentPaneCollapsed(false);
+                          }
+                        },
+                        showBar: !focusMode,
+                      );
+                    }
+                    return body;
                   },
                 );
               },
@@ -3454,6 +3739,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               store: widget.store,
               settings: widget.settings,
               workspaceStore: widget.workspaceStore,
+              agentEnabled: widget.agentEnabled,
             ),
           ),
         );

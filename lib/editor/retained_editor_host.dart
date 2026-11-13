@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
+import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
@@ -54,6 +55,8 @@ Future<void> openEditorPage(
         workspace: workspace,
         workspaceMembers: workspaceProjects ?? const [],
         workspaceStore: workspaceStore,
+        // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
+        agentEnabled: StudioProfile.current?.offlineOnly != true,
       ),
     ),
   );
@@ -677,6 +680,8 @@ class _SessionEditor extends StatelessWidget {
       workspace: session.workspace,
       workspaceMembers: session.workspaceProjects,
       workspaceStore: session.workspaceStore,
+      // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
+      agentEnabled: StudioProfile.current?.offlineOnly != true,
       onWorkspaceSaved: (workspace, members) =>
           controller.attachWorkspace(sessionKey, workspace, members),
       onProjectSelected: (project) => controller.open(
