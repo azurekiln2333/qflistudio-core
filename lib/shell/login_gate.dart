@@ -78,7 +78,7 @@ class LoginGuideCard extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '登录后可以使用 agent 会话、读写项目文件和调用技能。',
+              '登录后可以使用 Agent 会话、读写项目文件和调用技能。',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
