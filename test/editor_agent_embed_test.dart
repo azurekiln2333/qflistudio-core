@@ -11,7 +11,9 @@ import 'package:qfli_studio_core/chat/composer_state.dart';
 import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
 import 'package:qfli_studio_core/editor/agent/editor_agent_host.dart';
 import 'package:qfli_studio_core/editor/agent/session_list_view.dart';
+import 'package:qfli_studio_core/editor/ai_panel.dart';
 import 'package:qfli_studio_core/editor/editor_page.dart';
+import 'package:qfli_studio_core/editor/file_explorer.dart';
 import 'package:qfli_studio_core/editor/retained_editor_host.dart';
 import 'package:qfli_studio_core/layout/breakpoints.dart';
 import 'package:qfli_studio_core/models/project.dart';
@@ -100,6 +102,7 @@ void main() {
     WidgetTester tester, {
     Size size = const Size(1280, 900),
     bool injectRuntime = true,
+    bool agentEnabled = true,
     ValueNotifier<bool>? retainedVisibility,
     String? initialOpenPath,
     _RouteCounter? observer,
@@ -124,12 +127,58 @@ void main() {
           initialOpenPath: initialOpenPath,
           agentRuntime: injectRuntime ? runtime : null,
           composerDefaults: composerDefaults,
+          agentEnabled: agentEnabled,
           retainedVisibility: retainedVisibility,
         ),
       ),
     );
     await pumpFrames(tester);
   }
+
+  group('开关', () {
+    testWidgets('关闭：无 agent 控件，「AI 助手」仍开旧面板', (tester) async {
+      await mount(tester, agentEnabled: false);
+
+      expect(find.byKey(const ValueKey('editor-agent-toggle')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-switch')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('editor-main-pane-switch')),
+        findsNothing,
+      );
+      expect(find.byKey(const ValueKey('editor-agent-pane')), findsNothing);
+
+      await _openMoreMenu(tester, 'AI 助手');
+
+      expect(find.byType(AiPanel), findsOneWidget);
+    });
+
+    testWidgets('开启：分段在侧边栏顶部，「AI 助手」开 Agent 面板', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      final strip = find.byKey(
+        const ValueKey('editor-sidebar-section-switch'),
+      );
+      expect(strip, findsOneWidget);
+      final stripRect = tester.getRect(strip);
+      final explorerRect = tester.getRect(find.byType(FileExplorer).first);
+
+      expect(
+        stripRect.bottom,
+        lessThanOrEqualTo(explorerRect.top),
+        reason: '分段要在文件树卡片之上',
+      );
+      expect(stripRect.left, lessThan(300), reason: '分段在侧边栏，不在顶栏');
+
+      await _openMoreMenu(tester, 'AI 助手');
+
+      expect(find.byKey(const ValueKey('editor-agent-pane')), findsOneWidget);
+      expect(find.byType(AiPanel), findsNothing, reason: '只剩一个 AI 入口');
+    });
+  });
 
   group('布局', () {
     testWidgets('宽屏有 Agent 入口与「文件 | 会话」分段', (tester) async {
@@ -403,6 +452,7 @@ void main() {
       runtime.liveStatuses[failed.id] = AgentLiveStatus.failed;
 
       await mount(tester);
+      await _openSidebar(tester);
       await tester.tap(
         find.byKey(const ValueKey('editor-sidebar-section-sessions')),
       );
@@ -433,6 +483,7 @@ void main() {
 
     testWidgets('空会话列表给出说明和主操作', (tester) async {
       await mount(tester);
+      await _openSidebar(tester);
       await tester.tap(
         find.byKey(const ValueKey('editor-sidebar-section-sessions')),
       );
@@ -564,6 +615,25 @@ Future<void> pumpFrames(WidgetTester tester, [int frames = 30]) async {
       () => Future<void>.delayed(const Duration(milliseconds: 2)),
     );
   }
+}
+
+/// 打开侧边栏。宽屏默认收起，分段在侧边栏顶部，得先展开。
+Future<void> _openSidebar(WidgetTester tester) async {
+  final open = find.byTooltip('打开文件树');
+  if (open.evaluate().isEmpty) return;
+  await tester.tap(open);
+  await pumpFrames(tester);
+}
+
+/// 打开「更多」菜单并点其中一项。
+Future<void> _openMoreMenu(WidgetTester tester, String label) async {
+  await tester.tap(find.byTooltip('更多'));
+  final entry = find.widgetWithText(PopupMenuItem<String>, label);
+  await pumpUntil(tester, () => entry.evaluate().isNotEmpty);
+  await tester.pump(const Duration(milliseconds: 400));
+  await tester.tap(entry);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
 }
 
 Future<void> pumpUntil(

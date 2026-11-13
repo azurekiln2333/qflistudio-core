@@ -167,6 +167,7 @@ class EditorPage extends StatefulWidget {
     this.onProjectSelected,
     this.agentRuntime,
     this.composerDefaults,
+    this.agentEnabled = false,
   });
 
   final Project project;
@@ -215,6 +216,13 @@ class EditorPage extends StatefulWidget {
   ///
   /// 为空时用文件实现；测试注入内存实现，避开目录探测定时器。
   final ComposerDefaultsStore? composerDefaults;
+
+  /// 是否把 agent 嵌入本页。
+  ///
+  /// 默认关闭：直接构造 `EditorPage` 的地方行为与基线完全一致（菜单「AI 助手」
+  /// 打开旧面板，没有 agent 入口、分段和右栏）。宿主 `retained_editor_host`
+  /// 负责按产品策略打开，见 design.md §11.2。
+  final bool agentEnabled;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -377,7 +385,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _debugger.addListener(_onDebuggerChanged);
     _analysis.addListener(_onAnalysisChanged);
     widget.retainedVisibility?.addListener(_onRetainedVisibilityChanged);
-    if (EditorAgentHost.supported) {
+    if (widget.agentEnabled && EditorAgentHost.supported) {
       final host = EditorAgentHost(
         project: widget.project,
         auth: widget.auth,
@@ -1445,6 +1453,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   /// 侧边栏：「文件 | 会话」。没有 agent 时只有文件树。
+  ///
+  /// 分段固定在侧边栏顶部、文件树卡片之上，抽屉里用的是同一个组件。
   Widget _buildSidebar(BuildContext context, {VoidCallback? onFileOpened}) {
     final files = _buildExplorerCard(context, onFileOpened: onFileOpened);
     final host = _agentHost;
@@ -1452,11 +1462,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final runtime = host.runtime;
     return EditorSidebarTabs(
       state: host.state,
-      // 常驻侧边栏的分段放在顶栏，抽屉里的分段放在列表上方。
-      showStrip:
-          layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.narrow,
       files: files,
-      sessionsLoading: host.activated && runtime == null,
+      // 未激活时也给出「会话」分段，点它才开始解析运行时。
+      sessionsLoading: runtime == null,
+      onSectionChanged: _showSidebarSection,
       sessions: runtime == null
           ? null
           : SessionListView(
@@ -2713,26 +2722,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (_agentHost case final host?) ...[
+                                if (_agentHost case final host?)
                                   AgentEntryButton(
                                     host: host,
                                     active: _agentPanelActive,
                                     onPressed: _showAgentPanel,
                                   ),
-                                  if (layoutOf(
-                                        MediaQuery.sizeOf(context).width,
-                                      ) !=
-                                      WorkbenchLayout.narrow)
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 4,
-                                      ),
-                                      child: SidebarSectionSwitch(
-                                        section: host.state.sidebarSection,
-                                        onChanged: _showSidebarSection,
-                                      ),
-                                    ),
-                                ],
                                 if (widget.onMinimize != null)
                                   IconButton(
                                     tooltip: '暂时收起编辑器',
@@ -2886,16 +2881,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ),
                                         );
                                       case 'ai':
-                                        // 旧的内嵌 AI 面板保留，既有测试与
-                                        // 快捷键行为不变；agent 走新入口。
-                                        setState(
-                                          () => _bottomPanel =
-                                              _bottomPanel == _BottomPanel.ai
-                                              ? _BottomPanel.none
-                                              : _BottomPanel.ai,
-                                        );
-                                      case 'agent_panel':
-                                        _showAgentPanel();
+                                        // agent 打开时应用内只有一个 AI 入口，
+                                        // 菜单直接开 Agent 面板；否则维持旧面板。
+                                        if (_agentHost != null) {
+                                          _showAgentPanel();
+                                        } else {
+                                          setState(
+                                            () => _bottomPanel =
+                                                _bottomPanel ==
+                                                    _BottomPanel.ai
+                                                ? _BottomPanel.none
+                                                : _BottomPanel.ai,
+                                          );
+                                        }
                                       case 'online_terminal':
                                         unawaited(_openOnlineTerminal());
                                       case 'git':
@@ -3248,23 +3246,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           ],
                                         ),
                                       ),
-                                    if (StudioProfile.current?.offlineOnly !=
-                                        true)
-                                      PopupMenuItem(
-                                        value: 'agent_panel',
-                                        child: Row(
-                                          children: [
-                                            Icon(
-                                              Icons.smart_toy_outlined,
-                                              size: 20,
-                                            ),
-                                            const SizedBox(width: 12),
-                                            Flexible(
-                                              child: Text('Agent 面板'),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
+
                                     if (StudioProfile.current?.offlineOnly !=
                                         true)
                                       const PopupMenuItem(
@@ -3757,6 +3739,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               store: widget.store,
               settings: widget.settings,
               workspaceStore: widget.workspaceStore,
+              agentEnabled: widget.agentEnabled,
             ),
           ),
         );

@@ -4,8 +4,8 @@ import '../../shell/workbench_state.dart';
 
 /// 侧边栏分段：「文件 | 会话」。
 ///
-/// 常驻侧边栏里分段放在顶栏（见 [SidebarSectionSwitch]），抽屉里分段放在
-/// 列表上方，两处读同一个 [WorkbenchState]。见 design.md §11.1。
+/// 分段固定在侧边栏顶部、文件树卡片之上，抽屉里用的是同一个组件，两处读
+/// 同一个 [WorkbenchState]。见 design.md §11.1。
 class EditorSidebarTabs extends StatelessWidget {
   const EditorSidebarTabs({
     super.key,
@@ -14,6 +14,7 @@ class EditorSidebarTabs extends StatelessWidget {
     this.sessions,
     this.sessionsLoading = false,
     this.showStrip = true,
+    this.onSectionChanged,
   });
 
   final WorkbenchState state;
@@ -27,8 +28,11 @@ class EditorSidebarTabs extends StatelessWidget {
   /// 会话列表还在准备中。
   final bool sessionsLoading;
 
-  /// 是否在列表上方画分段条。常驻侧边栏由顶栏承载分段，这里传 false。
+  /// 是否在列表上方画分段条。
   final bool showStrip;
+
+  /// 切分段时的回调。默认只改状态；编辑器页用它顺带激活运行时。
+  final ValueChanged<SidebarSection>? onSectionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +51,7 @@ class EditorSidebarTabs extends StatelessWidget {
                 child: SidebarSectionSwitch(
                   section: state.sidebarSection,
                   showLabels: true,
-                  onChanged: state.showSidebarSection,
+                  onChanged: onSectionChanged ?? state.showSidebarSection,
                 ),
               ),
             Expanded(
