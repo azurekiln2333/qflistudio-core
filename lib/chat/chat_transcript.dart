@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../vibe_coding/vibe_agent_facade.dart';
@@ -13,11 +14,18 @@ class ChatTranscript extends StatefulWidget {
     required this.messages,
     required this.state,
     this.lastError,
+    this.errorInfo,
+    this.activity,
+    this.queued = false,
+    this.waitingSeconds,
+    this.hasEarlier = false,
+    this.loadingEarlier = false,
+    this.onLoadEarlier,
     this.pendingApproval,
     this.onApproval,
     this.onRetry,
     this.emptyTitle = '开始一个新的会话',
-    this.emptyHint = '描述你想改什么。agent 会读写项目文件，并在在线终端里运行命令。',
+    this.emptyHint = '描述你想改什么。Agent 会读写项目文件，并在在线终端里运行命令。',
     this.emptyAction,
     this.padding = const EdgeInsets.all(12),
   });
@@ -27,6 +35,26 @@ class ChatTranscript extends StatefulWidget {
 
   /// 最近一次失败的原因，直接来自 facade。
   final String? lastError;
+
+  /// 最近一次失败的分类。有分类时按 design.md §11.6 的文案表选文案。
+  final AgentErrorInfo? errorInfo;
+
+  /// 一句话说明正在做什么，来自 `facade.activity`。为空时写「思考中…」。
+  final String? activity;
+
+  /// 会话在排队。为真时状态行写「排队中」。
+  final bool queued;
+
+  /// 已等待秒数；不足 3 秒时为 null。
+  final int? waitingSeconds;
+
+  /// 还有更早的消息可以载入。
+  final bool hasEarlier;
+
+  /// 正在载入更早的一页。
+  final bool loadingEarlier;
+
+  final VoidCallback? onLoadEarlier;
 
   /// 等待确认的写入。
   final AgentWriteApproval? pendingApproval;
@@ -49,6 +77,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   final ScrollController _scroll = ScrollController();
   int _lastCount = 0;
   String _lastTail = '';
+  double _lastPixels = 0;
 
   @override
   void initState() {
@@ -57,6 +86,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     if (widget.messages.isNotEmpty) {
       _lastTail = _tailOf(widget.messages.last);
     }
+    _scroll.addListener(_onScroll);
     _scheduleScrollToBottom();
   }
 
@@ -75,6 +105,43 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   static String _tailOf(AgentMessageView message) =>
       '${message.id}|${message.text.length}|${message.pending}';
 
+  /// 已渲染过的条目。流式更新时只有末尾那条的内容会变，其余直接复用同一个
+  /// widget 实例，Flutter 会跳过它们的 build（brief 任务 9）。
+  final Map<String, Widget> _tiles = <String, Widget>{};
+  final Map<String, AgentMessageView> _rendered = <String, AgentMessageView>{};
+
+  /// 条目缓存的上限。超过就整体丢掉，避免长会话把旧条目一直留在内存里。
+  static const int _tileCacheLimit = 4000;
+
+  Widget _tileFor(AgentMessageView message) {
+    final cached = _tiles[message.id];
+    final previous = _rendered[message.id];
+    if (cached != null && previous != null && _sameView(previous, message)) {
+      return cached;
+    }
+    if (_tiles.length >= _tileCacheLimit) {
+      _tiles.clear();
+      _rendered.clear();
+    }
+    final tile = ChatMessageTile(
+      key: ValueKey('chat-message-${message.id}'),
+      message: message,
+    );
+    _tiles[message.id] = tile;
+    _rendered[message.id] = message;
+    return tile;
+  }
+
+  /// 内容没变就不重建。逐字段比较，不依赖 facade 复用同一个视图对象。
+  static bool _sameView(AgentMessageView a, AgentMessageView b) =>
+      a.role == b.role &&
+      a.text == b.text &&
+      a.toolName == b.toolName &&
+      a.isError == b.isError &&
+      a.pending == b.pending &&
+      a.aiGenerated == b.aiGenerated &&
+      listEquals(a.changedPaths, b.changedPaths);
+
   void _scheduleScrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
@@ -82,8 +149,24 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     });
   }
 
+  /// 用户往上滚到顶时载入更早的一页。
+  ///
+  /// 只在向上移动时触发，首次布局时 pixels 也等于 0，不能因此反复拉取。
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    final pixels = position.pixels;
+    final movingUp = pixels < _lastPixels;
+    _lastPixels = pixels;
+    if (!movingUp) return;
+    if (!widget.hasEarlier || widget.loadingEarlier) return;
+    if (pixels > position.minScrollExtent) return;
+    widget.onLoadEarlier?.call();
+  }
+
   @override
   void dispose() {
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
   }
@@ -93,24 +176,40 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       widget.state == AgentRunState.cancelling ||
       widget.state == AgentRunState.awaitingApproval;
 
+  /// 有进展要显示：运行、排队或等待确认。
+  bool get _busy => _running || widget.queued;
+
+  /// 状态行文案：排队优先，其次用 facade 的 activity，最后是「思考中…」。
+  String get _statusText {
+    if (widget.queued) return '排队中';
+    final activity = widget.activity?.trim() ?? '';
+    if (activity.isNotEmpty) return activity;
+    return '思考中…';
+  }
+
   @override
   Widget build(BuildContext context) {
     final messages = widget.messages;
-    if (messages.isEmpty && widget.pendingApproval == null) {
-      return _buildEmpty(context);
-    }
     final approval = widget.pendingApproval;
     final failed = widget.state == AgentRunState.failed;
-    return ListView.builder(
+    final busy = _busy;
+    if (messages.isEmpty && approval == null && !failed && !busy) {
+      return _buildEmpty(context);
+    }
+    final showEarlier = widget.hasEarlier;
+    final leading = showEarlier ? 1 : 0;
+    final extras = (approval == null ? 0 : 1) + (failed ? 1 : 0);
+    final list = ListView.builder(
       controller: _scroll,
       padding: widget.padding,
-      itemCount:
-          messages.length + (approval == null ? 0 : 1) + (failed ? 1 : 0),
+      itemCount: leading + messages.length + extras,
       itemBuilder: (context, index) {
-        if (index < messages.length) {
-          return ChatMessageTile(message: messages[index]);
+        if (showEarlier && index == 0) return _buildEarlierButton(context);
+        final position = index - leading;
+        if (position < messages.length) {
+          return _tileFor(messages[position]);
         }
-        if (approval != null && index == messages.length) {
+        if (approval != null && position == messages.length) {
           return WriteApprovalCard(
             approval: approval,
             onResolve: (allow) => widget.onApproval?.call(allow),
@@ -118,6 +217,78 @@ class _ChatTranscriptState extends State<ChatTranscript> {
         }
         return _buildErrorBar(context);
       },
+    );
+    if (!busy) return list;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildStatusHeader(context),
+        Expanded(child: list),
+      ],
+    );
+  }
+
+  /// 对话流顶部的进度条和状态行（design.md §11.6）。
+  Widget _buildStatusHeader(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final waiting = widget.waitingSeconds;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const LinearProgressIndicator(
+          key: ValueKey('chat-progress'),
+          minHeight: 3,
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: Row(
+            children: [
+              Icon(Icons.bolt, size: 14, color: scheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _statusText,
+                  key: const ValueKey('chat-status'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              if (waiting != null)
+                Text(
+                  '已等待 $waiting 秒',
+                  key: const ValueKey('chat-waiting'),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEarlierButton(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Center(
+        child: TextButton.icon(
+          key: const ValueKey('chat-load-earlier'),
+          onPressed: widget.loadingEarlier ? null : widget.onLoadEarlier,
+          icon: widget.loadingEarlier
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.history, size: 18),
+          label: const Text('载入更早的消息'),
+        ),
+      ),
     );
   }
 
@@ -160,11 +331,29 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     );
   }
 
+  /// design.md §11.6 的错误文案表。未知分类返回 null，由调用方回退到原文。
+  static String? _errorTextOf(AgentErrorInfo? info) {
+    if (info == null) return null;
+    return switch (info.kind) {
+      AgentErrorKind.loginExpired => '登录已过期，请重新登录',
+      AgentErrorKind.rateLimited => '请求太频繁，已自动重试仍失败，请稍后再试',
+      AgentErrorKind.notConfigured => 'AI 服务暂未开通（服务端未配置），请联系管理员',
+      AgentErrorKind.offline => '网络不可用，检查网络后重试',
+      AgentErrorKind.timeout => '上游响应超时，重试一次',
+      AgentErrorKind.unknown => null,
+    };
+  }
+
   /// 失败条：原因来自 facade，下一步由这里补一句可执行的动作。
   Widget _buildErrorBar(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final error = widget.lastError?.trim() ?? '';
+    final info = widget.errorInfo;
+    final raw = widget.lastError?.trim() ?? '';
+    final text = _errorTextOf(info) ?? (raw.isEmpty ? '这一轮没有完成。' : raw);
+    final hasDetails =
+        info != null &&
+        (info.statusCode != null || info.detail.trim().isNotEmpty);
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 4),
@@ -186,7 +375,8 @@ class _ChatTranscriptState extends State<ChatTranscript> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  error.isEmpty ? '这一轮没有完成。' : error,
+                  text,
+                  key: const ValueKey('chat-error'),
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: scheme.onErrorContainer,
                     height: 1.5,
@@ -195,6 +385,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
               ),
             ],
           ),
+          if (hasDetails) _buildErrorDetails(context, info),
           if (widget.onRetry != null) ...[
             const SizedBox(height: 8),
             SizedBox(
@@ -203,10 +394,54 @@ class _ChatTranscriptState extends State<ChatTranscript> {
                 key: const ValueKey('chat-retry'),
                 onPressed: _running ? null : widget.onRetry,
                 icon: const Icon(Icons.refresh, size: 18),
-                label: const Text('重试上一条消息'),
+                label: const Text('重试'),
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// 折叠的「详情」：状态码和服务端原文，不把堆栈放到主文案里。
+  Widget _buildErrorDetails(BuildContext context, AgentErrorInfo info) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final detail = info.detail.trim();
+    return Theme(
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        key: const ValueKey('chat-error-details'),
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        iconColor: scheme.onErrorContainer,
+        collapsedIconColor: scheme.onErrorContainer,
+        title: Text(
+          '详情',
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: scheme.onErrorContainer,
+          ),
+        ),
+        children: [
+          if (info.statusCode != null)
+            Text(
+              '状态码：${info.statusCode}',
+              key: const ValueKey('chat-error-status'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: scheme.onErrorContainer,
+              ),
+            ),
+          if (detail.isNotEmpty)
+            SelectableText(
+              detail,
+              key: const ValueKey('chat-error-detail'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontFamily: 'monospace',
+                color: scheme.onErrorContainer,
+              ),
+            ),
         ],
       ),
     );
@@ -219,8 +454,15 @@ class ChatMessageTile extends StatelessWidget {
 
   final AgentMessageView message;
 
+  /// 测试用：累计 build 次数，用来证明流式更新只重建末尾条目。
+  static int debugBuildCount = 0;
+
   @override
   Widget build(BuildContext context) {
+    assert(() {
+      debugBuildCount++;
+      return true;
+    }());
     final role = message.role;
     if (role == 'user') return _buildUser(context);
     if (role == 'tool') return _buildTool(context);
@@ -310,13 +552,11 @@ class ChatMessageTile extends StatelessWidget {
     final scheme = theme.colorScheme;
     final name = message.toolName ?? '';
     final failed = message.isError;
-    final icon = message.pending
-        ? Icons.autorenew
-        : (failed ? Icons.error_outline : Icons.check_circle_outline);
-    final color = message.pending
+    final pending = message.pending;
+    final color = pending
         ? scheme.primary
         : (failed ? scheme.error : scheme.primary);
-    final label = message.pending ? '执行中' : (failed ? '失败' : '完成');
+    final label = pending ? '执行中' : (failed ? '失败' : '完成');
     final detail = message.text.trim();
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -330,7 +570,24 @@ class ChatMessageTile extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(icon, size: 16, color: color),
+              // 运行中转圈，完成后对勾或叉（design.md §11.6 第 4 条）。
+              if (pending)
+                SizedBox(
+                  key: ValueKey('tool-spinner-${message.id}'),
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: color,
+                  ),
+                )
+              else
+                Icon(
+                  key: ValueKey('tool-done-${message.id}'),
+                  failed ? Icons.cancel_outlined : Icons.check_circle_outline,
+                  size: 16,
+                  color: color,
+                ),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(

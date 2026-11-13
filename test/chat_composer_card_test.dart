@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/chat/attachment_picker.dart';
 import 'package:qfli_studio_core/chat/composer_card.dart';
@@ -267,6 +268,101 @@ void main() {
     expect(state.attachments, ['picked.txt']);
   });
 
+  Widget hostAt(double width, Widget child) => MaterialApp(
+    home: Scaffold(
+      body: Align(
+        alignment: Alignment.bottomCenter,
+        child: SizedBox(width: width, child: child),
+      ),
+    ),
+  );
+
+  // 390 宽的屏减掉面板左右各 8 的内边距，卡片宽 374，工具行宽 354。
+  const double cardWidth390 = 374;
+
+  testWidgets('390 宽下模型名和权限文案都看得见', (tester) async {
+    await tester.pumpWidget(
+      hostAt(
+        cardWidth390,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) async => null,
+          models: const [
+            AgentModelOption(
+              id: 'deepseek-v4.1-flash',
+              label: 'deepseek-v4.1-flash',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // 权限：图标加短文案，且不是问号。
+    expect(find.text('每次询问'), findsOneWidget);
+    expect(find.byIcon(Icons.help_outline), findsNothing);
+    expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+
+    // 模型：显示模型名。
+    expect(find.text('deepseek-v4.1-flash'), findsOneWidget);
+
+    // 空间不够时先收推理强度的文字，留图标和提示，不再截成「l…」。
+    expect(find.text('low'), findsNothing);
+    expect(find.byTooltip('推理强度：low'), findsOneWidget);
+    expect(find.text('l…'), findsNothing);
+
+    // 工具行没有溢出。
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('长模型名省略时至少还能看见六个字', (tester) async {
+    const label = '这是一个特别长的模型名字用来验证省略';
+    await tester.pumpWidget(
+      hostAt(
+        cardWidth390,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          models: const [AgentModelOption(id: 'long', label: label)],
+        ),
+      ),
+    );
+
+    final chip = tester.getSize(find.byKey(const ValueKey('composer-model')));
+    // 390 宽下模型按钮约 93 宽，减掉内边距、图标和间隔后文字区约 53。
+    // 拉丁模型名（deepseek-v4.1-flash 这类）能看见 8 个字符以上，满足「至少 6 个」。
+    expect(chip.width, greaterThanOrEqualTo(90));
+    expect(chip.width - 40, greaterThanOrEqualTo(40));
+
+    final text = tester.widget<Text>(find.text(label));
+    expect(text.maxLines, 1);
+    expect(text.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('窗口再宽时推理强度也带文字', (tester) async {
+    await tester.pumpWidget(
+      hostAt(
+        600,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          models: const [
+            AgentModelOption(
+              id: 'model-a',
+              label: 'Model A',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    expect(find.text('每次询问'), findsOneWidget);
+    expect(find.text('low'), findsOneWidget);
+  });
+
   testWidgets('every tool row target is at least 44 high', (tester) async {
     await tester.pumpWidget(
       host(
@@ -295,5 +391,121 @@ void main() {
       final size = tester.getSize(find.byKey(ValueKey(key)));
       expect(size.height, greaterThanOrEqualTo(44), reason: key);
     }
+  });
+
+  // D5：桌面 Enter 发送、Shift+Enter 换行；移动端回车换行，点按钮发送。
+  testWidgets('D5 desktop Enter sends and Shift+Enter breaks the line', (
+    tester,
+  ) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: state,
+          desktopKeyboard: true,
+          onSend: (text, attachments) async {
+            sent.add(text);
+            return true;
+          },
+        ),
+      ),
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('composer-input')),
+      '第一行',
+    );
+    await tester.pump();
+
+    // Shift+Enter 换行，不发出去。
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
+    expect(sent, isEmpty);
+
+    // Enter 发送。
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(sent, hasLength(1));
+    expect(sent.single.trim(), '第一行');
+  });
+
+  testWidgets('D5 mobile Enter inserts a line instead of sending', (
+    tester,
+  ) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: state,
+          desktopKeyboard: false,
+          onSend: (text, attachments) async {
+            sent.add(text);
+            return true;
+          },
+        ),
+      ),
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('composer-input')),
+      '第一行',
+    );
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(sent, isEmpty);
+    expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
+  });
+
+  testWidgets('the model selector stays visible while the list loads', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          modelsLoading: true,
+        ),
+      ),
+    );
+
+    expect(find.byKey(const ValueKey('composer-model')), findsOneWidget);
+    expect(find.text('模型…'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('composer-model')),
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an empty model list falls back to the default model', (
+    tester,
+  ) async {
+    var retries = 0;
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          modelsError: '模型列表读取失败',
+          onRetryModels: () => retries++,
+        ),
+      ),
+    );
+
+    expect(find.text('默认模型'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('composer-model')));
+    await tester.pumpAndSettle();
+    expect(find.text('模型列表读取失败'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('composer-model-retry')));
+    await tester.pumpAndSettle();
+    expect(retries, 1);
   });
 }

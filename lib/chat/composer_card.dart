@@ -23,6 +23,10 @@ class ComposerCard extends StatefulWidget {
     this.onPickAttachments,
     this.enabled = true,
     this.hintText,
+    this.modelsLoading = false,
+    this.modelsError,
+    this.onRetryModels,
+    this.desktopKeyboard,
   });
 
   final ComposerState state;
@@ -37,6 +41,18 @@ class ComposerCard extends StatefulWidget {
 
   final List<AgentModelOption> models;
   final List<AgentSkillRef> skills;
+
+  /// 模型列表还在加载：选择器显示「模型…」和一个小转圈。
+  final bool modelsLoading;
+
+  /// 模型列表取不到的原因；为空表示没有出错。
+  final String? modelsError;
+
+  /// 重新拉取模型列表。
+  final VoidCallback? onRetryModels;
+
+  /// 覆盖「是否桌面键盘」的判断，只用于测试移动端与桌面端的回车行为。
+  final bool? desktopKeyboard;
 
   /// 打开附件选择器；为 null 时不显示加号。
   final Future<List<String>?> Function(AttachmentSource source)?
@@ -259,7 +275,7 @@ class _ComposerCardState extends State<ComposerCard> {
 
   /// 桌面端 Enter 发送、Shift+Enter 换行；移动端回车换行，点按钮发送。
   Map<ShortcutActivator, Intent> get _sendShortcuts {
-    if (!AppPaths.isDesktop) return const {};
+    if (!(widget.desktopKeyboard ?? AppPaths.isDesktop)) return const {};
     return const {
       SingleActivator(LogicalKeyboardKey.enter): _ComposerSendIntent(),
       SingleActivator(LogicalKeyboardKey.numpadEnter): _ComposerSendIntent(),
@@ -353,53 +369,73 @@ class _ComposerCardState extends State<ComposerCard> {
   }
 
   Widget _buildToolRow(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final scheme = Theme.of(context).colorScheme;
     final efforts = _efforts;
-    return Row(
-      children: [
-        if (widget.onPickAttachments != null)
-          _buildAddButton(context)
-        else
-          const SizedBox.shrink(),
-        const SizedBox(width: 2),
-        Flexible(child: _buildPermissionButton(context)),
-        if (widget.models.isNotEmpty) ...[
-          const SizedBox(width: 2),
-          Flexible(child: _buildModelButton(context)),
-        ],
-        if (efforts.isNotEmpty) ...[
-          const SizedBox(width: 2),
-          Flexible(child: _buildEffortButton(context, efforts)),
-        ],
-        const Spacer(),
-        SizedBox(
-          width: 48,
-          height: 48,
-          child: widget.running
-              ? IconButton.filledTonal(
-                  key: const ValueKey('composer-stop'),
-                  tooltip: '停止',
-                  onPressed: widget.onStop,
-                  icon: const Icon(Icons.stop, size: 20),
-                )
-              : IconButton.filled(
-                  key: const ValueKey('composer-send'),
-                  tooltip: '发送',
-                  onPressed: _state.canSend && widget.enabled ? _submit : null,
-                  icon: _sending
-                      ? SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: scheme.onPrimary,
-                          ),
-                        )
-                      : const Icon(Icons.arrow_upward, size: 20),
-                ),
-        ),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 文字缩放会等比放大按钮，按缩放后的等效宽度选档位。
+        final scale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 2.0);
+        final fit = _toolRowFit(constraints.maxWidth / scale);
+        return Row(
+          children: [
+            // 左侧一组占满，发送键才留在最右。模型是组内唯一可伸缩的，
+            // 所以剩下的宽度全给它，不会被空白吃掉（追加要求第 2、4 条）。
+            Expanded(
+              child: Row(
+                children: [
+                  if (widget.onPickAttachments != null)
+                    _buildAddButton(context)
+                  else
+                    const SizedBox.shrink(),
+                  const SizedBox(width: 2),
+                  _buildPermissionButton(
+                    context,
+                    showLabel: fit.permissionLabel,
+                  ),
+                  const SizedBox(width: 2),
+                  Flexible(child: _buildModelButton(context)),
+                  if (efforts.isNotEmpty) ...[
+                    const SizedBox(width: 2),
+                    _buildEffortButton(
+                      context,
+                      efforts,
+                      showLabel: fit.effortLabel,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 48,
+              height: 48,
+              child: widget.running
+                  ? IconButton.filledTonal(
+                      key: const ValueKey('composer-stop'),
+                      tooltip: '停止',
+                      onPressed: widget.onStop,
+                      icon: const Icon(Icons.stop, size: 20),
+                    )
+                  : IconButton.filled(
+                      key: const ValueKey('composer-send'),
+                      tooltip: '发送',
+                      onPressed: _state.canSend && widget.enabled
+                          ? _submit
+                          : null,
+                      icon: _sending
+                          ? SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: scheme.onPrimary,
+                              ),
+                            )
+                          : const Icon(Icons.arrow_upward, size: 20),
+                    ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -431,10 +467,13 @@ class _ComposerCardState extends State<ComposerCard> {
     AgentPermissionMode.autoAcceptEdits => '自动接受',
   };
 
-  Widget _buildPermissionButton(BuildContext context) {
+  Widget _buildPermissionButton(
+    BuildContext context, {
+    required bool showLabel,
+  }) {
     return PopupMenuButton<AgentPermissionMode>(
       key: const ValueKey('composer-permission'),
-      tooltip: '权限模式',
+      // 提示由下面的 chip 提供，这里不再重复，否则同一个提示会出现两次。
       onSelected: (mode) => _state.permission = mode,
       itemBuilder: (context) => [
         for (final mode in AgentPermissionMode.values)
@@ -458,44 +497,113 @@ class _ComposerCardState extends State<ComposerCard> {
       ],
       child: _chip(
         context,
+        // 不用问号：问号看不出这是权限，也容易被当成帮助按钮。
         icon: switch (_state.permission) {
           AgentPermissionMode.readOnly => Icons.visibility_outlined,
-          AgentPermissionMode.askEveryWrite => Icons.help_outline,
+          AgentPermissionMode.askEveryWrite => Icons.shield_outlined,
           AgentPermissionMode.autoAcceptEdits => Icons.bolt_outlined,
         },
         label: _permissionLabel,
+        tooltip: '权限模式：$_permissionLabel',
+        compact: !showLabel,
       ),
     );
   }
 
+  /// 模型选择始终显示，并且始终带模型名（design.md §11.6、brief 追加要求第 2 条）。
+  ///
+  /// 加载中显示「模型…」；列表为空或失败显示「默认模型」，点开说明原因并提供
+  /// 「重试」。名字过长时省略，但按钮至少留出六个字的宽度。
   Widget _buildModelButton(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final models = widget.models;
     final selected = _state.modelId;
-    return PopupMenuButton<String?>(
+    final String label;
+    if (widget.modelsLoading && models.isEmpty) {
+      label = '模型…';
+    } else if (selected == null ||
+        !models.any((model) => model.id == selected)) {
+      label = '默认模型';
+    } else {
+      label = _labelOf(selected);
+    }
+    return PopupMenuButton<Object>(
       key: const ValueKey('composer-model'),
-      tooltip: '模型',
-      onSelected: (id) {
-        _state.modelId = id;
-        final efforts = _efforts;
-        _state.reasoningEffort = efforts.isEmpty ? null : efforts.first;
+      onSelected: (value) {
+        if (value is _RetryModels) {
+          widget.onRetryModels?.call();
+          return;
+        }
+        if (value is String) _onModelSelected(value);
       },
-      itemBuilder: (context) => [
-        for (final model in widget.models)
-          PopupMenuItem<String?>(
-            value: model.id,
-            height: 44,
-            child: Text(
-              model.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-      ],
+      itemBuilder: (context) => _modelMenuItems(context),
       child: _chip(
         context,
         icon: Icons.memory,
-        label: selected == null ? '默认模型' : _labelOf(selected),
+        label: label,
+        tooltip: '模型：$label',
+        compact: false,
+        // 六个字左右的宽度：名字再长也先保证看得见开头。
+        minWidth: _modelChipMinWidth,
+        trailing: widget.modelsLoading && models.isEmpty
+            ? SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            : null,
       ),
     );
+  }
+
+  void _onModelSelected(String id) {
+    _state.modelId = id;
+    final efforts = _efforts;
+    _state.reasoningEffort = efforts.isEmpty ? null : efforts.first;
+    if (mounted) setState(() {});
+  }
+
+  List<PopupMenuEntry<Object>> _modelMenuItems(BuildContext context) {
+    final models = widget.models;
+    if (models.isEmpty) {
+      final theme = Theme.of(context);
+      final reason = widget.modelsLoading
+          ? '模型列表还在加载，暂时使用默认模型。'
+          : (widget.modelsError?.trim().isNotEmpty == true
+                ? widget.modelsError!.trim()
+                : '没有取到可选的模型列表，暂时使用默认模型。');
+      return [
+        PopupMenuItem<Object>(
+          key: const ValueKey('composer-model-empty'),
+          enabled: false,
+          height: 56,
+          child: _menuLine(context, title: '默认模型', subtitle: reason),
+        ),
+        if (widget.onRetryModels != null)
+          PopupMenuItem<Object>(
+            key: const ValueKey('composer-model-retry'),
+            value: const _RetryModels(),
+            height: 44,
+            child: Text('重试', style: theme.textTheme.bodyMedium),
+          ),
+      ];
+    }
+    return [
+      for (final model in models)
+        PopupMenuItem<Object>(
+          value: model.id,
+          height: 44,
+          child: Text(
+            model.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+    ];
   }
 
   String _labelOf(String modelId) {
@@ -505,11 +613,15 @@ class _ComposerCardState extends State<ComposerCard> {
     return modelId;
   }
 
-  Widget _buildEffortButton(BuildContext context, List<String> efforts) {
+  Widget _buildEffortButton(
+    BuildContext context,
+    List<String> efforts, {
+    required bool showLabel,
+  }) {
     final selected = _state.reasoningEffort;
+    final label = selected ?? efforts.first;
     return PopupMenuButton<String>(
       key: const ValueKey('composer-reasoning'),
-      tooltip: '推理强度',
       onSelected: (value) => _state.reasoningEffort = value,
       itemBuilder: (context) => [
         for (final effort in efforts)
@@ -519,43 +631,64 @@ class _ComposerCardState extends State<ComposerCard> {
             child: Text(effort, maxLines: 1, overflow: TextOverflow.ellipsis),
           ),
       ],
-      child: _chip(context, icon: Icons.tune, label: selected ?? efforts.first),
+      child: _chip(
+        context,
+        icon: Icons.tune,
+        label: label,
+        tooltip: '推理强度：$label',
+        compact: !showLabel,
+      ),
     );
   }
 
-  /// 工具行的紧凑按钮：整块可点，高度守住 44。
+  /// 工具行的紧凑按钮：整块可点，高度守住 44；窄卡片下只留图标。
   Widget _chip(
     BuildContext context, {
     required IconData icon,
     required String label,
+    required bool compact,
+    String? tooltip,
+    Widget? trailing,
+    double minWidth = 0,
   }) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Container(
+    final content = Container(
       height: 44,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
+      constraints: BoxConstraints(minWidth: compact ? 44 : minWidth),
+      // 内边距 8 而不是 10：390 宽下模型名能多看见两个字（追加要求第 2 条）。
+      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 8),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(10),
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(icon, size: 15, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 5),
-          Flexible(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
+          if (!compact) ...[
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
               ),
             ),
-          ),
+          ],
+          if (trailing != null) ...[
+            const SizedBox(width: 5),
+            trailing,
+          ],
         ],
       ),
     );
+    if (tooltip == null) return content;
+    return Tooltip(message: tooltip, child: content);
   }
 
   Widget _menuLine(
@@ -586,4 +719,42 @@ class _ComposerSendIntent extends Intent {
 
 class _ComposerSkillNextIntent extends Intent {
   const _ComposerSkillNextIntent();
+}
+
+/// 工具行保留哪些文字。
+///
+/// 收缩顺序按 brief 追加要求第 4 条：先收推理强度的文字，再收权限的文字，
+/// 模型名一直留到最窄。收掉文字后按钮仍有图标和 tooltip。
+@immutable
+class _ToolRowFit {
+  const _ToolRowFit({required this.permissionLabel, required this.effortLabel});
+
+  final bool permissionLabel;
+  final bool effortLabel;
+}
+
+/// 全部带文案需要的宽度：加号 48 + 权限 84 + 模型 106 + 推理 65 + 发送 48 + 间隔。
+const double _toolRowComfortWidth = 380;
+
+/// 权限文案还能放下、推理强度先收成图标的宽度。
+///
+/// 390 宽的屏：面板内边距 16 + 卡片内边距 44，工具行约 330，正好落在这档。
+const double _toolRowPermissionWidth = 320;
+
+/// 模型按钮的最小宽度，约六个字。
+const double _modelChipMinWidth = 106;
+
+_ToolRowFit _toolRowFit(double width) {
+  if (width >= _toolRowComfortWidth) {
+    return const _ToolRowFit(permissionLabel: true, effortLabel: true);
+  }
+  if (width >= _toolRowPermissionWidth) {
+    return const _ToolRowFit(permissionLabel: true, effortLabel: false);
+  }
+  return const _ToolRowFit(permissionLabel: false, effortLabel: false);
+}
+
+/// 模型菜单里的「重试」条目。用独立类型，避免和模型 id 的字符串撞上。
+class _RetryModels {
+  const _RetryModels();
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -20,6 +21,13 @@ class FakeAgentFacade extends AgentFacade {
   final List<bool> approvals = <bool>[];
   int cancelCount = 0;
   int retryCount = 0;
+  int loadEarlierCount = 0;
+
+  /// 界面必须不 dispose 门面（design.md §11.4）；这里记次数供测试断言。
+  int disposeCount = 0;
+
+  /// 非空时 send 先等它完成，用来观察「刚发出去」那一刻的界面。
+  Completer<void>? sendGate;
 
   /// 发送时抛 [AgentLoginRequired]，用于验证登录门控。
   bool throwLoginRequired = false;
@@ -72,6 +80,50 @@ class FakeAgentFacade extends AgentFacade {
     notifyListeners();
   }
 
+  AgentErrorInfo? _errorInfo;
+
+  @override
+  AgentErrorInfo? get lastErrorInfo => _errorInfo;
+
+  set lastErrorInfo(AgentErrorInfo? value) {
+    _errorInfo = value;
+    notifyListeners();
+  }
+
+  String? _activity;
+
+  @override
+  String? get activity => _activity;
+
+  set activity(String? value) {
+    _activity = value;
+    notifyListeners();
+  }
+
+  bool _hasEarlier = false;
+  List<AgentMessageView> _earlier = const <AgentMessageView>[];
+
+  @override
+  bool get hasEarlier => _hasEarlier;
+
+  /// 预置一页更早的消息；载入后合并到列表前面。
+  void seedEarlier(List<AgentMessageView> messages) {
+    _earlier = messages;
+    _hasEarlier = messages.isNotEmpty;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadEarlier() async {
+    loadEarlierCount++;
+    if (_earlier.isNotEmpty) {
+      _messages.insertAll(0, _earlier);
+      _earlier = const <AgentMessageView>[];
+      _hasEarlier = false;
+    }
+    notifyListeners();
+  }
+
   /// 预置消息，用于渲染断言。
   void seed(List<AgentMessageView> messages) {
     _messages
@@ -104,6 +156,8 @@ class FakeAgentFacade extends AgentFacade {
     append(
       AgentMessageView(id: 'm${_messages.length}', role: 'user', text: text),
     );
+    final gate = sendGate;
+    if (gate != null) await gate.future;
   }
 
   @override
@@ -123,6 +177,12 @@ class FakeAgentFacade extends AgentFacade {
     approvals.add(allow);
     _pendingApproval = null;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    disposeCount++;
+    super.dispose();
   }
 }
 
@@ -144,8 +204,18 @@ class FakeAgentRuntime implements AgentRuntime {
   /// 未登录时 `models`/`skills`/`open` 都抛 [AgentLoginRequired]。
   final bool loginRequired;
 
-  /// `open` 返回的门面；为 null 时按会话 id 新建。
+  /// `open` 返回的门面；为 null 时按会话 id 新建并复用。
   FakeAgentFacade? facade;
+
+  /// 每个会话的实例。同一个 id 多次 open 返回同一个对象，与真实运行时一致。
+  final Map<String, FakeAgentFacade> facades = <String, FakeAgentFacade>{};
+
+  /// 打开某个会话前先等这里放行，用来制造快速切换的竞态。
+  final Map<String, Completer<void>> openBlockers =
+      <String, Completer<void>>{};
+
+  /// 非空时 `models` 先等它完成，用来观察模型选择的加载态。
+  Completer<void>? modelsGate;
 
   final List<String> openedSessions = <String>[];
 
@@ -169,7 +239,7 @@ class FakeAgentRuntime implements AgentRuntime {
       liveStatuses[sessionId] ?? AgentLiveStatus.idle;
 
   @override
-  AgentFacade? liveFacade(String sessionId) => null;
+  AgentFacade? liveFacade(String sessionId) => facades[sessionId];
 
   @override
   void markSeen(String sessionId) => seenSessions.add(sessionId);
@@ -180,6 +250,8 @@ class FakeAgentRuntime implements AgentRuntime {
   @override
   Future<List<AgentModelOption>> models() async {
     if (loginRequired) throw const AgentLoginRequired();
+    final gate = modelsGate;
+    if (gate != null) await gate.future;
     return modelOptions;
   }
 
@@ -192,8 +264,15 @@ class FakeAgentRuntime implements AgentRuntime {
   @override
   Future<AgentFacade> open(String projectId, String sessionId) async {
     if (loginRequired) throw const AgentLoginRequired();
+    final blocker = openBlockers.remove(sessionId);
+    if (blocker != null) await blocker.future;
     openedSessions.add(sessionId);
-    return facade ?? FakeAgentFacade(sessionId: sessionId);
+    final given = facade;
+    if (given != null) return given;
+    return facades.putIfAbsent(
+      sessionId,
+      () => FakeAgentFacade(sessionId: sessionId),
+    );
   }
 
   /// 用给定目录建一个真实的文件会话存储。
