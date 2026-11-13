@@ -775,10 +775,13 @@ class VibeAgentFacade extends AgentFacade {
     try {
       final views = [..._restored, ..._runViews];
       for (var index = _persistedCount; index < views.length; index++) {
-        await _store.appendMessage(_meta.id, views[index].toJson());
+        await _store.appendMessage(_meta.id, _persistable(views[index]));
       }
       _persistedCount = views.length;
-      await _store.writeHistory(_meta.id, _controller.history);
+      await _store.writeHistory(
+        _meta.id,
+        _persistableHistory(_controller.history),
+      );
       final meta = _store.metaOf(_meta.id);
       if (meta != null) _meta = meta;
       _persistError = null;
@@ -787,6 +790,47 @@ class VibeAgentFacade extends AgentFacade {
       _persistError = '会话保存失败：$error';
       notifyListeners();
     }
+  }
+
+  /// 工具输出落盘前截断到 8 KB；完整输出只在内存里，不写文件。
+  ///
+  /// 视图里的工具条目只是摘要，真正的完整输出在模型历史的 `tool` 条目里，
+  /// 所以两处都截。
+  static const int _maxPersistedToolChars = 8 * 1024;
+
+  static List<Map<String, Object?>> _persistableHistory(
+    List<Map<String, dynamic>> history,
+  ) => [
+    for (final entry in history)
+      if (entry['role'] == 'tool' &&
+          entry['content'] is String &&
+          (entry['content'] as String).length > _maxPersistedToolChars)
+        {
+          ...entry,
+          'content':
+              '…（已截断，只保留最后 8 KB）\n'
+              '${(entry['content'] as String).substring((entry['content'] as String).length - _maxPersistedToolChars)}',
+        }
+      else
+        Map<String, Object?>.from(entry),
+  ];
+
+  static Map<String, Object?> _persistable(AgentMessageView view) {
+    if (view.role != 'tool' || view.text.length <= _maxPersistedToolChars) {
+      return view.toJson();
+    }
+    final tail = view.text.substring(
+      view.text.length - _maxPersistedToolChars,
+    );
+    return AgentMessageView(
+      id: view.id,
+      role: view.role,
+      text: '…（已截断，只保留最后 8 KB）\n$tail',
+      toolName: view.toolName,
+      isError: view.isError,
+      changedPaths: view.changedPaths,
+      aiGenerated: view.aiGenerated,
+    ).toJson();
   }
 
   /// 第一条消息决定会话标题，用户改名后不再覆盖。

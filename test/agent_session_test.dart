@@ -294,6 +294,43 @@ void main() {
     expect(meta.title.endsWith('…'), isTrue);
   });
 
+  test('compacts a file whose bad lines dominate', () async {
+    final meta = await store.create('p1');
+    await store.appendMessage(meta.id, message('m0', '好行'));
+    await store.flush();
+    jsonlOf(meta.id).writeAsStringSync(
+      '${jsonlOf(meta.id).readAsStringSync()}'
+      '{坏行1\n{坏行2\n{坏行3\n',
+    );
+
+    await store.compactIfNeeded(meta.id);
+
+    final raw = jsonlOf(meta.id).readAsStringSync();
+    expect(raw, isNot(contains('坏行')));
+    final page = await store.readTail(meta.id);
+    expect(page.messages.single['text'], '好行');
+  });
+
+  test('decodes a large history snapshot and caps it', () async {
+    final meta = await store.create('p1');
+    await store.appendMessage(meta.id, message('m0'));
+    final filler = 'x' * 600;
+    await store.writeHistory(meta.id, [
+      for (var index = 0; index < 600; index++)
+        {
+          'role': 'assistant',
+          'content': '$index $filler',
+        },
+    ]);
+    await store.flush();
+    // 这条快照超过 200 KB，解析走独立 isolate。
+    expect(jsonlOf(meta.id).lengthSync(), greaterThan(200 * 1024));
+
+    final history = await store.readHistory(meta.id);
+    expect(history.length, 200);
+    expect(history.last['content'], startsWith('599 '));
+  });
+
   test('write() still replaces the whole transcript', () async {
     final meta = await store.create('p1');
     await store.write(

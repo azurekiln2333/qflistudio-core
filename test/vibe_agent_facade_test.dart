@@ -465,6 +465,32 @@ void main() {
     expect(facade.activity, isNull);
   });
 
+  test('truncates tool output on disk but keeps it in memory', () async {
+    final meta = await store.create('p1');
+    File(p.join(project.path, 'big.txt')).writeAsStringSync('y' * 20000);
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([_readCall('c1', 'big.txt'), _textReply('看过了。')]);
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    await facade.send(
+      '看看 big.txt',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
+    await settle(facade);
+
+    // 内存里的工具条目是摘要，完整输出在模型历史里。
+    final tool = facade.messages.firstWhere((m) => m.role == 'tool');
+    expect(tool.toolName, 'read_file');
+
+    final saved = await store.read(meta.id);
+    final toolEntry = saved.history.firstWhere((e) => e['role'] == 'tool');
+    final savedText = toolEntry['content']! as String;
+    expect(savedText.length, lessThan(9000));
+    expect(savedText, contains('已截断'));
+    // 截断保留尾部：文件末尾的内容还在。
+    expect(savedText.trimRight().endsWith('y'), isTrue);
+  });
+
   test('models are cached in memory and on disk', () async {
     final relay = _FakeRelay()
       ..models = {
@@ -508,6 +534,25 @@ Map<String, dynamic> _writeCall(String id, String path, String content) => {
         'function': {
           'name': 'write_file',
           'arguments': jsonEncode({'path': path, 'content': content}),
+        },
+      },
+    ],
+  },
+  'aiGenerated': true,
+};
+
+Map<String, dynamic> _readCall(String id, String path) => {
+  'model': 'demo-model',
+  'message': {
+    'role': 'assistant',
+    'content': null,
+    'tool_calls': [
+      {
+        'id': id,
+        'type': 'function',
+        'function': {
+          'name': 'read_file',
+          'arguments': jsonEncode({'path': path}),
         },
       },
     ],

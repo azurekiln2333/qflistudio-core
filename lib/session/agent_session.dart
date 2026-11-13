@@ -205,6 +205,12 @@ class FileAgentSessionStore extends AgentSessionStore {
   static const String _indexFileName = 'index.json';
   static const Duration _indexDebounce = Duration(milliseconds: 500);
 
+  /// 单条记录超过这个字节数就放到独立 isolate 解析。
+  static const int _isolateThreshold = 200 * 1024;
+
+  /// 读历史时最多取多少条；控制器自己还会再裁一次。
+  static const int _maxHistoryEntries = 200;
+
   final Directory _root;
 
   final Map<String, AgentSessionMeta> _metas = {};
@@ -218,6 +224,9 @@ class FileAgentSessionStore extends AgentSessionStore {
   Timer? _indexTimer;
   Future<void> _chain = Future<void>.value();
   Future<void> _migration = Future<void>.value();
+
+  /// 已经检查过垃圾行比例的会话，避免反复全量扫。
+  final Set<String> _compactChecked = {};
 
   Directory get root => _root;
 
@@ -332,7 +341,11 @@ class FileAgentSessionStore extends AgentSessionStore {
   @override
   Future<AgentTranscript> read(String sessionId) async {
     final jsonl = _jsonlFor(sessionId);
-    if (await jsonl.exists()) return _readJsonl(jsonl);
+    if (await jsonl.exists()) {
+      final transcript = await _readJsonl(jsonl);
+      unawaited(compactIfNeeded(sessionId));
+      return transcript;
+    }
     final legacy = _legacyFor(sessionId);
     if (await legacy.exists()) return _readLegacy(legacy);
     return AgentTranscript.empty;
@@ -376,14 +389,29 @@ class FileAgentSessionStore extends AgentSessionStore {
     if (!await file.exists()) {
       return (await read(sessionId)).history;
     }
-    List<Map<String, Object?>>? found;
-    await _LineTail(file, blockSize: blockSize).readReverseLines((line) {
-      final record = _decodeLine(line);
+    String? line;
+    await _LineTail(file, blockSize: blockSize).readReverseLines((raw) {
+      final record = _decodeLine(raw);
       if (record == null || record.kind != _RecordKind.history) return true;
-      found = _mapList(record.value);
+      line = raw;
       return false;
     });
-    return found ?? const [];
+    if (line == null) return const [];
+    // 历史快照可能很大：超过 200 KB 的记录放到独立 isolate 解析。
+    Object? decoded;
+    if (line!.length > _isolateThreshold) {
+      decoded = await compute(_decodeJsonInIsolate, line!);
+    } else {
+      try {
+        decoded = jsonDecode(line!);
+      } on FormatException {
+        return const [];
+      }
+    }
+    if (decoded is! Map || decoded['t'] != 'hs') return const [];
+    final history = _mapList(decoded['v']);
+    if (history.length <= _maxHistoryEntries) return history;
+    return history.sublist(history.length - _maxHistoryEntries);
   }
 
   @override
@@ -422,6 +450,44 @@ class FileAgentSessionStore extends AgentSessionStore {
     _indexTimer = null;
     await _writeIndexNow();
     await _chain;
+  }
+
+  /// 坏行比例过半时压缩重写：只留好记录。
+  ///
+  /// 空闲时后台调；文件不大或坏行不多时什么都不做。失败不影响使用。
+  Future<void> compactIfNeeded(String sessionId) async {
+    if (!_compactChecked.add(sessionId)) return;
+    try {
+      final file = _jsonlFor(sessionId);
+      if (!await file.exists()) return;
+      final rows = const LineSplitter().convert(await file.readAsString());
+      var bad = 0;
+      var total = 0;
+      for (final row in rows) {
+        if (row.trim().isEmpty) continue;
+        total++;
+        if (_decodeLine(row) == null) bad++;
+      }
+      if (bad == 0 || bad * 2 <= total) return;
+      final meta = _metas[sessionId];
+      if (meta == null) return;
+      await _rewrite(sessionId, _payloadOf(meta, await _readJsonl(file)));
+    } on FileSystemException {
+      // 压缩失败就下次再说。
+    } on FormatException {
+      // 同上。
+    }
+  }
+
+  /// 把会话正文编码成完整的 jsonl 文本（重写与建文件用）。
+  String _payloadOf(AgentSessionMeta meta, AgentTranscript transcript) {
+    final buffer = StringBuffer()
+      ..writeln(jsonEncode(_headerRecord(meta)));
+    for (final message in transcript.messages) {
+      buffer.writeln(jsonEncode({'t': 'm', 'v': message}));
+    }
+    buffer.writeln(jsonEncode({'t': 'hs', 'v': transcript.history}));
+    return buffer.toString();
   }
 
   @override
@@ -492,6 +558,7 @@ class FileAgentSessionStore extends AgentSessionStore {
     });
     if (!reached) return AgentMessagePage.empty;
     final page = collected.take(limit).toList().reversed.toList();
+    unawaited(compactIfNeeded(sessionId));
     return AgentMessagePage(messages: page, hasEarlier: more);
   }
 
@@ -759,7 +826,6 @@ class FileAgentSessionStore extends AgentSessionStore {
       return null;
     }
   }
-
   static AgentSessionMeta? _metaFromJson(Object? decoded) {
     if (decoded is! Map) return null;
     final id = decoded['id'];
@@ -823,6 +889,9 @@ class FileAgentSessionStore extends AgentSessionStore {
 
 enum _RecordKind { header, message, history }
 
+/// 独立 isolate 里只做 `jsonDecode`：返回值都是可传输的基本结构。
+Object? _decodeJsonInIsolate(String line) => jsonDecode(line);
+
 class _Record {
   const _Record(this.kind, this.value);
 
@@ -864,7 +933,12 @@ class _LineTail {
         parts.add(current);
         final tail = parts.removeLast();
         final joined = <int>[...tail, ...carry];
-        if (position > 0 && parts.isNotEmpty) {
+        if (parts.isEmpty) {
+          // 这一块里没有换行：整行还没读完，继续往左拼。
+          carry = joined;
+          continue;
+        }
+        if (position > 0) {
           carry = parts.removeAt(0);
         } else {
           carry = <int>[];
