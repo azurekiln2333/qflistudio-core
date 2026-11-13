@@ -373,28 +373,38 @@ class _ComposerCardState extends State<ComposerCard> {
     final efforts = _efforts;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        // 窄卡片里只留图标，文字进 tooltip，避免工具行横向溢出。
-        // 阈值来自 briefs/rework-pi-C.md 第 10 条，不是布局断点。
-        final compact = width < _compactToolRowWidth;
-        // 模型是用户最需要看到的那一项，比其余按钮多撑一段才收成图标。
-        final compactModel = width < _compactModelWidth;
+        // 文字缩放会等比放大按钮，按缩放后的等效宽度选档位。
+        final scale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 2.0);
+        final fit = _toolRowFit(constraints.maxWidth / scale);
         return Row(
           children: [
-            if (widget.onPickAttachments != null)
-              _buildAddButton(context)
-            else
-              const SizedBox.shrink(),
-            const SizedBox(width: 2),
-            _buildPermissionButton(context, compact: compact),
-            const SizedBox(width: 2),
-            // 只有模型标签可以缩短：权限和推理强度是固定短语，模型名可能很长。
-            Flexible(child: _buildModelButton(context, compact: compactModel)),
-            if (efforts.isNotEmpty) ...[
-              const SizedBox(width: 2),
-              _buildEffortButton(context, efforts, compact: compact),
-            ],
-            const Spacer(),
+            // 左侧一组占满，发送键才留在最右。模型是组内唯一可伸缩的，
+            // 所以剩下的宽度全给它，不会被空白吃掉（追加要求第 2、4 条）。
+            Expanded(
+              child: Row(
+                children: [
+                  if (widget.onPickAttachments != null)
+                    _buildAddButton(context)
+                  else
+                    const SizedBox.shrink(),
+                  const SizedBox(width: 2),
+                  _buildPermissionButton(
+                    context,
+                    showLabel: fit.permissionLabel,
+                  ),
+                  const SizedBox(width: 2),
+                  Flexible(child: _buildModelButton(context)),
+                  if (efforts.isNotEmpty) ...[
+                    const SizedBox(width: 2),
+                    _buildEffortButton(
+                      context,
+                      efforts,
+                      showLabel: fit.effortLabel,
+                    ),
+                  ],
+                ],
+              ),
+            ),
             SizedBox(
               width: 48,
               height: 48,
@@ -459,11 +469,11 @@ class _ComposerCardState extends State<ComposerCard> {
 
   Widget _buildPermissionButton(
     BuildContext context, {
-    required bool compact,
+    required bool showLabel,
   }) {
     return PopupMenuButton<AgentPermissionMode>(
       key: const ValueKey('composer-permission'),
-      tooltip: '权限模式',
+      // 提示由下面的 chip 提供，这里不再重复，否则同一个提示会出现两次。
       onSelected: (mode) => _state.permission = mode,
       itemBuilder: (context) => [
         for (final mode in AgentPermissionMode.values)
@@ -487,23 +497,24 @@ class _ComposerCardState extends State<ComposerCard> {
       ],
       child: _chip(
         context,
+        // 不用问号：问号看不出这是权限，也容易被当成帮助按钮。
         icon: switch (_state.permission) {
           AgentPermissionMode.readOnly => Icons.visibility_outlined,
-          AgentPermissionMode.askEveryWrite => Icons.help_outline,
+          AgentPermissionMode.askEveryWrite => Icons.shield_outlined,
           AgentPermissionMode.autoAcceptEdits => Icons.bolt_outlined,
         },
         label: _permissionLabel,
         tooltip: '权限模式：$_permissionLabel',
-        compact: compact,
+        compact: !showLabel,
       ),
     );
   }
 
-  /// 模型选择始终显示（design.md §11.6）。
+  /// 模型选择始终显示，并且始终带模型名（design.md §11.6、brief 追加要求第 2 条）。
   ///
   /// 加载中显示「模型…」；列表为空或失败显示「默认模型」，点开说明原因并提供
-  /// 「重试」。推理强度只在当前模型支持时出现。
-  Widget _buildModelButton(BuildContext context, {required bool compact}) {
+  /// 「重试」。名字过长时省略，但按钮至少留出六个字的宽度。
+  Widget _buildModelButton(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final models = widget.models;
@@ -519,7 +530,6 @@ class _ComposerCardState extends State<ComposerCard> {
     }
     return PopupMenuButton<Object>(
       key: const ValueKey('composer-model'),
-      tooltip: '模型：$label',
       onSelected: (value) {
         if (value is _RetryModels) {
           widget.onRetryModels?.call();
@@ -533,8 +543,9 @@ class _ComposerCardState extends State<ComposerCard> {
         icon: Icons.memory,
         label: label,
         tooltip: '模型：$label',
-        compact: compact,
-        minWidth: 72,
+        compact: false,
+        // 六个字左右的宽度：名字再长也先保证看得见开头。
+        minWidth: _modelChipMinWidth,
         trailing: widget.modelsLoading && models.isEmpty
             ? SizedBox(
                 width: 12,
@@ -605,13 +616,12 @@ class _ComposerCardState extends State<ComposerCard> {
   Widget _buildEffortButton(
     BuildContext context,
     List<String> efforts, {
-    required bool compact,
+    required bool showLabel,
   }) {
     final selected = _state.reasoningEffort;
     final label = selected ?? efforts.first;
     return PopupMenuButton<String>(
       key: const ValueKey('composer-reasoning'),
-      tooltip: '推理强度',
       onSelected: (value) => _state.reasoningEffort = value,
       itemBuilder: (context) => [
         for (final effort in efforts)
@@ -626,7 +636,7 @@ class _ComposerCardState extends State<ComposerCard> {
         icon: Icons.tune,
         label: label,
         tooltip: '推理强度：$label',
-        compact: compact,
+        compact: !showLabel,
       ),
     );
   }
@@ -646,7 +656,8 @@ class _ComposerCardState extends State<ComposerCard> {
     final content = Container(
       height: 44,
       constraints: BoxConstraints(minWidth: compact ? 44 : minWidth),
-      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 10),
+      // 内边距 8 而不是 10：390 宽下模型名能多看见两个字（追加要求第 2 条）。
+      padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 8),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(10),
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
@@ -710,15 +721,38 @@ class _ComposerSkillNextIntent extends Intent {
   const _ComposerSkillNextIntent();
 }
 
-/// 工具行只留图标的宽度。来自 briefs/rework-pi-C.md 第 10 条的「小于 360」。
+/// 工具行保留哪些文字。
 ///
-/// 这不是布局断点（布局断点只在 `lib/layout/breakpoints.dart`），只是工具行自身
-/// 在窄卡片里的收缩阈值。
-const double _compactToolRowWidth = 360;
+/// 收缩顺序按 brief 追加要求第 4 条：先收推理强度的文字，再收权限的文字，
+/// 模型名一直留到最窄。收掉文字后按钮仍有图标和 tooltip。
+@immutable
+class _ToolRowFit {
+  const _ToolRowFit({required this.permissionLabel, required this.effortLabel});
 
-/// 模型选择收起成图标的宽度。比 [_compactToolRowWidth] 窄，因为「默认模型」
-/// 这类文案必须让用户看见（briefs/rework-pi-C.md 第 7 条）。
-const double _compactModelWidth = 320;
+  final bool permissionLabel;
+  final bool effortLabel;
+}
+
+/// 全部带文案需要的宽度：加号 48 + 权限 84 + 模型 106 + 推理 65 + 发送 48 + 间隔。
+const double _toolRowComfortWidth = 380;
+
+/// 权限文案还能放下、推理强度先收成图标的宽度。
+///
+/// 390 宽的屏：面板内边距 16 + 卡片内边距 44，工具行约 330，正好落在这档。
+const double _toolRowPermissionWidth = 320;
+
+/// 模型按钮的最小宽度，约六个字。
+const double _modelChipMinWidth = 106;
+
+_ToolRowFit _toolRowFit(double width) {
+  if (width >= _toolRowComfortWidth) {
+    return const _ToolRowFit(permissionLabel: true, effortLabel: true);
+  }
+  if (width >= _toolRowPermissionWidth) {
+    return const _ToolRowFit(permissionLabel: true, effortLabel: false);
+  }
+  return const _ToolRowFit(permissionLabel: false, effortLabel: false);
+}
 
 /// 模型菜单里的「重试」条目。用独立类型，避免和模型 id 的字符串撞上。
 class _RetryModels {

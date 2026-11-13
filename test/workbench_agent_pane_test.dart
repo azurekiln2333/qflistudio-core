@@ -577,7 +577,47 @@ void main() {
       await unmount(tester);
     });
 
-    testWidgets('窄卡片下工具行不溢出，只显示图标', (tester) async {
+    testWidgets('390 宽下模型名和权限文案都看得见', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(
+        store,
+        models: const [
+          AgentModelOption(
+            id: 'deepseek-v4.1-flash',
+            label: 'deepseek-v4.1-flash',
+            reasoningEfforts: ['low', 'high'],
+          ),
+        ],
+      );
+      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
+
+      await tester.pumpWidget(
+        host(
+          auth: auth,
+          runtime: runtime,
+          sessionId: meta.id,
+          size: const Size(390, 844),
+        ),
+      );
+      await settle(tester);
+
+      // 权限：图标加短文案，不是问号。
+      expect(find.text('每次询问'), findsOneWidget);
+      expect(find.byIcon(Icons.help_outline), findsNothing);
+      expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+      // 模型：显示模型名。
+      expect(find.text('deepseek-v4.1-flash'), findsOneWidget);
+      // 推理强度先收成图标，带提示，不再截成「l…」。
+      expect(find.byTooltip('推理强度：low'), findsOneWidget);
+      expect(find.text('l…'), findsNothing);
+      expect(tester.takeException(), isNull);
+
+      await unmount(tester);
+    });
+
+    testWidgets('窄卡片下工具行不溢出，权限与推理强度只留图标和提示', (tester) async {
       final auth = await loggedIn();
       final store = MemoryAgentSessionStore();
       final meta = await store.create('p1');
@@ -614,6 +654,9 @@ void main() {
         expect(size.height, greaterThanOrEqualTo(44), reason: key);
         expect(size.width, greaterThanOrEqualTo(44), reason: key);
       }
+      // 文字收掉后仍有提示，用户知道每个按钮是什么。
+      expect(find.byTooltip('权限模式：每次询问'), findsOneWidget);
+      expect(find.byTooltip('推理强度：high'), findsOneWidget);
 
       await unmount(tester);
     });

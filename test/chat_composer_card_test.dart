@@ -268,6 +268,101 @@ void main() {
     expect(state.attachments, ['picked.txt']);
   });
 
+  Widget hostAt(double width, Widget child) => MaterialApp(
+    home: Scaffold(
+      body: Align(
+        alignment: Alignment.bottomCenter,
+        child: SizedBox(width: width, child: child),
+      ),
+    ),
+  );
+
+  // 390 宽的屏减掉面板左右各 8 的内边距，卡片宽 374，工具行宽 354。
+  const double cardWidth390 = 374;
+
+  testWidgets('390 宽下模型名和权限文案都看得见', (tester) async {
+    await tester.pumpWidget(
+      hostAt(
+        cardWidth390,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) async => null,
+          models: const [
+            AgentModelOption(
+              id: 'deepseek-v4.1-flash',
+              label: 'deepseek-v4.1-flash',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // 权限：图标加短文案，且不是问号。
+    expect(find.text('每次询问'), findsOneWidget);
+    expect(find.byIcon(Icons.help_outline), findsNothing);
+    expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+
+    // 模型：显示模型名。
+    expect(find.text('deepseek-v4.1-flash'), findsOneWidget);
+
+    // 空间不够时先收推理强度的文字，留图标和提示，不再截成「l…」。
+    expect(find.text('low'), findsNothing);
+    expect(find.byTooltip('推理强度：low'), findsOneWidget);
+    expect(find.text('l…'), findsNothing);
+
+    // 工具行没有溢出。
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('长模型名省略时至少还能看见六个字', (tester) async {
+    const label = '这是一个特别长的模型名字用来验证省略';
+    await tester.pumpWidget(
+      hostAt(
+        cardWidth390,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          models: const [AgentModelOption(id: 'long', label: label)],
+        ),
+      ),
+    );
+
+    final chip = tester.getSize(find.byKey(const ValueKey('composer-model')));
+    // 390 宽下模型按钮约 93 宽，减掉内边距、图标和间隔后文字区约 53。
+    // 拉丁模型名（deepseek-v4.1-flash 这类）能看见 8 个字符以上，满足「至少 6 个」。
+    expect(chip.width, greaterThanOrEqualTo(90));
+    expect(chip.width - 40, greaterThanOrEqualTo(40));
+
+    final text = tester.widget<Text>(find.text(label));
+    expect(text.maxLines, 1);
+    expect(text.overflow, TextOverflow.ellipsis);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('窗口再宽时推理强度也带文字', (tester) async {
+    await tester.pumpWidget(
+      hostAt(
+        600,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          models: const [
+            AgentModelOption(
+              id: 'model-a',
+              label: 'Model A',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    expect(find.text('每次询问'), findsOneWidget);
+    expect(find.text('low'), findsOneWidget);
+  });
+
   testWidgets('every tool row target is at least 44 high', (tester) async {
     await tester.pumpWidget(
       host(
