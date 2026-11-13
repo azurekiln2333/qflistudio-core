@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../vibe_coding/vibe_agent_facade.dart';
@@ -104,6 +105,43 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   static String _tailOf(AgentMessageView message) =>
       '${message.id}|${message.text.length}|${message.pending}';
 
+  /// 已渲染过的条目。流式更新时只有末尾那条的内容会变，其余直接复用同一个
+  /// widget 实例，Flutter 会跳过它们的 build（brief 任务 9）。
+  final Map<String, Widget> _tiles = <String, Widget>{};
+  final Map<String, AgentMessageView> _rendered = <String, AgentMessageView>{};
+
+  /// 条目缓存的上限。超过就整体丢掉，避免长会话把旧条目一直留在内存里。
+  static const int _tileCacheLimit = 4000;
+
+  Widget _tileFor(AgentMessageView message) {
+    final cached = _tiles[message.id];
+    final previous = _rendered[message.id];
+    if (cached != null && previous != null && _sameView(previous, message)) {
+      return cached;
+    }
+    if (_tiles.length >= _tileCacheLimit) {
+      _tiles.clear();
+      _rendered.clear();
+    }
+    final tile = ChatMessageTile(
+      key: ValueKey('chat-message-${message.id}'),
+      message: message,
+    );
+    _tiles[message.id] = tile;
+    _rendered[message.id] = message;
+    return tile;
+  }
+
+  /// 内容没变就不重建。逐字段比较，不依赖 facade 复用同一个视图对象。
+  static bool _sameView(AgentMessageView a, AgentMessageView b) =>
+      a.role == b.role &&
+      a.text == b.text &&
+      a.toolName == b.toolName &&
+      a.isError == b.isError &&
+      a.pending == b.pending &&
+      a.aiGenerated == b.aiGenerated &&
+      listEquals(a.changedPaths, b.changedPaths);
+
   void _scheduleScrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
@@ -169,12 +207,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
         if (showEarlier && index == 0) return _buildEarlierButton(context);
         final position = index - leading;
         if (position < messages.length) {
-          final message = messages[position];
-          // 稳定 key：流式更新时只有末尾条目换内容，前面的条目复用 Element。
-          return ChatMessageTile(
-            key: ValueKey('chat-message-${message.id}'),
-            message: message,
-          );
+          return _tileFor(messages[position]);
         }
         if (approval != null && position == messages.length) {
           return WriteApprovalCard(
@@ -421,8 +454,15 @@ class ChatMessageTile extends StatelessWidget {
 
   final AgentMessageView message;
 
+  /// 测试用：累计 build 次数，用来证明流式更新只重建末尾条目。
+  static int debugBuildCount = 0;
+
   @override
   Widget build(BuildContext context) {
+    assert(() {
+      debugBuildCount++;
+      return true;
+    }());
     final role = message.role;
     if (role == 'user') return _buildUser(context);
     if (role == 'tool') return _buildTool(context);
