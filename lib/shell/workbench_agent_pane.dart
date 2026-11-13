@@ -268,11 +268,16 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
 
   /// 换到另一个会话。只动本地状态，不改别人的门面，也不停别人的会话。
   void _adoptSession(String? sessionId) {
+    // 新会话刚建好时，外层会用 onSessionOpened 把 id 回传，这里必须当成同一个
+    // 会话：否则刚发出的那条回声和停止键会被清掉，界面闪一下。
+    final sameAsEcho = sessionId != null && sessionId == _echoSessionId;
     _sessionId = sessionId;
-    _echo = null;
-    _echoSessionId = null;
-    _sending = false;
-    _waitedSeconds = 0;
+    if (!sameAsEcho) {
+      _echo = null;
+      _echoSessionId = null;
+      _sending = false;
+      _waitedSeconds = 0;
+    }
     _openError = null;
     if (sessionId == null) {
       _facade?.removeListener(_onFacadeChanged);
