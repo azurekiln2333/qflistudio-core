@@ -21,6 +21,8 @@ import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
+import 'package:qfli_studio_core/workspace/saved_workspace.dart';
+import 'package:qfli_studio_core/workspace/workspace_store.dart';
 import 'package:re_editor/re_editor.dart';
 
 import 'support/fake_agent.dart';
@@ -208,6 +210,62 @@ void main() {
 
       expect(find.text('打开项目'), findsOneWidget);
       expect(find.byType(EditorPage), findsNothing);
+    });
+
+    testWidgets('工作区入口同样直达编辑器页', (tester) async {
+      final counter = _RouteCounter();
+      final workspace = SavedWorkspace(
+        id: 'w1',
+        name: '示例工作区',
+        createdAt: DateTime(2026, 1, 1),
+        updatedAt: DateTime(2026, 1, 1),
+        members: [WorkspaceMember.fromProject(project, primary: true)],
+      );
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [counter],
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () => openEditorPage(
+                    context,
+                    project: project,
+                    auth: auth,
+                    store: store,
+                    settings: settings,
+                    workspace: workspace,
+                    workspaceProjects: [project],
+                    // 临时根目录：避开 AppPaths 的目录探测定时器。
+                    workspaceStore: WorkspaceStore(
+                      root: Directory(p.join(directory.path, 'ws')),
+                    ),
+                  ),
+                  child: const Text('打开工作区'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('打开工作区'));
+      await pumpFrames(tester);
+
+      expect(counter.pushes, 2, reason: '首屏 + 一个编辑器路由');
+      expect(find.byType(EditorPage), findsOneWidget);
+      expect(
+        find.textContaining('示例工作区'),
+        findsWidgets,
+        reason: '工作区直达编辑器页，不再经过项目页',
+      );
     });
 
     testWidgets('发送消息和切换会话都不推路由', (tester) async {
