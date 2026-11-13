@@ -63,6 +63,7 @@ import '../interop/interop_targets.dart';
 import '../layout/breakpoints.dart';
 import '../shell/login_gate.dart';
 import '../shell/workbench_state.dart';
+import '../chat/composer_state.dart';
 import '../vibe_coding/vibe_agent_facade.dart';
 import 'agent/agent_dock.dart';
 import 'agent/agent_pane_switcher.dart';
@@ -165,6 +166,7 @@ class EditorPage extends StatefulWidget {
     this.onWorkspaceSaved,
     this.onProjectSelected,
     this.agentRuntime,
+    this.composerDefaults,
   });
 
   final Project project;
@@ -208,6 +210,11 @@ class EditorPage extends StatefulWidget {
   /// 为空时在第一次展开 Agent 面板时解析应用级单例；测试注入用。
   /// agent 嵌在本页内，不另开页面（design.md §11.1）。
   final AgentRuntime? agentRuntime;
+
+  /// 按项目记住的模型 / 推理强度 / 权限模式（design.md §4 第 9 条）。
+  ///
+  /// 为空时用文件实现；测试注入内存实现，避开目录探测定时器。
+  final ComposerDefaultsStore? composerDefaults;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -273,6 +280,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   ///
   /// 离线产品为 null，页面上不出现任何 agent 控件。
   EditorAgentHost? _agentHost;
+
+  /// 输入卡片的选择记忆。构造不触 IO，磁盘读写延到首次读取。
+  late final ComposerDefaultsStore _composerDefaults =
+      widget.composerDefaults ?? FileComposerDefaultsStore();
 
   /// 编辑器列与 Agent 面板的保活 key。
   ///
@@ -1469,6 +1480,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       onSessionOpened: _selectAgentSession,
       error: host.error,
       onRetry: host.activate,
+      composerDefaults: _composerDefaults,
     ),
   );
 

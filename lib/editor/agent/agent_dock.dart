@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shell/workbench_agent_pane.dart';
+import '../../chat/composer_state.dart';
 import '../../models/project.dart';
 import '../../shell/workbench_state.dart';
 import '../../store/auth_store.dart';
@@ -225,6 +226,7 @@ class EditorAgentPane extends StatelessWidget {
     this.onSessionOpened,
     this.error,
     this.onRetry,
+    this.composerDefaults,
   });
 
   final Project project;
@@ -237,6 +239,9 @@ class EditorAgentPane extends StatelessWidget {
   /// 解析运行时的错误。
   final Object? error;
   final VoidCallback? onRetry;
+
+  /// 按项目记住的模型 / 推理强度 / 权限模式。
+  final ComposerDefaultsStore? composerDefaults;
 
   @override
   Widget build(BuildContext context) {
@@ -285,6 +290,7 @@ class EditorAgentPane extends StatelessWidget {
       settings: settings,
       sessionId: sessionId,
       onSessionOpened: onSessionOpened,
+      composerDefaults: composerDefaults,
     );
   }
 }

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/community/models.dart';
+import 'package:qfli_studio_core/chat/composer_state.dart';
 import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
 import 'package:qfli_studio_core/editor/agent/editor_agent_host.dart';
 import 'package:qfli_studio_core/editor/agent/session_list_view.dart';
@@ -26,7 +27,6 @@ import 'package:qfli_studio_core/workspace/workspace_store.dart';
 import 'package:re_editor/re_editor.dart';
 
 import 'support/fake_agent.dart';
-
 /// agent 嵌在编辑器页里，应用只有「主页 → 编辑器页」两层路由。
 ///
 /// 覆盖 CHECKLIST 的 A1-A4、B4、B6、E2、E3、F5、G8。
@@ -40,6 +40,7 @@ void main() {
   late SettingsStore settings;
   late MemoryAgentSessionStore sessions;
   late FakeAgentRuntime runtime;
+  late _MemoryComposerDefaults composerDefaults;
   StudioProfile? previousProfile;
 
   setUp(() async {
@@ -74,6 +75,7 @@ void main() {
       ),
     );
     sessions = MemoryAgentSessionStore();
+    composerDefaults = _MemoryComposerDefaults();
     runtime = FakeAgentRuntime(
       sessions: sessions,
       modelOptions: const [AgentModelOption(id: 'model-a', label: 'Model A')],
@@ -121,6 +123,7 @@ void main() {
           settings: settings,
           initialOpenPath: initialOpenPath,
           agentRuntime: injectRuntime ? runtime : null,
+          composerDefaults: composerDefaults,
           retainedVisibility: retainedVisibility,
         ),
       ),
@@ -440,6 +443,29 @@ void main() {
     });
   });
 
+  group('记忆', () {
+    testWidgets('选模型后按项目记下', (tester) async {
+      await mount(tester);
+      await tester.tap(find.byKey(const ValueKey('editor-agent-expand')));
+      await pumpFrames(tester);
+      await pumpUntil(
+        tester,
+        () => find.byKey(const ValueKey('composer-model')).evaluate().isNotEmpty,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('composer-model')));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Model A').last);
+      await pumpFrames(tester);
+
+      expect(
+        composerDefaults.valueFor(project.id)?.modelId,
+        'model-a',
+        reason: '模型选择要按项目落盘（design.md §4 第 9 条）',
+      );
+    });
+  });
+
   group('门控', () {
     testWidgets('离线产品任何宽度都没有 agent 控件', (tester) async {
       StudioProfile.current = const StudioProfile(
@@ -553,4 +579,19 @@ Future<void> pumpUntil(
     );
   }
   expect(condition(), isTrue, reason: '等待的条件没有达成');
+}
+
+/// 内存实现：测试里不碰文件系统，也不留目录探测定时器。
+class _MemoryComposerDefaults implements ComposerDefaultsStore {
+  final Map<String, ComposerDefaults> _byProject = {};
+
+  ComposerDefaults? valueFor(String projectId) => _byProject[projectId];
+
+  @override
+  Future<ComposerDefaults?> read(String projectId) async => _byProject[projectId];
+
+  @override
+  Future<void> write(String projectId, ComposerDefaults defaults) async {
+    _byProject[projectId] = defaults;
+  }
 }
