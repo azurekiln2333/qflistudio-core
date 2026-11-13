@@ -322,7 +322,7 @@ void main() {
       );
       // 会话文件里只有消息与历史，没有任何白名单字段。
       final raw = File(
-        p.join(sessionsDir.path, '${meta.id}.json'),
+        p.join(sessionsDir.path, '${meta.id}.jsonl'),
       ).readAsStringSync();
       expect(raw, isNot(contains('readOnly')));
       expect(raw, isNot(contains('allowList')));

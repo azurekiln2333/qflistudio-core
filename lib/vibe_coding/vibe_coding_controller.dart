@@ -13,6 +13,7 @@ import 'package:flutter/foundation.dart';
 import '../interop/interop_runner.dart';
 import '../services/ai_file_header.dart';
 import '../services/api_client.dart';
+import 'agent_request_scheduler.dart';
 import 'vibe_loop_guard.dart';
 import 'vibe_models.dart';
 import 'vibe_plan.dart';
@@ -216,6 +217,15 @@ class VibeCodingController extends ChangeNotifier {
 
   bool _roundHadFailures = false;
 
+  /// 最近一次模型请求的原始异常；会话层据此分类错误文案。
+  ApiException? _lastApiError;
+
+  /// 模型请求的并发门闸；为 null 时不限并发（现有行为）。
+  AgentRequestScheduler? requestScheduler;
+
+  /// 门闸里这个会话的键，通常就是会话 id。
+  String? schedulerKey;
+
   VibePhase get phase => _phase;
   List<VibeMessage> get messages => List.unmodifiable(_messages);
 
@@ -230,6 +240,40 @@ class VibeCodingController extends ChangeNotifier {
 
   int get maxRounds => _maxRounds ?? kVibeMaxRoundBudget;
   String? get lastError => _lastError;
+
+  /// 最近一次模型请求的原始异常；不是接口错误时为 null。
+  ApiException? get lastApiError => _lastApiError;
+
+  /// 一句话说明正在做什么，例如「正在读取 lib/main.dart」。
+  ///
+  /// 只在有工具正在执行时非空；空闲、等待确认、已完成都返回 null。
+  String? get activity {
+    for (var index = _messages.length - 1; index >= 0; index--) {
+      final message = _messages[index];
+      final tool = message.tool;
+      if (tool == null) continue;
+      if (!message.pending) return null;
+      return _activityLabel(tool);
+    }
+    return null;
+  }
+
+  static String _activityLabel(VibeToolCall tool) {
+    final target = tool.summary.trim();
+    return switch (tool.toolName) {
+      'read_file' => target.isEmpty ? '正在读取文件' : '正在读取 $target',
+      'write_file' => target.isEmpty ? '正在写入文件' : '正在写入 $target',
+      'edit_file' => target.isEmpty ? '正在编辑文件' : '正在编辑 $target',
+      'list_files' => target.isEmpty ? '正在查看目录' : '正在查看目录 $target',
+      'search_text' => target.isEmpty ? '正在搜索' : '正在搜索 $target',
+      'run_command' => '正在运行命令',
+      'todo' => '正在更新计划',
+      'use_skill' => '正在加载技能',
+      'web_search' => '正在联网搜索',
+      'web_fetch' => '正在读取网页',
+      _ => '正在执行 ${tool.toolName}',
+    };
+  }
 
   /// 已发生的模型对话历史（含 system）：会话层用它做持久化。
   ///
@@ -290,6 +334,7 @@ class VibeCodingController extends ChangeNotifier {
     }
     _cancelRequested = false;
     _lastError = null;
+    _lastApiError = null;
     _terminalUnavailable = false;
     _wroteCleanThisSend = false;
     _seenQueries.clear();
@@ -370,7 +415,7 @@ class VibeCodingController extends ChangeNotifier {
         }
         final AiChatResult reply;
         try {
-          reply = await _api.aiChat(
+          Future<AiChatResult> request() => _api.aiChat(
             token: activeToken,
             messages: List.unmodifiable(_history),
             tools: _toolSpecs(),
@@ -379,11 +424,21 @@ class VibeCodingController extends ChangeNotifier {
             model: _modelId,
             reasoningEffort: _reasoningEffort,
           );
+          final scheduler = requestScheduler;
+          reply = scheduler == null
+              ? await request()
+              : await scheduler.run(
+                  schedulerKey ?? 'session',
+                  request,
+                  isCancelled: () => _cancelRequested || _disposed,
+                );
         } on ApiException catch (error) {
           if (_cancelRequested || _disposed) {
             return;
           } else {
             _fail(error.message);
+            // 分类信息要在 _fail 之后写回：_fail 会清掉上一次的异常。
+            _lastApiError = error;
           }
           return;
         }
@@ -1456,6 +1511,7 @@ class VibeCodingController extends ChangeNotifier {
 
   void _fail(String message) {
     _lastError = message;
+    _lastApiError = null;
     _finish(VibePhase.failed);
   }
 

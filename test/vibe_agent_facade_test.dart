@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/session/agent_session.dart';
+import 'package:qfli_studio_core/vibe_coding/agent_request_scheduler.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
 void main() {
@@ -38,6 +39,7 @@ void main() {
     _FakeRelay relay, {
     String? token = 'local-token',
     String Function()? configuredModel,
+    Directory? cacheDir,
   }) => VibeAgentRuntime(
     api: ApiClient(transport: relay.client),
     tokenProvider: () => token,
@@ -45,6 +47,9 @@ void main() {
     projectRootOf: (_) => project.path,
     languageOf: (_) => 'python',
     configuredModel: configuredModel,
+    // 测试里不真的等 1/2/4 秒。
+    scheduler: AgentRequestScheduler(retryDelays: const []),
+    cacheDir: cacheDir,
   );
 
   Future<void> waitFor(
@@ -61,6 +66,17 @@ void main() {
   /// 等待后台持久化追上，避免测试结束与写入竞争。
   Future<void> settle(AgentFacade facade) async {
     await waitFor(() => Future.value(facade.state == AgentRunState.idle));
+    await facade.flush();
+  }
+
+  /// 等本轮结束，失败也算结束。
+  Future<void> settleAny(AgentFacade facade) async {
+    await waitFor(
+      () => Future.value(
+        facade.state != AgentRunState.running &&
+            facade.state != AgentRunState.cancelling,
+      ),
+    );
     await facade.flush();
   }
 
@@ -347,6 +363,131 @@ void main() {
     expect(facade.permission, AgentPermissionMode.readOnly);
     expect(notified, 1);
   });
+
+  test('send shows the user message and running state in the same frame', () async {
+    final meta = await store.create('p1');
+    final relay = _FakeRelay()..chatReplies.addAll([_textReply('好。')]);
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    final pending = facade.send(
+      '马上要看到我',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
+    // 同步段：这里还没 await 任何东西，界面已经能拿到用户消息和运行状态。
+    expect(facade.messages.last.role, 'user');
+    expect(facade.messages.last.text, '马上要看到我');
+    expect(facade.state, AgentRunState.running);
+
+    await pending;
+    await settle(facade);
+    expect(facade.messages.first.text, '马上要看到我');
+  });
+
+  test('opening a session never touches the network', () async {
+    final meta = await store.create('p1');
+    await store.appendMessage(meta.id, {
+      'id': 'm0',
+      'role': 'user',
+      'text': '历史消息',
+    });
+    await store.flush();
+    final relay = _FakeRelay()..failOnRequest = true;
+
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    expect(facade.messages.single.text, '历史消息');
+    expect(relay.requestCount, 0);
+  });
+
+  test('opens the tail and pages earlier messages on demand', () async {
+    final meta = await store.create('p1');
+    for (var index = 0; index < 100; index++) {
+      await store.appendMessage(meta.id, {
+        'id': 'm$index',
+        'role': 'user',
+        'text': '第 $index 条',
+      });
+    }
+    await store.flush();
+
+    final facade = await runtime(_FakeRelay()).open('p1', meta.id);
+    expect(facade.messages.length, 60);
+    expect(facade.messages.last.text, '第 99 条');
+    expect(facade.hasEarlier, isTrue);
+
+    await facade.loadEarlier();
+    expect(facade.messages.length, 100);
+    expect(facade.messages.first.text, '第 0 条');
+    expect(facade.hasEarlier, isFalse);
+  });
+
+  test('classifies API failures for the error card', () async {
+    final meta = await store.create('p1');
+
+    Future<AgentFacade> failing(int status, String message) async {
+      final relay = _FakeRelay()
+        ..chatStatus = status
+        ..chatError = message;
+      final facade = await runtime(relay).open('p1', meta.id);
+      await facade.send('x', permission: AgentPermissionMode.autoAcceptEdits);
+      await settleAny(facade);
+      return facade;
+    }
+
+    final notConfigured = await failing(503, 'AI 服务未配置');
+    expect(notConfigured.lastErrorInfo?.kind, AgentErrorKind.notConfigured);
+    expect(notConfigured.lastErrorInfo?.statusCode, 503);
+
+    final limited = await failing(429, '请求太频繁');
+    expect(limited.lastErrorInfo?.kind, AgentErrorKind.rateLimited);
+
+    final expired = await failing(401, '登录已过期');
+    expect(expired.lastErrorInfo?.kind, AgentErrorKind.loginExpired);
+  });
+
+  test('activity names the tool that is running', () async {
+    final meta = await store.create('p1');
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([
+        _writeCall('c1', 'a.txt', 'hi\n'),
+        _textReply('好了。'),
+      ]);
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    await facade.send('写个文件', permission: AgentPermissionMode.askEveryWrite);
+    await waitFor(
+      () => Future.value(facade.state == AgentRunState.awaitingApproval),
+    );
+    expect(facade.activity, '正在写入 a.txt');
+
+    facade.resolveApproval(true);
+    await settle(facade);
+    expect(facade.activity, isNull);
+  });
+
+  test('models are cached in memory and on disk', () async {
+    final relay = _FakeRelay()
+      ..models = {
+        'object': 'list',
+        'data': [
+          {'id': 'fast-model', 'object': 'model'},
+        ],
+      };
+    final cacheDir = Directory(p.join(root.path, 'cache'));
+
+    final first = runtime(relay, cacheDir: cacheDir);
+    expect((await first.models()).map((m) => m.id), ['fast-model']);
+    expect(relay.modelRequests, 1);
+
+    // 内存缓存：第二次不再请求。
+    expect((await first.models()).map((m) => m.id), ['fast-model']);
+    expect(relay.modelRequests, 1);
+
+    // 新运行时读盘缓存，仍然不请求。
+    final second = runtime(relay, cacheDir: cacheDir);
+    expect((await second.models()).map((m) => m.id), ['fast-model']);
+    expect(relay.modelRequests, 1);
+  });
 }
 
 Map<String, dynamic> _textReply(String text) => {
@@ -377,8 +518,13 @@ Map<String, dynamic> _writeCall(String id, String path, String content) => {
 class _FakeRelay {
   _FakeRelay() {
     client = MockClient.streaming((request, bodyStream) async {
+      requestCount++;
+      if (failOnRequest) {
+        throw StateError('测试里不应该发请求：${request.url.path}');
+      }
       final body = await utf8.decoder.bind(bodyStream).join();
       if (request.url.path == '/api/ai/models') {
+        modelRequests++;
         if (modelsFail) {
           return http.StreamedResponse(
             Stream.value(utf8.encode(jsonEncode({'error': '服务不可用'}))),
@@ -397,6 +543,15 @@ class _FakeRelay {
       chatBodies.add(
         body.isEmpty ? {} : jsonDecode(body) as Map<String, dynamic>,
       );
+      if (chatStatus != null) {
+        return http.StreamedResponse(
+          Stream.value(
+            utf8.encode(jsonEncode({'error': chatError ?? '失败'})),
+          ),
+          chatStatus!,
+          headers: {'content-type': 'application/json'},
+        );
+      }
       final reply = chatReplies.removeAt(0);
       return http.StreamedResponse(
         Stream.value(utf8.encode(jsonEncode(reply))),
@@ -411,4 +566,14 @@ class _FakeRelay {
   final List<Map<String, dynamic>> chatBodies = [];
   Map<String, dynamic>? models;
   bool modelsFail = false;
+
+  /// 任何请求都直接失败，用来证明某条路径不碰网络。
+  bool failOnRequest = false;
+
+  /// 非空时 `/api/ai/chat` 直接返回这个状态码。
+  int? chatStatus;
+  String? chatError;
+
+  int requestCount = 0;
+  int modelRequests = 0;
 }
