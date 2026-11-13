@@ -282,8 +282,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   EditorAgentHost? _agentHost;
 
   /// 输入卡片的选择记忆。构造不触 IO，磁盘读写延到首次读取。
+  ///
+  /// 文件实现按实例缓存整张表，多实例会互相覆盖，故全应用共用一个。
+  static final ComposerDefaultsStore _sharedComposerDefaults =
+      FileComposerDefaultsStore();
+
   late final ComposerDefaultsStore _composerDefaults =
-      widget.composerDefaults ?? FileComposerDefaultsStore();
+      widget.composerDefaults ?? _sharedComposerDefaults;
 
   /// 编辑器列与 Agent 面板的保活 key。
   ///
