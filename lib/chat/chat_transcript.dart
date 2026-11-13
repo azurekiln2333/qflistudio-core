@@ -179,9 +179,13 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   /// 有进展要显示：运行、排队或等待确认。
   bool get _busy => _running || widget.queued;
 
-  /// 状态行文案：排队优先，其次用 facade 的 activity，最后是「思考中…」。
+  /// 状态行文案：排队优先，其次等确认，再用 facade 的 activity，最后是「思考中…」。
+  ///
+  /// 等确认时不能写「思考中…」：会话已经停下来等用户，这时再提示思考会
+  /// 让用户以为还要等（C3）。
   String get _statusText {
     if (widget.queued) return '排队中';
+    if (widget.state == AgentRunState.awaitingApproval) return '等待你确认写入';
     final activity = widget.activity?.trim() ?? '';
     if (activity.isNotEmpty) return activity;
     return '思考中…';
