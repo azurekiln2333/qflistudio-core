@@ -154,6 +154,7 @@ class VibeAgentChips extends StatelessWidget {
 String vibeToolLabel(String toolName) => switch (toolName) {
   'list_files' => '列出文件',
   'read_file' => '读取文件',
+  'search_text' => '搜索文本',
   'write_file' => '写入文件',
   'edit_file' => '修改文件',
   'run_command' => '运行命令',
