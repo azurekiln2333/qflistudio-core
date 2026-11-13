@@ -230,7 +230,7 @@ class _AttachmentPickerSheetState extends State<AttachmentPickerSheet> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Text(
-                '这些文件来自其它项目，agent 只读，不能修改。'
+                '这些文件来自其它项目，Agent 只读，不能修改。'
                 '要改文件就先复制到本项目。',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant,
@@ -348,6 +348,14 @@ class _AttachmentPickerSheetState extends State<AttachmentPickerSheet> {
                 color: theme.colorScheme.onSurfaceVariant,
                 height: 1.5,
               ),
+            ),
+            const SizedBox(height: 16),
+            // 空状态也要有一个主操作（G7）：这里没有可附加的文件，
+            // 能做的只有关掉面板。
+            FilledButton.tonal(
+              key: const ValueKey('attachment-empty-close'),
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
             ),
           ],
         ),

@@ -176,6 +176,40 @@ void main() {
       expect(find.textContaining('加入同一工作区'), findsOneWidget);
     });
 
+    testWidgets('G7 an empty source offers a close action', (tester) async {
+      await tester.pumpWidget(
+        host(
+          Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showModalBottomSheet<List<String>>(
+                context: context,
+                isScrollControlled: true,
+                builder: (context) => AttachmentPickerSheet(
+                  source: AttachmentSource.project,
+                  load: () async => const [],
+                ),
+              ),
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('打开'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('这个项目还没有文件'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('attachment-empty-close')),
+        findsOneWidget,
+      );
+
+      // 主操作就是关掉面板：没有可附加的文件时只能退出。
+      await tester.tap(find.byKey(const ValueKey('attachment-empty-close')));
+      await tester.pumpAndSettle();
+      expect(find.text('这个项目还没有文件'), findsNothing);
+    });
+
     testWidgets('the workspace note explains the files are read only', (
       tester,
     ) async {
