@@ -903,6 +903,44 @@ void main() {
       await unmount(tester);
     });
 
+    testWidgets('流式更新只重建末尾条目', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      final facade = FakeAgentFacade(sessionId: meta.id)
+        ..seed(const [
+          AgentMessageView(id: 'm0', role: 'user', text: '把输出改成大写'),
+          AgentMessageView(id: 'm1', role: 'assistant', text: '先读一下文件。'),
+          AgentMessageView(id: 'm2', role: 'assistant', text: '正在', pending: true),
+        ]);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: meta.id),
+      );
+      await settle(tester);
+
+      // 末尾那条在流式增长：只有它重建，前面两条复用同一个 widget 实例。
+      ChatMessageTile.debugBuildCount = 0;
+      facade.seed(const [
+        AgentMessageView(id: 'm0', role: 'user', text: '把输出改成大写'),
+        AgentMessageView(id: 'm1', role: 'assistant', text: '先读一下文件。'),
+        AgentMessageView(
+          id: 'm2',
+          role: 'assistant',
+          text: '正在读取文件…',
+          pending: true,
+        ),
+      ]);
+      await tester.pump();
+
+      expect(ChatMessageTile.debugBuildCount, 1);
+      expect(find.text('正在读取文件…'), findsOneWidget);
+
+      await unmount(tester);
+    });
+
     testWidgets('滚到顶部时自动载入更早的消息', (tester) async {
       final auth = await loggedIn();
       final store = MemoryAgentSessionStore();
