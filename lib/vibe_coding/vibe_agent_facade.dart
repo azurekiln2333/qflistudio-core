@@ -168,12 +168,49 @@ class AgentLoginRequired implements Exception {
   String toString() => 'AgentLoginRequired';
 }
 
+/// 失败原因的分类。界面据此选文案，见 design.md §11.6。
+enum AgentErrorKind {
+  loginExpired,
+  rateLimited,
+  notConfigured,
+  offline,
+  timeout,
+  unknown,
+}
+
+/// 一次失败的结构化信息。
+class AgentErrorInfo {
+  const AgentErrorInfo({required this.kind, this.statusCode, this.detail = ''});
+
+  final AgentErrorKind kind;
+
+  /// HTTP 状态码；不是 HTTP 错误时为 null。
+  final int? statusCode;
+
+  /// 服务端原文或异常摘要，只放进「详情」折叠区。不含密钥。
+  final String detail;
+}
+
 /// 一个实例对应一个会话。消息在会话结束时自动持久化。
 abstract class AgentFacade extends ChangeNotifier {
   String get sessionId;
   List<AgentMessageView> get messages;
   AgentRunState get state;
   String? get lastError;
+
+  /// 最近一次失败的分类。没有失败时为 null。由 pi-B 在返工阶段实现。
+  AgentErrorInfo? get lastErrorInfo => null;
+
+  /// 一句话说明正在做什么，例如「正在读取 lib/main.dart」。空闲时为 null。
+  /// 由 pi-B 在返工阶段实现。
+  String? get activity => null;
+
+  /// 是否还有更早的消息没有载入。由 pi-B 在返工阶段实现。
+  bool get hasEarlier => false;
+
+  /// 载入更早的一页消息。由 pi-B 在返工阶段实现。
+  Future<void> loadEarlier() async {}
+
   AgentWriteApproval? get pendingApproval;
 
   /// 当前权限模式。[send] 会更新它，界面也可直接设置。
