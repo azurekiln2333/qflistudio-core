@@ -556,6 +556,7 @@ class VibeAgentFacade extends AgentFacade {
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
     final body = text.trim();
     if (body.isEmpty) return;
+    final feedbackWatch = Stopwatch()..start();
     _permission = permission;
     _lastUserText = body;
     _cancelBeforeStart = false;
@@ -572,6 +573,8 @@ class VibeAgentFacade extends AgentFacade {
     );
     _starting = true;
     notifyListeners();
+    // 「发送到出现用户消息」的耗时，不含网络与磁盘。
+    agentPerf('send.feedback', feedbackWatch.elapsedMilliseconds);
     try {
       // 历史推迟到第一次发送时才读：打开会话不需要它。
       await _ensureHistoryLoaded();
