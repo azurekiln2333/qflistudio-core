@@ -465,6 +465,46 @@ void main() {
       await unmount(tester);
     });
 
+    testWidgets('D1/D2 模型列表晚到时切换会话也能补上模型名和推理强度', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final first = await store.create('p1', title: '会话一');
+      final second = await store.create('p1', title: '会话二');
+      final runtime = runtimeFor(
+        store,
+        models: const [
+          AgentModelOption(
+            id: 'model-a',
+            label: 'Model A',
+            reasoningEfforts: ['low', 'high'],
+          ),
+        ],
+      )..modelsGate = Completer<void>();
+      runtime.facades[first.id] = FakeAgentFacade(sessionId: first.id);
+      runtime.facades[second.id] = FakeAgentFacade(sessionId: second.id);
+
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: first.id),
+      );
+      await settle(tester);
+      expect(find.text('模型…'), findsOneWidget);
+
+      // 模型还没回来就切到会话二。
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: second.id),
+      );
+      await settle(tester);
+      expect(find.text('模型…'), findsOneWidget);
+
+      // 模型到达：会话二也补上模型名和推理强度。
+      runtime.modelsGate!.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Model A'), findsOneWidget);
+      expect(find.text('low'), findsOneWidget);
+
+      await unmount(tester);
+    });
+
     testWidgets('D3 模型加载中显示加载态，且不影响会话与发送', (tester) async {
       final auth = await loggedIn();
       final store = MemoryAgentSessionStore();
