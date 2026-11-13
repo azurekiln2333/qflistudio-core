@@ -14,16 +14,51 @@ import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
 import 'support/fake_agent.dart';
 
+Project _project() => Project(
+  id: 'p1',
+  name: 'Demo',
+  path: 'demo',
+  createdAt: DateTime(2026, 1, 1),
+  lastOpenedAt: DateTime(2026, 1, 1),
+);
+
+/// 模拟外层：把 `onSessionOpened` 回传的 id 当成新的 `sessionId` 重建面板。
+class _HandoffHost extends StatefulWidget {
+  const _HandoffHost({required this.auth, required this.runtime});
+
+  final AuthStore auth;
+  final FakeAgentRuntime runtime;
+
+  @override
+  State<_HandoffHost> createState() => _HandoffHostState();
+}
+
+class _HandoffHostState extends State<_HandoffHost> {
+  String? _sessionId;
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    home: LoginGateScope(
+      auth: widget.auth,
+      child: Scaffold(
+        body: MediaQuery(
+          data: const MediaQueryData(size: Size(420, 800)),
+          child: WorkbenchAgentPane(
+            project: _project(),
+            runtime: widget.runtime,
+            auth: widget.auth,
+            settings: SettingsStore(),
+            sessionId: _sessionId,
+            onSessionOpened: (id) => setState(() => _sessionId = id),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 /// Agent 面板的反馈、错误和输入卡片（CHECKLIST 的 C、D、H 与 E2 显示部分）。
 void main() {
-  Project project() => Project(
-    id: 'p1',
-    name: 'Demo',
-    path: 'demo',
-    createdAt: DateTime(2026, 1, 1),
-    lastOpenedAt: DateTime(2026, 1, 1),
-  );
-
   Future<AuthStore> loggedIn() async {
     final auth = AuthStore();
     await auth.signIn(
@@ -48,6 +83,7 @@ void main() {
     String? sessionId,
     Size size = const Size(420, 800),
     double bottomInset = 0,
+    double textScale = 1,
   }) => MaterialApp(
     home: LoginGateScope(
       auth: auth,
@@ -56,9 +92,10 @@ void main() {
           data: MediaQueryData(
             size: size,
             viewInsets: EdgeInsets.only(bottom: bottomInset),
+            textScaler: TextScaler.linear(textScale),
           ),
           child: WorkbenchAgentPane(
-            project: project(),
+            project: _project(),
             runtime: runtime,
             auth: auth,
             settings: SettingsStore(),
@@ -862,6 +899,128 @@ void main() {
       expect(built, lessThan(200));
       // 末尾一条在可视区内。
       expect(find.text('第 199 条消息'), findsOneWidget);
+
+      await unmount(tester);
+    });
+
+    testWidgets('滚到顶部时自动载入更早的消息', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      final facade = FakeAgentFacade(sessionId: meta.id)
+        ..seed([
+          for (var index = 0; index < 40; index++)
+            AgentMessageView(
+              id: 'm$index',
+              role: index.isEven ? 'user' : 'assistant',
+              text: '第 $index 条消息',
+            ),
+        ])
+        ..seedEarlier(const [
+          AgentMessageView(id: 'e0', role: 'assistant', text: '更早的一条'),
+        ]);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: meta.id),
+      );
+      await settle(tester);
+      expect(facade.loadEarlierCount, 0);
+
+      // 往上拖到顶，触发 loadEarlier。
+      await tester.drag(find.byType(ListView), const Offset(0, 4000));
+      await tester.pump();
+
+      expect(facade.loadEarlierCount, 1);
+      expect(find.text('更早的一条'), findsOneWidget);
+
+      await unmount(tester);
+    });
+  });
+
+  group('回归', () {
+    testWidgets('新会话建好后回传 id 不会清掉刚发出的消息和停止键', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final runtime = runtimeFor(store);
+      // 内存存储的第一个会话 id 是 session-0；先给它一个停在门里的门面，
+      // 好在「回传 id 之后」那一帧观察界面。
+      final facade = FakeAgentFacade(sessionId: 'session-0')
+        ..sendGate = Completer<void>();
+      runtime.facades['session-0'] = facade;
+
+      await tester.pumpWidget(_HandoffHost(auth: auth, runtime: runtime));
+      await settle(tester);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('composer-input')),
+        '第一句',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      // 建会话 → onSessionOpened 回传 id → 外层重建面板。
+      await tester.pump();
+      await tester.pump();
+
+      expect(store.sessionsOf('p1'), hasLength(1));
+      expect(
+        find.descendant(
+          of: find.byType(ChatTranscript),
+          matching: find.text('第一句'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('composer-stop')), findsOneWidget);
+
+      facade.sendGate!.complete();
+      await unmount(tester);
+    });
+
+    testWidgets('文字缩放 1.3 时工具行与对话流不溢出', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(
+        store,
+        models: const [
+          AgentModelOption(
+            id: 'model-a',
+            label: '一个比较长的模型名字',
+            reasoningEfforts: ['low', 'high'],
+          ),
+        ],
+      );
+      final facade = FakeAgentFacade(sessionId: meta.id)
+        ..seed(const [
+          AgentMessageView(
+            id: 'm0',
+            role: 'user',
+            text: '把输出改成大写，并补一个测试。',
+          ),
+          AgentMessageView(
+            id: 'm1',
+            role: 'tool',
+            text: '12 行',
+            toolName: 'read_file',
+            changedPaths: ['lib/main.dart'],
+          ),
+        ]);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        host(
+          auth: auth,
+          runtime: runtime,
+          sessionId: meta.id,
+          size: const Size(390, 780),
+          textScale: 1.3,
+        ),
+      );
+      await settle(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('composer-model')), findsOneWidget);
 
       await unmount(tester);
     });
