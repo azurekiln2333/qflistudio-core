@@ -408,6 +408,8 @@ class VibeAgentFacade extends AgentFacade {
 
   /// 用户在「已显示反馈、还没真正开始」的窗口里点了停止。
   bool _cancelBeforeStart = false;
+  bool _endedWithSuccess = false;
+  bool _inControllerRun = false;
   bool _hasEarlier;
   bool _loadingEarlier = false;
   bool _historyLoaded = false;
@@ -726,10 +728,17 @@ class VibeAgentFacade extends AgentFacade {
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
     final body = text.trim();
     if (body.isEmpty) return;
+    if (state == AgentRunState.running ||
+        state == AgentRunState.cancelling ||
+        state == AgentRunState.awaitingApproval) {
+      return;
+    }
     final feedbackWatch = Stopwatch()..start();
     _permission = permission;
     _lastUserText = body;
     _cancelBeforeStart = false;
+    _endedWithSuccess = false;
+    _inControllerRun = false;
     _controller.configureModel(
       modelId: modelId,
       reasoningEffort: reasoningEffort,
@@ -756,6 +765,7 @@ class VibeAgentFacade extends AgentFacade {
       _cancelBeforeStart = false;
       return;
     }
+    _inControllerRun = true;
     _controller.send(composed);
     _sync();
     // 标题只是列表的装饰，不能拖住发送。
@@ -811,6 +821,7 @@ class VibeAgentFacade extends AgentFacade {
     _pendingApproval = null;
     _pendingCompleter = null;
     if (completer != null && !completer.isCompleted) completer.complete(false);
+    _endedWithSuccess = false;
     if (_starting) {
       // 还没进入控制器：记下来，send 恢复后不再启动本轮。
       _cancelBeforeStart = true;
@@ -825,7 +836,12 @@ class VibeAgentFacade extends AgentFacade {
   @override
   Future<void> retryLast() async {
     final text = _lastUserText;
-    if (text == null || state == AgentRunState.running) return;
+    if (text == null ||
+        state == AgentRunState.running ||
+        state == AgentRunState.cancelling ||
+        state == AgentRunState.awaitingApproval) {
+      return;
+    }
     await send(text, permission: _permission);
   }
 
@@ -914,17 +930,23 @@ class VibeAgentFacade extends AgentFacade {
         ),
       );
     }
-    if (source.isNotEmpty) {
-      // 控制器已接管用户消息，乐观条目下台。
+    final phase = _controller.phase;
+    if (source.isNotEmpty ||
+        phase == VibePhase.failed ||
+        phase == VibePhase.cancelled) {
+      // 控制器已接管用户消息或本轮结束，乐观条目下台。
       _optimistic = null;
       _starting = false;
     }
     _runViews = next;
-    final phase = _controller.phase;
     final settled = phase != VibePhase.running && phase != VibePhase.cancelling;
     final wasRunning =
         _lastPhase == VibePhase.running || _lastPhase == VibePhase.cancelling;
     _lastPhase = phase;
+    if (_inControllerRun && settled) {
+      _endedWithSuccess = phase == VibePhase.succeeded;
+      _inControllerRun = false;
+    }
     notifyListeners();
     if (settled && (wasRunning || _heldPaths.isNotEmpty)) {
       // 本轮结束：释放路径租约，再收尾落盘。
@@ -1127,7 +1149,9 @@ class VibeAgentRuntime implements AgentRuntime {
   void markSeen(String sessionId) {
     final changed =
         _unread.remove(sessionId) | _failedUnread.remove(sessionId);
-    if (changed) _liveTick.value++;
+    if (!changed) return;
+    _lastStatus[sessionId] = statusOf(sessionId);
+    _liveTick.value++;
   }
 
   @override
@@ -1261,10 +1285,10 @@ class VibeAgentRuntime implements AgentRuntime {
       _unread.remove(sessionId);
       _failedUnread.remove(sessionId);
     } else if (_active.remove(sessionId)) {
-      // 后台刚结束：失败进「失败未读」，其余进「完成未读」。
+      // 后台刚结束：失败进「失败未读」，正常完成进「完成未读」；取消的不标未读。
       if (state == AgentRunState.failed) {
         _failedUnread.add(sessionId);
-      } else if (state == AgentRunState.idle) {
+      } else if (state == AgentRunState.idle && facade._endedWithSuccess) {
         _unread.add(sessionId);
       }
     }

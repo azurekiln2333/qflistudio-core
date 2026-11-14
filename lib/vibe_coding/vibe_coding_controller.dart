@@ -340,10 +340,10 @@ class VibeCodingController extends ChangeNotifier {
     _seenQueries.clear();
     _seenUrls.clear();
     _searchCount = 0;
-    _appendMessage(VibeMessage(isUser: true, text: prompt));
+    _phase = VibePhase.running;
+    _messages.add(VibeMessage(isUser: true, text: prompt));
     _history.add({'role': 'user', 'content': prompt});
     _trimHistory();
-    _phase = VibePhase.running;
     _notify();
     _activeRun = _run(prompt);
   }
@@ -436,9 +436,7 @@ class VibeCodingController extends ChangeNotifier {
           if (_cancelRequested || _disposed) {
             return;
           } else {
-            _fail(error.message);
-            // 分类信息要在 _fail 之后写回：_fail 会清掉上一次的异常。
-            _lastApiError = error;
+            _fail(error.message, apiError: error);
           }
           return;
         }
@@ -1509,9 +1507,9 @@ class VibeCodingController extends ChangeNotifier {
     if (notify) _notify();
   }
 
-  void _fail(String message) {
+  void _fail(String message, {ApiException? apiError}) {
     _lastError = message;
-    _lastApiError = null;
+    _lastApiError = apiError;
     _finish(VibePhase.failed);
   }
 

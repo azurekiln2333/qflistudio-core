@@ -293,6 +293,57 @@ void main() {
     expect(a.state, isNot(AgentRunState.running));
     expect(b.state, isNot(AgentRunState.running));
   });
+
+  test('cancelling a running session leaves it idle, never finishedUnread', () async {
+    final meta = await store.create('p1');
+    final relay = _Relay()..add(_textReply('不会到达'), gate: Completer<void>());
+    final hub = runtime(relay);
+    final facade = await hub.open('p1', meta.id);
+    final observed = <AgentLiveStatus>[];
+    hub.liveChanges.addListener(() {
+      observed.add(hub.statusOf(meta.id));
+    });
+
+    final send = facade.send('跑一下', permission: AgentPermissionMode.autoAcceptEdits);
+    await waitFor(() => Future.value(facade.state == AgentRunState.running));
+
+    final cancelling = facade.cancel();
+    relay.releaseAll();
+    await cancelling;
+    await send;
+    await facade.flush();
+
+    expect(facade.state, AgentRunState.idle);
+    expect(hub.statusOf(meta.id), AgentLiveStatus.idle);
+    expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
+  });
+
+  test('starting send does not flicker finishedUnread before completion', () async {
+    final meta = await store.create('p1');
+    final relay = _Relay()
+      ..add(_textReply('第一轮'))
+      ..add(_textReply('第二轮'), gate: Completer<void>());
+    final hub = runtime(relay);
+    final facade = await hub.open('p1', meta.id);
+
+    await facade.send('一', permission: AgentPermissionMode.autoAcceptEdits);
+    await waitFor(() => Future.value(facade.state == AgentRunState.idle));
+    hub.markSeen(meta.id);
+
+    final observed = <AgentLiveStatus>[];
+    hub.liveChanges.addListener(() {
+      observed.add(hub.statusOf(meta.id));
+    });
+
+    final second = facade.send('二', permission: AgentPermissionMode.autoAcceptEdits);
+    await waitFor(() => Future.value(facade.state == AgentRunState.running));
+    expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
+
+    relay.releaseAll();
+    await second;
+    await waitFor(() => Future.value(facade.state == AgentRunState.idle));
+    expect(hub.statusOf(meta.id), AgentLiveStatus.finishedUnread);
+  });
 }
 
 Map<String, dynamic> _textReply(String text) => {

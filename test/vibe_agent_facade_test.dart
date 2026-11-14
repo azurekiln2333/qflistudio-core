@@ -514,6 +514,30 @@ void main() {
     expect((await second.models()).map((m) => m.id), ['fast-model']);
     expect(relay.modelRequests, 1);
   });
+
+  test('send and retryLast ignore duplicate triggers while active', () async {
+    final meta = await store.create('p1');
+    final gate = Completer<void>();
+    final relay = _FakeRelay()..chatGate = gate;
+    relay.chatReplies.add(_textReply('回复一'));
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    final first = facade.send('只发一次', permission: AgentPermissionMode.autoAcceptEdits);
+    await waitFor(() => Future.value(facade.state == AgentRunState.running));
+
+    await facade.send('并发重复', permission: AgentPermissionMode.autoAcceptEdits);
+    await facade.retryLast();
+
+    gate.complete();
+    await first;
+    await settle(facade);
+
+    expect(relay.chatBodies, hasLength(1));
+    expect(
+      facade.messages.where((m) => m.role == 'user').map((m) => m.text).toList(),
+      ['只发一次'],
+    );
+  });
 }
 
 Map<String, dynamic> _textReply(String text) => {
@@ -598,6 +622,8 @@ class _FakeRelay {
         );
       }
       final reply = chatReplies.removeAt(0);
+      final gate = chatGate;
+      if (gate != null) await gate.future;
       return http.StreamedResponse(
         Stream.value(utf8.encode(jsonEncode(reply))),
         200,
@@ -607,6 +633,7 @@ class _FakeRelay {
   }
 
   late final http.Client client;
+  Completer<void>? chatGate;
   final List<Map<String, dynamic>> chatReplies = [];
   final List<Map<String, dynamic>> chatBodies = [];
   Map<String, dynamic>? models;

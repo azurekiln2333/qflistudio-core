@@ -409,5 +409,28 @@ void main() {
       expect(text, contains('③ TLS 握手：失败'));
       expect(probe.touchedHosts, everyElement(host));
     });
+
+    test('同步监听者在失败通知当刻就能读到 host 与 phase', () async {
+      final meta = await store.create('p1');
+      final api = throwingClient(
+        HandshakeException('Connection terminated during handshake'),
+      );
+      final facade = await runtime(api).open('p1', meta.id);
+      final snapshots = <AgentErrorInfo?>[];
+      facade.addListener(() {
+        if (facade.state == AgentRunState.failed) {
+          snapshots.add(facade.lastErrorInfo);
+        }
+      });
+
+      await facade.send('x', permission: AgentPermissionMode.autoAcceptEdits);
+      await settle(facade);
+
+      expect(snapshots, isNotEmpty);
+      final first = snapshots.first!;
+      expect(first.phase, AgentErrorPhase.tls);
+      expect(first.host, host);
+      expect(first.detail, contains('服务器：$host'));
+    });
   });
 }
