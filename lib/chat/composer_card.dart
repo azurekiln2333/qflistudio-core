@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -376,13 +378,15 @@ class _ComposerCardState extends State<ComposerCard> {
     final efforts = _efforts;
     return LayoutBuilder(
       builder: (context, constraints) {
-        // 文字缩放会等比放大按钮，按缩放后的等效宽度选档位。
-        final scale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 2.0);
-        final fit = _toolRowFit(constraints.maxWidth / scale);
+        // 按实际可用宽度决定保留哪些文字，不按屏幕宽度分档：手机横屏、
+        // 侧边栏、字体缩放都会改变这里的宽度（追加要求第 3 条）。
+        final fit = _fitFor(
+          context,
+          constraints.maxWidth,
+          efforts: efforts,
+        );
         return Row(
           children: [
-            // 左侧一组占满，发送键才留在最右。模型是组内唯一可伸缩的，
-            // 所以剩下的宽度全给它，不会被空白吃掉（追加要求第 2、4 条）。
             Expanded(
               child: Row(
                 children: [
@@ -396,7 +400,13 @@ class _ComposerCardState extends State<ComposerCard> {
                     showLabel: fit.permissionLabel,
                   ),
                   const SizedBox(width: 2),
-                  Flexible(child: _buildModelButton(context)),
+                  // 剩下的宽度全给模型名，它和发送键之间不留空档。
+                  Flexible(
+                    child: SizedBox(
+                      width: fit.modelWidth,
+                      child: _buildModelButton(context),
+                    ),
+                  ),
                   if (efforts.isNotEmpty) ...[
                     const SizedBox(width: 2),
                     _buildEffortButton(
@@ -724,37 +734,124 @@ class _ComposerSkillNextIntent extends Intent {
   const _ComposerSkillNextIntent();
 }
 
-/// 工具行保留哪些文字。
-///
-/// 收缩顺序按 brief 追加要求第 4 条：先收推理强度的文字，再收权限的文字，
-/// 模型名一直留到最窄。收掉文字后按钮仍有图标和 tooltip。
+/// 工具行保留哪些文字，以及模型按钮拿到多宽。
 @immutable
 class _ToolRowFit {
-  const _ToolRowFit({required this.permissionLabel, required this.effortLabel});
+  const _ToolRowFit({
+    required this.permissionLabel,
+    required this.effortLabel,
+    required this.modelWidth,
+  });
 
   final bool permissionLabel;
   final bool effortLabel;
+
+  /// 模型按钮的宽度：可用宽度的剩余部分全给它。
+  final double modelWidth;
 }
 
-/// 全部带文案需要的宽度：加号 48 + 权限 84 + 模型 106 + 推理 65 + 发送 48 + 间隔。
-const double _toolRowComfortWidth = 380;
+/// 模型按钮至少留出的宽度：图标加约五个字。判档时按这个下界算，
+/// 剩余宽度不够时就不会硬顶出溢出。
+const double _modelChipMinWidth = 84;
 
-/// 权限文案还能放下、推理强度先收成图标的宽度。
+/// 工具行固定尺寸：加号、发送键和按钮间隔。指标都在这里，便于对账。
+const double _toolAddWidth = 48;
+const double _toolSendWidth = 48;
+const double _toolGap = 2;
+const double _toolIconChipWidth = 44;
+
+/// 刚好塞满时字体会压线，留一点余量再换下一档。
+const double _toolFitSlack = 12;
+
+/// 生成一套按钮宽度：文字用真实的字体度量，已含字体缩放。
+class _ToolRowMetrics {
+  _ToolRowMetrics(BuildContext context)
+    : permissionLabel = _chipWidth(context, _permissionLabels),
+      effortLabel = _chipWidth(context, _effortLabels);
+
+  /// 权限按钮带文字时的宽度：三种模式里取最宽的，切换模式不抖动。
+  final double permissionLabel;
+
+  /// 推理强度带文字时的宽度：常见的几档里取最宽。
+  final double effortLabel;
+
+  static const List<String> _permissionLabels = ['只读', '每次询问', '自动接受'];
+
+  /// 推理强度的可选值由模型决定，这里用几个常见的短词估宽；真实值更短也不会溢出。
+  static const List<String> _effortLabels = ['low', 'medium', 'high', '最小'];
+
+  static double _chipWidth(BuildContext context, List<String> labels) {
+    var widest = 0.0;
+    for (final label in labels) {
+      widest = math.max(widest, _textWidth(context, label));
+    }
+    // 图标 15 + 图标与文字的间距 5 + 左右内边距 16。
+    return 36 + widest;
+  }
+
+  static double _textWidth(BuildContext context, String text) {
+    final theme = Theme.of(context);
+    final painter = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: theme.textTheme.labelMedium ?? const TextStyle(),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+}
+
+/// 选最齐的档：先试全部带文字，再只收推理强度，最后两个都收。
 ///
-/// 390 宽的屏：面板内边距 16 + 卡片内边距 44，工具行约 330，正好落在这档。
-const double _toolRowPermissionWidth = 320;
+/// 收缩顺序按追加要求第 3 条：推理强度，权限，模型名最后。
+_ToolRowFit _fitFor(
+  BuildContext context,
+  double available, {
+  required List<String> efforts,
+}) {
+  final metrics = _ToolRowMetrics(context);
+  final hasEfforts = efforts.isNotEmpty;
+  final fixed = _toolAddWidth + _toolGap + _toolGap + _toolSendWidth +
+      (hasEfforts ? _toolGap : 0);
 
-/// 模型按钮的最小宽度，约六个字。
-const double _modelChipMinWidth = 106;
+  double required({required bool permission, required bool effort}) {
+    final permissionWidth = permission
+        ? metrics.permissionLabel
+        : _toolIconChipWidth;
+    final effortWidth = !hasEfforts
+        ? 0.0
+        : (effort ? metrics.effortLabel : _toolIconChipWidth);
+    // 模型的宽度下界也算进去：放不下就继续收文字，而不是让它撑出边界。
+    return fixed + permissionWidth + effortWidth + _modelChipMinWidth;
+  }
 
-_ToolRowFit _toolRowFit(double width) {
-  if (width >= _toolRowComfortWidth) {
-    return const _ToolRowFit(permissionLabel: true, effortLabel: true);
+  bool fits({required bool permission, required bool effort}) =>
+      required(permission: permission, effort: effort) + _toolFitSlack <=
+      available;
+
+  var permission = false;
+  var effort = false;
+  if (hasEfforts && fits(permission: true, effort: true)) {
+    permission = true;
+    effort = true;
+  } else if (fits(permission: true, effort: false)) {
+    permission = true;
   }
-  if (width >= _toolRowPermissionWidth) {
-    return const _ToolRowFit(permissionLabel: true, effortLabel: false);
-  }
-  return const _ToolRowFit(permissionLabel: false, effortLabel: false);
+
+  // 剩下的宽度全给模型名：它和发送键之间不留空档。
+  final others =
+      required(permission: permission, effort: effort) - _modelChipMinWidth;
+  final modelWidth = math.max(0.0, available - others);
+  return _ToolRowFit(
+    permissionLabel: permission,
+    effortLabel: effort,
+    modelWidth: modelWidth,
+  );
 }
 
 /// 模型菜单里的「重试」条目。用独立类型，避免和模型 id 的字符串撞上。

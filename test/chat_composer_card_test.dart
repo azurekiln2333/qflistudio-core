@@ -268,14 +268,18 @@ void main() {
     expect(state.attachments, ['picked.txt']);
   });
 
-  Widget hostAt(double width, Widget child) => MaterialApp(
-    home: Scaffold(
-      body: Align(
-        alignment: Alignment.bottomCenter,
-        child: SizedBox(width: width, child: child),
-      ),
-    ),
-  );
+  Widget hostAt(double width, Widget child, {double textScale = 1}) =>
+      MaterialApp(
+        home: MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+          child: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: SizedBox(width: width, child: child),
+            ),
+          ),
+        ),
+      );
 
   // 390 宽的屏减掉面板左右各 8 的内边距，卡片宽 374，工具行宽 354。
   const double cardWidth390 = 374;
@@ -307,10 +311,10 @@ void main() {
     // 模型：显示模型名。
     expect(find.text('deepseek-v4.1-flash'), findsOneWidget);
 
-    // 空间不够时先收推理强度的文字，留图标和提示，不再截成「l…」。
-    expect(find.text('low'), findsNothing);
-    expect(find.byTooltip('推理强度：low'), findsOneWidget);
+    // 空间不够时先收推理强度的文字，留图标和提示；有空间就带完整文字，
+    // 但任何情况下都不会截成「l…」。
     expect(find.text('l…'), findsNothing);
+    expect(find.byTooltip('推理强度：low'), findsOneWidget);
 
     // 工具行没有溢出。
     expect(tester.takeException(), isNull);
@@ -507,5 +511,129 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('composer-model-retry')));
     await tester.pumpAndSettle();
     expect(retries, 1);
+  });
+
+  group('工具行按可用宽度决定文字', () {
+    const models = [
+      AgentModelOption(
+        id: 'deepseek-v4.1-flash',
+        label: 'deepseek-v4.1-flash',
+        reasoningEfforts: ['low', 'high'],
+      ),
+    ];
+
+    testWidgets('宽 424、缩放 1.0：权限显示「每次询问」，不留大片空白', (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          424,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+            models: models,
+          ),
+        ),
+      );
+
+      // 真机上权限只剩图标，是因为按屏幕宽度分档，而不是按可用宽度。
+      expect(find.text('每次询问'), findsOneWidget);
+      expect(find.byIcon(Icons.shield_outlined), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      // 模型按钮把剩下的宽度吃掉：工具行末尾没有大片空档。
+      // 推理强度收成图标后仍占 44，落在模型和发送键之间。
+      final send = tester.getRect(find.byKey(const ValueKey('composer-send')));
+      final trailing = tester.getRect(
+        find.byKey(const ValueKey('composer-reasoning')),
+      );
+      expect(send.left - trailing.right, lessThanOrEqualTo(4));
+      // 剩余宽度给了模型名，不是空着。
+      expect(
+        tester.getRect(find.byKey(const ValueKey('composer-model'))).width,
+        greaterThan(106),
+      );
+    });
+
+    testWidgets('宽 424 减掉面板内边距后也显示权限文字', (tester) async {
+      // 编辑器面板左右各留 8，卡片实际宽 408。
+      await tester.pumpWidget(
+        hostAt(
+          408,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+            models: models,
+          ),
+        ),
+      );
+
+      expect(find.text('每次询问'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('宽 360 不溢出', (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          360,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+            models: models,
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      // 每个按钮仍然可点，高度不小于 44。
+      for (final key in const [
+        'composer-permission',
+        'composer-model',
+        'composer-send',
+      ]) {
+        final size = tester.getSize(find.byKey(ValueKey(key)));
+        expect(size.height, greaterThanOrEqualTo(44), reason: key);
+      }
+    });
+
+    testWidgets('缩放 1.3 且宽 360 不溢出', (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          360,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+            models: models,
+          ),
+          textScale: 1.3,
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
+    });
+
+    testWidgets('放不下时先收推理强度，再收权限，模型名最后', (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          320,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+            models: models,
+          ),
+          textScale: 1.3,
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      // 收掉文字后仍有图标和提示，不是空白。
+      expect(find.byTooltip('权限模式：每次询问'), findsOneWidget);
+      expect(find.byTooltip('推理强度：low'), findsOneWidget);
+      expect(find.byTooltip('模型：deepseek-v4.1-flash'), findsOneWidget);
+    });
   });
 }
