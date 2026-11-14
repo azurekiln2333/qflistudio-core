@@ -972,6 +972,53 @@ void main() {
       expect(find.byKey(const ValueKey('chat-retry')), findsOneWidget);
       await unmount(tester);
     });
+
+    testWidgets('H6 带主机的错误写明主机和步骤，可诊断连接', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      runtime.diagnosisText =
+          '服务器：qfli.suanxiwanjie.cn\n'
+          '① 域名解析：成功，172.67.140.164（0.04 秒）\n'
+          '③ TLS 握手：失败，HandshakeException（6.0 秒）';
+      final facade = FakeAgentFacade(sessionId: meta.id);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        host(auth: auth, runtime: runtime, sessionId: meta.id),
+      );
+      await settle(tester);
+
+      facade.seedError(
+        message: '连不上服务器 qfli.suanxiwanjie.cn：TLS 握手失败',
+        kind: AgentErrorKind.offline,
+        host: 'qfli.suanxiwanjie.cn',
+        phase: AgentErrorPhase.tls,
+        detail: '请求：POST /api/ai/chat\n'
+            '服务器：qfli.suanxiwanjie.cn\n'
+            '失败步骤：TLS 握手',
+      );
+      await tester.pump();
+
+      // 标题是门面给的友好文案，带主机和步骤，不是一句固定活。
+      expect(find.text('连不上服务器 qfli.suanxiwanjie.cn：TLS 握手失败'), findsOneWidget);
+
+      await tester.tap(find.text('详情'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('失败步骤：TLS 握手'), findsOneWidget);
+
+      // 诊断走的是运行时的真实入口。
+      await tester.tap(find.byKey(const ValueKey('chat-error-diagnose')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(runtime.diagnoseCount, 1);
+      expect(find.byKey(const ValueKey('chat-error-diagnosis')), findsOneWidget);
+      expect(find.textContaining('TLS 握手：失败'), findsOneWidget);
+
+      await unmount(tester);
+    });
   });
 
   group('对话流性能与分页', () {

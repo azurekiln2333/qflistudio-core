@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../vibe_coding/vibe_agent_facade.dart';
 import '../vibe_coding/vibe_coding_widgets.dart';
@@ -24,6 +25,7 @@ class ChatTranscript extends StatefulWidget {
     this.pendingApproval,
     this.onApproval,
     this.onRetry,
+    this.onDiagnose,
     this.emptyTitle = '开始一个新的会话',
     this.emptyHint = '描述你想改什么。Agent 会读写项目文件，并在在线终端里运行命令。',
     this.emptyAction,
@@ -64,6 +66,10 @@ class ChatTranscript extends StatefulWidget {
   /// 重试上一条用户消息。
   final VoidCallback? onRetry;
 
+  /// 诊断到 API 服务器的连接。只在用户点「诊断连接」时调用，不自动发起。
+  /// 为空时不显示该按钮。
+  final Future<String> Function()? onDiagnose;
+
   final String emptyTitle;
   final String emptyHint;
   final Widget? emptyAction;
@@ -79,6 +85,14 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   String _lastTail = '';
   double _lastPixels = 0;
 
+  /// 诊断结果和它对应的那次失败。失败变了就丢掉旧结果，避免张冠李戴。
+  String? _diagnosis;
+  String? _diagnosisFor;
+  bool _diagnosing = false;
+
+  /// 刚复制过详情，按钮上给一句回执。
+  bool _copied = false;
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +107,12 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   @override
   void didUpdateWidget(covariant ChatTranscript oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (_signatureOf(widget.errorInfo) != _signatureOf(oldWidget.errorInfo)) {
+      _diagnosis = null;
+      _diagnosisFor = null;
+      _diagnosing = false;
+      _copied = false;
+    }
     final messages = widget.messages;
     final tail = messages.isEmpty ? '' : _tailOf(messages.last);
     if (messages.length != _lastCount || tail != _lastTail) {
@@ -335,6 +355,82 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     );
   }
 
+  /// 一次失败的身份，用于判断诊断结果和「已复制」是否还适用。
+  static String _signatureOf(AgentErrorInfo? info) {
+    if (info == null) return '';
+    return '${info.host}|${info.phase.name}|${info.statusCode}|${info.detail}';
+  }
+
+  /// 详情区的文本：状态码单独一行，后面跟多行说明。
+  static String _detailTextOf(AgentErrorInfo info) {
+    final detail = info.detail.trim();
+    return <String>[
+      if (info.statusCode != null) '状态码：${info.statusCode}',
+      if (detail.isNotEmpty) detail,
+    ].join('\n');
+  }
+
+  /// 复制用的文本：详情加一行设备时间，方便和日志对上。
+  static String _copyTextOf(AgentErrorInfo info) {
+    final stamp = '复制于 ${_formatDeviceTime(DateTime.now())}';
+    final body = _detailTextOf(info);
+    return body.isEmpty ? stamp : '$body\n$stamp';
+  }
+
+  static String _formatDeviceTime(DateTime time) {
+    String two(int value) => value.toString().padLeft(2, '0');
+    final offset = time.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final absolute = offset.abs();
+    final zone =
+        '$sign${two(absolute.inHours)}:'
+        '${two(absolute.inMinutes.remainder(60))}';
+    return '${time.year}-${two(time.month)}-${two(time.day)} '
+        '${two(time.hour)}:${two(time.minute)}:${two(time.second)} $zone';
+  }
+
+  /// 连接类失败才建议诊断：服务器返回了 HTTP 错误时诊断没有意义。
+  bool _canDiagnose(AgentErrorInfo info) {
+    if (widget.onDiagnose == null) return false;
+    return switch (info.phase) {
+      AgentErrorPhase.dns ||
+      AgentErrorPhase.connect ||
+      AgentErrorPhase.tls ||
+      AgentErrorPhase.timeout => true,
+      _ => false,
+    };
+  }
+
+  Future<void> _copyDetails(AgentErrorInfo info) async {
+    await Clipboard.setData(ClipboardData(text: _copyTextOf(info)));
+    if (!mounted) return;
+    setState(() => _copied = true);
+  }
+
+  /// 用户点了才发起，失败也只写一句本地提示。
+  Future<void> _diagnose(AgentErrorInfo info) async {
+    final callback = widget.onDiagnose;
+    if (callback == null || _diagnosing) return;
+    final signature = _signatureOf(info);
+    setState(() {
+      _diagnosing = true;
+      _diagnosisFor = signature;
+      _diagnosis = null;
+    });
+    String text;
+    try {
+      final result = (await callback()).trim();
+      text = result.isEmpty ? '诊断没有返回结果。' : result;
+    } catch (_) {
+      text = '诊断没有完成，请稍后再试。';
+    }
+    if (!mounted) return;
+    setState(() {
+      _diagnosing = false;
+      _diagnosis = text;
+    });
+  }
+
   /// design.md §11.6 的错误文案表。未知分类返回 null，由调用方回退到原文。
   static String? _errorTextOf(AgentErrorInfo? info) {
     if (info == null) return null;
@@ -354,10 +450,16 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     final scheme = theme.colorScheme;
     final info = widget.errorInfo;
     final raw = widget.lastError?.trim() ?? '';
-    final text = _errorTextOf(info) ?? (raw.isEmpty ? '这一轮没有完成。' : raw);
+    // 有主机时用门面的友好文案：它已经写清是哪台服务器、哪一步失败。
+    final host = info?.host.trim() ?? '';
+    final text = host.isNotEmpty && raw.isNotEmpty
+        ? raw
+        : (_errorTextOf(info) ?? (raw.isEmpty ? '这一轮没有完成。' : raw));
     final hasDetails =
         info != null &&
-        (info.statusCode != null || info.detail.trim().isNotEmpty);
+        (info.statusCode != null ||
+            info.detail.trim().isNotEmpty ||
+            _canDiagnose(info));
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 4),
@@ -407,11 +509,17 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     );
   }
 
-  /// 折叠的「详情」：状态码和服务端原文，不把堆栈放到主文案里。
+  /// 折叠的「详情」：状态码、多行说明、复制与诊断。不把堆栈放到主文案里。
   Widget _buildErrorDetails(BuildContext context, AgentErrorInfo info) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final detail = info.detail.trim();
+    final signature = _signatureOf(info);
+    final diagnosis = _diagnosisFor == signature ? _diagnosis : null;
+    final monospace = theme.textTheme.bodySmall?.copyWith(
+      fontFamily: 'monospace',
+      color: scheme.onErrorContainer,
+    );
     return Theme(
       data: theme.copyWith(dividerColor: Colors.transparent),
       child: ExpansionTile(
@@ -446,6 +554,48 @@ class _ChatTranscriptState extends State<ChatTranscript> {
                 color: scheme.onErrorContainer,
               ),
             ),
+          // 窄屏和放大字体下两个按钮换行，不横向溢出。
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              TextButton.icon(
+                key: const ValueKey('chat-error-copy'),
+                onPressed: () => _copyDetails(info),
+                icon: Icon(_copied ? Icons.check : Icons.copy, size: 16),
+                label: Text(_copied ? '已复制' : '复制'),
+                style: TextButton.styleFrom(
+                  foregroundColor: scheme.onErrorContainer,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+              if (_canDiagnose(info))
+                TextButton.icon(
+                  key: const ValueKey('chat-error-diagnose'),
+                  onPressed: _diagnosing ? null : () => _diagnose(info),
+                  icon: _diagnosing
+                      ? const SizedBox.square(
+                          key: ValueKey('chat-error-diagnose-progress'),
+                          dimension: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.wifi_tethering, size: 16),
+                  label: Text(_diagnosing ? '正在诊断…' : '诊断连接'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: scheme.onErrorContainer,
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+            ],
+          ),
+          if (diagnosis != null) ...[
+            const SizedBox(height: 4),
+            SelectableText(
+              diagnosis,
+              key: const ValueKey('chat-error-diagnosis'),
+              style: monospace,
+            ),
+          ],
         ],
       ),
     );

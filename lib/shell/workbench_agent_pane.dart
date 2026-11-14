@@ -500,6 +500,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
             pendingApproval: facade?.pendingApproval,
             onApproval: facade?.resolveApproval,
             onRetry: facade?.retryLast,
+            // 只在用户点「诊断连接」时才发起，不自动跑。
+            onDiagnose: widget.runtime.diagnoseConnection,
             emptyTitle: '开始一个新的会话',
             emptyHint: '在下面的输入卡片里说一句要改什么，发送后就在这里跑。',
           ),

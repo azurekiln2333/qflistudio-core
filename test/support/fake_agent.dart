@@ -90,6 +90,29 @@ class FakeAgentFacade extends AgentFacade {
     notifyListeners();
   }
 
+  /// 预置一次失败：友好文案加上结构化信息（host、phase、detail、状态码）。
+  ///
+  /// 一次通知把状态改成 failed，界面拿到的是一次完整的失败。
+  void seedError({
+    String? message,
+    AgentErrorKind kind = AgentErrorKind.unknown,
+    int? statusCode,
+    String host = '',
+    AgentErrorPhase phase = AgentErrorPhase.other,
+    String detail = '',
+  }) {
+    _lastError = message;
+    _errorInfo = AgentErrorInfo(
+      kind: kind,
+      statusCode: statusCode,
+      host: host,
+      phase: phase,
+      detail: detail,
+    );
+    _state = AgentRunState.failed;
+    notifyListeners();
+  }
+
   String? _activity;
 
   @override
@@ -251,9 +274,14 @@ class FakeAgentRuntime implements AgentRuntime {
   String diagnosisText = '';
   int diagnoseCount = 0;
 
+  /// 非空时诊断先等它完成，用来观察「正在诊断」的转圈。
+  Completer<void>? diagnoseGate;
+
   @override
   Future<String> diagnoseConnection() async {
     diagnoseCount++;
+    final gate = diagnoseGate;
+    if (gate != null) await gate.future;
     return diagnosisText;
   }
 
