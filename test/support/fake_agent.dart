@@ -247,6 +247,16 @@ class FakeAgentRuntime implements AgentRuntime {
   @override
   Future<void> cancelAll() async => cancelAllCount++;
 
+  /// 测试给定的诊断文本。`diagnoseCount` 记录被调用的次数。
+  String diagnosisText = '';
+  int diagnoseCount = 0;
+
+  @override
+  Future<String> diagnoseConnection() async {
+    diagnoseCount++;
+    return diagnosisText;
+  }
+
   @override
   Future<List<AgentModelOption>> models() async {
     if (loginRequired) throw const AgentLoginRequired();

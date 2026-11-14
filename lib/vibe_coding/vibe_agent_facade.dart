@@ -185,15 +185,51 @@ enum AgentErrorKind {
 
 /// 一次失败的结构化信息。
 class AgentErrorInfo {
-  const AgentErrorInfo({required this.kind, this.statusCode, this.detail = ''});
+  const AgentErrorInfo({
+    required this.kind,
+    this.statusCode,
+    this.detail = '',
+    this.host = '',
+    this.phase = AgentErrorPhase.other,
+  });
 
   final AgentErrorKind kind;
 
   /// HTTP 状态码；不是 HTTP 错误时为 null。
   final int? statusCode;
 
-  /// 服务端原文或异常摘要，只放进「详情」折叠区。不含密钥。
+  /// 多行的技术说明，只放进「详情」折叠区。不含密钥、令牌和请求正文。
   final String detail;
+
+  /// 出错的服务器主机名，例如 `qfli.suanxiwanjie.cn`。未知时为空。
+  final String host;
+
+  /// 失败发生在哪一步。
+  final AgentErrorPhase phase;
+}
+
+/// 失败发生在哪一步。界面据此写出「哪里坏了」。
+enum AgentErrorPhase {
+  /// 域名解析。
+  dns,
+
+  /// TCP 连接。
+  connect,
+
+  /// TLS 握手。
+  tls,
+
+  /// 等待响应超时。
+  timeout,
+
+  /// 服务器返回了 HTTP 错误。
+  http,
+
+  /// 响应内容无法解析。
+  response,
+
+  /// 其他或未知。
+  other,
 }
 
 /// 一个实例对应一个会话。消息在会话结束时自动持久化。
@@ -272,6 +308,12 @@ abstract class AgentRuntime {
 
   /// 停止全部运行中和排队中的会话。
   Future<void> cancelAll();
+
+  /// 检查到 API 服务器的连接，逐步报告：域名解析、TCP 连接、TLS 握手。
+  ///
+  /// 只连接 API 服务器，不连接任何其他主机。返回多行文本，可直接显示。
+  /// 由 pi-B 在第四轮实现；基线是占位，返回空文本。
+  Future<String> diagnoseConnection();
 }
 
 /// 基于 [VibeCodingController] 的会话实现。
@@ -971,6 +1013,10 @@ class VibeAgentRuntime implements AgentRuntime {
     }
     _scheduler.cancelWaiting();
   }
+
+  // 连接诊断由 pi-B 在第四轮实现。下面是能编译的占位。
+  @override
+  Future<String> diagnoseConnection() async => '';
 
   @override
   Future<List<AgentModelOption>> models() async {
