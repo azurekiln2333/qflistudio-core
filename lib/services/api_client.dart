@@ -9,6 +9,7 @@ import '../community/models.dart';
 import '../config/api_config.dart';
 import '../config/client_platform.dart';
 import 'ai_service.dart';
+import 'connection_probe.dart';
 import 'studio_profile.dart';
 
 /// AI 请求走哪条链路。
@@ -202,9 +203,12 @@ class TerminalEvent {
 
 /// azurekiln-qfli-server 的 HTTP 客户端。
 class ApiClient {
-  ApiClient({http.Client? transport}) : _transport = transport;
+  ApiClient({http.Client? transport, ConnectionProbe? probe})
+    : _transport = transport,
+      _probe = probe ?? const SocketConnectionProbe();
 
   final http.Client? _transport;
+  final ConnectionProbe _probe;
   // 延迟创建并复用连接，不在应用首帧初始化网络。
   late final http.Client _http = _transport ?? http.Client();
 
@@ -238,6 +242,7 @@ class ApiClient {
   }) async {
     _requireOnline();
     final uri = ApiConfig.endpoint(path, query);
+    final clock = Stopwatch()..start();
     try {
       // [abortTrigger] 完成时真正中断在途请求（取消、退出页面）。
       final request =
@@ -263,39 +268,327 @@ class ApiClient {
         data = text;
       }
       if (response.statusCode >= 300) {
-        var message = data is Map && data['error'] is String
-            ? data['error'] as String
-            : '服务暂时不可用（${response.statusCode}），请稍后重试';
-        final requestId = data is Map ? data['requestId'] : null;
-        if (response.statusCode >= 500 && requestId is String) {
+        final payload = data is Map
+            ? Map<String, dynamic>.from(data)
+            : null;
+        final serverError = payload?['error'] is String
+            ? _clip(payload!['error'] as String, 200)
+            : '';
+        final headerId = response.headers['x-request-id'];
+        final bodyId = payload?['requestId'];
+        final requestId = headerId != null && headerId.trim().isNotEmpty
+            ? headerId.trim()
+            : (bodyId is String && bodyId.isNotEmpty ? bodyId : null);
+        var message = serverError.isNotEmpty
+            ? serverError
+            : '服务器 ${uri.host} 返回 ${response.statusCode}，请稍后重试';
+        if (response.statusCode >= 500 && requestId != null) {
           message = '$message\n请求编号：$requestId';
         }
         throw ApiException(
           message,
           statusCode: response.statusCode,
-          details: data is Map ? Map<String, dynamic>.from(data) : const {},
+          details: {
+            ...?payload,
+            ..._failureDetails(
+              phase: 'http',
+              method: method,
+              uri: uri,
+              elapsed: clock.elapsed,
+              statusCode: response.statusCode,
+              serverError: serverError.isNotEmpty ? serverError : text,
+              requestId: requestId,
+            ),
+          },
         );
       }
       if (data != null && data is! Map && data is! List) {
-        throw ApiException('服务响应异常，请稍后重试');
+        throw ApiException(
+          '服务响应异常，请稍后重试',
+          details: _failureDetails(
+            phase: 'response',
+            method: method,
+            uri: uri,
+            elapsed: clock.elapsed,
+          ),
+        );
       }
       return data;
     } on http.RequestAbortedException {
       throw ApiException('请求已取消');
     } on SocketException catch (e) {
-      throw ApiException('无法连接服务器：${e.message}');
-    } on TimeoutException {
-      throw ApiException('连接超时，请检查网络后重试');
-    } on http.ClientException {
-      throw ApiException('暂时无法连接服务，请检查网络后重试');
-    } on HandshakeException {
-      throw ApiException('无法建立安全连接，请检查设备时间或稍后重试');
+      final phase = _phaseOfSocket(e);
+      final osMessage = _osMessageOf(e);
+      throw ApiException(
+        _failureMessage(phase, uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: phase,
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: e.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on TimeoutException catch (e) {
+      final osMessage = _osMessageOf(e);
+      throw ApiException(
+        _failureMessage('timeout', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'timeout',
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: e.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (e) {
+      final osMessage = _osMessageOf(e);
+      throw ApiException(
+        _failureMessage('connect', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'connect',
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: e.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on HandshakeException catch (e) {
+      final osMessage = _osMessageOf(e);
+      throw ApiException(
+        _failureMessage('tls', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'tls',
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: e.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     } on FormatException {
-      throw ApiException('服务响应异常，请稍后重试');
+      throw ApiException(
+        '服务响应异常，请稍后重试',
+        details: _failureDetails(
+          phase: 'response',
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: 'FormatException',
+        ),
+      );
     } on HttpException catch (e) {
-      throw ApiException('网络错误：${e.message}');
+      final osMessage = _osMessageOf(e);
+      throw ApiException(
+        _failureMessage('http', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'http',
+          method: method,
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: e.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     }
   }
+
+  /// 一次失败的结构化说明。只放进「详情」，不含授权头、令牌、正文与查询串。
+  static Map<String, dynamic> _failureDetails({
+    required String phase,
+    required String method,
+    required Uri uri,
+    required Duration elapsed,
+    String exception = '',
+    String osMessage = '',
+    int? statusCode,
+    String? serverError,
+    String? requestId,
+  }) {
+    final details = <String, dynamic>{
+      'phase': phase,
+      if (exception.isNotEmpty) 'exception': exception,
+      if (osMessage.trim().isNotEmpty) 'osMessage': osMessage.trim(),
+      'host': uri.host,
+      'method': method,
+      'path': uri.path,
+      'elapsedMs': elapsed.inMilliseconds,
+      'statusCode': ?statusCode,
+    };
+    final server = serverError?.trim() ?? '';
+    if (server.isNotEmpty) details['serverError'] = _clip(server, 200);
+    final id = requestId?.trim() ?? '';
+    if (id.isNotEmpty) details['requestId'] = id;
+    return details;
+  }
+
+  /// 一句话说清哪里坏了：带主机名和失败的那一步。
+  ///
+  /// 「请检查设备时间」只在证书过期或尚未生效时出现；其他握手失败不提设备时间。
+  static String _failureMessage(
+    String phase,
+    String host, {
+    String osMessage = '',
+  }) {
+    switch (phase) {
+      case 'dns':
+        return '找不到服务器 $host：域名解析失败，请检查网络和 DNS 设置';
+      case 'connect':
+        return '连不上服务器 $host：连接被拒绝或网络不通';
+      case 'tls':
+        if (_isCertificateTimeProblem(osMessage)) {
+          return '连不上服务器 $host：TLS 握手失败，证书已过期或尚未生效，请检查设备时间';
+        }
+        return '连不上服务器 $host：TLS 握手失败，握手被断开';
+      case 'timeout':
+        return '连不上服务器 $host：等待响应超时';
+      case 'http':
+        return '连不上服务器 $host：连接在传输中被中断';
+      case 'response':
+        return '服务器 $host 返回的内容无法解析';
+      default:
+        return '连不上服务器 $host';
+    }
+  }
+
+  /// 证书是不是过期或尚未生效。系统原文的措辞各平台不同，只认这两种。
+  static bool _isCertificateTimeProblem(String osMessage) {
+    final text = osMessage.toLowerCase();
+    return text.contains('expired') || text.contains('not yet valid');
+  }
+
+  /// [SocketException] 是解析失败还是连不上。判断不了就按连接失败处理。
+  static String _phaseOfSocket(SocketException error) {
+    final text = '${error.message} ${error.osError?.message ?? ''}'
+        .toLowerCase();
+    const dnsMarkers = [
+      'failed host lookup',
+      'nodename nor servname',
+      'name or service not known',
+      'no address associated',
+      'temporary failure in name resolution',
+    ];
+    for (final marker in dnsMarkers) {
+      if (text.contains(marker)) return 'dns';
+    }
+    return 'connect';
+  }
+
+  /// 系统给出的原文，用于「详情」的「系统信息」一行。
+  static String _osMessageOf(Object error) {
+    if (error is SocketException) {
+      final os = error.osError?.message;
+      return os != null && os.isNotEmpty ? os : error.message;
+    }
+    if (error is HandshakeException) return error.message;
+    if (error is TlsException) return error.message;
+    if (error is HttpException) return error.message;
+    if (error is TimeoutException) return error.message ?? '';
+    if (error is http.ClientException) return error.message;
+    return error.toString();
+  }
+
+  static String _clip(String text, int max) {
+    final trimmed = text.trim();
+    return trimmed.length <= max ? trimmed : trimmed.substring(0, max);
+  }
+
+  // ---- 连接诊断 ----
+
+  /// 每一步的超时。真机上 TLS 被拦时通常卡在这一步。
+  static const Duration probeStepTimeout = Duration(seconds: 6);
+
+  /// 逐步检查到 API 服务器的连接：域名解析、TCP 连接、TLS 握手。
+  ///
+  /// 只连 API 服务器，不连任何其他主机。每一步独立超时。
+  /// 返回可直接显示的多行文本；本方法不抛异常。
+  Future<String> probeConnection() async {
+    final uri = Uri.parse(ApiConfig.baseUrl);
+    final host = uri.host;
+    final port = uri.hasPort
+        ? uri.port
+        : (uri.scheme == 'https' ? 443 : 80);
+    final lines = <String>['服务器：$host'];
+
+    final dns = await _probeStep(() => _probe.lookup(host));
+    if (!dns.ok) {
+      lines.add('① 域名解析：失败，${dns.describe()}');
+      lines.add('结论：域名解析失败，请检查网络和 DNS 设置。');
+      return lines.join('\n');
+    }
+    lines.add('① 域名解析：成功，${dns.addresses.join('、')}（${_seconds(dns.elapsed)}）');
+
+    final connect = await _probeStep(() async {
+      await _probe.connect(host, port);
+      return const <String>[];
+    });
+    if (!connect.ok) {
+      lines.add('② TCP 连接 $port：失败，${connect.describe()}');
+      lines.add('结论：服务器的 $port 端口连不上，可能端口不通或被网络拦截。');
+      return lines.join('\n');
+    }
+    lines.add('② TCP 连接 $port：成功（${_seconds(connect.elapsed)}）');
+
+    if (uri.scheme == 'https') {
+      final tls = await _probeStep(() async {
+        await _probe.handshake(host, port);
+        return const <String>[];
+      });
+      if (!tls.ok) {
+        lines.add('③ TLS 握手：失败，${tls.describe()}');
+        if (_isCertificateTimeProblem(tls.osMessage)) {
+          lines.add(
+            '结论：服务器证书已过期或尚未生效。检查设备时间，或稍后重试。',
+          );
+        } else {
+          lines.add(
+            '结论：能连到服务器的 IP，但 TLS 握手被断开。'
+            '常见原因：当前网络拦截了这个域名，或服务器证书、代理配置有问题。'
+            '试试换一个网络，比如手机流量。',
+          );
+        }
+        return lines.join('\n');
+      }
+      lines.add('③ TLS 握手：成功（${_seconds(tls.elapsed)}）');
+    }
+
+    lines.add('结论：到服务器的连接正常。问题可能在服务端返回的内容，稍后重试。');
+    return lines.join('\n');
+  }
+
+  Future<_ProbeStep> _probeStep(
+    Future<List<String>> Function() step,
+  ) async {
+    final clock = Stopwatch()..start();
+    try {
+      final addresses = await step().timeout(probeStepTimeout);
+      return _ProbeStep(
+        ok: true,
+        elapsed: clock.elapsed,
+        addresses: addresses,
+      );
+    } on TimeoutException {
+      return _ProbeStep(
+        ok: false,
+        elapsed: clock.elapsed,
+        osMessage: '${probeStepTimeout.inSeconds} 秒内没有响应',
+        exception: 'TimeoutException',
+      );
+    } on Object catch (error) {
+      return _ProbeStep(
+        ok: false,
+        elapsed: clock.elapsed,
+        osMessage: _osMessageOf(error),
+        exception: error.runtimeType.toString(),
+      );
+    }
+  }
+
+  static String _seconds(Duration elapsed) =>
+      '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)} 秒';
 
   // ---- 认证 ----
 
@@ -921,16 +1214,15 @@ class ApiClient {
     Future<void>? abortTrigger,
   }) async* {
     _requireOnline();
+    final uri = ApiConfig.endpoint('/api/terminal/exec/stream');
+    final clock = Stopwatch()..start();
     try {
       final request =
           (abortTrigger == null
-                ? http.Request(
-                    'POST',
-                    ApiConfig.endpoint('/api/terminal/exec/stream'),
-                  )
+                ? http.Request('POST', uri)
                 : http.AbortableRequest(
                     'POST',
-                    ApiConfig.endpoint('/api/terminal/exec/stream'),
+                    uri,
                     abortTrigger: abortTrigger,
                   ))
             ..followRedirects = false
@@ -957,6 +1249,15 @@ class ApiClient {
               ? data['error'] as String
               : '在线终端不可用（${response.statusCode}）',
           statusCode: response.statusCode,
+          details: _failureDetails(
+            phase: 'http',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+            statusCode: response.statusCode,
+            serverError: body,
+            requestId: response.headers['x-request-id'],
+          ),
         );
       }
       if (!(response.headers['content-type'] ?? '').startsWith(
@@ -988,19 +1289,72 @@ class ApiClient {
         if (aborted) return;
         throw ApiException('终端连接已中断，未收到执行结果');
       }
-    } on TimeoutException {
-      throw ApiException('终端连接超时，请重试');
+    } on TimeoutException catch (error) {
+      // 文案不变：终端面板的旧文案仍在用。
+      throw ApiException(
+        '终端连接超时，请重试',
+        details: _failureDetails(
+          phase: 'timeout',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
     } on http.RequestAbortedException {
       // 取消是预期路径：不向调用方谎报错误，直接结束流。
       return;
     } on SocketException catch (error) {
-      throw ApiException('无法连接终端：${error.message}');
-    } on http.ClientException {
-      throw ApiException('终端连接已中断');
-    } on HandshakeException {
-      throw ApiException('无法建立终端安全连接');
+      final phase = _phaseOfSocket(error);
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        '无法连接终端：$osMessage',
+        details: _failureDetails(
+          phase: phase,
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (error) {
+      throw ApiException(
+        '终端连接已中断',
+        details: _failureDetails(
+          phase: 'connect',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
+    } on HandshakeException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        '连不上终端服务器 ${uri.host}：TLS 握手失败',
+        details: _failureDetails(
+          phase: 'tls',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     } on FormatException {
-      throw ApiException('终端响应格式无效');
+      throw ApiException(
+        '终端响应格式无效',
+        details: _failureDetails(
+          phase: 'response',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: 'FormatException',
+        ),
+      );
     }
   }
 
@@ -1359,6 +1713,7 @@ class ApiClient {
           )
           ..headers['x-client-platform'] = ClientPlatform.header
           ..body = jsonEncode(body);
+    final clock = Stopwatch()..start();
     try {
       final response = await _http
           .send(request)
@@ -1366,31 +1721,104 @@ class ApiClient {
           .timeout(_aiTimeout);
       final text = utf8.decode(response.bodyBytes);
       if (response.statusCode >= 300) {
+        final headerId = response.headers['x-request-id'];
         throw ApiException(
           _aiErrorMessage(response.statusCode, text),
           statusCode: response.statusCode,
+          details: _failureDetails(
+            phase: 'http',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+            exception: 'HttpStatus',
+            statusCode: response.statusCode,
+            serverError: text,
+            requestId: headerId,
+          ),
         );
       }
       final decoded = text.isEmpty ? null : jsonDecode(text);
       if (decoded is! Map<String, dynamic>) {
-        throw ApiException('AI 接口返回了无法解析的内容');
+        throw ApiException(
+          'AI 接口返回了无法解析的内容',
+          details: _failureDetails(
+            phase: 'response',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+          ),
+        );
       }
       return _decodeAiResult({
         'model': model ?? endpoint.model.trim(),
         'message': AiService.decodeReply(endpoint.protocol, decoded),
       });
-    } on SocketException {
-      throw ApiException('无法连接 AI 接口，请检查地址与网络');
-    } on TimeoutException {
-      throw ApiException('AI 接口请求超时');
+    } on SocketException catch (error) {
+      final phase = _phaseOfSocket(error);
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage(phase, uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: phase,
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on TimeoutException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('timeout', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'timeout',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     } on http.RequestAbortedException {
       throw ApiException('请求已取消', details: const {'code': 'ABORTED'});
-    } on HandshakeException {
-      throw ApiException('无法建立安全连接，请检查设备时间或稍后重试');
-    } on http.ClientException {
-      throw ApiException('暂时无法连接 AI 接口，请检查网络后重试');
+    } on HandshakeException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('tls', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'tls',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('connect', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'connect',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     } on FormatException {
-      throw ApiException('AI 接口返回了无法解析的内容');
+      throw ApiException(
+        'AI 接口返回了无法解析的内容',
+        details: _failureDetails(
+          phase: 'response',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: 'FormatException',
+        ),
+      );
     } on AiException catch (error) {
       throw ApiException(error.message);
     }
@@ -1473,6 +1901,29 @@ class ApiClient {
       usage: usage is Map ? Map<String, dynamic>.from(usage) : null,
       aiGenerated: data['aiGenerated'] != false,
     );
+  }
+}
+
+/// 诊断中某一步的结果。失败时写系统原文和异常类型名。
+class _ProbeStep {
+  const _ProbeStep({
+    required this.ok,
+    required this.elapsed,
+    this.addresses = const [],
+    this.osMessage = '',
+    this.exception = '',
+  });
+
+  final bool ok;
+  final Duration elapsed;
+  final List<String> addresses;
+  final String osMessage;
+  final String exception;
+
+  /// 「失败，HandshakeException（6.0 秒）」这种片段。
+  String describe() {
+    final name = exception.isEmpty ? '未知错误' : exception;
+    return '$name（${ApiClient._seconds(elapsed)}）';
   }
 }
 

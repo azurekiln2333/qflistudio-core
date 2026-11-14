@@ -456,11 +456,129 @@ class VibeAgentFacade extends AgentFacade {
         detail: message,
       );
     }
+    final phase = _phaseOf(api.details['phase']);
     return AgentErrorInfo(
       kind: _kindOf(api),
       statusCode: api.statusCode,
-      detail: api.message,
+      host: _hostOf(api.details),
+      phase: phase,
+      detail: _errorDetail(api, phase: phase),
     );
+  }
+
+  /// 「详情」里的多行说明：哪一步、哪台服务器、原文和用时。
+  ///
+  /// 不含授权头、令牌、请求正文和查询串。没有结构化信息时退回错误文案。
+  static String _errorDetail(
+    ApiException error, {
+    required AgentErrorPhase phase,
+  }) {
+    final details = error.details;
+    if (details['phase'] is! String) return error.message;
+    final lines = <String>[];
+    final method = details['method'];
+    final path = details['path'];
+    if (method is String && path is String) {
+      lines.add('请求：$method $path');
+    }
+    final host = _hostOf(details);
+    if (host.isNotEmpty) lines.add('服务器：$host');
+    lines.add('失败步骤：${_phaseLabel(phase)}');
+    final statusCode = details['statusCode'];
+    if (statusCode is int) lines.add('状态码：$statusCode');
+    final exception = details['exception'];
+    if (exception is String && exception.isNotEmpty) {
+      lines.add('异常：$exception');
+    }
+    final osMessage = details['osMessage'];
+    if (osMessage is String && osMessage.isNotEmpty) {
+      lines.add('系统信息：$osMessage');
+    }
+    final serverError = details['serverError'];
+    if (serverError is String && serverError.isNotEmpty) {
+      lines.add('服务端信息：$serverError');
+    }
+    final elapsed = details['elapsedMs'];
+    if (elapsed is int && elapsed >= 0) lines.add('用时：${_seconds(elapsed)}');
+    lines.add('设备时间：${_deviceTime(DateTime.now())}');
+    final requestId = details['requestId'];
+    if (requestId is String && requestId.isNotEmpty) {
+      lines.add('请求 ID：$requestId');
+    }
+    final advice = _advice(phase, osMessage is String ? osMessage : '');
+    if (advice.isNotEmpty) lines.add('建议：$advice');
+    return lines.join('\n');
+  }
+
+  static String _hostOf(Map<String, dynamic> details) {
+    final host = details['host'];
+    return host is String ? host : '';
+  }
+
+  static AgentErrorPhase _phaseOf(Object? value) {
+    if (value is! String) return AgentErrorPhase.other;
+    return switch (value) {
+      'dns' => AgentErrorPhase.dns,
+      'connect' => AgentErrorPhase.connect,
+      'tls' => AgentErrorPhase.tls,
+      'timeout' => AgentErrorPhase.timeout,
+      'http' => AgentErrorPhase.http,
+      'response' => AgentErrorPhase.response,
+      _ => AgentErrorPhase.other,
+    };
+  }
+
+  static String _phaseLabel(AgentErrorPhase phase) => switch (phase) {
+    AgentErrorPhase.dns => '域名解析',
+    AgentErrorPhase.connect => 'TCP 连接',
+    AgentErrorPhase.tls => 'TLS 握手',
+    AgentErrorPhase.timeout => '等待响应',
+    AgentErrorPhase.http => '服务器返回',
+    AgentErrorPhase.response => '响应解析',
+    AgentErrorPhase.other => '未知',
+  };
+
+  /// 下一步该做什么。TLS 失败只在证书过期或尚未生效时提设备时间。
+  static String _advice(AgentErrorPhase phase, String osMessage) {
+    final text = osMessage.toLowerCase();
+    switch (phase) {
+      case AgentErrorPhase.dns:
+        return '域名解析失败，检查网络和 DNS 设置，或换一个网络试试';
+      case AgentErrorPhase.connect:
+        return '连不上服务器的端口，可能被网络拦截，换一个网络试试';
+      case AgentErrorPhase.tls:
+        if (text.contains('expired') || text.contains('not yet valid')) {
+          return '服务器证书已过期或尚未生效，检查设备时间';
+        }
+        return '握手被断开，常见原因：当前网络拦截了这个域名，或服务器证书、代理配置有问题';
+      case AgentErrorPhase.timeout:
+        return '等待响应超时，稍后重试；反复超时请检查网络';
+      case AgentErrorPhase.http:
+        return '服务器返回了错误，稍后重试';
+      case AgentErrorPhase.response:
+        return '服务器返回的内容无法解析，稍后重试或联系管理员';
+      case AgentErrorPhase.other:
+        return '';
+    }
+  }
+
+  static String _seconds(int milliseconds) {
+    if (milliseconds < 1000) return '$milliseconds 毫秒';
+    return '${(milliseconds / 1000).toStringAsFixed(1)} 秒';
+  }
+
+  /// 「2026-11-14 12:03:11 +08:00（UTC 04:03:11）」。核对证书需要设备时间。
+  static String _deviceTime(DateTime now) {
+    String two(int value) => value.toString().padLeft(2, '0');
+    final offset = now.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final local =
+        '${now.year}-${two(now.month)}-${two(now.day)} '
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)} '
+        '$sign${two(offset.inHours.abs())}:'
+        '${two(offset.inMinutes.abs() % 60)}';
+    final utc = now.toUtc();
+    return '$local（UTC ${two(utc.hour)}:${two(utc.minute)}:${two(utc.second)}）';
   }
 
   @override
@@ -531,6 +649,16 @@ class VibeAgentFacade extends AgentFacade {
         if (error.message.contains('AI 服务未配置')) {
           return AgentErrorKind.notConfigured;
         }
+    }
+    // 连不上服务器（解析、连接、握手）归到「网络不可用」，超时单独一类。
+    switch (_phaseOf(error.details['phase'])) {
+      case AgentErrorPhase.dns:
+      case AgentErrorPhase.connect:
+      case AgentErrorPhase.tls:
+        return AgentErrorKind.offline;
+      case AgentErrorPhase.timeout:
+        return AgentErrorKind.timeout;
+      default:
     }
     return _kindOfMessage(error.message);
   }
@@ -1014,9 +1142,15 @@ class VibeAgentRuntime implements AgentRuntime {
     _scheduler.cancelWaiting();
   }
 
-  // 连接诊断由 pi-B 在第四轮实现。下面是能编译的占位。
+  // 连接诊断：只连 API 服务器，逐步报告解析、连接、握手。
   @override
-  Future<String> diagnoseConnection() async => '';
+  Future<String> diagnoseConnection() async {
+    try {
+      return await _api.probeConnection();
+    } on Object {
+      return '诊断没有完成，请稍后重试';
+    }
+  }
 
   @override
   Future<List<AgentModelOption>> models() async {
