@@ -2616,6 +2616,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
+    // 只有真正并排显示右栏的宽屏才在顶栏放机器人图标。
+    // 窄屏和中屏已有「编辑器 | Agent」分段，顶栏再放一个是重复的，
+    // 而且会把项目名挤成「Ba…」。见第四轮 brief 的 pi-A 第 2 条。
+    final wideAgentPane =
+        layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide;
     final focusMode = _inlineFocusDocuments.contains(_editor.current);
     final sidebarVisible = !focusMode && (_explorerVisible ?? false);
     return Shortcuts(
@@ -2722,12 +2727,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (_agentHost case final host?)
-                                  AgentEntryButton(
-                                    host: host,
-                                    active: _agentPanelActive,
-                                    onPressed: _showAgentPanel,
-                                  ),
+                                if (wideAgentPane)
+                                  if (_agentHost case final host?)
+                                    AgentEntryButton(
+                                      host: host,
+                                      active: _agentPanelActive,
+                                      onPressed: _showAgentPanel,
+                                    ),
                                 if (widget.onMinimize != null)
                                   IconButton(
                                     tooltip: '暂时收起编辑器',
@@ -3512,6 +3518,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                         state: agentHost.state,
                         editor: body,
                         agent: agentPane!,
+                        // 顶栏不再放机器人图标，角标改挂在「Agent」段上。
+                        agentIcon: AgentSegmentIcon(host: agentHost),
                         onPaneSelected: (pane) {
                           if (pane == MainPane.agent) {
                             agentHost.activate();
