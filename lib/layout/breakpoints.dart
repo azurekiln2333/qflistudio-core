@@ -12,7 +12,9 @@ abstract final class Breakpoints {
   static const double sidebarWidth = 280;
 
   /// 宽屏下对话流栏的宽度。
-  static const double agentPaneWidth = 360;
+  ///
+  /// 400 而不是 360：360 时输入卡片的权限与推理强度只剩图标。
+  static const double agentPaneWidth = 400;
 }
 
 /// 工作台的三种宽度形态。
