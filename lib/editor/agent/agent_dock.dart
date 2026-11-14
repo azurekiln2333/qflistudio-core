@@ -57,16 +57,25 @@ class AgentEntryButton extends StatelessWidget {
   );
 
   /// 后台待确认或失败的会话数。
-  int _badgeCount(AgentRuntime runtime) =>
-      agentBadgeCount(runtime, host.project.id);
+  int _badgeCount(AgentRuntime runtime) => agentBadgeCount(
+    runtime,
+    host.project.id,
+    foregroundSessionId: active ? host.state.sessionId : null,
+  );
 }
 
 /// 后台待确认或失败的会话数。
 ///
 /// 顶栏图标和中窄屏分段条的「Agent」段共用这一份计数，数字必须一致。
-int agentBadgeCount(AgentRuntime runtime, String projectId) {
+/// 用户正在眼前看的会话（[foregroundSessionId]）不算后台未读。
+int agentBadgeCount(
+  AgentRuntime runtime,
+  String projectId, {
+  String? foregroundSessionId,
+}) {
   var count = 0;
   for (final meta in runtime.sessions.sessionsOf(projectId)) {
+    if (meta.id == foregroundSessionId) continue;
     final status = runtime.statusOf(meta.id);
     if (status == AgentLiveStatus.awaitingApproval ||
         status == AgentLiveStatus.failed) {
@@ -92,13 +101,21 @@ class AgentSegmentIcon extends StatelessWidget {
       builder: (context, _) {
         final runtime = host.runtime;
         if (runtime == null) return _icon(0);
+        final foregroundSessionId = host.state.mainPane == MainPane.agent
+            ? host.state.sessionId
+            : null;
         return AnimatedBuilder(
           animation: Listenable.merge([
             runtime.liveChanges,
             runtime.sessions,
           ]),
-          builder: (context, _) =>
-              _icon(agentBadgeCount(runtime, host.project.id)),
+          builder: (context, _) => _icon(
+            agentBadgeCount(
+              runtime,
+              host.project.id,
+              foregroundSessionId: foregroundSessionId,
+            ),
+          ),
         );
       },
     );
@@ -268,6 +285,7 @@ class EditorAgentPane extends StatelessWidget {
     this.error,
     this.onRetry,
     this.composerDefaults,
+    this.active = true,
   });
 
   final Project project;
@@ -283,6 +301,9 @@ class EditorAgentPane extends StatelessWidget {
 
   /// 按项目记住的模型 / 推理强度 / 权限模式。
   final ComposerDefaultsStore? composerDefaults;
+
+  /// 当前会话面板是否处于可见状态。
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
@@ -332,6 +353,7 @@ class EditorAgentPane extends StatelessWidget {
       sessionId: sessionId,
       onSessionOpened: onSessionOpened,
       composerDefaults: composerDefaults,
+      active: active,
     );
   }
 }

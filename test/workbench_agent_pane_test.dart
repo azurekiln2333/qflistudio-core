@@ -1244,5 +1244,59 @@ void main() {
 
       await unmount(tester);
     });
+
+    testWidgets('可见面板里的当前会话失败时立刻标为已读，隐藏在后台时保留未读', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      final facade = FakeAgentFacade(sessionId: meta.id);
+      runtime.facades[meta.id] = facade;
+
+      Widget wrap({required bool active}) => MaterialApp(
+        home: LoginGateScope(
+          auth: auth,
+          child: Scaffold(
+            body: WorkbenchAgentPane(
+              project: _project(),
+              runtime: runtime,
+              auth: auth,
+              settings: SettingsStore(),
+              sessionId: meta.id,
+              active: active,
+            ),
+          ),
+        ),
+      );
+
+      // 隐藏在后台时失败：不能提前清未读。
+      await tester.pumpWidget(wrap(active: false));
+      await settle(tester);
+      runtime.seenSessions.clear();
+      facade.seedError(
+        message: '网络不可用',
+        kind: AgentErrorKind.offline,
+      );
+      await tester.pump();
+      expect(runtime.seenSessions, isNot(contains(meta.id)));
+
+      // 切回可见时立刻标为已读。
+      await tester.pumpWidget(wrap(active: true));
+      await tester.pump();
+      expect(runtime.seenSessions, contains(meta.id));
+
+      // 在可见态下再次失败也会标为已读。
+      runtime.seenSessions.clear();
+      facade.state = AgentRunState.running;
+      await tester.pump();
+      facade.seedError(
+        message: '超时',
+        kind: AgentErrorKind.timeout,
+      );
+      await tester.pump();
+      expect(runtime.seenSessions, contains(meta.id));
+
+      await unmount(tester);
+    });
   });
 }

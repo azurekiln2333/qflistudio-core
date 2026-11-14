@@ -1393,19 +1393,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     return host.state.mainPane == MainPane.agent;
   }
 
-  /// 后台待确认或失败的会话数，用于顶栏角标。
+  /// 后台待确认或失败的会话数，用于顶栏与收起竖条角标。
   int _agentBadgeCount() {
-    final runtime = _agentHost?.runtime;
-    if (runtime == null) return 0;
-    var count = 0;
-    for (final meta in runtime.sessions.sessionsOf(widget.project.id)) {
-      final status = runtime.statusOf(meta.id);
-      if (status == AgentLiveStatus.awaitingApproval ||
-          status == AgentLiveStatus.failed) {
-        count++;
-      }
-    }
-    return count;
+    final host = _agentHost;
+    final runtime = host?.runtime;
+    if (host == null || runtime == null) return 0;
+    return agentBadgeCount(
+      runtime,
+      widget.project.id,
+      foregroundSessionId: _agentPanelActive ? host.state.sessionId : null,
+    );
   }
 
   /// 宽屏右栏：展开时是会话框，收起时只剩竖条。
@@ -1482,21 +1479,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   ///
   /// 外面包 [LoginGateScope]：输入卡片的登录门控需要一个能读到登录态的
   /// 作用域，编辑器页现在是唯一的提供者。
-  Widget _buildAgentPane(EditorAgentHost host) => LoginGateScope(
-    auth: widget.auth,
-    child: EditorAgentPane(
-      key: _agentPaneKey,
-      project: widget.project,
-      runtime: host.runtime,
-      auth: widget.auth,
-      settings: widget.settings,
-      sessionId: host.state.sessionId,
-      onSessionOpened: _selectAgentSession,
-      error: host.error,
-      onRetry: host.activate,
-      composerDefaults: _composerDefaults,
-    ),
-  );
+  Widget _buildAgentPane(EditorAgentHost host, {required bool active}) =>
+      LoginGateScope(
+        auth: widget.auth,
+        child: EditorAgentPane(
+          key: _agentPaneKey,
+          project: widget.project,
+          runtime: host.runtime,
+          auth: widget.auth,
+          settings: widget.settings,
+          sessionId: host.state.sessionId,
+          onSessionOpened: _selectAgentSession,
+          error: host.error,
+          onRetry: host.activate,
+          composerDefaults: _composerDefaults,
+          active: active,
+        ),
+      );
 
   // ---- 编辑动作 ----
 
@@ -3381,8 +3380,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     final agentEnabled = agentHost != null && !focusMode;
                     final agentCollapsed =
                         agentHost?.state.agentPaneCollapsed ?? true;
+                    final agentVisible = agentEnabled &&
+                        (layout == WorkbenchLayout.wide
+                            ? !agentCollapsed
+                            : agentHost.state.mainPane == MainPane.agent);
                     final agentPane = agentEnabled
-                        ? _buildAgentPane(agentHost)
+                        ? _buildAgentPane(agentHost, active: agentVisible)
                         : null;
                     final body = Row(
                       key: const ValueKey('editor-body-wide'),

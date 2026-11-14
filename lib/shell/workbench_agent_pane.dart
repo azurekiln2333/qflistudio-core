@@ -29,6 +29,7 @@ class WorkbenchAgentPane extends StatefulWidget {
     this.draft = ComposerDraft.empty,
     this.composerDefaults,
     this.onSessionOpened,
+    this.active = true,
   });
 
   final Project project;
@@ -46,6 +47,13 @@ class WorkbenchAgentPane extends StatefulWidget {
 
   /// 首次发送时新建了会话，通知外层记住 id。
   final ValueChanged<String>? onSessionOpened;
+
+  /// 面板当前是否在屏幕上可见。
+  ///
+  /// 中窄屏在「编辑器」分段、宽屏在收起态时为 false；只在可见时把当前
+  /// 会话标为已读，避免后台会话的未读标记被保活子树误消，也避免用户正看着
+  /// 当前失败或完成的会话时顶栏角标继续亮着。
+  final bool active;
 
   @override
   State<WorkbenchAgentPane> createState() => _WorkbenchAgentPaneState();
@@ -152,6 +160,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       // 同步换草稿和门面引用，随本次重建生效，不必再标脏。
       _adoptSession(widget.sessionId);
       unawaited(_openSession(widget.sessionId));
+    } else if (!oldWidget.active && widget.active) {
+      _markCurrentSessionSeen();
     }
   }
 
@@ -250,8 +260,25 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
   void _onFacadeChanged() {
     if (!mounted) return;
     if (_echo != null && _echoSuperseded()) _echo = null;
+    _markCurrentSessionSeen();
     _syncWaitTimer();
     setState(() {});
+  }
+
+  /// 当前会话正在用户面前且已经停下时，同步标为已读。
+  void _markCurrentSessionSeen() {
+    if (!widget.active) return;
+    final sessionId = _sessionId;
+    if (sessionId == null) return;
+    final facade = _facade;
+    if (facade != null &&
+        facade.sessionId == sessionId &&
+        (facade.state == AgentRunState.running ||
+            facade.state == AgentRunState.cancelling ||
+            facade.state == AgentRunState.awaitingApproval)) {
+      return;
+    }
+    widget.runtime.markSeen(sessionId);
   }
 
   /// 门面已经收录了这条用户消息，就不再显示回声。
@@ -297,8 +324,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       _facade?.removeListener(_onFacadeChanged);
       _facade = null;
     } else {
-      // 已经是用户看过的了，清掉角标（design.md §11.5）。
-      widget.runtime.markSeen(sessionId);
+      // 只有面板可见时才清角标；面板处于后台保活时不得误消。
+      if (widget.active) widget.runtime.markSeen(sessionId);
       final live = widget.runtime.liveFacade(sessionId);
       if (live != null) _attachFacade(live);
     }
@@ -344,17 +371,19 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       _facade = facade;
     }
     _echoBaseline = facade.messages.length;
+    _markCurrentSessionSeen();
     _syncWaitTimer();
   }
 
   /// 发送。同一帧内先清空输入、追加用户消息、把发送键换成停止键。
   Future<bool> _send(String text, List<String> attachments) async {
+    if (_working) return false;
     final composer = _composer;
     final body = text.trim();
     if (body.isEmpty && attachments.isEmpty) return false;
     if (!_loggedIn) {
       final ok = await ensureLoggedIn(context);
-      if (!ok || !mounted) return false;
+      if (!ok || !mounted || _working) return false;
     }
     final echoText = body.isEmpty
         ? '（附带了 ${attachments.length} 个项目文件）'

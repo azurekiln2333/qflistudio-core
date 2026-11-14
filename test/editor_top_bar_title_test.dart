@@ -246,6 +246,45 @@ void main() {
       reason: '宽屏的角标仍在顶栏图标上',
     );
   });
+
+  testWidgets('424 宽：当前正在看的前台会话失败不显示分段角标，切回编辑器后才提示', (tester) async {
+    final meta = await sessions.create(project.id, title: '当前会话');
+    final facade = FakeAgentFacade(sessionId: meta.id);
+    runtime.facades[meta.id] = facade;
+
+    await mount(tester, size: const Size(424, 900));
+    await tester.tap(find.text('Agent'));
+    await pumpFrames(tester);
+
+    // 侧边栏打开刚创建的唯一会话，让它成为前台正在看的会话。
+    await tester.tap(find.byTooltip('打开文件树'));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(const ValueKey('editor-sidebar-section-sessions')));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(ValueKey('session-${meta.id}')));
+    await pumpFrames(tester);
+
+    // 用户正停在 Agent 分段看它，即使状态仍是 failed 也不应亮角标。
+    runtime.liveStatuses[meta.id] = AgentLiveStatus.failed;
+    runtime.notifyLive();
+    await pumpFrames(tester);
+    expect(
+      find.byKey(const ValueKey('editor-agent-badge')),
+      findsNothing,
+      reason: '用户正在看着该会话的错误卡片，不应该在 Agent 分段显示 1 角标',
+    );
+
+    // 切回编辑器分段时，该会话变成后台未处理，分段条提示角标。
+    await tester.tap(find.text('编辑器'));
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('editor-agent-badge')), findsOneWidget);
+
+    // 切回 Agent 分段：调用 markSeen 后恢复已读。
+    runtime.liveStatuses[meta.id] = AgentLiveStatus.idle;
+    await tester.tap(find.text('Agent'));
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('editor-agent-badge')), findsNothing);
+  });
 }
 
 /// 让真实的文件 I/O 和定时器跑完。
