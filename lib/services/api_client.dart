@@ -1214,16 +1214,15 @@ class ApiClient {
     Future<void>? abortTrigger,
   }) async* {
     _requireOnline();
+    final uri = ApiConfig.endpoint('/api/terminal/exec/stream');
+    final clock = Stopwatch()..start();
     try {
       final request =
           (abortTrigger == null
-                ? http.Request(
-                    'POST',
-                    ApiConfig.endpoint('/api/terminal/exec/stream'),
-                  )
+                ? http.Request('POST', uri)
                 : http.AbortableRequest(
                     'POST',
-                    ApiConfig.endpoint('/api/terminal/exec/stream'),
+                    uri,
                     abortTrigger: abortTrigger,
                   ))
             ..followRedirects = false
@@ -1250,6 +1249,15 @@ class ApiClient {
               ? data['error'] as String
               : '在线终端不可用（${response.statusCode}）',
           statusCode: response.statusCode,
+          details: _failureDetails(
+            phase: 'http',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+            statusCode: response.statusCode,
+            serverError: body,
+            requestId: response.headers['x-request-id'],
+          ),
         );
       }
       if (!(response.headers['content-type'] ?? '').startsWith(
@@ -1281,19 +1289,72 @@ class ApiClient {
         if (aborted) return;
         throw ApiException('终端连接已中断，未收到执行结果');
       }
-    } on TimeoutException {
-      throw ApiException('终端连接超时，请重试');
+    } on TimeoutException catch (error) {
+      // 文案不变：终端面板的旧文案仍在用。
+      throw ApiException(
+        '终端连接超时，请重试',
+        details: _failureDetails(
+          phase: 'timeout',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
     } on http.RequestAbortedException {
       // 取消是预期路径：不向调用方谎报错误，直接结束流。
       return;
     } on SocketException catch (error) {
-      throw ApiException('无法连接终端：${error.message}');
-    } on http.ClientException {
-      throw ApiException('终端连接已中断');
-    } on HandshakeException {
-      throw ApiException('无法建立终端安全连接');
+      final phase = _phaseOfSocket(error);
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        '无法连接终端：$osMessage',
+        details: _failureDetails(
+          phase: phase,
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (error) {
+      throw ApiException(
+        '终端连接已中断',
+        details: _failureDetails(
+          phase: 'connect',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
+    } on HandshakeException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        '连不上终端服务器 ${uri.host}：TLS 握手失败',
+        details: _failureDetails(
+          phase: 'tls',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
     } on FormatException {
-      throw ApiException('终端响应格式无效');
+      throw ApiException(
+        '终端响应格式无效',
+        details: _failureDetails(
+          phase: 'response',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: 'FormatException',
+        ),
+      );
     }
   }
 
