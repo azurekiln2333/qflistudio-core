@@ -86,6 +86,24 @@ void main() {
     expect(find.text('执行中'), findsOneWidget);
   });
 
+  testWidgets('C3 等确认时状态行写「等待你确认写入」', (tester) async {
+    await tester.pumpWidget(
+      host(
+        ChatTranscript(
+          messages: [message(id: 'm0', role: 'assistant', text: '准备写入')],
+          state: AgentRunState.awaitingApproval,
+          pendingApproval: const AgentWriteApproval(
+            path: 'src/Main.java',
+            summary: '新增 3 行',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('等待你确认写入'), findsOneWidget);
+    expect(find.text('思考中…'), findsNothing);
+  });
+
   testWidgets('the approval card allows a write', (tester) async {
     final decisions = <bool>[];
     await tester.pumpWidget(
