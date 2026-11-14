@@ -217,6 +217,11 @@ void main() {
     await waitFor(() => Future.value(facade.state == AgentRunState.running));
 
     await store.delete(meta.id);
+    // 回复还被 gate 挡着：状态离开 running 只可能是 cancel 做过了。
+    await waitFor(
+      () => Future.value(facade.state != AgentRunState.running),
+      reason: '删除运行中的会话时没有先 cancel，实例被直接销毁',
+    );
     relay.releaseAll();
     await send;
 

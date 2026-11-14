@@ -19,6 +19,14 @@ const int _bigMessages = 3000;
 const int _smallMessages = 20;
 const int _pageSize = 60;
 
+/// 追加计时的样本数：取中位数，避开磁盘抖动。
+const int _appendSamples = 9;
+
+int _medianMicros(List<int> samples) {
+  final sorted = [...samples]..sort();
+  return sorted[sorted.length ~/ 2];
+}
+
 /// 一条消息约 6.7 KB，3000 条约 20 MB。
 String _body(int index) =>
     '第 $index 条：${'这是一段用于撑大文件的正文。' * 200}';
@@ -74,23 +82,27 @@ void main() {
     final loadWatch = Stopwatch()..start();
     await newStore.load();
     loadWatch.stop();
-    final newLoad = loadWatch.elapsedMilliseconds;
+    final newLoad = loadWatch.elapsedMicroseconds;
 
     final openWatch = Stopwatch()..start();
     final page = await newStore.readTail(big, limit: _pageSize);
     openWatch.stop();
-    final newOpen = openWatch.elapsedMilliseconds;
+    final newOpen = openWatch.elapsedMicroseconds;
     expect(page.messages.length, _pageSize);
     expect(page.hasEarlier, isTrue);
 
-    final appendWatch = Stopwatch()..start();
-    await newStore.appendMessage(big, {
-      'id': 'm-last',
-      'role': 'user',
-      'text': '追加一条',
-    });
-    appendWatch.stop();
-    final newAppend = appendWatch.elapsedMilliseconds;
+    final newAppendSamples = <int>[];
+    for (var index = 0; index < _appendSamples; index++) {
+      final appendWatch = Stopwatch()..start();
+      await newStore.appendMessage(big, {
+        'id': 'm-last-$index',
+        'role': 'user',
+        'text': '追加一条',
+      });
+      appendWatch.stop();
+      newAppendSamples.add(appendWatch.elapsedMicroseconds);
+    }
+    final newAppend = _medianMicros(newAppendSamples);
     await newStore.flush();
 
     // ---- 旧实现：每会话一个 JSON，整文件读写 ----
@@ -129,7 +141,7 @@ void main() {
       if (decoded is Map && decoded['id'] is String) oldCount++;
     }
     oldLoadWatch.stop();
-    final oldLoad = oldLoadWatch.elapsedMilliseconds;
+    final oldLoad = oldLoadWatch.elapsedMicroseconds;
     expect(oldCount, _sessionCount);
 
     final oldOpenWatch = Stopwatch()..start();
@@ -137,28 +149,35 @@ void main() {
       File(p.join(oldRoot.path, '$big.json')).readAsStringSync(),
     );
     oldOpenWatch.stop();
-    final oldOpen = oldOpenWatch.elapsedMilliseconds;
+    final oldOpen = oldOpenWatch.elapsedMicroseconds;
     expect((oldDecoded as Map)['messages'], isA<List>());
 
-    final oldAppendWatch = Stopwatch()..start();
-    final transcript = Map<String, Object?>.from(oldDecoded);
-    final messages = List<Map<String, Object?>>.from(
-      (transcript['messages'] as List).cast<Map<String, Object?>>(),
-    )..add({'id': 'm-last', 'role': 'user', 'text': '追加一条'});
-    transcript['messages'] = messages;
-    File(p.join(oldRoot.path, '$big.json')).writeAsStringSync(
-      jsonEncode(transcript),
-    );
-    oldAppendWatch.stop();
-    final oldAppend = oldAppendWatch.elapsedMilliseconds;
+    final oldAppendSamples = <int>[];
+    for (var index = 0; index < _appendSamples; index++) {
+      final transcript = Map<String, Object?>.from(oldDecoded);
+      final messages = List<Map<String, Object?>>.from(
+        (transcript['messages'] as List).cast<Map<String, Object?>>(),
+      )..add({'id': 'm-last-$index', 'role': 'user', 'text': '追加一条'});
+      transcript['messages'] = messages;
+      // 旧实现为了加一条消息要把 20 MB 整体重写一次。
+      final oldAppendWatch = Stopwatch()..start();
+      File(p.join(oldRoot.path, '$big.json')).writeAsStringSync(
+        jsonEncode(transcript),
+      );
+      oldAppendWatch.stop();
+      oldAppendSamples.add(oldAppendWatch.elapsedMicroseconds);
+    }
+    final oldAppend = _medianMicros(oldAppendSamples);
 
     // ---- 报告 ----
-    void row(String name, int oldMs, int newMs, int budgetMs) {
-      final verdict = newMs <= budgetMs ? '通过' : '超出';
+    String ms(int micros) => (micros / 1000).toStringAsFixed(1);
+
+    void row(String name, int oldMicros, int newMicros, int budgetMs) {
+      final verdict = newMicros <= budgetMs * 1000 ? '通过' : '超出';
       // ignore: avoid_print
       print(
-        '${name.padRight(22)} 旧 ${oldMs.toString().padLeft(5)} ms   '
-        '新 ${newMs.toString().padLeft(5)} ms   预算 $budgetMs ms   $verdict',
+        '${name.padRight(22)} 旧 ${ms(oldMicros).padLeft(6)} ms   '
+        '新 ${ms(newMicros).padLeft(6)} ms   预算 $budgetMs ms   $verdict',
       );
     }
 

@@ -4,6 +4,8 @@
 /// 只做进程内互斥：跨进程同时编辑不在本次范围内。
 library;
 
+import 'dart:io' show Platform;
+
 import 'package:path/path.dart' as p;
 
 /// 一次申请的结果。
@@ -28,11 +30,22 @@ class _Held {
 }
 
 /// 进程内的写租约表。按项目根区分，路径统一规范化后再比较。
+///
+/// 大小写不敏感的平台（Windows、macOS、iOS）把 `a.txt` 和 `A.TXT` 当成
+/// 同一个租约；Linux 上两者是两个文件。测试用 [caseInsensitive] 注入。
 class ProjectWriteLeases {
-  ProjectWriteLeases({this.projectRoot = ''});
+  ProjectWriteLeases({this.projectRoot = '', bool? caseInsensitive})
+    : caseInsensitive = caseInsensitive ?? defaultCaseInsensitive;
+
+  /// 平台默认是否折叠大小写。
+  static bool get defaultCaseInsensitive =>
+      Platform.isWindows || Platform.isMacOS || Platform.isIOS;
 
   /// 项目根；只用于把绝对路径换成相对键，空串表示不分项目。
   final String projectRoot;
+
+  /// 路径键是否折叠大小写。默认跟随平台。
+  final bool caseInsensitive;
 
   final Map<String, _Held> _held = {};
 
@@ -85,14 +98,21 @@ class ProjectWriteLeases {
   };
 
   String _keyOf(String path) {
-    final absolute = p.isAbsolute(path)
-        ? p.normalize(path)
-        : p.normalize(p.join(projectRoot, path));
-    final key = projectRoot.isEmpty
+    // 先把反斜杠统一成 `/`：Linux 的 `p` 不认反斜杠，Windows 两种都认。
+    final root = projectRoot.replaceAll('\\', '/');
+    final input = path.replaceAll('\\', '/');
+    final absolute = p.isAbsolute(input)
+        ? p.normalize(input)
+        : p.normalize(p.join(root, input));
+    var key = root.isEmpty
         ? absolute
-        : (p.isWithin(projectRoot, absolute)
-              ? p.relative(absolute, from: projectRoot)
+        : (p.isWithin(root, absolute)
+              ? p.relative(absolute, from: root)
               : absolute);
-    return key.replaceAll('\\', '/');
+    key = key.replaceAll('\\', '/');
+    while (key.startsWith('./')) {
+      key = key.substring(2);
+    }
+    return caseInsensitive ? key.toLowerCase() : key;
   }
 }
