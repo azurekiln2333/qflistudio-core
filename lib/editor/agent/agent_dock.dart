@@ -57,17 +57,58 @@ class AgentEntryButton extends StatelessWidget {
   );
 
   /// 后台待确认或失败的会话数。
-  int _badgeCount(AgentRuntime runtime) {
-    var count = 0;
-    for (final meta in runtime.sessions.sessionsOf(host.project.id)) {
-      final status = runtime.statusOf(meta.id);
-      if (status == AgentLiveStatus.awaitingApproval ||
-          status == AgentLiveStatus.failed) {
-        count++;
-      }
+  int _badgeCount(AgentRuntime runtime) =>
+      agentBadgeCount(runtime, host.project.id);
+}
+
+/// 后台待确认或失败的会话数。
+///
+/// 顶栏图标和中窄屏分段条的「Agent」段共用这一份计数，数字必须一致。
+int agentBadgeCount(AgentRuntime runtime, String projectId) {
+  var count = 0;
+  for (final meta in runtime.sessions.sessionsOf(projectId)) {
+    final status = runtime.statusOf(meta.id);
+    if (status == AgentLiveStatus.awaitingApproval ||
+        status == AgentLiveStatus.failed) {
+      count++;
     }
-    return count;
   }
+  return count;
+}
+
+/// 中窄屏分段条上「Agent」段的图标：角标挂在这里。
+///
+/// 窄屏和中屏已经有「编辑器 | Agent」分段，顶栏不再重复放机器人图标。
+/// 见第四轮 brief 的 pi-A 第 2 条。
+class AgentSegmentIcon extends StatelessWidget {
+  const AgentSegmentIcon({super.key, required this.host});
+
+  final EditorAgentHost host;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: host,
+      builder: (context, _) {
+        final runtime = host.runtime;
+        if (runtime == null) return _icon(0);
+        return AnimatedBuilder(
+          animation: Listenable.merge([
+            runtime.liveChanges,
+            runtime.sessions,
+          ]),
+          builder: (context, _) =>
+              _icon(agentBadgeCount(runtime, host.project.id)),
+        );
+      },
+    );
+  }
+
+  Widget _icon(int badge) => AgentBadgeIcon(
+    badgeCount: badge,
+    icon: Icons.smart_toy_outlined,
+    iconSize: 18,
+  );
 }
 
 /// 宽屏右栏：会话标题、新建、收起，下面是对话流。
@@ -301,10 +342,14 @@ class AgentBadgeIcon extends StatelessWidget {
     super.key,
     required this.badgeCount,
     required this.icon,
+    this.iconSize,
   });
 
   final int badgeCount;
   final IconData icon;
+
+  /// 分段条里的图标小一号；顶栏按钮用默认尺寸。
+  final double? iconSize;
 
   @override
   Widget build(BuildContext context) {
@@ -313,7 +358,7 @@ class AgentBadgeIcon extends StatelessWidget {
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        Icon(icon),
+        Icon(icon, size: iconSize),
         if (badgeCount > 0)
           Positioned(
             right: -6,

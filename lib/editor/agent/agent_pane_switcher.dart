@@ -12,6 +12,7 @@ class AgentPaneSwitcher extends StatelessWidget {
     required this.state,
     required this.editor,
     required this.agent,
+    this.agentIcon,
     this.onPaneSelected,
     this.showBar = true,
   });
@@ -23,6 +24,9 @@ class AgentPaneSwitcher extends StatelessWidget {
 
   /// Agent 面板。为 null 时该分段只显示等待占位。
   final Widget? agent;
+
+  /// 「Agent」段的图标。中窄屏把后台会话角标挂在这里。
+  final Widget? agentIcon;
 
   /// 分段被切换后的回调。打开 Agent 分段时由外层开始解析运行时。
   final ValueChanged<MainPane>? onPaneSelected;
@@ -75,16 +79,21 @@ class AgentPaneSwitcher extends StatelessWidget {
           SegmentedButton<MainPane>(
             key: const ValueKey('editor-main-pane-switch'),
             showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(
+            // 分段是手机上唯一的 Agent 入口，触摸目标不能低于 44。
+            style: const ButtonStyle(
+              minimumSize: WidgetStatePropertyAll(Size(0, 44)),
+            ),
+            segments: [
+              const ButtonSegment(
                 value: MainPane.editor,
                 label: Text('编辑器'),
                 icon: Icon(Icons.code, size: 18),
               ),
               ButtonSegment(
                 value: MainPane.agent,
-                label: Text('Agent'),
-                icon: Icon(Icons.smart_toy_outlined, size: 18),
+                label: const Text('Agent'),
+                icon:
+                    agentIcon ?? const Icon(Icons.smart_toy_outlined, size: 18),
               ),
             ],
             selected: {state.mainPane},
