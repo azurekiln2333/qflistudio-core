@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -11,7 +12,7 @@ import 'composer_state.dart';
 
 /// 输入卡片。
 ///
-/// 项目页和工作台共用这一个实现，见 design.md §4 第 1 条。上方是输入区，
+/// 项目页和工作台共用这一定义。上方是输入区，
 /// 下方是工具行；发送按钮在卡片内部，运行中同一位置变成停止按钮。
 class ComposerCard extends StatefulWidget {
   const ComposerCard({
@@ -136,7 +137,7 @@ class _ComposerCardState extends State<ComposerCard> {
     _selection = 0;
   }
 
-  /// 模型支持的推理强度；不支持时返回空，选择器整块隐藏（design.md §4 第 11 条）。
+  /// 模型支持的推理强度；不支持时返回空，选择器整块隐藏。
   List<String> get _efforts {
     final modelId = _state.modelId;
     if (modelId == null) return const [];
@@ -170,21 +171,33 @@ class _ComposerCardState extends State<ComposerCard> {
     if (!_state.canSend || _sending || widget.running || !widget.enabled) {
       return;
     }
+    // 记下发起这次发送的状态：await 期间可能已经换了会话。
+    final composer = _state;
+    final text = composer.text.trim();
+    final attachments = composer.attachments;
     setState(() => _sending = true);
-    final text = _state.text.trim();
-    final attachments = _state.attachments;
     final sent = await widget.onSend(text, attachments);
     if (!mounted) return;
     setState(() => _sending = false);
-    if (sent) _state.clearInput();
+    if (!sent) return;
+    // 已经换了会话：新会话的草稿不能动。
+    if (!identical(composer, _state)) return;
+    // 只有输入仍是刚发出去那一份时才清空，不覆盖用户新打的字。
+    if (composer.text.trim() != text) return;
+    if (!listEquals(composer.attachments, attachments)) return;
+    composer.clearInput();
   }
 
   Future<void> _pick(AttachmentSource source) async {
     final picker = widget.onPickAttachments;
     if (picker == null) return;
+    // 选择器关闭前可能换了会话，回到时只能加到原来那个。
+    final composer = _state;
     final paths = await picker(source);
     if (paths == null || paths.isEmpty) return;
-    _state.attachAll(paths);
+    if (!mounted) return;
+    if (!identical(composer, _state)) return;
+    composer.attachAll(paths);
   }
 
   @override
@@ -195,7 +208,8 @@ class _ComposerCardState extends State<ComposerCard> {
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+        // 左右同宽的内边距：输入区和工具行都对齐到这条线，右侧不再比左侧窄。
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -207,13 +221,13 @@ class _ComposerCardState extends State<ComposerCard> {
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: scheme.outlineVariant),
               ),
-              padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+              padding: const EdgeInsets.fromLTRB(10, 10, 8, 6),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _buildInput(context),
                   if (_state.attachments.isNotEmpty) _buildAttachments(context),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
                   _buildToolRow(context),
                 ],
               ),
@@ -373,90 +387,137 @@ class _ComposerCardState extends State<ComposerCard> {
     );
   }
 
+  /// 工具行：左侧附件，中间选择器成组，右侧紧凑的发送键。
+  ///
+  /// 不按屏幕宽度分档，只看实际可用宽度。
   Widget _buildToolRow(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final efforts = _efforts;
     return LayoutBuilder(
       builder: (context, constraints) {
-        // 按实际可用宽度决定保留哪些文字，不按屏幕宽度分档：手机横屏、
-        // 侧边栏、字体缩放都会改变这里的宽度（追加要求第 3 条）。
         final fit = _fitFor(
           context,
           constraints.maxWidth,
           efforts: efforts,
+          hasPicker: widget.onPickAttachments != null,
+          desktop: widget.desktopKeyboard ?? AppPaths.isDesktop,
         );
         return Row(
           children: [
-            Expanded(
-              child: Row(
-                children: [
-                  if (widget.onPickAttachments != null)
-                    _buildAddButton(context)
-                  else
-                    const SizedBox.shrink(),
-                  const SizedBox(width: 2),
-                  _buildPermissionButton(
-                    context,
-                    showLabel: fit.permissionLabel,
-                  ),
-                  const SizedBox(width: 2),
-                  // 剩下的宽度全给模型名，它和发送键之间不留空档。
-                  Flexible(
-                    child: SizedBox(
-                      width: fit.modelWidth,
-                      child: _buildModelButton(context),
-                    ),
-                  ),
-                  if (efforts.isNotEmpty) ...[
-                    const SizedBox(width: 2),
-                    _buildEffortButton(
-                      context,
-                      efforts,
-                      showLabel: fit.effortLabel,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            SizedBox(
-              width: 48,
-              height: 48,
-              child: widget.running
-                  ? IconButton.filledTonal(
-                      key: const ValueKey('composer-stop'),
-                      tooltip: '停止',
-                      onPressed: widget.onStop,
-                      icon: const Icon(Icons.stop, size: 20),
-                    )
-                  : IconButton.filled(
-                      key: const ValueKey('composer-send'),
-                      tooltip: '发送',
-                      onPressed: _state.canSend && widget.enabled
-                          ? _submit
-                          : null,
-                      icon: _sending
-                          ? SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: scheme.onPrimary,
-                              ),
-                            )
-                          : const Icon(Icons.arrow_upward, size: 20),
-                    ),
-            ),
+            // 第一组：附件；没有选择器时不占位。
+            if (widget.onPickAttachments != null)
+              _buildAddButton(context, hasLabel: fit.addLabel),
+            // 组间最小间距要先占住：窄屏下 Spacer 会缩成 0，
+            // 两个 chip 就会贴在一起。
+            if (widget.onPickAttachments != null) SizedBox(width: fit.outerGap),
+            // 第二组：权限、模型、推理强度，组内间距一致。
+            _buildSelectorGroup(context, fit: fit, efforts: efforts),
+            const Spacer(),
+            SizedBox(width: fit.rightGap),
+            // 第三组：发送。可见的圆 36，可点范围 44。
+            _buildSendButton(context),
           ],
         );
       },
     );
   }
 
-  Widget _buildAddButton(BuildContext context) {
+  /// 选择器组：放不下就收文字，不会撑出边界。
+  Widget _buildSelectorGroup(
+    BuildContext context, {
+    required _ToolRowFit fit,
+    required List<String> efforts,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildPermissionButton(context, showLabel: fit.permissionLabel),
+        const SizedBox(width: _selectorGap),
+        // 宽度由档位算好，这里不再伸缩。
+        SizedBox(width: fit.modelWidth, child: _buildModelButton(context)),
+        if (efforts.isNotEmpty) ...[
+          const SizedBox(width: _selectorGap),
+          _buildEffortButton(context, efforts, showLabel: fit.effortLabel),
+        ],
+      ],
+    );
+  }
+
+  /// 发送与停止占同一块区域。
+  ///
+  /// 用标准 `IconButton` 保留按钮语义与键盘激活；背景透明，
+  /// 可见的圆由 36 的容器画，可点范围仍为 44。
+  Widget _buildSendButton(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final running = widget.running;
+    // 能点需要同时满足：有内容、界面可用、当前没在发。
+    final canSendNow = _state.canSend && widget.enabled && !_sending;
+
+    // 底色与前景色成对给出，保证对比度：
+    // 运行/禁用用容器色，可用时用主色。
+    final Color fill;
+    final Color foreground;
+    if (running) {
+      fill = scheme.surfaceContainerHighest;
+      // 深色主题下 onSurfaceVariant 与容器色对比不够，用 onSurface。
+      foreground = scheme.onSurface;
+    } else if (canSendNow) {
+      fill = scheme.primary;
+      foreground = scheme.onPrimary;
+    } else {
+      fill = scheme.surfaceContainerHighest;
+      foreground = scheme.onSurfaceVariant;
+    }
+
+    return SizedBox(
+      width: _sendTarget,
+      height: _sendTarget,
+      child: IconButton(
+        key: ValueKey(running ? 'composer-stop' : 'composer-send'),
+        tooltip: running ? '停止' : '发送',
+        onPressed: running ? widget.onStop : (canSendNow ? _submit : null),
+        style: IconButton.styleFrom(
+          fixedSize: const Size.square(_sendTarget),
+          minimumSize: const Size.square(_sendTarget),
+          tapTargetSize: MaterialTapTargetSize.padded,
+          padding: EdgeInsets.zero,
+          // 不画底色：否则会把 44 的可点区整个填满，看起来又变大了。
+          backgroundColor: Colors.transparent,
+          disabledBackgroundColor: Colors.transparent,
+          splashFactory: InkSparkle.splashFactory,
+          shape: const CircleBorder(),
+        ),
+        icon: Container(
+          width: _sendDiameter,
+          height: _sendDiameter,
+          decoration: BoxDecoration(color: fill, shape: BoxShape.circle),
+          child: Center(
+            child: running
+                ? Icon(Icons.stop, size: 18, color: foreground)
+                : (_sending
+                      ? SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: foreground,
+                          ),
+                        )
+                      : Icon(Icons.arrow_upward, size: 18, color: foreground)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 附件加号：贴在最左侧。
+  ///
+  /// 图标左对齐，避免默认居中摆放造成的视觉偏移。
+  Widget _buildAddButton(BuildContext context, {required bool hasLabel}) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return PopupMenuButton<AttachmentSource>(
       key: const ValueKey('composer-plus'),
       tooltip: '添加文件',
-      icon: const Icon(Icons.add, size: 20),
       constraints: const BoxConstraints(minWidth: 180),
       onSelected: _pick,
       itemBuilder: (context) => const [
@@ -471,6 +532,38 @@ class _ComposerCardState extends State<ComposerCard> {
           child: Text('工作区文件'),
         ),
       ],
+      child: Container(
+        height: 44,
+        constraints: BoxConstraints(minWidth: hasLabel ? 64 : _addWidth),
+        // 不加底色：它只是图标入口，不像选择器那样需要 chip。
+        // 左边不留白，图标与输入框文字对齐。
+        padding: EdgeInsets.only(
+          left: hasLabel ? 8 : 0,
+          right: hasLabel ? 8 : 0,
+        ),
+        alignment: Alignment.centerLeft,
+        // 图标靠左不居中，否则看起来又离左边远了一截。
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            Icon(Icons.add, size: 20, color: scheme.onSurfaceVariant),
+            if (hasLabel) ...[
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  '附件',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -523,7 +616,7 @@ class _ComposerCardState extends State<ComposerCard> {
     );
   }
 
-  /// 模型选择始终显示，并且始终带模型名（design.md §11.6、brief 追加要求第 2 条）。
+  /// 模型选择始终显示，并且始终带模型名。
   ///
   /// 加载中显示「模型…」；列表为空或失败显示「默认模型」，点开说明原因并提供
   /// 「重试」。名字过长时省略，但按钮至少留出六个字的宽度。
@@ -669,7 +762,7 @@ class _ComposerCardState extends State<ComposerCard> {
     final content = Container(
       height: 44,
       constraints: BoxConstraints(minWidth: compact ? 44 : minWidth),
-      // 内边距 8 而不是 10：390 宽下模型名能多看见两个字（追加要求第 2 条）。
+      // 内边距 8 而不是 10：窄卡片下模型名能多看见两个字。
       padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 8),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(10),
@@ -693,10 +786,7 @@ class _ComposerCardState extends State<ComposerCard> {
               ),
             ),
           ],
-          if (trailing != null) ...[
-            const SizedBox(width: 5),
-            trailing,
-          ],
+          if (trailing != null) ...[const SizedBox(width: 5), trailing],
         ],
       ),
     );
@@ -734,34 +824,63 @@ class _ComposerSkillNextIntent extends Intent {
   const _ComposerSkillNextIntent();
 }
 
-/// 工具行保留哪些文字，以及模型按钮拿到多宽。
+/// 工具行保留哪些文字，以及各段空隙的宽度。
 @immutable
 class _ToolRowFit {
   const _ToolRowFit({
+    required this.addLabel,
     required this.permissionLabel,
     required this.effortLabel,
     required this.modelWidth,
+    required this.outerGap,
+    required this.rightGap,
   });
 
+  /// 加号是否带「附件」文字。只有很宽且宽松的卡片才带。
+  final bool addLabel;
   final bool permissionLabel;
   final bool effortLabel;
 
-  /// 模型按钮的宽度：可用宽度的剩余部分全给它。
+  /// 模型按钮的宽度。
   final double modelWidth;
+
+  /// 附件与选择器组之间的空隙。永远不小于 _minOuterGap。
+  final double outerGap;
+
+  /// 选择器组与发送键之间留出的空隙。
+  final double rightGap;
 }
 
-/// 模型按钮至少留出的宽度：图标加约五个字。判档时按这个下界算，
-/// 剩余宽度不够时就不会硬顶出溢出。
+/// 模型按钮至少留出的宽度：图标加约五个字。
 const double _modelChipMinWidth = 84;
 
-/// 工具行固定尺寸：加号、发送键和按钮间隔。指标都在这里，便于对账。
-const double _toolAddWidth = 48;
-const double _toolSendWidth = 48;
-const double _toolGap = 2;
+/// 模型按钮在极窄时的绝对下界：图标加一两个字，不再往下缩。
+const double _modelChipFloorWidth = 56;
+
+/// 选择器组内部的按钮间距：比组间的空隙小，看起来是一组。
+const double _selectorGap = 6;
+
+/// 加号按钮的尺寸（无文字）与带文字时的宽度。
+const double _addWidth = 44;
+const double _addLabelWidth = 64;
+
+/// 选择器只剩图标时的宽度。
 const double _toolIconChipWidth = 44;
 
-/// 刚好塞满时字体会压线，留一点余量再换下一档。
-const double _toolFitSlack = 12;
+/// 发送键：可点范围 44，视觉圆 36。
+const double _sendDiameter = 36;
+const double _sendTarget = 44;
+
+/// 选择器组与发送键之间：发送是主操作，留得比组内间距大。
+const double _toolSendGap = 12;
+
+/// 附件与选择器组之间的最小空隙。必须在宽度预算里先扣出来，
+/// 否则窄屏下会被挤成 0。
+const double _minOuterGap = 8;
+
+/// 刚好塞满时字体会压线，留一点余量再换下一档。空隙已经算在 required()
+/// 里，这里的余量只需覆盖四舍五入误差，不用再放大。
+const double _toolFitSlack = 0;
 
 /// 生成一套按钮宽度：文字用真实的字体度量，已含字体缩放。
 class _ToolRowMetrics {
@@ -806,20 +925,32 @@ class _ToolRowMetrics {
   }
 }
 
-/// 选最齐的档：先试全部带文字，再只收推理强度，最后两个都收。
+/// 选最齐的档：先试全部带文字，再依次收附件、推理强度、权限的文字。
 ///
-/// 收缩顺序按追加要求第 3 条：推理强度，权限，模型名最后。
+/// 收缩顺序：推理强度，权限，模型名最后；附件标签最先收。
 _ToolRowFit _fitFor(
   BuildContext context,
   double available, {
   required List<String> efforts,
+  required bool hasPicker,
+  required bool desktop,
 }) {
   final metrics = _ToolRowMetrics(context);
   final hasEfforts = efforts.isNotEmpty;
-  final fixed = _toolAddWidth + _toolGap + _toolGap + _toolSendWidth +
-      (hasEfforts ? _toolGap : 0);
+  final sendWidth = _sendTarget;
+  // 组间空隙在预算里先留出来：窄屏下 Spacer 会缩成 0，
+  // 预留这一段才能保证两个 chip 不贴着。
+  final filterGap = hasPicker ? _minOuterGap : 0.0;
+  final gaps = filterGap + _toolSendGap;
 
-  double required({required bool permission, required bool effort}) {
+  double required({
+    required bool addLabel,
+    required bool permission,
+    required bool effort,
+  }) {
+    final addWidthNow = !hasPicker
+        ? 0.0
+        : (addLabel ? math.max(_addWidth, _addLabelWidth) : _addWidth);
     final permissionWidth = permission
         ? metrics.permissionLabel
         : _toolIconChipWidth;
@@ -827,30 +958,75 @@ _ToolRowFit _fitFor(
         ? 0.0
         : (effort ? metrics.effortLabel : _toolIconChipWidth);
     // 模型的宽度下界也算进去：放不下就继续收文字，而不是让它撑出边界。
-    return fixed + permissionWidth + effortWidth + _modelChipMinWidth;
+    final selectorGaps = _selectorGap + (hasEfforts ? _selectorGap : 0.0);
+    return addWidthNow +
+        gaps +
+        permissionWidth +
+        selectorGaps +
+        effortWidth +
+        _modelChipMinWidth +
+        sendWidth;
   }
 
-  bool fits({required bool permission, required bool effort}) =>
-      required(permission: permission, effort: effort) + _toolFitSlack <=
+  bool fits({
+    required bool addLabel,
+    required bool permission,
+    required bool effort,
+  }) =>
+      required(addLabel: addLabel, permission: permission, effort: effort) +
+          _toolFitSlack <=
       available;
 
+  // 桌面端选择器标签是主要识别信息，只要放得下就一直带；移动端按宽度收。
+  var addLabel = false;
   var permission = false;
   var effort = false;
-  if (hasEfforts && fits(permission: true, effort: true)) {
+
+  if (fits(addLabel: hasPicker, permission: true, effort: hasEfforts)) {
+    addLabel = hasPicker;
     permission = true;
-    effort = true;
-  } else if (fits(permission: true, effort: false)) {
+    effort = hasEfforts;
+  } else if (fits(addLabel: false, permission: true, effort: hasEfforts)) {
+    permission = true;
+    effort = hasEfforts;
+  } else if (fits(addLabel: false, permission: true, effort: false)) {
     permission = true;
   }
 
-  // 剩下的宽度全给模型名：它和发送键之间不留空档。
-  final others =
-      required(permission: permission, effort: effort) - _modelChipMinWidth;
-  final modelWidth = math.max(0.0, available - others);
+  // 桌面窗口再窄也优先保留选择器文字，放不下时宁可让模型名窄一点。
+  if (desktop && !permission) {
+    final withoutLabels = required(
+      addLabel: false,
+      permission: true,
+      effort: false,
+    );
+    if (withoutLabels + _toolFitSlack <= available) permission = true;
+  }
+
+  // 模型名拿剩下的宽度。
+  //
+  // 三种情况：放得下就按下界与封顶值取一个；原本就挤时先缩到
+  // _modelChipFloorWidth（还剩图标加一两个字），把腾出来的宽度让给
+  // 组间空隙和发送键。宁可模型名短一点，也不让两个 chip 贴在一起。
+  final used =
+      required(addLabel: addLabel, permission: permission, effort: effort) -
+      _modelChipMinWidth;
+  final room = available - used;
+  final double modelWidth;
+  if (room >= _modelChipMinWidth) {
+    final modelCap = math.max(_modelChipMinWidth, available * 0.36);
+    modelWidth = math.min(modelCap, room);
+  } else {
+    // 放不下完整下界：先保证图标可见，剩余宽度全部留给模型名。
+    modelWidth = math.max(_modelChipFloorWidth, room);
+  }
   return _ToolRowFit(
+    addLabel: addLabel,
     permissionLabel: permission,
     effortLabel: effort,
     modelWidth: modelWidth,
+    outerGap: hasPicker ? _minOuterGap : 0,
+    rightGap: _toolSendGap,
   );
 }
 

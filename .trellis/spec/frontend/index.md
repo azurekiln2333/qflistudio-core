@@ -18,6 +18,8 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Offline Editor Analysis](./offline-editor-analysis.md) | Unsaved provider contract, bounded scheduling, diagnostic rendering and navigation | Implemented |
 | [Offline Content](./offline-content.md) | Subject filters, saved metadata, bundled restoration, fixture import and shared tools sliver | Implemented |
 | [Offline Workspace](./offline-workspace.md) | Multi-root tree/history and owner-aware ordered editor sessions | Implemented |
+| [Saved Workspaces](./saved-workspaces.md) | Named workspace persistence and additions-only project picker | Implemented |
+| [Embedded Agent](./embedded-agent.md) | Shared sidebar, session loading, composer and message actions | Implemented |
 | [Offline Debugger](./offline-debugger.md) | Optional real provider contract, pause generations, bounded snapshots and cleanup | Contract; UI/provider acceptance pending |
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |

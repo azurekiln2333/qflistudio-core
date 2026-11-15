@@ -212,6 +212,60 @@ class WorkspaceStore extends ChangeNotifier {
     });
   }
 
+  /// Appends members to a saved workspace.
+  ///
+  /// Additions only: the saved identity, name, member order, members that are
+  /// missing from the registry right now, and the session snapshot are all kept
+  /// as they are.
+  ///
+  /// The additions are snapshotted before the write is enqueued, so a caller
+  /// that mutates its list afterwards cannot change what gets written, and
+  /// duplicate paths inside the argument collapse to one member.
+  ///
+  /// Returns the updated workspace; returns the unchanged record when every
+  /// addition was already a member; returns null when the workspace is missing.
+  /// Storage failures are rethrown so the caller can report them.
+  Future<SavedWorkspace?> addMembers(
+    String workspaceId,
+    Iterable<Project> additions,
+  ) {
+    final snapshot = <WorkspaceMember>[];
+    final keys = <String>{};
+    for (final project in additions) {
+      if (project.isCloud) continue;
+      // 同一路径重复传入只算一个成员。
+      if (!keys.add(workspacePathKey(project.path))) continue;
+      snapshot.add(WorkspaceMember.fromProject(project));
+    }
+    if (snapshot.isEmpty) return Future.value();
+    return _serialize(() async {
+      await _ensureLoaded();
+      return _atRoot((root) async {
+        final currentList = await _readAll(root);
+        final current = _find(currentList, workspaceId);
+        if (current == null) return null;
+        final taken = {
+          for (final member in current.members) workspacePathKey(member.path),
+        };
+        final added = <WorkspaceMember>[];
+        for (final member in snapshot) {
+          if (!taken.add(workspacePathKey(member.path))) continue;
+          added.add(member);
+        }
+        if (added.isEmpty) return current;
+        final updated = current.copyWith(
+          updatedAt: DateTime.now(),
+          members: [...current.members, ...added],
+        );
+        await _write(_fileFor(root, workspaceId), updated);
+        currentList.removeWhere((item) => item.id == workspaceId);
+        currentList.add(updated);
+        _publish(currentList);
+        return updated;
+      });
+    });
+  }
+
   /// Updates only the session. Stale retained editors cannot recreate a deleted
   /// workspace; disappearance is observed in the same transaction as the write.
   Future<void> saveSession(

@@ -2,79 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../../shell/workbench_state.dart';
 
-/// 侧边栏分段：「文件 | 会话」。
+/// 「文件 | 会话」切换控件，渲染在侧边栏卡片的标题行里。
 ///
-/// 分段固定在侧边栏顶部、文件树卡片之上，抽屉里用的是同一个组件，两处读
-/// 同一个 [WorkbenchState]。见 design.md §11.1。
-class EditorSidebarTabs extends StatelessWidget {
-  const EditorSidebarTabs({
-    super.key,
-    required this.state,
-    required this.files,
-    this.sessions,
-    this.sessionsLoading = false,
-    this.showStrip = true,
-    this.onSectionChanged,
-  });
-
-  final WorkbenchState state;
-
-  /// 「文件」分段的内容，即原有的文件树。
-  final Widget files;
-
-  /// 「会话」分段的内容；为 null 时没有 agent，只显示文件树。
-  final Widget? sessions;
-
-  /// 会话列表还在准备中。
-  final bool sessionsLoading;
-
-  /// 是否在列表上方画分段条。
-  final bool showStrip;
-
-  /// 切分段时的回调。默认只改状态；编辑器页用它顺带激活运行时。
-  final ValueChanged<SidebarSection>? onSectionChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final hasSessions = sessions != null || sessionsLoading;
-    return AnimatedBuilder(
-      animation: state,
-      builder: (context, _) {
-        final showSessions =
-            hasSessions && state.sidebarSection == SidebarSection.sessions;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (showStrip && hasSessions)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-                child: SidebarSectionSwitch(
-                  section: state.sidebarSection,
-                  showLabels: true,
-                  onChanged: onSectionChanged ?? state.showSidebarSection,
-                ),
-              ),
-            Expanded(
-              child: showSessions
-                  ? (sessions ??
-                        const Center(
-                          child: SizedBox.square(
-                            dimension: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ))
-                  : files,
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-/// 「文件 | 会话」分段控件。
-///
-/// 每个分段至少 44×44，颜色只用主题 token。见 design.md §4 第 10 条。
+/// 每个分段至少 44×44，颜色只用主题 token。标题栏要和项目名、新建、搜索、
+/// 刷新共用一行，所以这里固定紧凑样式；文字只在确实放得下时显示，否则只留
+/// 图标加 tooltip，避免把标签挤成两行。
 class SidebarSectionSwitch extends StatelessWidget {
   const SidebarSectionSwitch({
     super.key,
@@ -86,41 +18,95 @@ class SidebarSectionSwitch extends StatelessWidget {
   final SidebarSection section;
   final ValueChanged<SidebarSection> onChanged;
 
-  /// 是否显示文字。顶栏空间紧张时只显示图标，靠 tooltip 说明。
+  /// 是否显示文字。标题栏空间紧张时只显示图标。
   final bool showLabels;
 
   @override
   Widget build(BuildContext context) {
-    return SegmentedButton<SidebarSection>(
+    final scheme = Theme.of(context).colorScheme;
+    // 自绘两段切换控件：Material 的 SegmentedButton 会强制留出 56 宽，
+    // 280 宽的侧边栏放不下，所以直接画两个 44×44 的方框。
+    return Container(
       key: const ValueKey('editor-sidebar-section-switch'),
-      showSelectedIcon: false,
-      style: const ButtonStyle(
-        minimumSize: WidgetStatePropertyAll(Size(44, 44)),
+      // 外框描边占 1px，容器 46 才能让里层触摸目标真的达到 44。
+      height: 46,
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(22),
       ),
-      segments: [
-        ButtonSegment(
-          value: SidebarSection.files,
-          label: showLabels ? const Text('文件') : null,
-          tooltip: '文件',
-          icon: const Icon(
-            Icons.folder_outlined,
-            key: ValueKey('editor-sidebar-section-files'),
-            size: 18,
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _segment(
+            context,
+            section: SidebarSection.files,
+            icon: Icons.folder_outlined,
+            label: '文件',
+            iconKey: const ValueKey('editor-sidebar-section-files'),
+          ),
+          _segment(
+            context,
+            section: SidebarSection.sessions,
+            icon: Icons.forum_outlined,
+            label: '会话',
+            iconKey: const ValueKey('editor-sidebar-section-sessions'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _segment(
+    BuildContext context, {
+    required SidebarSection section,
+    required IconData icon,
+    required String label,
+    required Key iconKey,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = this.section == section;
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: label,
+        child: InkWell(
+          onTap: () => onChanged(section),
+          child: Container(
+            // 44×44 的触摸目标，不给标签留挤压空间。
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            alignment: Alignment.center,
+            color: selected ? scheme.secondaryContainer : null,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  key: iconKey,
+                  size: 18,
+                  color: selected
+                      ? scheme.onSecondaryContainer
+                      : scheme.onSurfaceVariant,
+                ),
+                if (showLabels) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    label,
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: selected
+                          ? scheme.onSecondaryContainer
+                          : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
-        ButtonSegment(
-          value: SidebarSection.sessions,
-          label: showLabels ? const Text('会话') : null,
-          tooltip: '会话',
-          icon: const Icon(
-            Icons.forum_outlined,
-            key: ValueKey('editor-sidebar-section-sessions'),
-            size: 18,
-          ),
-        ),
-      ],
-      selected: {section},
-      onSelectionChanged: (selection) => onChanged(selection.first),
+      ),
     );
   }
 }

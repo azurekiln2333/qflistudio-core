@@ -16,6 +16,7 @@ class SessionListView extends StatelessWidget {
     required this.projectId,
     this.onSelect,
     this.onCreate,
+    this.embedded = false,
   });
 
   final AgentRuntime runtime;
@@ -28,6 +29,15 @@ class SessionListView extends StatelessWidget {
   /// 新建会话。
   final Future<void> Function()? onCreate;
 
+  /// 标题栏最左侧的控件，例如「文件 | 会话」分段。
+  ///
+  /// 会话分段选中时预览仍是同一个标题行，用户能从那里切回文件树。
+  /// 为 true 时本视图只给卡片主体，不再带自己的标题行和外框。
+  ///
+  /// 嵌入 [FileExplorerSections] 时由文件树卡片的共享标题行提供标题、
+  /// 新建和「全部停止」，两种主体共用一套外框。
+  final bool embedded;
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -37,8 +47,7 @@ class SessionListView extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildHeader(context),
-            const Divider(height: 1),
+            if (!embedded) ...[_buildHeader(context), const Divider(height: 1)],
             Expanded(
               child: sessions.isEmpty
                   ? _buildEmpty(context)
@@ -69,9 +78,7 @@ class SessionListView extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
       child: Row(
         children: [
-          Expanded(
-            child: Text('会话', style: theme.textTheme.titleSmall),
-          ),
+          Expanded(child: Text('会话', style: theme.textTheme.titleSmall)),
           if (onCreate != null)
             IconButton(
               key: const ValueKey('session-new'),
@@ -83,11 +90,7 @@ class SessionListView extends StatelessWidget {
             key: const ValueKey('session-list-menu'),
             tooltip: '会话操作',
             itemBuilder: (context) => const [
-              PopupMenuItem(
-                value: 'stop_all',
-                height: 44,
-                child: Text('全部停止'),
-              ),
+              PopupMenuItem(value: 'stop_all', height: 44, child: Text('全部停止')),
             ],
             onSelected: (action) {
               if (action == 'stop_all') runtime.cancelAll();
@@ -272,10 +275,7 @@ class SessionStatusMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return SizedBox.square(
-      dimension: 20,
-      child: Center(child: _build(scheme)),
-    );
+    return SizedBox.square(dimension: 20, child: Center(child: _build(scheme)));
   }
 
   Widget _build(ColorScheme scheme) => switch (status) {

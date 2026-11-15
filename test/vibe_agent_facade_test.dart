@@ -221,6 +221,9 @@ void main() {
     final userMessage = facade.messages.firstWhere((m) => m.role == 'user');
     expect(userMessage.text, contains('notes.txt'));
     expect(userMessage.text, isNot(contains('秘密正文')));
+    // 原始输入与附件单独带着，不用从拼好的显示文本里反推。
+    expect(userMessage.sourceText, '看看这个文件');
+    expect(userMessage.attachedPaths, ['notes.txt']);
     expect(target.existsSync(), isTrue);
 
     final sent = (relay.chatBodies.first['messages'] as List)
@@ -229,6 +232,120 @@ void main() {
     expect(sent['content'], contains('- notes.txt'));
     expect(sent['content'], isNot(contains('秘密正文')));
   });
+
+  test('source text and attachments survive a reopen', () async {
+    final meta = await store.create('p1');
+    final relay = _FakeRelay()..chatReplies.addAll([_textReply('收到。')]);
+    final first = await runtime(relay).open('p1', meta.id);
+
+    await first.send(
+      '看看这个文件',
+      attachedPaths: ['notes.txt'],
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
+    await settle(first);
+    await first.flush();
+
+    final reopened = await runtime(relay).open('p1', meta.id);
+    final userMessage = reopened.messages.firstWhere((m) => m.role == 'user');
+    expect(userMessage.sourceText, '看看这个文件');
+    expect(userMessage.attachedPaths, ['notes.txt']);
+    // 显示文本仍是展开后的。
+    expect(userMessage.text, contains('notes.txt'));
+  });
+
+  test('retryLast sends the same attachments again', () async {
+    final meta = await store.create('p1');
+    final relay = _FakeRelay()
+      ..chatReplies.addAll([_textReply('一'), _textReply('二')]);
+    final facade = await runtime(relay).open('p1', meta.id);
+
+    await facade.send(
+      '看看这个文件',
+      attachedPaths: ['notes.txt'],
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
+    await settle(facade);
+    await facade.retryLast();
+    await settle(facade);
+
+    expect(relay.chatBodies, hasLength(2));
+    final resent = (relay.chatBodies.last['messages'] as List)
+        .cast<Map<String, dynamic>>()
+        .firstWhere((entry) => entry['role'] == 'user');
+    expect(resent['content'], contains('notes.txt'));
+  });
+
+  test(
+    'later sends retain each earlier user message source and attachments',
+    () async {
+      final meta = await store.create('p1');
+      final relay = _FakeRelay()
+        ..chatReplies.addAll([_textReply('first'), _textReply('second')]);
+      final facade = await runtime(relay).open('p1', meta.id);
+
+      await facade.send(
+        'first prompt',
+        attachedPaths: ['first.txt'],
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      await settle(facade);
+      final firstId = facade.messages.firstWhere((m) => m.role == 'user').id;
+      await facade.send(
+        'second prompt',
+        attachedPaths: ['second.txt'],
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      await settle(facade);
+
+      void expectSources(AgentFacade current) {
+        final users = current.messages.where((m) => m.role == 'user').toList();
+        expect(users, hasLength(2));
+        expect(users.first.id, firstId);
+        expect(users.map((m) => m.sourceText), [
+          'first prompt',
+          'second prompt',
+        ]);
+        expect(users.map((m) => m.attachedPaths), [
+          ['first.txt'],
+          ['second.txt'],
+        ]);
+      }
+
+      expectSources(facade);
+      expectSources(await runtime(relay).open('p1', meta.id));
+    },
+  );
+
+  test(
+    'attachment-only sends and retries retain an empty source on reopen',
+    () async {
+      final meta = await store.create('p1');
+      final relay = _FakeRelay()
+        ..chatReplies.addAll([_textReply('first'), _textReply('retry')]);
+      final facade = await runtime(relay).open('p1', meta.id);
+
+      await facade.send(
+        '',
+        attachedPaths: ['notes.txt'],
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      await settle(facade);
+      expect(relay.chatBodies, hasLength(1));
+      await facade.retryLast();
+      await settle(facade);
+      expect(relay.chatBodies, hasLength(2));
+
+      final reopened = await runtime(relay).open('p1', meta.id);
+      final users = reopened.messages.where((m) => m.role == 'user').toList();
+      expect(users, hasLength(2));
+      for (final user in users) {
+        expect(user.sourceText, '');
+        expect(user.attachedPaths, ['notes.txt']);
+        expect(user.text.split('notes.txt'), hasLength(2));
+      }
+    },
+  );
 
   test('persists messages and restores the model history', () async {
     final meta = await store.create('p1');
@@ -364,24 +481,27 @@ void main() {
     expect(notified, 1);
   });
 
-  test('send shows the user message and running state in the same frame', () async {
-    final meta = await store.create('p1');
-    final relay = _FakeRelay()..chatReplies.addAll([_textReply('好。')]);
-    final facade = await runtime(relay).open('p1', meta.id);
+  test(
+    'send shows the user message and running state in the same frame',
+    () async {
+      final meta = await store.create('p1');
+      final relay = _FakeRelay()..chatReplies.addAll([_textReply('好。')]);
+      final facade = await runtime(relay).open('p1', meta.id);
 
-    final pending = facade.send(
-      '马上要看到我',
-      permission: AgentPermissionMode.autoAcceptEdits,
-    );
-    // 同步段：这里还没 await 任何东西，界面已经能拿到用户消息和运行状态。
-    expect(facade.messages.last.role, 'user');
-    expect(facade.messages.last.text, '马上要看到我');
-    expect(facade.state, AgentRunState.running);
+      final pending = facade.send(
+        '马上要看到我',
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      // 同步段：这里还没 await 任何东西，界面已经能拿到用户消息和运行状态。
+      expect(facade.messages.last.role, 'user');
+      expect(facade.messages.last.text, '马上要看到我');
+      expect(facade.state, AgentRunState.running);
 
-    await pending;
-    await settle(facade);
-    expect(facade.messages.first.text, '马上要看到我');
-  });
+      await pending;
+      await settle(facade);
+      expect(facade.messages.first.text, '马上要看到我');
+    },
+  );
 
   test('opening a session never touches the network', () async {
     final meta = await store.create('p1');
@@ -522,7 +642,10 @@ void main() {
     relay.chatReplies.add(_textReply('回复一'));
     final facade = await runtime(relay).open('p1', meta.id);
 
-    final first = facade.send('只发一次', permission: AgentPermissionMode.autoAcceptEdits);
+    final first = facade.send(
+      '只发一次',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
     await waitFor(() => Future.value(facade.state == AgentRunState.running));
 
     await facade.send('并发重复', permission: AgentPermissionMode.autoAcceptEdits);
@@ -534,7 +657,10 @@ void main() {
 
     expect(relay.chatBodies, hasLength(1));
     expect(
-      facade.messages.where((m) => m.role == 'user').map((m) => m.text).toList(),
+      facade.messages
+          .where((m) => m.role == 'user')
+          .map((m) => m.text)
+          .toList(),
       ['只发一次'],
     );
   });
@@ -614,9 +740,7 @@ class _FakeRelay {
       );
       if (chatStatus != null) {
         return http.StreamedResponse(
-          Stream.value(
-            utf8.encode(jsonEncode({'error': chatError ?? '失败'})),
-          ),
+          Stream.value(utf8.encode(jsonEncode({'error': chatError ?? '失败'}))),
           chatStatus!,
           headers: {'content-type': 'application/json'},
         );

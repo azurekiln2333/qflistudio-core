@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -76,6 +78,7 @@ void main() {
     );
 
     await tester.pumpWidget(host(widget));
+    // 发送与停止占同一个区域，两者都量到外框，不量内部的圆。
     final idleSlot = tester.getRect(
       find.byKey(const ValueKey('composer-send')),
     );
@@ -171,6 +174,90 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(state.text, '保留这一条');
+  });
+
+  // 发送跨了会话切换：回来的那次发送不能清新会话的草稿。
+  testWidgets(
+    'a send that returns after a session switch keeps the new draft',
+    (tester) async {
+      final first = ComposerState()..text = '第一条';
+      final second = ComposerState()..text = '新会话的草稿';
+      addTearDown(first.dispose);
+      addTearDown(second.dispose);
+      final gate = Completer<bool>();
+
+      await tester.pumpWidget(
+        host(
+          ComposerCard(
+            state: first,
+            onSend: (text, attachments) => gate.future,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('composer-send')));
+      await tester.pump();
+
+      // 发送还没返回就换了会话。
+      await tester.pumpWidget(
+        host(
+          ComposerCard(
+            state: second,
+            onSend: (text, attachments) async => true,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      gate.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(second.text, '新会话的草稿');
+      expect(second.attachments, isEmpty);
+    },
+  );
+
+  // 选择器跨了会话切换：回来时不能把附件加到新会话。
+  testWidgets('a picker that returns after a session switch is dropped', (
+    tester,
+  ) async {
+    final first = ComposerState();
+    final second = ComposerState();
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    final gate = Completer<List<String>?>();
+
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: first,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) => gate.future,
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('composer-plus')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('项目文件'));
+    await tester.pump();
+
+    // 等选择器的时候换了会话。
+    await tester.pumpWidget(
+      host(
+        ComposerCard(
+          state: second,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) async => null,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    gate.complete(['src/late.java']);
+    await tester.pumpAndSettle();
+
+    expect(second.attachments, isEmpty);
+    expect(first.attachments, isEmpty);
   });
 
   testWidgets('attachments show as removable chips', (tester) async {
@@ -394,7 +481,157 @@ void main() {
     ]) {
       final size = tester.getSize(find.byKey(ValueKey(key)));
       expect(size.height, greaterThanOrEqualTo(44), reason: key);
+      // 可点范围也要够宽，不是只有高度够。
+      expect(size.width, greaterThanOrEqualTo(44), reason: key);
     }
+  });
+
+  // 加号靠左、选择器分开、发送键小且离右边有余量。
+  testWidgets(
+    'the send control is compact with a full 44 target and a right inset',
+    (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          424,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+          ),
+        ),
+      );
+
+      final panel = tester.getRect(find.byType(ComposerCard));
+      final send = tester.getRect(find.byKey(const ValueKey('composer-send')));
+      // 手势区（IconButton 本身）不小于 44。
+      expect(send.width, greaterThanOrEqualTo(44));
+      expect(send.height, greaterThanOrEqualTo(44));
+      // 可见图标比手势区小：控件看起来轻，可点范围不变。
+      final icon = tester.getRect(
+        find.descendant(
+          of: find.byKey(const ValueKey('composer-send')),
+          matching: find.byIcon(Icons.arrow_upward),
+        ),
+      );
+      expect(icon.width, lessThanOrEqualTo(send.width - 10));
+      // 与右边框之间留出内边距，不是贴着边。
+      expect(panel.right - send.right, greaterThanOrEqualTo(12));
+    },
+  );
+
+  testWidgets(
+    'the plus icon sits at the left text edge, not centred in a slot',
+    (tester) async {
+      await tester.pumpWidget(
+        hostAt(
+          424,
+          ComposerCard(
+            state: state,
+            onSend: (text, attachments) async => true,
+            onPickAttachments: (_) async => null,
+          ),
+        ),
+      );
+
+      final panel = tester.getRect(find.byType(ComposerCard));
+      final plusIcon = tester.getRect(
+        find.descendant(
+          of: find.byKey(const ValueKey('composer-plus')),
+          matching: find.byIcon(Icons.add),
+        ),
+      );
+      final input = tester.getRect(
+        find.byKey(const ValueKey('composer-input')),
+      );
+      // 加号图标与输入框文字左边基本对齐。Material 图标自带一点内边，
+      // 允许 12 像素以内的偏差；原来的居中摆放差出 12 像素以上。
+      expect(
+        (plusIcon.left - panel.left) - (input.left - panel.left),
+        lessThan(12),
+      );
+      // 且明显靠左，占位不超过 24 像素。
+      expect(plusIcon.left - panel.left, lessThan(32));
+      // 整个加号按钮的左边就是内容区的左边，没有额外的空槽。
+      expect(input.left - panel.left, lessThan(24));
+    },
+  );
+
+  testWidgets('a real gap stays between plus and the selectors when narrow', (
+    tester,
+  ) async {
+    // 320 宽 + 1.3 缩放是最挤的情况：原来 Spacer 会缩成 0，两个 chip 贴着。
+    await tester.pumpWidget(
+      hostAt(
+        320,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) async => null,
+          models: const [
+            AgentModelOption(
+              id: 'deepseek-v4.1-flash',
+              label: 'deepseek-v4.1-flash',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+        textScale: 1.3,
+      ),
+    );
+
+    final plus = tester.getRect(find.byKey(const ValueKey('composer-plus')));
+    final permission = tester.getRect(
+      find.byKey(const ValueKey('composer-permission')),
+    );
+    final model = tester.getRect(find.byKey(const ValueKey('composer-model')));
+
+    // 附件与选择器组之间留出真正的空隙，不被挤成 0。
+    expect(permission.left - plus.right, greaterThanOrEqualTo(8));
+    // 它仍然大于组内间距，两层关系分得开。
+    expect(
+      permission.left - plus.right,
+      greaterThan(model.left - permission.right),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the selector group is separated from plus and from send', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      hostAt(
+        424,
+        ComposerCard(
+          state: state,
+          onSend: (text, attachments) async => true,
+          onPickAttachments: (_) async => null,
+          models: const [
+            AgentModelOption(
+              id: 'deepseek-v4.1-flash',
+              label: 'deepseek-v4.1-flash',
+              reasoningEfforts: ['low', 'high'],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final plus = tester.getRect(find.byKey(const ValueKey('composer-plus')));
+    final permission = tester.getRect(
+      find.byKey(const ValueKey('composer-permission')),
+    );
+    final reasoning = tester.getRect(
+      find.byKey(const ValueKey('composer-reasoning')),
+    );
+    final send = tester.getRect(find.byKey(const ValueKey('composer-send')));
+    // 附件组与选择器组之间的空隙大于组内间距。
+    final outerGap = permission.left - plus.right;
+    final innerGap =
+        tester.getRect(find.byKey(const ValueKey('composer-model'))).left -
+        permission.right;
+    expect(outerGap, greaterThan(innerGap));
+    // 选择器组与发送键也看得出分开。
+    expect(send.left - reasoning.right, greaterThan(innerGap));
   });
 
   // D5：桌面 Enter 发送、Shift+Enter 换行；移动端回车换行，点按钮发送。
@@ -415,10 +652,7 @@ void main() {
       ),
     );
 
-    await tester.enterText(
-      find.byKey(const ValueKey('composer-input')),
-      '第一行',
-    );
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '第一行');
     await tester.pump();
 
     // Shift+Enter 换行，不发出去。
@@ -452,10 +686,7 @@ void main() {
       ),
     );
 
-    await tester.enterText(
-      find.byKey(const ValueKey('composer-input')),
-      '第一行',
-    );
+    await tester.enterText(find.byKey(const ValueKey('composer-input')), '第一行');
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
@@ -546,7 +777,9 @@ void main() {
       final trailing = tester.getRect(
         find.byKey(const ValueKey('composer-reasoning')),
       );
-      expect(send.left - trailing.right, lessThanOrEqualTo(4));
+      // 发送键与选择器组之间留出固定的分隔间距，不是零贴边，也不是大片空档。
+      expect(send.left - trailing.right, greaterThanOrEqualTo(8));
+      expect(send.left - trailing.right, lessThanOrEqualTo(20));
       // 剩余宽度给了模型名，不是空着。
       expect(
         tester.getRect(find.byKey(const ValueKey('composer-model'))).width,

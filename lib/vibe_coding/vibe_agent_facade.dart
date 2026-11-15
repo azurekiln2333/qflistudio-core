@@ -91,6 +91,8 @@ class AgentMessageView {
     this.changedPaths = const [],
     this.pending = false,
     this.aiGenerated = false,
+    this.sourceText,
+    this.attachedPaths = const [],
   });
 
   /// 会话内稳定标识，用于列表 key。
@@ -116,6 +118,16 @@ class AgentMessageView {
   /// 该条文本是否由 AI 生成。
   final bool aiGenerated;
 
+  /// 用户原始输入的文本，尚未展开 `@路径` 引用。用户条目才可能有值。
+  ///
+  /// 显示用 [text]；编辑与重发用这个，免得把展开后的内容又写回去。
+  final String? sourceText;
+
+  /// 用户这一轮附上的文件路径。
+  ///
+  /// 这是用户意图，与 [changedPaths]（工具真正写过的文件）不同。
+  final List<String> attachedPaths;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'role': role,
@@ -125,6 +137,8 @@ class AgentMessageView {
     if (changedPaths.isNotEmpty) 'changedPaths': changedPaths,
     'pending': pending,
     'aiGenerated': aiGenerated,
+    if (sourceText != null) 'sourceText': sourceText,
+    if (attachedPaths.isNotEmpty) 'attachedPaths': attachedPaths,
   };
 
   static AgentMessageView? fromJson(Object? value) {
@@ -135,6 +149,8 @@ class AgentMessageView {
     if (id is! String || id.isEmpty) return null;
     if (role is! String || role.isEmpty) return null;
     final paths = value['changedPaths'];
+    final attached = value['attachedPaths'];
+    final source = value['sourceText'];
     return AgentMessageView(
       id: id,
       role: role,
@@ -151,6 +167,14 @@ class AgentMessageView {
           : const [],
       pending: false,
       aiGenerated: value['aiGenerated'] == true,
+      sourceText: source is String ? source : null,
+      // 旧文件没有这个字段：默认空表，不从 text 反推。
+      attachedPaths: attached is List
+          ? [
+              for (final path in attached)
+                if (path is String && path.isNotEmpty) path,
+            ]
+          : const [],
     );
   }
 }
@@ -390,6 +414,12 @@ class VibeAgentFacade extends AgentFacade {
   AgentWriteApproval? _pendingApproval;
   Completer<bool>? _pendingCompleter;
   String? _lastUserText;
+
+  List<String> _lastUserAttachedPaths = const [];
+
+  // Controller messages retain their indices across sends. Keep each input's
+  // metadata beside that index so later projections preserve earlier inputs.
+  final Map<int, ({String text, List<String> attachedPaths})> _userInputs = {};
   VibePhase _lastPhase = VibePhase.idle;
 
   /// 已经写给存储的消息条数（含尾部页）。
@@ -426,11 +456,8 @@ class VibeAgentFacade extends AgentFacade {
   String get sessionId => _meta.id;
 
   @override
-  List<AgentMessageView> get messages => List.unmodifiable([
-    ..._restored,
-    ..._runViews,
-    ?_optimistic,
-  ]);
+  List<AgentMessageView> get messages =>
+      List.unmodifiable([..._restored, ..._runViews, ?_optimistic]);
 
   @override
   AgentRunState get state {
@@ -453,10 +480,7 @@ class VibeAgentFacade extends AgentFacade {
     final message = _controller.lastError;
     if (api == null) {
       if (message == null) return null;
-      return AgentErrorInfo(
-        kind: _kindOfMessage(message),
-        detail: message,
-      );
+      return AgentErrorInfo(kind: _kindOfMessage(message), detail: message);
     }
     final phase = _phaseOf(api.details['phase']);
     return AgentErrorInfo(
@@ -727,7 +751,7 @@ class VibeAgentFacade extends AgentFacade {
     final token = _tokenProvider();
     if (token == null || token.isEmpty) throw const AgentLoginRequired();
     final body = text.trim();
-    if (body.isEmpty) return;
+    if (body.isEmpty && attachedPaths.isEmpty) return;
     if (state == AgentRunState.running ||
         state == AgentRunState.cancelling ||
         state == AgentRunState.awaitingApproval) {
@@ -744,11 +768,14 @@ class VibeAgentFacade extends AgentFacade {
       reasoningEffort: reasoningEffort,
     );
     final composed = _compose(body, _resolveAttachments(attachedPaths));
+    _lastUserAttachedPaths = List.unmodifiable(attachedPaths);
     // 同步段：这一帧就要看到用户消息和运行状态。这里不做任何磁盘 I/O。
     _optimistic = AgentMessageView(
       id: 'pending-user',
       role: 'user',
       text: composed,
+      sourceText: body,
+      attachedPaths: _lastUserAttachedPaths,
     );
     _starting = true;
     notifyListeners();
@@ -766,6 +793,10 @@ class VibeAgentFacade extends AgentFacade {
       return;
     }
     _inControllerRun = true;
+    _userInputs[_controller.messages.length] = (
+      text: body,
+      attachedPaths: _lastUserAttachedPaths,
+    );
     _controller.send(composed);
     _sync();
     // 标题只是列表的装饰，不能拖住发送。
@@ -842,7 +873,12 @@ class VibeAgentFacade extends AgentFacade {
         state == AgentRunState.awaitingApproval) {
       return;
     }
-    await send(text, permission: _permission);
+    // 重发要带上同一轮的附件，否则模型看到的上下文变了。
+    await send(
+      text,
+      attachedPaths: _lastUserAttachedPaths,
+      permission: _permission,
+    );
   }
 
   @override
@@ -909,11 +945,14 @@ class VibeAgentFacade extends AgentFacade {
   void _sync() {
     final source = _controller.messages;
     _idByIndex.removeWhere((index, _) => index >= source.length);
+    _userInputs.removeWhere((index, _) => index >= source.length);
     final next = <AgentMessageView>[];
     for (var index = 0; index < source.length; index++) {
       final message = source[index];
       final tool = message.tool;
       final id = _idByIndex.putIfAbsent(index, () => 'm${_nextMessageId++}');
+      final isUser = tool == null && message.isUser;
+      final input = isUser ? _userInputs[index] : null;
       next.add(
         AgentMessageView(
           id: id,
@@ -927,6 +966,8 @@ class VibeAgentFacade extends AgentFacade {
           changedPaths: tool?.changedPaths ?? const [],
           pending: message.pending,
           aiGenerated: message.aiGenerated,
+          sourceText: input?.text,
+          attachedPaths: input?.attachedPaths ?? const [],
         ),
       );
     }
@@ -1011,9 +1052,7 @@ class VibeAgentFacade extends AgentFacade {
     if (view.role != 'tool' || view.text.length <= _maxPersistedToolChars) {
       return view.toJson();
     }
-    final tail = view.text.substring(
-      view.text.length - _maxPersistedToolChars,
-    );
+    final tail = view.text.substring(view.text.length - _maxPersistedToolChars);
     return AgentMessageView(
       id: view.id,
       role: view.role,
@@ -1106,7 +1145,15 @@ class VibeAgentRuntime implements AgentRuntime {
   final Directory? _cacheDir;
 
   final Map<String, VibeAgentFacade> _facades = {};
+
+  /// 正在打开中的会话。同一个 `sessionId` 的并发 `open()` 共用一次磁盘读，
+  /// 返回同一个实例（契约要求）。
+  final Map<String, Future<AgentFacade>> _opening = {};
+
   final Map<String, DateTime> _lastUsed = {};
+
+  /// 每个实例的监听器，销毁时精确摘掉，避免泄漏。
+  final Map<String, VoidCallback> _listenerOf = {};
   final Map<String, AgentLiveStatus> _lastStatus = {};
   final Set<String> _active = {};
   final Set<String> _unread = {};
@@ -1130,15 +1177,17 @@ class VibeAgentRuntime implements AgentRuntime {
     if (facade == null) return AgentLiveStatus.idle;
     if (_scheduler.isWaiting(sessionId)) return AgentLiveStatus.queued;
     return switch (facade.state) {
-      AgentRunState.running || AgentRunState.cancelling =>
-        AgentLiveStatus.running,
+      AgentRunState.running ||
+      AgentRunState.cancelling => AgentLiveStatus.running,
       AgentRunState.awaitingApproval => AgentLiveStatus.awaitingApproval,
-      AgentRunState.failed => _failedUnread.contains(sessionId)
-          ? AgentLiveStatus.failed
-          : AgentLiveStatus.idle,
-      AgentRunState.idle => _unread.contains(sessionId)
-          ? AgentLiveStatus.finishedUnread
-          : AgentLiveStatus.idle,
+      AgentRunState.failed =>
+        _failedUnread.contains(sessionId)
+            ? AgentLiveStatus.failed
+            : AgentLiveStatus.idle,
+      AgentRunState.idle =>
+        _unread.contains(sessionId)
+            ? AgentLiveStatus.finishedUnread
+            : AgentLiveStatus.idle,
     };
   }
 
@@ -1147,8 +1196,7 @@ class VibeAgentRuntime implements AgentRuntime {
 
   @override
   void markSeen(String sessionId) {
-    final changed =
-        _unread.remove(sessionId) | _failedUnread.remove(sessionId);
+    final changed = _unread.remove(sessionId) | _failedUnread.remove(sessionId);
     if (!changed) return;
     _lastStatus[sessionId] = statusOf(sessionId);
     _liveTick.value++;
@@ -1229,6 +1277,19 @@ class VibeAgentRuntime implements AgentRuntime {
       _lastUsed[sessionId] = DateTime.now();
       return live;
     }
+    // 同一个会话已经在打开：复用那一次，避免重复读盘和两个实例。
+    final pending = _opening[sessionId];
+    if (pending != null) return await pending;
+    final opening = _openNew(projectId, sessionId);
+    _opening[sessionId] = opening;
+    try {
+      return await opening;
+    } finally {
+      if (identical(_opening[sessionId], opening)) _opening.remove(sessionId);
+    }
+  }
+
+  Future<AgentFacade> _openNew(String projectId, String sessionId) async {
     final watch = Stopwatch()..start();
     final meta = _sessions.metaOf(sessionId);
     if (meta == null) {
@@ -1237,6 +1298,10 @@ class VibeAgentRuntime implements AgentRuntime {
     final root = _projectRootOf(projectId);
     // 只读尾部一页：打开会话不等网络，也不解析全文。
     final page = await _sessions.readTail(sessionId, limit: pageSize);
+    // 打开期间可能已被淘汰或被删除：不要复活一个已经不需要的实例。
+    if (_sessions.metaOf(sessionId) == null) {
+      throw ArgumentError.value(sessionId, 'sessionId', '会话不存在');
+    }
     final facade = VibeAgentFacade(
       api: _api,
       tokenProvider: _tokenProvider,
@@ -1256,7 +1321,10 @@ class VibeAgentRuntime implements AgentRuntime {
     );
     _facades[sessionId] = facade;
     _lastUsed[sessionId] = DateTime.now();
-    facade.addListener(() => _onFacadeChanged(sessionId));
+    // 监听器带着实例身份：已经不是缓存里的那个实例就什么都不做。
+    void onChange() => _onFacadeChanged(sessionId, facade);
+    facade.addListener(onChange);
+    _listenerOf[sessionId] = onChange;
     _lastStatus[sessionId] = statusOf(sessionId);
     agentPerf('session.open', watch.elapsedMilliseconds);
     _evictIfNeeded();
@@ -1272,9 +1340,10 @@ class VibeAgentRuntime implements AgentRuntime {
     );
   }
 
-  void _onFacadeChanged(String sessionId) {
+  void _onFacadeChanged(String sessionId, VibeAgentFacade source) {
     final facade = _facades[sessionId];
-    if (facade == null) return;
+    // 旧实例被换掉后仍可能回调：只认缓存里的那一个。
+    if (facade == null || !identical(facade, source)) return;
     final state = facade.state;
     final isActive =
         state == AgentRunState.running ||
@@ -1320,6 +1389,8 @@ class VibeAgentRuntime implements AgentRuntime {
 
   void _destroy(String sessionId) {
     final facade = _facades.remove(sessionId);
+    final listener = _listenerOf.remove(sessionId);
+    if (facade != null && listener != null) facade.removeListener(listener);
     _lastUsed.remove(sessionId);
     _lastStatus.remove(sessionId);
     _active.remove(sessionId);

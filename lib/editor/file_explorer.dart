@@ -20,6 +20,7 @@ import '../workspace/editor_workspace.dart';
 import '../workspace/saved_workspace.dart';
 import '../workspace/workspace_dialogs.dart';
 import '../workspace/workspace_store.dart';
+import '../shell/workbench_state.dart';
 import 'editor_controller.dart';
 
 class FileNode {
@@ -46,7 +47,20 @@ class FileExplorer extends StatefulWidget {
     this.workspaceStore,
     this.onWorkspaceChanged,
     this.onProjectSelected,
+    this.headerLeading,
+    this.sections,
   });
+
+  /// 标题栏最左侧的控件，例如「文件 | 会话」分段。
+  ///
+  /// 放在卡片自己的标题行里，不额外加一条外层工具栏，这样只有一层标题。
+  final Widget? headerLeading;
+
+  /// 有值时这个卡片同时装载「文件」和「会话」两种主体。
+  ///
+  /// 卡片外框和标题行只有一套；切换只替换卡片内部的主体，不会出现两个
+  /// 外框或第二层标题。
+  final FileExplorerSections? sections;
 
   /// 是否由本组件自绘 MD3 outlined 卡片外观（圆角 + 细描边）。
   ///
@@ -127,6 +141,30 @@ class FileExplorer extends StatefulWidget {
   State<FileExplorer> createState() => _FileExplorerState();
 }
 
+/// 卡片内两段主体的配置：文件树与会话列表共用一套外框和标题行。
+///
+/// [state] 是唯一的选中态来源；[sessions] 为 null 时主体显示等待，标题行
+/// 仍在，所以随时可以切回文件树。
+class FileExplorerSections {
+  const FileExplorerSections({
+    required this.state,
+    required this.sessions,
+    this.onNewSession,
+    this.onStopAllSessions,
+  });
+
+  final WorkbenchState state;
+
+  /// 会话列表主体；未就绪时为 null。
+  final Widget? sessions;
+
+  /// 会话段标题行里的新建动作。
+  final VoidCallback? onNewSession;
+
+  /// 会话段标题行里的「全部停止」。
+  final VoidCallback? onStopAllSessions;
+}
+
 class _FileExplorerState extends State<FileExplorer> {
   final Map<String, List<FileNode>> _children = {};
   final Set<String> _expanded = {};
@@ -151,7 +189,8 @@ class _FileExplorerState extends State<FileExplorer> {
       if (!p.equals(
         project.path,
         _savedWorkspace != null ? widget.project.path : _browsing.path,
-      )) project,
+      ))
+        project,
   ];
 
   List<FileNode> get _roots => [
@@ -242,10 +281,7 @@ class _FileExplorerState extends State<FileExplorer> {
     // Membership comes from the resolved widget membership only. Deriving it
     // from `_workspace`/`_workspaceMembersOrdered` would be circular: those
     // include `_browsing`, so the stale root A would always look allowed.
-    final allowed = [
-      widget.project,
-      ..._workspaceProjects,
-    ];
+    final allowed = [widget.project, ..._workspaceProjects];
     if (!allowed.any((project) => p.equals(project.path, _browsing.path))) {
       _browsing = widget.project;
     }
@@ -340,9 +376,9 @@ class _FileExplorerState extends State<FileExplorer> {
     if (_savedWorkspace == null &&
         supportsSavedWorkspaces &&
         widget.project.isCloud) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('仅本地项目可保存工作区，请先打开本地项目')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('仅本地项目可保存工作区，请先打开本地项目')));
       return;
     }
     if (_savedWorkspace == null && !supportsSavedWorkspaces) {
@@ -502,7 +538,9 @@ class _FileExplorerState extends State<FileExplorer> {
       }
       members.add(match);
     }
-    if (!members.any((project) => p.equals(project.path, widget.project.path))) {
+    if (!members.any(
+      (project) => p.equals(project.path, widget.project.path),
+    )) {
       members.insert(0, widget.project);
     }
     return members;
@@ -551,7 +589,44 @@ class _FileExplorerState extends State<FileExplorer> {
     );
   }
 
-  /// Workspace members share a stable tree; external projects own a session.
+  /// 多选项目加入当前工作区。
+  ///
+  /// 已有成员默认勾上且不可取消，选中非成员后批量加入、持久化、刷新树；
+  /// 不会暗中移除成员。
+  Future<void> _pickProjectsToAddToWorkspace() async {
+    final saved = _savedWorkspace;
+    if (saved == null) return;
+    final members = _workspaceMembersOrdered;
+    final memberKeys = {for (final p in members) workspacePathKey(p.path)};
+    final candidates = widget.store.projects
+        .where(
+          (project) =>
+              !project.isCloud &&
+              !memberKeys.contains(workspacePathKey(project.path)),
+        )
+        .toList(growable: false);
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('没有可加入的本地项目')));
+      return;
+    }
+    final picked = await showDialog<List<Project>>(
+      context: context,
+      builder: (context) =>
+          _AddProjectsDialog(members: members, candidates: candidates),
+    );
+    if (picked == null || picked.isEmpty || !mounted) return;
+    await _addProjectsToWorkspace(picked);
+  }
+
+  /// The project picker only changes which tree is browsed.
+  ///
+  /// A normal session keeps its project and the Agent session on the edited
+  /// project; browsing another project is temporary, matching the original
+  /// cross-project file-open behaviour. Inside a saved workspace it is also a
+  /// temporary browse when the target is a member, and a non-member is offered
+  /// for addition to the workspace instead of silently navigating away.
   void _switchProject(Project project) {
     if (workspacePathKey(project.path) == workspacePathKey(_browsing.path)) {
       return;
@@ -566,20 +641,79 @@ class _FileExplorerState extends State<FileExplorer> {
           _browsing = project;
           _root = FileNode(path: project.path, name: project.name, isDir: true);
         });
+        widget.store.setBrowsedProject(project);
       } else {
-        widget.onProjectSelected?.call(project);
+        unawaited(_addProjectsToWorkspace([project]));
       }
       return;
     }
-    if (isMainStudioRelease && widget.onProjectSelected != null) {
-      widget.onProjectSelected!(project);
-      return;
-    }
+    // Plain project session: never navigate, never change which project the
+    // editor and the Agent belong to.
     setState(() {
       _browsing = project;
       _rebuildRoot();
     });
     widget.store.setBrowsedProject(project);
+  }
+
+  /// Offers the tapped non-member for addition to the saved workspace.
+  ///
+  /// One dialog, one write: the multi-select picker's confirm goes straight to
+  /// [WorkspaceStore.addMembers], which only appends. Identity, name, member
+  /// order, missing members and session data are kept; nothing is removed and no
+  /// second naming/removal dialog is opened.
+  Future<void> _addProjectsToWorkspace(List<Project> projects) async {
+    final saved = _savedWorkspace;
+    if (saved == null || projects.isEmpty) return;
+    final existing = {for (final p in _workspace) workspacePathKey(p.path)};
+    final additions = [
+      for (final project in projects)
+        if (!existing.contains(workspacePathKey(project.path))) project,
+    ];
+    if (additions.isEmpty) return;
+    SavedWorkspace? merged;
+    try {
+      merged = await _workspaceStore.addMembers(saved.id, additions);
+    } catch (_) {
+      merged = null;
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('加入工作区失败：无法保存工作区记录')));
+      }
+      return;
+    }
+    if (!mounted) return;
+    if (merged == null) {
+      // 记录已被删除：不能假装成功。
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('加入失败：该工作区记录已被删除')));
+      return;
+    }
+    if (merged.members.length == _workspace.length) {
+      // 没有任何新成员落盘，不要给出成功的错觉。
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('所选项目都已在该工作区里')));
+      return;
+    }
+    final members = _membersFor(merged);
+    await _restoring;
+    if (!mounted) return;
+    _captureWorkspaceExpansion();
+    setState(() {
+      _savedWorkspace = merged;
+      _workspaceProjects = [
+        for (final project in members)
+          if (!p.equals(project.path, widget.project.path)) project,
+      ];
+    });
+    _rebuildRoot();
+    await _restoring;
+    if (!mounted) return;
+    _captureWorkspaceExpansion();
+    _notifyWorkspace();
   }
 
   /// Finds the stored key for [path] in a workspace session map, tolerating
@@ -606,9 +740,10 @@ class _FileExplorerState extends State<FileExplorer> {
       if (rootKey != null && _workspaceRootExpanded[rootKey] == false) {
         _expanded.remove(projectPath);
       }
-      for (final rel in expandedKey == null
-          ? const <String>[]
-          : _workspaceExpandedDirs[expandedKey]!) {
+      for (final rel
+          in expandedKey == null
+              ? const <String>[]
+              : _workspaceExpandedDirs[expandedKey]!) {
         final abs = p.normalize(
           p.isAbsolute(rel) ? rel : p.join(projectPath, rel),
         );
@@ -1166,6 +1301,19 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   Widget _buildBody(BuildContext context, ColorScheme scheme) {
+    final sections = widget.sections;
+    if (sections == null) return _buildBodyContent(context, scheme, null);
+    return AnimatedBuilder(
+      animation: sections.state,
+      builder: (context, _) => _buildBodyContent(context, scheme, sections),
+    );
+  }
+
+  Widget _buildBodyContent(
+    BuildContext context,
+    ColorScheme scheme,
+    FileExplorerSections? sections,
+  ) {
     return LayoutBuilder(
       builder: (context, constraints) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1175,203 +1323,361 @@ class _FileExplorerState extends State<FileExplorer> {
             // so short panels only give up space from the tree below.
             constraints: const BoxConstraints(minHeight: 48),
             child: Row(
-              children: [                const SizedBox(width: 8),
-                Expanded(
-                  child: PopupMenuButton<Project>(
-                    tooltip: '切换项目（跨项目打开文件）',
-                    onSelected: _switchProject,
-                    itemBuilder: (context) => [
-                      for (final p in widget.store.projects)
-                        PopupMenuItem(
-                          value: p,
-                          enabled: _savedWorkspace == null ||
-                              widget.onProjectSelected != null ||
-                              _workspace.any(
-                                (member) => workspacePathKey(member.path) ==
-                                    workspacePathKey(p.path),
-                              ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                p.isCloud
-                                    ? Icons.cloud_outlined
-                                    : Icons.folder_outlined,
-                                size: 18,
-                                color: p.path == _browsing.path
-                                    ? scheme.primary
-                                    : scheme.onSurfaceVariant,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  p.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              if (p.path == _browsing.path)
-                                Icon(
-                                  Icons.check,
-                                  size: 16,
-                                  color: scheme.primary,
-                                ),
-                            ],
-                          ),
-                        ),
-                    ],
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: scheme.surfaceContainerHighest.withValues(
-                          alpha: 0.5,
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              _browsing.name,
-                              style: Theme.of(context).textTheme.labelLarge,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const Icon(Icons.arrow_drop_down, size: 18),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '新建文件',
-                  icon: const Icon(Icons.note_add_outlined, size: 20),
-                  onPressed: () => _create(null, false),
-                ),
-                IconButton(
-                  tooltip: '新建文件夹',
-                  icon: const Icon(Icons.create_new_folder_outlined, size: 20),
-                  onPressed: () => _create(null, true),
-                ),
-                IconButton(
-                  tooltip: _searchOpen ? '退出搜索' : '搜索文件',
-                  icon: Icon(_searchOpen ? Icons.close : Icons.search),
-                  onPressed: () {
-                    setState(() {
-                      _searchOpen = !_searchOpen;
-                      _searchQuery = '';
-                      _searchController.clear();
-                    });
-                  },
-                ),
-                IconButton(
-                  tooltip: '刷新',
-                  icon: const Icon(Icons.refresh, size: 20),
-                  onPressed: _refresh,
-                ),
+              children: [
                 const SizedBox(width: 4),
+                // 「文件 | 会话」放在卡片自己的标题行里，与项目、新建、搜索、
+                // 刷新同一行，不另加外层分段条。
+                if (widget.headerLeading case final leading?) ...[leading],
+                Expanded(child: _buildHeaderTitle(context, scheme, sections)),
+                ..._buildHeaderActions(context, sections, constraints.maxWidth),
               ],
             ),
           ),
           // Always visible: saving a workspace must stay reachable even when
           // the panel is short and the registry has a single project.
-          ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 40),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-              child: Row(
-                children: [
-                  Icon(
-                    _savedWorkspace == null
-                        ? Icons.folder_copy_outlined
-                        : Icons.workspaces_outline,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _savedWorkspace == null
-                          ? '工作区 · ${_workspace.length} 个项目'
-                          : '${_savedWorkspace!.name} · ${_workspace.length} 个项目',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '工作区项目',
-                    icon: const Icon(Icons.tune, size: 20),
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(
-                      minWidth: 40,
-                      minHeight: 40,
-                    ),
-                    onPressed:
-                        _savedWorkspace != null ||
-                            supportsSavedWorkspaces ||
-                            !isMainStudioRelease
-                        ? _manageWorkspace
-                        : null,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
-          if (_searchOpen)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: TextField(
-                controller: _searchController,
-                autofocus: true,
-                style: Theme.of(context).textTheme.bodyMedium,
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: '按文件名搜索（含子目录）',
-                  prefixIcon: const Icon(Icons.search, size: 18),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
-                  ),
+          if (sections == null ||
+              sections.state.sidebarSection == SidebarSection.files)
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 40),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 2,
                 ),
-                onChanged: (value) => setState(() => _searchQuery = value),
+                child: Row(
+                  children: [
+                    Icon(
+                      _savedWorkspace == null
+                          ? Icons.folder_copy_outlined
+                          : Icons.workspaces_outline,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _savedWorkspace == null
+                            ? '工作区 · ${_workspace.length} 个项目'
+                            : '${_savedWorkspace!.name} · ${_workspace.length} 个项目',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '工作区项目',
+                      icon: const Icon(Icons.tune, size: 20),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 40,
+                        minHeight: 40,
+                      ),
+                      onPressed:
+                          _savedWorkspace != null ||
+                              supportsSavedWorkspaces ||
+                              !isMainStudioRelease
+                          ? _manageWorkspace
+                          : null,
+                    ),
+                  ],
+                ),
               ),
             ),
-          Expanded(
-            child: _searchOpen && _searchQuery.trim().isNotEmpty
-                ? _buildSearchResults(context)
-                : GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onSecondaryTapUp: (details) =>
-                        _showMenu(_root, details.globalPosition),
-                    child: ListView(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      children: [
-                        for (final root in _roots)
-                          KeyedSubtree(
-                            key: ValueKey('workspace-root-${root.path}'),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                _buildRow(context, root, 0),
-                                if (_expanded.contains(root.path))
-                                  for (final node in _childrenOf(root))
-                                    _buildNode(context, node, 1),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-          ),
+          Divider(height: 1, thickness: 1, color: scheme.outlineVariant),
+          Expanded(child: _buildPanelBody(context, sections)),
         ],
       ),
+    );
+  }
+
+  /// 共享标题栏左侧的主标题：文件段是项目选择器，会话段是会话标题。
+  Widget _buildHeaderTitle(
+    BuildContext context,
+    ColorScheme scheme,
+    FileExplorerSections? sections,
+  ) {
+    if (sections != null &&
+        sections.state.sidebarSection == SidebarSection.sessions) {
+      return Text(
+        '会话',
+        style: Theme.of(context).textTheme.titleSmall,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    }
+    if (_savedWorkspace != null) {
+      // 工作区里直接开多选：不再先弹菜单再嵌一层选项目。
+      return Tooltip(
+        message: '选择项目加入当前工作区',
+        child: InkWell(
+          key: const ValueKey('file-explorer-project-picker'),
+          onTap: () => unawaited(_pickProjectsToAddToWorkspace()),
+          borderRadius: BorderRadius.circular(8),
+          child: _buildTitleChip(context, scheme),
+        ),
+      );
+    }
+    return PopupMenuButton<Project>(
+      key: const ValueKey('file-explorer-project-picker'),
+      tooltip: '浏览项目（跨项目打开文件）',
+      onSelected: _switchProject,
+      itemBuilder: (context) => [
+        for (final p in widget.store.projects)
+          PopupMenuItem<Project>(
+            value: p,
+            child: Row(
+              children: [
+                Icon(
+                  p.isCloud ? Icons.cloud_outlined : Icons.folder_outlined,
+                  size: 18,
+                  color: p.path == _browsing.path
+                      ? scheme.primary
+                      : scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    p.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (p.path == _browsing.path)
+                  Icon(Icons.check, size: 16, color: scheme.primary),
+              ],
+            ),
+          ),
+      ],
+      child: _buildTitleChip(context, scheme),
+    );
+  }
+
+  Widget _buildTitleChip(BuildContext context, ColorScheme scheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              _browsing.name,
+              style: Theme.of(context).textTheme.labelLarge,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // 工作区里点标题是多选加入，不适合再挂一个“下拉”箭头。
+          if (_savedWorkspace == null)
+            const Icon(Icons.arrow_drop_down, size: 18)
+          else
+            const Icon(Icons.playlist_add, size: 18),
+        ],
+      ),
+    );
+  }
+
+  /// 共享标题栏右侧的动作：跟随当前分段，文件动作与会话动作互不混杂。
+  ///
+  /// 宽度不够时（如 280 宽的持久侧边栏）只留新建文件和搜索，新建文件夹与
+  /// 刷新收进带文字的溢出菜单，以免项目选择器被挤到不可用。所有操作仍可达。
+  List<Widget> _buildHeaderActions(
+    BuildContext context,
+    FileExplorerSections? sections,
+    double availableWidth,
+  ) {
+    if (sections != null &&
+        sections.state.sidebarSection == SidebarSection.sessions) {
+      return [
+        if (sections.onNewSession != null)
+          IconButton(
+            key: const ValueKey('session-new'),
+            tooltip: '新会话',
+            onPressed: sections.onNewSession,
+            icon: const Icon(Icons.add_comment_outlined, size: 20),
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          ),
+        if (sections.onStopAllSessions != null)
+          PopupMenuButton<String>(
+            key: const ValueKey('session-list-menu'),
+            tooltip: '会话操作',
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'stop_all', height: 44, child: Text('全部停止')),
+            ],
+            onSelected: (action) {
+              if (action == 'stop_all') sections.onStopAllSessions!();
+            },
+          ),
+      ];
+    }
+    // 动作预算从实际可用宽度算：减去开关、内边距和项目选择器的最小宽度，
+    // 剩下的才是按钮能用的空间。四个按钮（含溢出菜单位）每个 44。
+    const horizontalChrome = 4.0 + 4.0; // 左内边距 + 右侧余量
+    const pickerFloor = 96.0;
+    // 开关宽 90（两个 44 段 + 描边），由 SidebarSectionSwitch 固定。
+    final switchWidth = widget.headerLeading == null ? 0.0 : 90.0;
+    final actionBudget =
+        availableWidth - horizontalChrome - switchWidth - pickerFloor;
+    // 全部就地放置需要四个按钮：新建文件、新建文件夹、搜索、刷新。
+    const fullActions = 44.0 * 4;
+    final fitsAll = actionBudget >= fullActions;
+    // 新建、搜索和溢出按钮共占三个触摸目标。
+    final ultraCompact = actionBudget < 44.0 * 3;
+    final compact = !fitsAll;
+    return [
+      _compactHeaderAction(
+        tooltip: '新建文件',
+        icon: const Icon(Icons.note_add_outlined, size: 20),
+        onPressed: () => _create(null, false),
+      ),
+      if (!ultraCompact)
+        _compactHeaderAction(
+          tooltip: _searchOpen ? '退出搜索' : '搜索文件',
+          icon: Icon(_searchOpen ? Icons.close : Icons.search),
+          onPressed: () {
+            setState(() {
+              _searchOpen = !_searchOpen;
+              _searchQuery = '';
+              _searchController.clear();
+            });
+          },
+        ),
+      if (compact)
+        PopupMenuButton<String>(
+          key: const ValueKey('file-explorer-more'),
+          tooltip: '更多文件操作',
+          itemBuilder: (context) => [
+            if (ultraCompact)
+              const PopupMenuItem(
+                value: 'search',
+                height: 44,
+                child: Text('搜索文件'),
+              ),
+            const PopupMenuItem(
+              value: 'new-folder',
+              height: 44,
+              child: Text('新建文件夹'),
+            ),
+            const PopupMenuItem(
+              value: 'refresh',
+              height: 44,
+              child: Text('刷新'),
+            ),
+          ],
+          onSelected: (action) {
+            if (action == 'search') {
+              setState(() {
+                _searchOpen = true;
+                _searchQuery = '';
+                _searchController.clear();
+              });
+            }
+            if (action == 'new-folder') _create(null, true);
+            if (action == 'refresh') _refresh();
+          },
+          icon: const Icon(Icons.more_vert, size: 20),
+        )
+      else ...[
+        _compactHeaderAction(
+          tooltip: '新建文件夹',
+          icon: const Icon(Icons.create_new_folder_outlined, size: 20),
+          onPressed: () => _create(null, true),
+        ),
+        _compactHeaderAction(
+          tooltip: '刷新',
+          icon: const Icon(Icons.refresh, size: 20),
+          onPressed: _refresh,
+        ),
+      ],
+    ];
+  }
+
+  /// 卡片主体：文件段是文件树，会话段是会话列表。
+  Widget _buildPanelBody(BuildContext context, FileExplorerSections? sections) {
+    if (sections != null &&
+        sections.state.sidebarSection == SidebarSection.sessions) {
+      return sections.sessions ??
+          const Center(
+            child: SizedBox.square(
+              dimension: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_searchOpen)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: TextField(
+              controller: _searchController,
+              autofocus: true,
+              style: Theme.of(context).textTheme.bodyMedium,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '按文件名搜索（含子目录）',
+                prefixIcon: const Icon(Icons.search, size: 18),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+              ),
+              onChanged: (value) => setState(() => _searchQuery = value),
+            ),
+          ),
+        Expanded(
+          child: _searchOpen && _searchQuery.trim().isNotEmpty
+              ? _buildSearchResults(context)
+              : GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (details) =>
+                      _showMenu(_root, details.globalPosition),
+                  child: ListView(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    children: [
+                      for (final root in _roots)
+                        KeyedSubtree(
+                          key: ValueKey('workspace-root-${root.path}'),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _buildRow(context, root, 0),
+                              if (_expanded.contains(root.path))
+                                for (final node in _childrenOf(root))
+                                  _buildNode(context, node, 1),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// 标题行里的紧凑动作按钮。
+  ///
+  /// 视觉尺寸 40 以便和项目名、分段控件共用一行；固定 44 的最小尺寸保证
+  /// 实际触摸区域不小于无障碍要求。
+  Widget _compactHeaderAction({
+    required String tooltip,
+    required Widget icon,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      icon: icon,
+      onPressed: onPressed,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
     );
   }
 
@@ -1420,54 +1726,56 @@ class _FileExplorerState extends State<FileExplorer> {
               padding: const EdgeInsets.symmetric(vertical: 3),
               child: Row(
                 children: [
-                SizedBox(width: 8.0 + depth * 18.0),
-                if (node.isDir)
+                  SizedBox(width: 8.0 + depth * 18.0),
+                  if (node.isDir)
+                    Icon(
+                      _expanded.contains(node.path)
+                          ? Icons.keyboard_arrow_down
+                          : Icons.keyboard_arrow_right,
+                      size: 18,
+                      color: scheme.onSurfaceVariant,
+                    )
+                  else
+                    const SizedBox(width: 18),
+                  const SizedBox(width: 2),
                   Icon(
-                    _expanded.contains(node.path)
-                        ? Icons.keyboard_arrow_down
-                        : Icons.keyboard_arrow_right,
+                    node.isDir
+                        ? (_expanded.contains(node.path)
+                              ? Icons.folder_open
+                              : Icons.folder_outlined)
+                        : FileService.iconForFile(node.name),
                     size: 18,
-                    color: scheme.onSurfaceVariant,
-                  )
-                else
-                  const SizedBox(width: 18),
-                const SizedBox(width: 2),
-                Icon(
-                  node.isDir
-                      ? (_expanded.contains(node.path)
-                            ? Icons.folder_open
-                            : Icons.folder_outlined)
-                      : FileService.iconForFile(node.name),
-                  size: 18,
-                  color: node.isDir ? scheme.primary : scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    node.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      fontWeight: depth == 0 ? FontWeight.w600 : null,
-                      color: node.isDir
-                          ? scheme.onSurface
-                          : (selected
-                                ? scheme.onSurface
-                                : scheme.onSurfaceVariant),
+                    color: node.isDir
+                        ? scheme.primary
+                        : scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      node.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: depth == 0 ? FontWeight.w600 : null,
+                        color: node.isDir
+                            ? scheme.onSurface
+                            : (selected
+                                  ? scheme.onSurface
+                                  : scheme.onSurfaceVariant),
+                      ),
                     ),
                   ),
-                ),
-                if (dirty)
-                  Container(
-                    width: 6,
-                    height: 6,
-                    margin: const EdgeInsets.only(right: 10),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: scheme.primary,
+                  if (dirty)
+                    Container(
+                      width: 6,
+                      height: 6,
+                      margin: const EdgeInsets.only(right: 10),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: scheme.primary,
+                      ),
                     ),
-                  ),
-              ],
+                ],
               ),
             ),
           ),
@@ -1477,6 +1785,84 @@ class _FileExplorerState extends State<FileExplorer> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: row,
+    );
+  }
+}
+
+/// 多选项目加入工作区。已有成员固定勾选且不可取消，所以只会新增。
+class _AddProjectsDialog extends StatefulWidget {
+  const _AddProjectsDialog({required this.members, required this.candidates});
+
+  final List<Project> members;
+  final List<Project> candidates;
+
+  @override
+  State<_AddProjectsDialog> createState() => _AddProjectsDialogState();
+}
+
+class _AddProjectsDialogState extends State<_AddProjectsDialog> {
+  final Set<String> _selected = {};
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('加入当前工作区'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '已有成员保持不变。勾选要加入的项目后确认。',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 8),
+            for (final member in widget.members)
+              CheckboxListTile(
+                key: ValueKey('workspace-existing-${member.id}'),
+                contentPadding: EdgeInsets.zero,
+                value: true,
+                onChanged: null,
+                title: Text(member.name),
+              ),
+            for (final project in widget.candidates)
+              CheckboxListTile(
+                key: ValueKey('workspace-add-${project.id}'),
+                contentPadding: EdgeInsets.zero,
+                value: _selected.contains(project.path),
+                onChanged: (checked) => setState(() {
+                  if (checked ?? false) {
+                    _selected.add(project.path);
+                  } else {
+                    _selected.remove(project.path);
+                  }
+                }),
+                title: Text(project.name),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const ValueKey('workspace-add-confirm'),
+          onPressed: _selected.isEmpty
+              ? null
+              : () => Navigator.of(context).pop([
+                  for (final project in widget.candidates)
+                    if (_selected.contains(project.path)) project,
+                ]),
+          child: const Text('加入'),
+        ),
+      ],
     );
   }
 }

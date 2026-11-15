@@ -92,6 +92,12 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
   bool _loadingEarlier = false;
   bool _draftSent = false;
 
+  /// 正在重发的那条消息；用来避免连点重复发送。
+  String? _resendingId;
+
+  /// 每次发送的序号。换会话或又一次发送后，旧的那次不再动界面。
+  int _sendToken = 0;
+
   bool get _loggedIn => widget.auth.isLoggedIn;
 
   ComposerState get _composer => _composerFor(_sessionId);
@@ -327,7 +333,14 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       // 只有面板可见时才清角标；面板处于后台保活时不得误消。
       if (widget.active) widget.runtime.markSeen(sessionId);
       final live = widget.runtime.liveFacade(sessionId);
-      if (live != null) _attachFacade(live);
+      if (live != null) {
+        _attachFacade(live);
+      } else if (_facade == null || _facade!.sessionId != sessionId) {
+        // 新会话还没有活着的门面：先摘掉旧的那个，否则在 _openSession
+        // 完成前会继续把上一个会话的历史显示在新会话下面。
+        _facade?.removeListener(_onFacadeChanged);
+        _facade = null;
+      }
     }
     _syncWaitTimer();
   }
@@ -376,19 +389,31 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
   }
 
   /// 发送。同一帧内先清空输入、追加用户消息、把发送键换成停止键。
-  Future<bool> _send(String text, List<String> attachments) async {
+  ///
+  /// [preserveDraft] 为真时不碰输入卡片：重发历史消息不能借用、也不能
+  /// 清掉用户未发出的草稿。
+  Future<bool> _send(
+    String text,
+    List<String> attachments, {
+    bool preserveDraft = false,
+  }) async {
     if (_working) return false;
     final composer = _composer;
     final body = text.trim();
     if (body.isEmpty && attachments.isEmpty) return false;
+    // 这次发送属于哪个会话。每个 await 之后都要确认还归自己管：
+    // 用户中途换会话时，发送继续在原会话后台跑，但绝不动现在的界面和草稿。
+    var owner = _sessionId;
+    final token = ++_sendToken;
+    bool ownsUi() => mounted && token == _sendToken && _sessionId == owner;
     if (!_loggedIn) {
       final ok = await ensureLoggedIn(context);
-      if (!ok || !mounted || _working) return false;
+      if (!ok || !ownsUi() || _working || !identical(composer, _composer)) {
+        return false;
+      }
     }
-    final echoText = body.isEmpty
-        ? '（附带了 ${attachments.length} 个项目文件）'
-        : body;
-    composer.clearInput();
+    final echoText = body.isEmpty ? '（附带了 ${attachments.length} 个项目文件）' : body;
+    if (!preserveDraft) composer.clearInput();
     final baseline = _facade?.messages.length ?? 0;
     setState(() {
       _sending = true;
@@ -397,6 +422,7 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
         id: 'pending-echo',
         role: 'user',
         text: echoText,
+        pending: true,
       );
       _echoSessionId = _sessionId;
       _echoBaseline = baseline;
@@ -413,23 +439,30 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
         sessionId = meta.id;
         _composers[sessionId] = composer;
         if (identical(_newComposer, composer)) _newComposer = null;
-        setState(() {
-          _sessionId = sessionId;
-          _echoSessionId = sessionId;
-          _echoBaseline = 0;
-        });
-        widget.onSessionOpened?.call(sessionId);
+        // 建会话期间用户换走了：这条消息在原会话后台发出去，不把界面拉回来。
+        if (ownsUi()) {
+          owner = sessionId;
+          setState(() {
+            _sessionId = sessionId;
+            _echoSessionId = sessionId;
+            _echoBaseline = 0;
+          });
+          widget.onSessionOpened?.call(sessionId);
+        }
       }
       if (facade == null || facade.sessionId != sessionId) {
         final opened = await widget.runtime.open(widget.project.id, sessionId);
         if (!mounted) return false;
-        _openToken++;
         facade = opened;
-        setState(() {
-          _attachFacade(opened);
-          _echoSessionId = sessionId;
-          _echoBaseline = opened.messages.length;
-        });
+        // 打开期间换了会话：门面只留给后台发送，不接到现在的界面上。
+        if (ownsUi()) {
+          _openToken++;
+          setState(() {
+            _attachFacade(opened);
+            _echoSessionId = sessionId;
+            _echoBaseline = opened.messages.length;
+          });
+        }
       }
       await facade.send(
         body,
@@ -439,29 +472,115 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
         reasoningEffort: composer.reasoningEffort,
       );
       if (!mounted) return true;
-      setState(() => _sending = false);
-      _syncWaitTimer();
+      // 只有还归自己管才收掉发送态；否则会清掉新会话的界面状态。
+      if (ownsUi()) {
+        setState(() => _sending = false);
+        _syncWaitTimer();
+      }
       return true;
     } on AgentLoginRequired {
-      if (mounted) _rollback(composer, body, attachments);
+      // 草稿按会话保存，还给原会话是对的；界面提示只给还在看它的人。
+      _rollback(composer, body, attachments, preserveDraft, ownsUi());
+      if (ownsUi()) setState(() {});
       return false;
     } catch (_) {
-      if (mounted) {
-        _rollback(composer, body, attachments);
-        setState(() => _openError = '这一条没有发出去，请重试。');
-      }
+      _rollback(composer, body, attachments, preserveDraft, ownsUi());
+      if (ownsUi()) setState(() => _openError = '这一条没有发出去，请重试。');
       return false;
     }
   }
 
+  /// 把一条历史用户消息放进输入卡片，等用户自己确认发送。
+  ///
+  /// 原消息留在对话流里，历史不变。卡片里已有内容时不默默覆盖：
+  /// 先问一句「替换草稿」，用户同意才写进去。
+  Future<void> _editUserMessage(
+    AgentUserMessage message, [
+    String? menuSession,
+  ]) async {
+    // 同上：旧会话的菜单不能把内容写进现在的卡片。
+    if (menuSession != null && menuSession != _sessionId) return;
+    if (_working || _resendingId != null) return;
+    final composer = _composer;
+    if (composer.canSend) {
+      final replace = await _confirmReplaceDraft();
+      // 等待确认期间状态可能变了：会话换掉、这一轮开始跑、面板卸载。
+      if (!mounted || !replace) return;
+      if (!identical(composer, _composer)) return;
+      if (_working || _resendingId != null) return;
+    }
+    // 先清空再写入：否则旧的附件会和这条历史消息的附件叠在一起。
+    composer.clearInput();
+    composer.text = message.text;
+    composer.attachAll(message.attachedPaths);
+    if (mounted) setState(() {});
+  }
+
+  /// 覆盖非空草稿前问一次。只在这里问，不发消息也不改历史。
+  Future<bool> _confirmReplaceDraft() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        key: const ValueKey('composer-replace-draft'),
+        title: const Text('替换当前草稿？'),
+        content: const Text('输入卡片里已有内容。编辑后重发会覆盖这些内容。'),
+        actions: [
+          TextButton(
+            key: const ValueKey('composer-replace-cancel'),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('保留草稿'),
+          ),
+          TextButton(
+            key: const ValueKey('composer-replace-confirm'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('替换并编辑'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  /// 把一条历史用户消息原样再发一次。
+  ///
+  /// 走现有发送管线，不碰输入卡片里未发出的草稿。成功或失败都不动草稿。
+  Future<void> _resendUserMessage(
+    AgentUserMessage message,
+    String id, [
+    String? menuSession,
+  ]) async {
+    // 菜单弹着的时候换了会话：这条历史不属于现在的会话，直接不响应。
+    if (menuSession != null && menuSession != _sessionId) return;
+    if (_working || _resendingId != null) return;
+    final body = message.text.trim();
+    if (body.isEmpty && message.attachedPaths.isEmpty) return;
+    setState(() => _resendingId = id);
+    try {
+      // preserveDraft: 直接重发不借用也不清空卡片里未发出的草稿。
+      await _send(body, message.attachedPaths, preserveDraft: true);
+    } finally {
+      if (mounted) setState(() => _resendingId = null);
+    }
+  }
+
   /// 发送失败时把草稿还给用户，回声消息撤回。
+  ///
+  /// 草稿按会话保存，所以总是还给发起这次发送的那个会话；
+  /// 界面状态只在这次发送仍然拥有界面时才收，免得清掉别人的发送态。
   void _rollback(
     ComposerState composer,
     String text,
-    List<String> attachments,
-  ) {
-    composer.text = text;
-    composer.attachAll(attachments);
+    List<String> attachments, [
+    bool preserveDraft = false,
+    bool touchUi = true,
+  ]) {
+    if (!mounted) return;
+    // 重发失败时草稿原样留着，不把重发的正文塞回卡片。
+    if (!preserveDraft) {
+      composer.text = text;
+      composer.attachAll(attachments);
+    }
+    if (!touchUi || !mounted) return;
     setState(() {
       _sending = false;
       _echo = null;
@@ -500,6 +619,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       return const Center(child: LoginGuideCard(compact: true));
     }
     final facade = _facade;
+    // 这一帧的会话。菜单回调拿着它，换会话后旧菜单就失效。
+    final menuSession = _sessionId;
     final inset = MediaQuery.viewInsetsOf(context).bottom;
     return Column(
       children: [
@@ -531,6 +652,11 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
             onRetry: facade?.retryLast,
             // 只在用户点「诊断连接」时才发起，不自动跑。
             onDiagnose: widget.runtime.diagnoseConnection,
+            onResend: (message, id) =>
+                _resendUserMessage(message, id, menuSession),
+            onEdit: (message, id) => _editUserMessage(message, menuSession),
+            busy: _working || _resendingId != null,
+            sessionKey: _sessionId,
             emptyTitle: '开始一个新的会话',
             emptyHint: '在下面的输入卡片里说一句要改什么，发送后就在这里跑。',
           ),

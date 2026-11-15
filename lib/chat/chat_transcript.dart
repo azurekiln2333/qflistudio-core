@@ -26,6 +26,10 @@ class ChatTranscript extends StatefulWidget {
     this.onApproval,
     this.onRetry,
     this.onDiagnose,
+    this.onResend,
+    this.onEdit,
+    this.busy = false,
+    this.sessionKey,
     this.emptyTitle = '开始一个新的会话',
     this.emptyHint = '描述你想改什么。Agent 会读写项目文件，并在在线终端里运行命令。',
     this.emptyAction,
@@ -70,6 +74,22 @@ class ChatTranscript extends StatefulWidget {
   /// 为空时不显示该按钮。
   final Future<String> Function()? onDiagnose;
 
+  /// 把一条用户消息原样再发一次。为空时不显示「重发」。
+  ///
+  /// 重发走现有的发送管线，不碰输入卡片里未发出的草稿。第二个参数是消息 id，
+  /// 调用方用它做「同一条消息不会被连点两次」的守卫。
+  final void Function(AgentUserMessage message, String id)? onResend;
+
+  /// 把一条用户消息放进输入卡片等用户确认发送。为空时不显示「编辑后重发」。
+  final void Function(AgentUserMessage message, String id)? onEdit;
+
+  /// 会话正在跑：消息动作只能复制，编辑与重发要等这一轮结束。
+  final bool busy;
+
+  /// 当前会话的标识。换值时丢掉条目缓存并回到最新一条，
+  /// 避免把上一个会话的条目和滚动位置带过来。
+  final Object? sessionKey;
+
   final String emptyTitle;
   final String emptyHint;
   final Widget? emptyAction;
@@ -81,9 +101,30 @@ class ChatTranscript extends StatefulWidget {
 
 class _ChatTranscriptState extends State<ChatTranscript> {
   final ScrollController _scroll = ScrollController();
-  int _lastCount = 0;
   String _lastTail = '';
   double _lastPixels = 0;
+
+  /// 列表是否跟随底部。只有用户本来就贴着底部时新消息才自动滚到底：
+  /// 用户往上翻看历史时不被抢走位置。
+  bool _followBottom = true;
+  bool _bottomJumpScheduled = false;
+  bool _programmaticScroll = false;
+
+  /// 首次载入的消息固定在中心，后续历史向上生长。
+  final _centerKey = GlobalKey();
+  int _earlierCount = 0;
+
+  /// 上一次的条目 id 序列。判前插只看它，不看条数差。
+  List<String> _lastIds = const <String>[];
+
+  /// 每个缓存条目建出来时的动作指纹。
+  final Map<String, String> _actionStamps = <String, String>{};
+
+  /// 整个列表最近一次的动作指纹。
+  String _lastActionStamp = '';
+
+  /// 距离底部多少像素以内算「贴着底部」。
+  static const double _followSlack = 32;
 
   /// 诊断结果和它对应的那次失败。失败变了就丢掉旧结果，避免张冠李戴。
   String? _diagnosis;
@@ -96,7 +137,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   @override
   void initState() {
     super.initState();
-    _lastCount = widget.messages.length;
+    _lastIds = [for (final message in widget.messages) message.id];
     if (widget.messages.isNotEmpty) {
       _lastTail = _tailOf(widget.messages.last);
     }
@@ -113,13 +154,53 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       _diagnosing = false;
       _copied = false;
     }
+    // 换了会话：条目缓存、底部跟随和诊断结果都不属于新会话。
+    if (widget.sessionKey != oldWidget.sessionKey) {
+      _resetTiles();
+      _diagnosis = null;
+      _diagnosisFor = null;
+      _diagnosing = false;
+      _copied = false;
+      _scheduleJumpToBottom();
+      return;
+    }
+    _refreshActionsIfNeeded();
     final messages = widget.messages;
     final tail = messages.isEmpty ? '' : _tailOf(messages.last);
-    if (messages.length != _lastCount || tail != _lastTail) {
-      _lastCount = messages.length;
-      _lastTail = tail;
-      _scheduleScrollToBottom();
+    final ids = [for (final message in messages) message.id];
+    if (_sameIds(ids, _lastIds) && tail == _lastTail) {
+      if (_followBottom && widget.hasEarlier != oldWidget.hasEarlier) {
+        _scheduleScrollToBottom();
+      }
+      return;
     }
+    final prepended = _isPrepend(_lastIds, ids);
+    if (prepended) _earlierCount += ids.length - _lastIds.length;
+    _lastIds = ids;
+    _lastTail = tail;
+    if (prepended) return;
+    if (_earlierCount > ids.length) _earlierCount = 0;
+    if (_followBottom) _scheduleScrollToBottom();
+  }
+
+  /// 新列表就是把旧列表原样接在后面：只在前面多了条目。
+  ///
+  /// 用稳定 id 做命中比较，不看条数差：一次载入可能一条，也可能十几条。
+  static bool _isPrepend(List<String> before, List<String> after) {
+    if (before.isEmpty || after.length <= before.length) return false;
+    final shift = after.length - before.length;
+    for (var index = 0; index < before.length; index++) {
+      if (after[index + shift] != before[index]) return false;
+    }
+    return true;
+  }
+
+  static bool _sameIds(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var index = 0; index < a.length; index++) {
+      if (a[index] != b[index]) return false;
+    }
+    return true;
   }
 
   static String _tailOf(AgentMessageView message) =>
@@ -136,20 +217,84 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   Widget _tileFor(AgentMessageView message) {
     final cached = _tiles[message.id];
     final previous = _rendered[message.id];
-    if (cached != null && previous != null && _sameView(previous, message)) {
+    if (cached != null &&
+        previous != null &&
+        _sameView(previous, message) &&
+        _actionStamps[message.id] == _actionStamp()) {
       return cached;
     }
     if (_tiles.length >= _tileCacheLimit) {
       _tiles.clear();
       _rendered.clear();
     }
+    // 只有用户的提问能编辑或重发；助手与工具条目不是提示词。
+    // 回声消息（这一条还在发送中）也还不是可编辑的历史。
+    final isUser = message.role == 'user';
+    final settled = isUser && !message.pending;
+    final offerEdit = settled && widget.onEdit != null;
+    final offerResend = settled && widget.onResend != null;
+    final canEdit = offerEdit && !widget.busy;
+    final canResend = offerResend && !widget.busy;
+    final sessionKey = widget.sessionKey;
     final tile = ChatMessageTile(
       key: ValueKey('chat-message-${message.id}'),
       message: message,
+      actions: ChatMessageActions(
+        canEdit: canEdit,
+        canResend: canResend,
+        busy: widget.busy,
+        onCopy: () => _copyMessage(context, message),
+        onEdit: offerEdit
+            ? () {
+                if (widget.sessionKey != sessionKey || widget.busy) return;
+                widget.onEdit?.call(AgentUserMessage.of(message), message.id);
+              }
+            : null,
+        onResend: offerResend
+            ? () {
+                if (widget.sessionKey != sessionKey || widget.busy) return;
+                widget.onResend?.call(AgentUserMessage.of(message), message.id);
+              }
+            : null,
+      ),
     );
     _tiles[message.id] = tile;
     _rendered[message.id] = message;
+    _actionStamps[message.id] = _actionStamp();
     return tile;
+  }
+
+  /// 动作可用性是否变了的指纹。
+  ///
+  /// 运行中/空闲切换会改变菜单项的可点状态，缓存条目必须跟着重建，
+  /// 否则会继续用旧的回调与旧的 enabled 状态。
+  String _actionStamp() =>
+      '${widget.busy}|${widget.onEdit != null}|${widget.onResend != null}';
+
+  /// 动作指纹变过就丢掉条目缓存。
+  void _refreshActionsIfNeeded() {
+    final stamp = _actionStamp();
+    if (stamp == _lastActionStamp) return;
+    _lastActionStamp = stamp;
+    _tiles.clear();
+    _rendered.clear();
+    _actionStamps.clear();
+  }
+
+  /// 复制一条消息的正文。附件段的路径也复制，用户拿到的就是当时发的原文。
+  Future<void> _copyMessage(
+    BuildContext context,
+    AgentMessageView message,
+  ) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final text = message.text.trim();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: message.text));
+    messenger
+      ?..clearSnackBars()
+      ..showSnackBar(
+        const SnackBar(content: Text('已复制'), duration: Duration(seconds: 2)),
+      );
   }
 
   /// 内容没变就不重建。逐字段比较，不依赖 facade 复用同一个视图对象。
@@ -159,14 +304,51 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       a.toolName == b.toolName &&
       a.isError == b.isError &&
       a.pending == b.pending &&
+      a.sourceText == b.sourceText &&
       a.aiGenerated == b.aiGenerated &&
-      listEquals(a.changedPaths, b.changedPaths);
+      listEquals(a.changedPaths, b.changedPaths) &&
+      listEquals(a.attachedPaths, b.attachedPaths);
+
+  /// 条目缓存按会话隔离：换会话后旧条目不能活下来。
+  void _resetTiles() {
+    _tiles.clear();
+    _rendered.clear();
+    _actionStamps.clear();
+    _earlierCount = 0;
+    _lastPixels = 0;
+    _lastIds = [for (final message in widget.messages) message.id];
+    _lastTail = widget.messages.isEmpty ? '' : _tailOf(widget.messages.last);
+    _followBottom = true;
+  }
 
   void _scheduleScrollToBottom() {
+    if (_bottomJumpScheduled) return;
+    _bottomJumpScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      _bottomJumpScheduled = false;
+      if (!mounted || !_scroll.hasClients || !_followBottom) return;
+      final position = _scroll.position;
+      final target = position.maxScrollExtent <= 0
+          ? position.minScrollExtent
+          : position.maxScrollExtent;
+      if ((position.pixels - target).abs() <= 0.5) return;
+      _programmaticScroll = true;
+      try {
+        _scroll.jumpTo(target);
+      } finally {
+        _programmaticScroll = false;
+      }
+      _followBottom = true;
+      // 懒列表会更新滚动范围，下一帧继续贴近真实底部。
+      _scheduleScrollToBottom();
+      WidgetsBinding.instance.scheduleFrame();
     });
+  }
+
+  /// 换会话后无条件跳到底：新会话的第一屏就是最新一条。
+  void _scheduleJumpToBottom() {
+    _followBottom = true;
+    _scheduleScrollToBottom();
   }
 
   /// 用户往上滚到顶时载入更早的一页。
@@ -178,6 +360,10 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     final pixels = position.pixels;
     final movingUp = pixels < _lastPixels;
     _lastPixels = pixels;
+    if (_programmaticScroll) return;
+    // 只有贴着底部时才跟随新消息；离得远就当作在阅读历史。
+    final atBottom = position.maxScrollExtent - pixels <= _followSlack;
+    if (atBottom != _followBottom) _followBottom = atBottom;
     if (!movingUp) return;
     if (!widget.hasEarlier || widget.loadingEarlier) return;
     if (pixels > position.minScrollExtent) return;
@@ -221,26 +407,52 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       return _buildEmpty(context);
     }
     final showEarlier = widget.hasEarlier;
-    final leading = showEarlier ? 1 : 0;
     final extras = (approval == null ? 0 : 1) + (failed ? 1 : 0);
-    final list = ListView.builder(
+    final list = CustomScrollView(
       controller: _scroll,
-      padding: widget.padding,
-      itemCount: leading + messages.length + extras,
-      itemBuilder: (context, index) {
-        if (showEarlier && index == 0) return _buildEarlierButton(context);
-        final position = index - leading;
-        if (position < messages.length) {
-          return _tileFor(messages[position]);
-        }
-        if (approval != null && position == messages.length) {
-          return WriteApprovalCard(
-            approval: approval,
-            onResolve: (allow) => widget.onApproval?.call(allow),
-          );
-        }
-        return _buildErrorBar(context);
-      },
+      center: _centerKey,
+      slivers: [
+        SliverPadding(
+          padding: EdgeInsets.fromLTRB(
+            widget.padding.left,
+            widget.padding.top,
+            widget.padding.right,
+            0,
+          ),
+          sliver: SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) => index < _earlierCount
+                  ? _tileFor(messages[_earlierCount - 1 - index])
+                  : _buildEarlierButton(context),
+              childCount: _earlierCount + (showEarlier ? 1 : 0),
+            ),
+          ),
+        ),
+        SliverPadding(
+          key: _centerKey,
+          padding: EdgeInsets.fromLTRB(
+            widget.padding.left,
+            0,
+            widget.padding.right,
+            widget.padding.bottom,
+          ),
+          sliver: SliverList(
+            delegate: SliverChildBuilderDelegate((context, index) {
+              final position = _earlierCount + index;
+              if (position < messages.length) {
+                return _tileFor(messages[position]);
+              }
+              if (approval != null && position == messages.length) {
+                return WriteApprovalCard(
+                  approval: approval,
+                  onResolve: (allow) => widget.onApproval?.call(allow),
+                );
+              }
+              return _buildErrorBar(context);
+            }, childCount: messages.length - _earlierCount + extras),
+          ),
+        ),
+      ],
     );
     if (!busy) return list;
     return Column(
@@ -602,11 +814,40 @@ class _ChatTranscriptState extends State<ChatTranscript> {
   }
 }
 
+/// 一条用户消息的原始形态：正文加真实附件路径。
+///
+/// 数据来自 `AgentMessageView` 的类型化元数据（`sourceText`、`attachedPaths`），
+/// 不从展示文本里反推路径。旧版持久化消息没有这些字段时，正文保持原文不变，
+/// 附件视为空。
+@immutable
+class AgentUserMessage {
+  const AgentUserMessage({required this.text, this.attachedPaths = const []});
+
+  /// 用户真正输入的正文（`@路径` 展开之前）。
+  final String text;
+
+  /// 用户自己附加的文件路径，按当时的顺序。
+  final List<String> attachedPaths;
+
+  /// 从消息视图取编辑/重发需要的原文与附件。
+  factory AgentUserMessage.of(AgentMessageView message) {
+    final source = message.sourceText;
+    return AgentUserMessage(
+      // 没有元数据的旧消息：正文就是展示文本，原样保留。
+      text: source ?? message.text,
+      attachedPaths: message.attachedPaths,
+    );
+  }
+}
+
 /// 一条消息：用户气泡、助手正文或工具调用条目。
 class ChatMessageTile extends StatelessWidget {
-  const ChatMessageTile({super.key, required this.message});
+  const ChatMessageTile({super.key, required this.message, this.actions});
 
   final AgentMessageView message;
+
+  /// 消息动作；为空或全部不可用时只显示正文。
+  final ChatMessageActions? actions;
 
   /// 测试用：累计 build 次数，用来证明流式更新只重建末尾条目。
   static int debugBuildCount = 0;
@@ -629,16 +870,25 @@ class ChatMessageTile extends StatelessWidget {
       alignment: Alignment.centerRight,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10, left: 40),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: scheme.primaryContainer,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: SelectableText(
-          message.text,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: scheme.onPrimaryContainer),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: SelectableText(
+                message.text,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: scheme.onPrimaryContainer,
+                ),
+              ),
+            ),
+            _MessageActionsButton(message: message, actions: actions),
+          ],
         ),
       ),
     );
@@ -695,6 +945,7 @@ class ChatMessageTile extends StatelessWidget {
                   ],
                 ),
               ),
+            _MessageActionsButton(message: message, actions: actions),
           ],
         ),
       ),
@@ -782,6 +1033,95 @@ class ChatMessageTile extends StatelessWidget {
                   color: failed ? scheme.error : scheme.onSurfaceVariant,
                 ),
               ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 一条消息可以做的动作。菜单项按可用性显示。
+@immutable
+class ChatMessageActions {
+  const ChatMessageActions({
+    this.canEdit = false,
+    this.canResend = false,
+    this.busy = false,
+    this.onCopy,
+    this.onEdit,
+    this.onResend,
+  });
+
+  /// 运行中不允许编辑与重发，避免和正在跑的一轮抢执行槽。
+  final bool canEdit;
+  final bool canResend;
+  final bool busy;
+  final VoidCallback? onCopy;
+  final VoidCallback? onEdit;
+  final VoidCallback? onResend;
+
+  bool get isEmpty => onCopy == null && onEdit == null && onResend == null;
+}
+
+/// 消息右上角的紧凑动作菜单。触屏和鼠标都能用。
+///
+/// 菜单只用图标按钮，不占正文宽度；动作不可用时菜单项变灰并说明原因。
+class _MessageActionsButton extends StatelessWidget {
+  const _MessageActionsButton({required this.message, this.actions});
+
+  final AgentMessageView message;
+  final ChatMessageActions? actions;
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = this.actions;
+    if (actions == null || actions.isEmpty) return const SizedBox.shrink();
+    final blocked =
+        actions.busy && (actions.onEdit != null || actions.onResend != null);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: PopupMenuButton<String>(
+        key: ValueKey('chat-actions-${message.id}'),
+        tooltip: '消息操作',
+        icon: Icon(
+          Icons.more_horiz,
+          size: 18,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        iconSize: 18,
+        padding: EdgeInsets.zero,
+        // 触屏与鼠标都需要 44 像素的点击区。
+        constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+        onSelected: (value) {
+          switch (value) {
+            case 'copy':
+              actions.onCopy?.call();
+            case 'edit':
+              actions.onEdit?.call();
+            case 'resend':
+              actions.onResend?.call();
+          }
+        },
+        itemBuilder: (context) => [
+          if (actions.onCopy != null)
+            const PopupMenuItem<String>(value: 'copy', child: Text('复制')),
+          if (actions.onEdit != null)
+            PopupMenuItem<String>(
+              value: 'edit',
+              enabled: actions.canEdit,
+              child: const Text('编辑后重发'),
+            ),
+          if (actions.onResend != null)
+            PopupMenuItem<String>(
+              value: 'resend',
+              enabled: actions.canResend,
+              child: const Text('重发'),
+            ),
+          if (blocked)
+            const PopupMenuItem<String>(
+              value: 'busy',
+              enabled: false,
+              child: Text('等这一轮结束后可用'),
             ),
         ],
       ),

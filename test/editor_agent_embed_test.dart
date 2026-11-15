@@ -10,6 +10,7 @@ import 'package:qfli_studio_core/community/models.dart';
 import 'package:qfli_studio_core/chat/composer_state.dart';
 import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
 import 'package:qfli_studio_core/editor/agent/editor_agent_host.dart';
+import 'package:qfli_studio_core/editor/agent/editor_sidebar_tabs.dart';
 import 'package:qfli_studio_core/editor/agent/session_list_view.dart';
 import 'package:qfli_studio_core/editor/ai_panel.dart';
 import 'package:qfli_studio_core/editor/editor_page.dart';
@@ -29,6 +30,7 @@ import 'package:qfli_studio_core/workspace/workspace_store.dart';
 import 'package:re_editor/re_editor.dart';
 
 import 'support/fake_agent.dart';
+
 /// agent 嵌在编辑器页里，应用只有「主页 → 编辑器页」两层路由。
 ///
 /// 覆盖 CHECKLIST 的 A1-A4、B4、B6、E2、E3、F5、G8。
@@ -106,6 +108,7 @@ void main() {
     ValueNotifier<bool>? retainedVisibility,
     String? initialOpenPath,
     _RouteCounter? observer,
+    double textScale = 1.0,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -119,16 +122,24 @@ void main() {
         navigatorObservers: observer == null
             ? const <NavigatorObserver>[]
             : <NavigatorObserver>[observer],
-        home: EditorPage(
-          project: project,
-          auth: auth,
-          store: store,
-          settings: settings,
-          initialOpenPath: initialOpenPath,
-          agentRuntime: injectRuntime ? runtime : null,
-          composerDefaults: composerDefaults,
-          agentEnabled: agentEnabled,
-          retainedVisibility: retainedVisibility,
+        home: Builder(
+          builder: (context) => MediaQuery(
+            // 只叠加字缩放，其余沿用真实媒体查询（尺寸、内边距等）。
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: TextScaler.linear(textScale)),
+            child: EditorPage(
+              project: project,
+              auth: auth,
+              store: store,
+              settings: settings,
+              initialOpenPath: initialOpenPath,
+              agentRuntime: injectRuntime ? runtime : null,
+              composerDefaults: composerDefaults,
+              agentEnabled: agentEnabled,
+              retainedVisibility: retainedVisibility,
+            ),
+          ),
         ),
       ),
     );
@@ -155,21 +166,24 @@ void main() {
       expect(find.byType(AiPanel), findsOneWidget);
     });
 
-    testWidgets('开启：分段在侧边栏顶部，「AI 助手」开 Agent 面板', (tester) async {
+    testWidgets('开启：分段在侧边栏卡片标题行内，「AI 助手」开 Agent 面板', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
-      final strip = find.byKey(
-        const ValueKey('editor-sidebar-section-switch'),
-      );
+      final strip = find.byKey(const ValueKey('editor-sidebar-section-switch'));
       expect(strip, findsOneWidget);
       final stripRect = tester.getRect(strip);
       final explorerRect = tester.getRect(find.byType(FileExplorer).first);
 
       expect(
+        stripRect.top,
+        greaterThanOrEqualTo(explorerRect.top),
+        reason: '分段要在文件树卡片内部，不再是卡片之上的独立条',
+      );
+      expect(
         stripRect.bottom,
-        lessThanOrEqualTo(explorerRect.top),
-        reason: '分段要在文件树卡片之上',
+        lessThan(explorerRect.top + 56),
+        reason: '分段要和卡片标题行同一行',
       );
       expect(stripRect.left, lessThan(300), reason: '分段在侧边栏，不在顶栏');
 
@@ -495,7 +509,10 @@ void main() {
       await pumpFrames(tester);
 
       expect(find.text('还没有会话'), findsOneWidget);
-      expect(find.byKey(const ValueKey('session-empty-create')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('session-empty-create')),
+        findsOneWidget,
+      );
     });
   });
 
@@ -506,7 +523,8 @@ void main() {
       await pumpFrames(tester);
       await pumpUntil(
         tester,
-        () => find.byKey(const ValueKey('composer-model')).evaluate().isNotEmpty,
+        () =>
+            find.byKey(const ValueKey('composer-model')).evaluate().isNotEmpty,
       );
 
       await tester.tap(find.byKey(const ValueKey('composer-model')));
@@ -599,6 +617,210 @@ void main() {
       expect(notified, 1);
     });
   });
+  group('侧边栏分段在卡片标题行内', () {
+    testWidgets('文件段：分段与文件动作同行可达', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      final switchFinder = find.byKey(
+        const ValueKey('editor-sidebar-section-switch'),
+      );
+      expect(switchFinder, findsOneWidget);
+
+      final card = tester.getRect(find.byType(FileExplorer).first);
+      final switchRect = tester.getRect(switchFinder);
+      // 同一张卡片、同一个标题行，不是卡片之外的第二条。
+      expect(switchRect.top, greaterThanOrEqualTo(card.top));
+      expect(switchRect.bottom, lessThanOrEqualTo(card.top + 56));
+
+      expect(find.byTooltip('新建文件'), findsOneWidget);
+      // 侧边栏只有 280 宽，其余文件动作在溢出菜单里，仍然可达。
+      expect(find.byKey(const ValueKey('file-explorer-more')), findsOneWidget);
+      // 会话动作不混进来。
+      expect(find.byKey(const ValueKey('session-new')), findsNothing);
+      expect(find.byKey(const ValueKey('session-list-menu')), findsNothing);
+    });
+
+    testWidgets('会话段：同一个卡片外框，会话动作替换文件动作', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      final cardBefore = tester.getRect(find.byType(FileExplorer).first);
+
+      await tester.tap(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+      );
+      await pumpFrames(tester);
+
+      // 外框还是同一个：左边和宽度没有变，也没有第二张卡片。
+      final cardAfter = tester.getRect(find.byType(FileExplorer));
+      expect(cardAfter.left, cardBefore.left);
+      expect(cardAfter.width, cardBefore.width);
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-switch')),
+        findsOneWidget,
+        reason: '会话段仍要能切回文件',
+      );
+
+      // 会话动作可达。
+      expect(find.byKey(const ValueKey('session-new')), findsOneWidget);
+      expect(find.byKey(const ValueKey('session-list-menu')), findsOneWidget);
+
+      // 文件动作不再显示，两个模式互不混杂。
+      expect(find.byTooltip('新建文件'), findsNothing);
+      expect(find.byTooltip('搜索文件'), findsNothing);
+      expect(find.byKey(const ValueKey('file-explorer-more')), findsNothing);
+
+      // 会话主体在卡片内部。
+      expect(find.byType(SessionListView), findsOneWidget);
+      expect(
+        tester.getRect(find.byType(SessionListView)).top,
+        greaterThanOrEqualTo(cardBefore.top),
+      );
+    });
+
+    testWidgets('会话段可以切回文件段，文件动作恢复', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      await tester.tap(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+      );
+      await pumpFrames(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('editor-sidebar-section-files')),
+      );
+      await pumpFrames(tester);
+
+      expect(find.byTooltip('新建文件'), findsOneWidget);
+      expect(find.byKey(const ValueKey('session-new')), findsNothing);
+    });
+
+    testWidgets('分段触摸目标不小于 44', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      for (final key in const [
+        'editor-sidebar-section-files',
+        'editor-sidebar-section-sessions',
+      ]) {
+        final hit = tester.getSize(
+          find
+              .ancestor(
+                of: find.byKey(ValueKey(key)),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        );
+        expect(hit.height, greaterThanOrEqualTo(44), reason: '$key 高度');
+        expect(hit.width, greaterThanOrEqualTo(44), reason: '$key 宽度');
+      }
+    });
+  });
+
+  group('窄侧边栏标题行', () {
+    testWidgets('280 宽：项目选择器可用，其余动作进溢出菜单', (tester) async {
+      await mount(tester, size: const Size(500, 900));
+      await _openSidebar(tester);
+
+      final picker = find.byKey(const ValueKey('file-explorer-project-picker'));
+      expect(picker, findsOneWidget);
+      // 项目选择器必须有可用宽度，不能被挤成零宽。
+      expect(tester.getSize(picker).width, greaterThanOrEqualTo(72));
+
+      // 常用动作：新建文件就地可达；搜索最窄时也在溢出菜单里。
+      expect(find.byTooltip('新建文件'), findsOneWidget);
+
+      // 新建文件夹与刷新一定在溢出菜单里，而不是消失。
+      expect(find.byTooltip('新建文件夹'), findsNothing);
+      expect(find.byTooltip('刷新'), findsNothing);
+      final more = find.byKey(const ValueKey('file-explorer-more'));
+      expect(more, findsOneWidget);
+      await tester.tap(more);
+      await tester.pumpAndSettle();
+      expect(find.text('新建文件夹'), findsOneWidget);
+      expect(find.text('刷新'), findsOneWidget);
+      expect(find.text('搜索文件'), findsOneWidget, reason: '最窄时搜索仍可达');
+    });
+
+    // 两种宽度 × 字缩放 1.3，都要保证项目选择器可用、所有操作可达。
+    for (final (label, size) in const [
+      ('280 宽', Size(500, 900)),
+      ('320 宽', Size(560, 900)),
+    ]) {
+      testWidgets('$label · 字缩放 1.3：选择器可用且操作全可达', (tester) async {
+        await mount(tester, size: size, textScale: 1.3);
+        await _openSidebar(tester);
+
+        final picker = find.byKey(
+          const ValueKey('file-explorer-project-picker'),
+        );
+        expect(picker, findsOneWidget);
+        expect(
+          tester.getSize(picker).width,
+          greaterThanOrEqualTo(72),
+          reason: '字放大后项目选择器仍必须有可用宽度',
+        );
+
+        // 新建文件就地可达。
+        expect(find.byTooltip('新建文件'), findsOneWidget);
+
+        // 其余操作要么就地、要么在溢出菜单里，不能消失。
+        final inlineNewFolder = find.byTooltip('新建文件夹');
+        final inlineRefresh = find.byTooltip('刷新');
+        final more = find.byKey(const ValueKey('file-explorer-more'));
+        if (inlineNewFolder.evaluate().isEmpty) {
+          expect(more, findsOneWidget);
+          await tester.tap(more);
+          await tester.pumpAndSettle();
+          expect(find.text('新建文件夹'), findsOneWidget);
+          expect(find.text('刷新'), findsOneWidget);
+        } else {
+          expect(inlineRefresh, findsOneWidget);
+        }
+      });
+    }
+
+    testWidgets('320 宽不选全套按钮：留给选择器足够宽度', (tester) async {
+      // 侧边栏 320 时旧阈值（318）会选“四个按钮全放”，把选择器挤到 ~50。
+      await mount(tester, size: const Size(560, 900));
+      await _openSidebar(tester);
+
+      final picker = find.byKey(const ValueKey('file-explorer-project-picker'));
+      expect(
+        tester.getSize(picker).width,
+        greaterThanOrEqualTo(96),
+        reason: '动作预算要扣掉真实的四个按钮宽度',
+      );
+    });
+  });
+
+  group('共享标题行', () {
+    testWidgets('SidebarSectionSwitch 只画两个分段且不高出 44', (tester) async {
+      var current = SidebarSection.files;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, update) => SidebarSectionSwitch(
+                section: current,
+                onChanged: (value) => update(() => current = value),
+              ),
+            ),
+          ),
+        ),
+      );
+      final rect = tester.getRect(
+        find.byKey(const ValueKey('editor-sidebar-section-switch')),
+      );
+      expect(rect.height, lessThanOrEqualTo(48));
+      await tester.tap(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+      );
+      await tester.pumpAndSettle();
+      expect(current, SidebarSection.sessions);
+    });
+  });
 }
 
 /// 记录路由推入次数。
@@ -663,7 +885,8 @@ class _MemoryComposerDefaults implements ComposerDefaultsStore {
   ComposerDefaults? valueFor(String projectId) => _byProject[projectId];
 
   @override
-  Future<ComposerDefaults?> read(String projectId) async => _byProject[projectId];
+  Future<ComposerDefaults?> read(String projectId) async =>
+      _byProject[projectId];
 
   @override
   Future<void> write(String projectId, ComposerDefaults defaults) async {

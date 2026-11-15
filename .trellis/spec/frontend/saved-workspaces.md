@@ -28,12 +28,15 @@ already-open explicit documents remain manageable.
   session?})` returns `({String? error, SavedWorkspace? workspace})`.
 - `saveSession(SavedWorkspace, WorkspaceSessionSnapshot)`, `remove(String id)`,
   `load({bool force = false})`, and `settle()` return `Future<void>`.
+- `addMembers(String workspaceId, Iterable<Project> additions)` appends local
+  members to the latest stored document and returns the updated workspace.
+  Snapshot inputs before queueing and deduplicate by `workspacePathKey`.
 - `resolve(SavedWorkspace, ProjectStore)` returns `WorkspaceResolution` with
   `projects`, `missing`, `primary`, `primaryMissing`, and `isEmpty`.
 - `openEditorPage(..., workspace?, workspaceProjects?, workspaceStore?)` opens
   a standalone session when `workspace` is null.
-- `EditorPage(..., onProjectSelected?)` lets the retained owner open a project
-  outside the active workspace; without an owner it pushes a standalone page.
+- The explorer project selector changes temporary browsing in standalone mode.
+  In a saved workspace it opens the additions picker directly.
 
 ## 3. Contracts
 
@@ -60,16 +63,20 @@ disappears resumes W with survivor B and preserves B's live dirty buffers.
 Main standalone history ignores foreign-owner documents and remembered foreign
 tree roots. Child products continue restoring legacy multi-root history.
 
-The explorer's project selector is independent of saved-workspace membership.
-Selecting a member changes the browsing/default creation target only: retain
-all roots in primary/member order, their loaded children, expansion and scroll.
-Never derive that membership by prepending the selected project to a list that
-excludes the primary; that drops the primary when a secondary is selected.
-Selecting an external project opens/resumes a separate standalone editor with
-`workspace: null`, so its tree, file ownership, history and run identity agree.
-Keep the original workspace and its dirty buffers live and recoverable. A bare
-saved-workspace explorer without a navigation owner disables external choices.
-Legacy language-product unsaved browsing retains its history contract.
+In standalone mode, the explorer selector changes only the browsed tree and
+default creation target. Keep the editor, Agent project, live buffers and route.
+Opening a file from another project passes that project's owner to the editor.
+Temporary foreign roots do not become saved-workspace members.
+
+In saved-workspace mode, the same selector directly opens a multi-select
+additions dialog. One confirmation appends selected local projects. Do not open
+a second naming or membership-edit dialog. Existing members cannot be unchecked.
+The store transaction preserves the latest name, identity, primary, member order,
+missing-member references and session data. A stale additions picker must not
+overwrite a concurrent session save or resurrect a deleted workspace. Preserve
+live buffers and tree expansion when publishing the updated document. Report a
+failed addition visibly. Legacy language-product unsaved browsing retains its
+history contract.
 
 Same-id metadata changes must propagate through retained host, page and explorer.
 Reopening or saving a rename/member edit updates the retained session snapshot
@@ -106,8 +113,10 @@ a usable dialog. The same layout contract applies to legacy project selection.
 | Session save after deletion | No-op; never resurrect metadata. |
 | Metadata save after deletion | Return a save-as-new error. |
 | Root removed then re-added | Restore its stored expansion; preserve other roots. |
-| Selector chooses current workspace member | Preserve the complete ordered tree and its view state. |
-| Selector chooses external project | Replace visible tree through a standalone editor; never add it to the workspace. |
+| Standalone selector chooses another project | Change only the browsed tree; retain editor and Agent identity. |
+| Workspace selector opens | Show one additions picker with existing members fixed. |
+| Add multiple projects | Append unique local members; preserve missing references and latest session. |
+| Cancel additions | Preserve membership and live editor state. |
 
 ## 5. Good/Base/Bad Cases
 
@@ -135,12 +144,13 @@ single-project save, unchanged source, retained page identity and cancellation
 returning toolbar input. Include the explicit language-product legacy dialog.
 Advance the initial frame and the keyboard-inset animation before scrolling
 or clicking; finder presence alone does not establish a visible dialog.
-`workspace_project_switch_test.dart` must physically use the project selector:
-select B/A within W(A,B), then external C, restore W and select C again. Assert
-unchanged root order/expansion/scroll and dirty buffers for internal switches,
-standalone identity and correct owner for C, unchanged W membership, retained
-session reuse, and a non-host page's route/Back fallback.
-Also cover standalone-to-standalone selection and resuming an existing session.
+`workspace_project_switch_test.dart` and
+`editor_project_browse_semantics_test.dart` must physically use the selector.
+Assert temporary standalone browsing, cross-project file ownership and unchanged
+editor/Agent identity. In a workspace, select several additions in one dialog
+and assert persisted order, missing-member retention, independent dirty buffers
+and unchanged workspace identity. Cancellation must not save or navigate.
+Store tests cover duplicate/mutable inputs and concurrent session writes.
 Open the initially collapsed explorer through its toolbar before clicking rows;
 mounted tree text can be clipped and is not evidence that it receives input.
 Use a nonzero scroll offset and drain each project's queued history via
@@ -161,8 +171,7 @@ the primary path as a required identity component. Correct: update only an
 existing disk document in the serialized transaction and locate a retained
 workspace by id; update its effective primary/members without rebuilding buffers.
 
-Wrong: derive saved roots from `[selected, ...membersWithoutPrimary]` or only
-replace the explorer's root when an external project is selected. Correct:
-derive saved roots from the primary and configured members, update only the
-member creation target, and delegate external selection to a standalone editor
-whose project, file ownership and history all identify the chosen project.
+Wrong: navigate to another editor when the user only changes the browsed tree,
+or reconstruct workspace membership from resolved projects and lose missing
+references. Correct: keep browsing independent from editor identity and append
+workspace additions inside the serialized store transaction.

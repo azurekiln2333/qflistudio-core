@@ -14,6 +14,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -343,7 +344,7 @@ class FileAgentSessionStore extends AgentSessionStore {
     final jsonl = _jsonlFor(sessionId);
     if (await jsonl.exists()) {
       final transcript = await _readJsonl(jsonl);
-      unawaited(compactIfNeeded(sessionId));
+      _scheduleCompaction(sessionId);
       return transcript;
     }
     final legacy = _legacyFor(sessionId);
@@ -361,8 +362,7 @@ class FileAgentSessionStore extends AgentSessionStore {
       preview: _previewOf(transcript.messages),
     );
     _metas[sessionId] = next;
-    final buffer = StringBuffer()
-      ..writeln(jsonEncode(_headerRecord(next)));
+    final buffer = StringBuffer()..writeln(jsonEncode(_headerRecord(next)));
     for (final message in transcript.messages) {
       buffer.writeln(jsonEncode({'t': 'm', 'v': message}));
     }
@@ -389,29 +389,45 @@ class FileAgentSessionStore extends AgentSessionStore {
     if (!await file.exists()) {
       return (await read(sessionId)).history;
     }
-    String? line;
-    await _LineTail(file, blockSize: blockSize).readReverseLines((raw) {
-      final record = _decodeLine(raw);
-      if (record == null || record.kind != _RecordKind.history) return true;
-      line = raw;
-      return false;
-    });
-    if (line == null) return const [];
-    // 历史快照可能很大：超过 200 KB 的记录放到独立 isolate 解析。
-    Object? decoded;
-    if (line!.length > _isolateThreshold) {
-      decoded = await compute(_decodeJsonInIsolate, line!);
-    } else {
-      try {
-        decoded = jsonDecode(line!);
-      } on FormatException {
-        return const [];
-      }
-    }
-    if (decoded is! Map || decoded['t'] != 'hs') return const [];
-    final history = _mapList(decoded['v']);
+    List<Map<String, Object?>>? found;
+    // 边读边解：遇到第一条能用的 hs 就停，不先把候选行攒起来。
+    // 写坏的、或者根本不是 hs 的行继续往前找，一直找到文件头。
+    await _LineTail(file, blockSize: blockSize).readReverseLines(
+      (_) => true,
+      onLineBytes: (raw) async {
+        if (!_mayBeHistoryBytes(raw)) return true;
+        final history = await _decodeHistoryRecord(raw);
+        if (history == null) return true;
+        found = history;
+        return false;
+      },
+    );
+    final history = found;
+    if (history == null) return const [];
     if (history.length <= _maxHistoryEntries) return history;
     return history.sublist(history.length - _maxHistoryEntries);
+  }
+
+  /// 解开一条历史快照。
+  ///
+  /// 返回 null 表示这行不是可用的 `hs`：不是历史记录、或者 JSON 已经写坏。
+  /// 两种情况都该继续往前找，所以不区分。
+  Future<List<Map<String, Object?>>?> _decodeHistoryRecord(
+    List<int> bytes,
+  ) async {
+    if (bytes.length > _isolateThreshold) {
+      // compute 内部抛的 FormatException 会包一层：这里兜住，当作坏快照。
+      try {
+        return await compute(_decodeHistoryInIsolate, bytes);
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      return _decodeHistoryBytes(bytes);
+    } on FormatException {
+      return null;
+    }
   }
 
   @override
@@ -454,20 +470,16 @@ class FileAgentSessionStore extends AgentSessionStore {
 
   /// 坏行比例过半时压缩重写：只留好记录。
   ///
-  /// 空闲时后台调；文件不大或坏行不多时什么都不做。失败不影响使用。
+  /// 这里会读全文件，所以它不挂在打开会话的路径上，也不会在界面 isolate
+  /// 上做：大于阈值的文件交给独立 isolate 扫。
   Future<void> compactIfNeeded(String sessionId) async {
     if (!_compactChecked.add(sessionId)) return;
     try {
       final file = _jsonlFor(sessionId);
       if (!await file.exists()) return;
-      final rows = const LineSplitter().convert(await file.readAsString());
-      var bad = 0;
-      var total = 0;
-      for (final row in rows) {
-        if (row.trim().isEmpty) continue;
-        total++;
-        if (_decodeLine(row) == null) bad++;
-      }
+      final rows = await _scanRows(file);
+      if (rows == null) return;
+      final (total, bad) = rows;
       if (bad == 0 || bad * 2 <= total) return;
       final meta = _metas[sessionId];
       if (meta == null) return;
@@ -479,10 +491,27 @@ class FileAgentSessionStore extends AgentSessionStore {
     }
   }
 
+  /// 后台排队做一次坏行扫描；真正的扫描由 [compactIfNeeded] 去重。
+  void _scheduleCompaction(String sessionId) {
+    if (_compactChecked.contains(sessionId)) return;
+    unawaited(compactIfNeeded(sessionId));
+  }
+
+  /// 扫一遍全文件，返回（总行数, 坏行数）。空文件返回 null。
+  ///
+  /// 大文件放到独立 isolate，避免占住界面 isolate 的一帧。
+  Future<(int, int)?> _scanRows(File file) async {
+    final length = await file.length();
+    if (length == 0) return null;
+    if (length <= _isolateThreshold) {
+      return _scanRowsSync(await file.readAsString());
+    }
+    return Isolate.run(() => _scanRowsInIsolate(file.path));
+  }
+
   /// 把会话正文编码成完整的 jsonl 文本（重写与建文件用）。
   String _payloadOf(AgentSessionMeta meta, AgentTranscript transcript) {
-    final buffer = StringBuffer()
-      ..writeln(jsonEncode(_headerRecord(meta)));
+    final buffer = StringBuffer()..writeln(jsonEncode(_headerRecord(meta)));
     for (final message in transcript.messages) {
       buffer.writeln(jsonEncode({'t': 'm', 'v': message}));
     }
@@ -537,28 +566,34 @@ class FileAgentSessionStore extends AgentSessionStore {
     final seen = <String>{};
     var reached = beforeId == null;
     var more = false;
-    await _LineTail(file, blockSize: blockSize).readReverseLines((line) {
-      final record = _decodeLine(line);
-      if (record == null || record.kind != _RecordKind.message) return true;
-      final message = _map(record.value);
-      final id = message?['id'];
-      if (message == null || id is! String) return true;
-      // 同一 id 后写的覆盖旧值；反向读时先遇到的就是最新那条。
-      if (!seen.add(id)) return true;
-      if (!reached) {
-        if (id == beforeId) reached = true;
+    await _LineTail(file, blockSize: blockSize).readReverseLines(
+      (_) => true,
+      onLineBytes: (bytes) {
+        // 历史快照单行就能到几 MB。分页只要消息，先在字节上看类型前缀：
+        // 认出是 hs / hdr 就直接跳过，不做 UTF-8 解码也不做 JSON 解码。
+        if (isOtherRecordBytes(bytes)) return true;
+        final record = _decodeLine(utf8.decode(bytes, allowMalformed: true));
+        if (record == null || record.kind != _RecordKind.message) return true;
+        final message = _map(record.value);
+        final id = message?['id'];
+        if (message == null || id is! String) return true;
+        // 同一 id 后写的覆盖旧值；反向读时先遇到的就是最新那条。
+        if (!seen.add(id)) return true;
+        if (!reached) {
+          if (id == beforeId) reached = true;
+          return true;
+        }
+        collected.add(message);
+        if (collected.length > limit) {
+          more = true;
+          return false;
+        }
         return true;
-      }
-      collected.add(message);
-      if (collected.length > limit) {
-        more = true;
-        return false;
-      }
-      return true;
-    });
+      },
+    );
     if (!reached) return AgentMessagePage.empty;
     final page = collected.take(limit).toList().reversed.toList();
-    unawaited(compactIfNeeded(sessionId));
+    // 打开会话的路径不扫全文件：坏行修复留给 read()。
     return AgentMessagePage(messages: page, hasEarlier: more);
   }
 
@@ -583,10 +618,7 @@ class FileAgentSessionStore extends AgentSessionStore {
   ///
   /// 崩溃可能留下半行：最后一行没以换行结尾时先补一个换行，否则新记录会
   /// 粘到坏行上，一起被当成坏行跳过。
-  Future<void> _appendRecord(
-    String sessionId,
-    Map<String, Object?> record,
-  ) {
+  Future<void> _appendRecord(String sessionId, Map<String, Object?> record) {
     return _serialize(() async {
       if (!await _root.exists()) await _root.create(recursive: true);
       final file = _jsonlFor(sessionId);
@@ -782,8 +814,7 @@ class FileAgentSessionStore extends AgentSessionStore {
   /// 旧 `.json` → `.jsonl`，然后改名为 `.json.bak`。
   Future<void> _convertLegacy(File file, AgentSessionMeta meta) async {
     final transcript = await _readLegacy(file);
-    final buffer = StringBuffer()
-      ..writeln(jsonEncode(_headerRecord(meta)));
+    final buffer = StringBuffer()..writeln(jsonEncode(_headerRecord(meta)));
     for (final message in transcript.messages) {
       buffer.writeln(jsonEncode({'t': 'm', 'v': message}));
     }
@@ -809,6 +840,54 @@ class FileAgentSessionStore extends AgentSessionStore {
     'createdAt': meta.createdAt.toIso8601String(),
   };
 
+  /// 分页里能不能直接跳过这一行。
+  ///
+  /// 只认 canonical 写法：应用自己写的行永远从列 0 开始、格式固定，
+  /// 所以绝大多数行一次比较就完事。认不出来就返回 false，
+  /// 让调用方照旧解码判定，宁可多解一行也不能把消息当成快照丢掉。
+  static bool isOtherRecordBytes(List<int> bytes) {
+    return _startsWithBytes(bytes, _historyPrefixBytes) ||
+        _startsWithBytes(bytes, _headerPrefixBytes);
+  }
+
+  /// 值不值得当成历史快照去试。
+  ///
+  /// 快捷路径先认 canonical 写法；认不出来只排除明显的消息行和空行，
+  /// 剩下的交给真解码去判。
+  static bool _mayBeHistoryBytes(List<int> bytes) {
+    if (_startsWithBytes(bytes, _historyPrefixBytes)) return true;
+    if (_startsWithBytes(bytes, _messagePrefixBytes)) return false;
+    if (bytes.isEmpty) return false;
+    var index = 0;
+    while (index < bytes.length && _isJsonSpace(bytes[index])) {
+      index++;
+    }
+    // 不是 JSON 对象开头的行不可能是快照。
+    return index < bytes.length && bytes[index] == _braceOpen;
+  }
+
+  static bool _startsWithBytes(List<int> bytes, List<int> prefix) {
+    if (bytes.length < prefix.length) return false;
+    for (var index = 0; index < prefix.length; index++) {
+      if (bytes[index] != prefix[index]) return false;
+    }
+    return true;
+  }
+
+  static bool _isJsonSpace(int byte) =>
+      byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D;
+
+  static const int _braceOpen = 0x7B;
+
+  /// 小快照就地解码；不是 `hs` 或结构不对时返回 null。
+  static List<Map<String, Object?>>? _decodeHistoryBytes(List<int> bytes) =>
+      _historyFrom(jsonDecode(utf8.decode(bytes, allowMalformed: true)));
+
+  /// 与写端 `jsonEncode({"t": "hs"})` / `{"t": "hdr"}` / `{"t": "m"}` 一致。
+  static final List<int> _historyPrefixBytes = utf8.encode('{"t":"hs",');
+  static final List<int> _headerPrefixBytes = utf8.encode('{"t":"hdr",');
+  static final List<int> _messagePrefixBytes = utf8.encode('{"t":"m",');
+
   static _Record? _decodeLine(String line) {
     final trimmed = line.trim();
     if (trimmed.isEmpty) return null;
@@ -826,6 +905,7 @@ class FileAgentSessionStore extends AgentSessionStore {
       return null;
     }
   }
+
   static AgentSessionMeta? _metaFromJson(Object? decoded) {
     if (decoded is! Map) return null;
     final id = decoded['id'];
@@ -889,8 +969,58 @@ class FileAgentSessionStore extends AgentSessionStore {
 
 enum _RecordKind { header, message, history }
 
-/// 独立 isolate 里只做 `jsonDecode`：返回值都是可传输的基本结构。
-Object? _decodeJsonInIsolate(String line) => jsonDecode(line);
+/// 扫一遍 jsonl 文本，返回（总行数, 坏行数）。
+///
+/// 单独拿出来是因为隔离 isolate 只能调顶层函数。
+(int, int) _scanRowsSync(String text) {
+  var bad = 0;
+  var total = 0;
+  for (final row in const LineSplitter().convert(text)) {
+    if (row.trim().isEmpty) continue;
+    total++;
+    if (_isGoodRow(row)) continue;
+    bad++;
+  }
+  return (total, bad);
+}
+
+/// 在独立 isolate 里扫文件：不把整份文本回传到界面 isolate。
+(int, int) _scanRowsInIsolate(String path) =>
+    _scanRowsSync(File(path).readAsStringSync());
+
+/// 一行到底能不能用。与 `_decodeLine` 同口径，但不构造对象。
+bool _isGoodRow(String line) {
+  final trimmed = line.trim();
+  if (trimmed.isEmpty) return false;
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is! Map) return false;
+    return switch (decoded['t']) {
+      'm' || 'hs' || 'hdr' => true,
+      _ => false,
+    };
+  } on FormatException {
+    return false;
+  }
+}
+
+/// 把 `{"t":"hs","v":[...]}` 解析成历史列表。
+///
+/// 不是 `hs` 记录、或 `v` 不是列表时返回 null：调用方据此继续往前找，
+/// 不能把一条 `hdr` 当成“空历史”而提前停下。
+List<Map<String, Object?>>? _historyFrom(Object? decoded) {
+  if (decoded is! Map || decoded['t'] != 'hs') return null;
+  final value = decoded['v'];
+  if (value is! List) return null;
+  return [
+    for (final entry in value)
+      if (entry is Map) Map<String, Object?>.from(entry),
+  ];
+}
+
+/// 在独立 isolate 里解历史快照。
+List<Map<String, Object?>>? _decodeHistoryInIsolate(List<int> bytes) =>
+    _historyFrom(jsonDecode(utf8.decode(bytes, allowMalformed: true)));
 
 class _Record {
   const _Record(this.kind, this.value);
@@ -909,12 +1039,27 @@ class _LineTail {
   final int blockSize;
 
   /// 逐行回调，返回 false 停止。
-  Future<void> readReverseLines(bool Function(String line) onLine) async {
+  ///
+  /// [onLineBytes] 非空时直接交原始字节，由调用方决定要不要解码：
+  /// 分页只要消息，遇到几 MB 的历史快照行就不该为它做一次 UTF-8 解码。
+  ///
+  /// 回调可以返回 Future：分页这种同步场景不会多付一次 await，
+  /// 读历史则能边读边解码，碰到第一条可用快照就停。
+  Future<void> readReverseLines(
+    FutureOr<bool> Function(String line) onLine, {
+    FutureOr<bool> Function(List<int> bytes)? onLineBytes,
+  }) async {
+    // 同步回调直接返回布尔，不进事件循环。只有真的是 Future 才 await。
+    FutureOr<bool> emit(List<int> bytes) =>
+        onLineBytes != null ? onLineBytes(bytes) : _emit(bytes, onLine);
     if (!await file.exists()) return;
     final RandomAccessFile handle = await file.open();
     try {
       var position = await handle.length();
-      var carry = <int>[];
+      // 跨块的半行按块收集，最后拼一次。以前每读一块就拼一次更大的列表，
+      // 一条 4 MB 的历史快照要多拷近 4 MB × 块数，占了打开的绝大部分时间。
+      final carryParts = <List<int>>[];
+      var carryLength = 0;
       while (position > 0) {
         final start = position - blockSize < 0 ? 0 : position - blockSize;
         await handle.setPosition(start);
@@ -932,29 +1077,58 @@ class _LineTail {
         }
         parts.add(current);
         final tail = parts.removeLast();
-        final joined = <int>[...tail, ...carry];
+        if (tail.isNotEmpty) {
+          carryParts.add(tail);
+          carryLength += tail.length;
+        }
         if (parts.isEmpty) {
           // 这一块里没有换行：整行还没读完，继续往左拼。
-          carry = joined;
           continue;
         }
+        final joined = _joinReversed(carryParts, carryLength);
+        carryParts.clear();
+        carryLength = 0;
         if (position > 0) {
-          carry = parts.removeAt(0);
-        } else {
-          carry = <int>[];
+          final head = parts.removeAt(0);
+          if (head.isNotEmpty) {
+            carryParts.add(head);
+            carryLength += head.length;
+          }
         }
-        if (!_emit(joined, onLine)) return;
+        final joinedResult = emit(joined);
+        if (!(joinedResult is bool ? joinedResult : await joinedResult)) return;
         for (var index = parts.length - 1; index >= 0; index--) {
-          if (!_emit(parts[index], onLine)) return;
+          final result = emit(parts[index]);
+          if (!(result is bool ? result : await result)) return;
         }
       }
-      if (carry.isNotEmpty) _emit(carry, onLine);
+      if (carryLength > 0) {
+        final result = emit(_joinReversed(carryParts, carryLength));
+        if (result is Future<bool>) await result;
+      }
     } finally {
       await handle.close();
     }
   }
 
-  static bool _emit(List<int> bytes, bool Function(String line) onLine) {
+  /// 把反向收集的块拼成一条完整的行。只拷一次。
+  static List<int> _joinReversed(List<List<int>> parts, int length) {
+    if (parts.isEmpty) return const [];
+    if (parts.length == 1) return parts.single;
+    final joined = Uint8List(length);
+    var offset = length;
+    // parts 是按从右往左的顺序收的。
+    for (final part in parts) {
+      offset -= part.length;
+      joined.setRange(offset, offset + part.length, part);
+    }
+    return joined;
+  }
+
+  static FutureOr<bool> _emit(
+    List<int> bytes,
+    FutureOr<bool> Function(String line) onLine,
+  ) {
     if (bytes.isEmpty) return true;
     final line = utf8.decode(bytes, allowMalformed: true).trim();
     if (line.isEmpty) return true;

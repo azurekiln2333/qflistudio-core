@@ -33,7 +33,7 @@ void main() {
   tearDown(() => StudioProfile.current = previous);
 
   testWidgets(
-    'member selection preserves the tree; external selection uses a retained standalone',
+    'workspace selector adds a non-member in one dialog and keeps identity, order and dirty buffers',
     (tester) async {
       final fixture = (await tester.runAsync(_Fixture.create))!;
       addTearDown(fixture.dispose);
@@ -49,185 +49,178 @@ void main() {
       buffer.controller.text = dirtyText;
       await tester.pump();
       expect(buffer.dirty, isTrue);
-      final treeScroll = _treeScroll(tester);
-      treeScroll.position.jumpTo(20);
-      await tester.pump();
-      final treeOffset = treeScroll.position.pixels;
-      expect(treeOffset, greaterThan(0));
 
-      await _chooseProject(tester, fixture.second);
-      _expectWorkspaceTree(tester, fixture);
-      expect(
-        find.descendant(
-          of: find.byType(PopupMenuButton<Project>),
-          matching: find.text(fixture.second.name),
-        ),
-        findsOneWidget,
-      );
-      expect(_treeScroll(tester), same(treeScroll));
-      expect(treeScroll.position.pixels, treeOffset);
-      expect(tester.state(find.byType(EditorPage)), same(pageState));
-      expect(_editor(tester), same(editor));
-      expect(editor.current, same(buffer));
-      expect(buffer.controller.text, dirtyText);
-      expect(buffer.dirty, isTrue);
-
-      // The selector still changes the default creation target within W(A,B).
-      await tester.tap(find.byTooltip('新建文件夹'));
+      // 工作区模式下，标题即入口：一次点击就开多选。
+      await tester.tap(fixture.picker);
       await _pumpUntil(
         tester,
         () => find.byType(AlertDialog).evaluate().isNotEmpty,
-        'new folder dialog',
-      );
-      await tester.enterText(
-        find.descendant(
-          of: find.byType(AlertDialog),
-          matching: find.byType(TextField),
-        ),
-        'selected_b',
-      );
-      await tester.tap(find.text('创建').last);
-      await _pumpUntil(
-        tester,
-        () => Directory(p.join(fixture.second.path, 'selected_b')).existsSync(),
-        'folder in selected B',
-      );
-      expect(
-        Directory(p.join(fixture.first.path, 'selected_b')).existsSync(),
-        isFalse,
+        'add projects dialog',
       );
 
-      await _chooseProject(tester, fixture.first);
-      _expectWorkspaceTree(tester, fixture);
-      expect(_editor(tester), same(editor));
-      expect(editor.current, same(buffer));
-      expect(buffer.controller.text, dirtyText);
+      // 已有成员固定勾选且不可取消，所以只能新增。
+      for (final member in [fixture.first, fixture.second]) {
+        final tile = tester.widget<CheckboxListTile>(
+          find.byKey(ValueKey('workspace-existing-${member.id}')),
+        );
+        expect(tile.value, isTrue);
+        expect(tile.onChanged, isNull, reason: '已有成员不能被取消');
+      }
 
-      await _chooseProject(tester, fixture.external);
-      await _waitForProject(tester, fixture.external);
-      expect(_rootOrder(), ['workspace-root-${fixture.external.path}']);
-      final standalonePage = tester.state(find.byType(EditorPage));
-      final standaloneEditor = _editor(tester);
-      expect(standaloneEditor, isNot(same(editor)));
-      final standalone = fixture.host.sessionInfos.singleWhere(
-        (session) => session.project.id == fixture.external.id,
+      await tester.tap(
+        find.byKey(ValueKey('workspace-add-${fixture.external.id}')),
       );
-      expect(standalone.workspace, isNull);
-      expect(fixture.host.sessionInfos, hasLength(2));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('workspace-add-confirm')));
       await _pumpUntil(
         tester,
-        () => _entry(
-          fixture.external,
-          'src_c',
-        ).hitTestable().evaluate().isNotEmpty,
-        'external directory read',
+        () => fixture.savedMembers().length == 3,
+        'workspace gains the external member',
       );
-      await tester.tap(_entry(fixture.external, 'src_c'));
-      await _pumpUntil(
-        tester,
-        () => _entry(fixture.external, 'c.txt').evaluate().isNotEmpty,
-        'external children',
-      );
-      await tester.tap(_entry(fixture.external, 'c.txt'));
-      await _pumpUntil(
-        tester,
-        () => standaloneEditor.current?.name == 'c.txt',
-        'external file open',
-      );
-      expect(standaloneEditor.current!.projectRootPath, fixture.external.path);
-      expect(standaloneEditor.current!.ownerProjectName, fixture.external.name);
-      fixture.expectSavedMembersUnchanged();
 
-      fixture.host.resume(fixture.first, workspace: fixture.saved);
-      await _waitForProject(tester, fixture.first);
-      _expectWorkspaceTree(tester, fixture);
+      // 只追加：身份、名称、顺序都保留，外部项目排在末尾。
+      final stored = fixture.savedWorkspacesById();
+      expect(stored.id, fixture.saved.id);
+      expect(stored.name, fixture.saved.name);
+      expect(stored.members.map((m) => m.projectId).toList(), [
+        fixture.first.id,
+        fixture.second.id,
+        fixture.external.id,
+      ]);
+      expect(stored.members.first.primary, isTrue, reason: '主成员身份不变');
+
+      // 编辑器页、编辑器、脏缓冲都不受影响。
       expect(tester.state(find.byType(EditorPage)), same(pageState));
       expect(_editor(tester), same(editor));
       expect(editor.current, same(buffer));
       expect(buffer.controller.text, dirtyText);
       expect(buffer.dirty, isTrue);
 
-      // C is already mounted: choosing it again must reuse that standalone.
-      await _chooseProject(tester, fixture.external);
-      await _waitForProject(tester, fixture.external);
-      expect(fixture.host.sessionInfos, hasLength(2));
-      expect(tester.state(find.byType(EditorPage)), same(standalonePage));
-      expect(_editor(tester), same(standaloneEditor));
-      expect(standaloneEditor.current!.name, 'c.txt');
-      expect(_rootOrder(), ['workspace-root-${fixture.external.path}']);
-      fixture.host.resume(fixture.first, workspace: fixture.saved);
-      await _waitForProject(tester, fixture.first);
-      _expectWorkspaceTree(tester, fixture);
-      expect(tester.state(find.byType(EditorPage)), same(pageState));
-      expect(_editor(tester), same(editor));
-      expect(editor.current, same(buffer));
-      expect(buffer.controller.text, dirtyText);
-      fixture.expectSavedMembersUnchanged();
+      // 树刷新后包含新成员。
+      await _pumpUntil(
+        tester,
+        () => _root(fixture.external).evaluate().isNotEmpty,
+        'tree refreshes with the new member',
+      );
+      expect(_rootOrder(), [
+        'workspace-root-${fixture.first.path}',
+        'workspace-root-${fixture.second.path}',
+        'workspace-root-${fixture.external.path}',
+      ]);
+
       fixture.expectOriginalSources();
       expect(tester.takeException(), isNull);
     },
   );
 
   testWidgets(
-    'without a retained host external selection opens a standalone route',
+    'cancelling workspace additions keeps the tree and dirty buffer',
     (tester) async {
       final fixture = (await tester.runAsync(_Fixture.create))!;
       addTearDown(fixture.dispose);
       addTearDown(() => fixture.unmount(tester));
-      await fixture.mount(tester, retained: false);
+      await fixture.mount(tester, retained: true);
       await fixture.expandWorkspace(tester);
       await tester.tap(_entry(fixture.first, 'a.txt'));
       await _pumpUntil(tester, () => _editor(tester).current != null, 'open A');
       final editor = _editor(tester);
       final pageState = tester.state(find.byType(EditorPage));
       final buffer = editor.current!;
-      buffer.controller.text = 'unsaved route A';
+      buffer.controller.text = 'unsaved member A';
       await tester.pump();
+      final treeScroll = _treeScroll(tester);
 
-      await _chooseProject(tester, fixture.external);
-      await _waitForProject(tester, fixture.external);
-      expect(_rootOrder(), ['workspace-root-${fixture.external.path}']);
-      expect(
-        tester.widget<EditorPage>(find.byType(EditorPage)).workspace,
-        isNull,
+      final treeOffset = treeScroll.position.pixels;
+      await tester.tap(fixture.picker);
+      await _pumpUntil(
+        tester,
+        () => find.byType(AlertDialog).evaluate().isNotEmpty,
+        'additions picker',
       );
-      expect(_editor(tester), isNot(same(editor)));
-      await tester.binding.handlePopRoute();
-      await _waitForProject(tester, fixture.first);
-      _expectWorkspaceTree(tester, fixture);
+      await tester.tap(find.text('取消').last);
+      await _pumpUntil(
+        tester,
+        () => find.byType(AlertDialog).evaluate().isEmpty,
+        'cancel additions',
+      );
+
+      // 同一个页面实例、同一个编辑器、同一个脏缓冲。
       expect(tester.state(find.byType(EditorPage)), same(pageState));
       expect(_editor(tester), same(editor));
       expect(editor.current, same(buffer));
-      expect(buffer.controller.text, 'unsaved route A');
+      expect(buffer.controller.text, 'unsaved member A');
       expect(buffer.dirty, isTrue);
+      expect(_treeScroll(tester), same(treeScroll));
+      expect(treeScroll.position.pixels, treeOffset);
+      // 浏览只换默认树，不增减成员。
       fixture.expectSavedMembersUnchanged();
-      fixture.expectOriginalSources();
       expect(tester.takeException(), isNull);
     },
   );
 
   testWidgets(
-    'standalone selector replaces the tree with the external project',
+    'plain project selector browses another project without navigating',
     (tester) async {
       final fixture = (await tester.runAsync(_Fixture.create))!;
       addTearDown(fixture.dispose);
       addTearDown(() => fixture.unmount(tester));
+      // 无工作区：普通项目模式。
       await fixture.mount(tester, retained: true, workspace: false);
       expect(_rootOrder(), ['workspace-root-${fixture.first.path}']);
-      final firstState = tester.state(find.byType(EditorPage));
-      await _chooseProject(tester, fixture.external);
-      await _waitForProject(tester, fixture.external);
+      final firstPage = tester.state(find.byType(EditorPage));
+      final pushesBefore = fixture.host.sessionInfos.length;
+
+      await fixture.browseProject(tester, fixture.external);
+
+      // 临时浏览：树换成外部项目，但页面和项目不变，也没有新会话。
       expect(_rootOrder(), ['workspace-root-${fixture.external.path}']);
-      expect(fixture.host.sessionInfos, hasLength(2));
+      expect(
+        tester.widget<EditorPage>(find.byType(EditorPage)).project.id,
+        fixture.first.id,
+        reason: '不能切换编辑器和 Agent 所属项目',
+      );
+      expect(tester.state(find.byType(EditorPage)), same(firstPage));
+      expect(fixture.host.sessionInfos, hasLength(pushesBefore));
       expect(
         fixture.host.sessionInfos.every((session) => session.workspace == null),
         isTrue,
       );
-      await _chooseProject(tester, fixture.first);
-      await _waitForProject(tester, fixture.first);
+      await _pumpUntil(
+        tester,
+        () => _entry(
+          fixture.external,
+          'src_c',
+        ).hitTestable().evaluate().isNotEmpty,
+        'external tree',
+      );
+      await tester.tap(_entry(fixture.external, 'src_c'));
+      await _pumpUntil(
+        tester,
+        () => _entry(
+          fixture.external,
+          'c.txt',
+        ).hitTestable().evaluate().isNotEmpty,
+        'external file',
+      );
+      await tester.tap(_entry(fixture.external, 'c.txt'));
+      await _pumpUntil(
+        tester,
+        () => _editor(tester).current != null,
+        'open external file',
+      );
+      expect(
+        _editor(tester).current!.path,
+        p.join(fixture.external.path, 'src_c', 'c.txt'),
+      );
+      expect(
+        tester.widget<EditorPage>(find.byType(EditorPage)).project.id,
+        fixture.first.id,
+      );
+
+      // 还能浏览回来。
+      await fixture.browseProject(tester, fixture.first);
       expect(_rootOrder(), ['workspace-root-${fixture.first.path}']);
-      expect(tester.state(find.byType(EditorPage)), same(firstState));
-      expect(fixture.host.sessionInfos, hasLength(2));
+      expect(tester.state(find.byType(EditorPage)), same(firstPage));
       fixture.expectSavedMembersUnchanged();
       expect(tester.takeException(), isNull);
     },
@@ -264,47 +257,6 @@ ScrollableState _treeScroll(WidgetTester tester) =>
         matching: find.byType(Scrollable),
       ),
     );
-
-void _expectWorkspaceTree(WidgetTester tester, _Fixture fixture) {
-  expect(_rootOrder(), [
-    'workspace-root-${fixture.first.path}',
-    'workspace-root-${fixture.second.path}',
-  ]);
-  expect(_entry(fixture.first, 'a.txt').hitTestable(), findsOneWidget);
-  expect(_entry(fixture.second, 'b.txt').hitTestable(), findsOneWidget);
-  expect(tester.takeException(), isNull);
-}
-
-Future<void> _chooseProject(WidgetTester tester, Project project) async {
-  final selector = find.descendant(
-    of: find.byType(FileExplorer),
-    matching: find.byType(PopupMenuButton<Project>),
-  );
-  expect(selector.hitTestable(), findsOneWidget);
-  await tester.tap(selector);
-  await _pumpUntil(
-    tester,
-    () => find
-        .byWidgetPredicate(
-          (widget) =>
-              widget is PopupMenuItem<Project> &&
-              widget.value?.id == project.id,
-        )
-        .evaluate()
-        .isNotEmpty,
-    'project selector menu',
-  );
-  final item = find.byWidgetPredicate(
-    (widget) =>
-        widget is PopupMenuItem<Project> && widget.value?.id == project.id,
-  );
-  await tester.ensureVisible(item);
-  await tester.pump(const Duration(milliseconds: 200));
-  expect(item.hitTestable(), findsOneWidget);
-  await tester.tap(item);
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 300));
-}
 
 Future<void> _waitForProject(WidgetTester tester, Project project) async {
   await _pumpUntil(
@@ -463,6 +415,45 @@ class _Fixture {
               _entry(second, 'src_b').hitTestable().evaluate().isNotEmpty),
       'workspace directory reads',
     );
+  }
+
+  /// 标题栏里的入口：工作区模式是加入按钮，普通模式是浏览菜单。
+  Finder get picker =>
+      find.byKey(const ValueKey('file-explorer-project-picker'));
+
+  /// 落盘记录里的成员 id，按顺序。
+  List<String> savedMembers() =>
+      savedWorkspacesById().members.map((member) => member.projectId).toList();
+
+  /// 从磁盘重新读取当前工作区记录。
+  SavedWorkspace savedWorkspacesById() {
+    final document =
+        jsonDecode(
+              File(
+                p.join(directory.path, 'workspaces', '${saved.id}.json'),
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    return SavedWorkspace.fromJson(document)!;
+  }
+
+  /// 通过标题栏选择器浏览另一个项目，不假定它会导航。
+  Future<void> browseProject(WidgetTester tester, Project project) async {
+    final entry = picker.hitTestable();
+    expect(entry, findsOneWidget, reason: '项目选择器应当可用');
+    await tester.tap(entry);
+    // 工作区模式会直接弹多选；普通模式弹菜单。两种情况都等到出现项目名。
+    await _pumpUntil(
+      tester,
+      () => find.text(project.name).evaluate().isNotEmpty,
+      'project selector for ${project.name}',
+    );
+    final item = find.text(project.name).last;
+    await tester.ensureVisible(item);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(item);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
   }
 
   Future<void> expandWorkspace(WidgetTester tester) async {

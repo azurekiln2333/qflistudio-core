@@ -405,7 +405,10 @@ void main() {
       // 点开说明原因并提供重试。
       await tester.tap(find.byKey(const ValueKey('composer-model')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('composer-model-retry')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('composer-model-retry')),
+        findsOneWidget,
+      );
       expect(find.textContaining('默认模型'), findsWidgets);
 
       await tester.tap(find.byKey(const ValueKey('composer-model-retry')));
@@ -892,9 +895,7 @@ void main() {
       final store = MemoryAgentSessionStore();
       final runtime = runtimeFor(store, loginRequired: true);
 
-      await tester.pumpWidget(
-        host(auth: AuthStore(), runtime: runtime),
-      );
+      await tester.pumpWidget(host(auth: AuthStore(), runtime: runtime));
       await settle(tester);
 
       expect(find.byType(LoginGuideCard), findsOneWidget);
@@ -995,7 +996,8 @@ void main() {
         kind: AgentErrorKind.offline,
         host: 'qfli.suanxiwanjie.cn',
         phase: AgentErrorPhase.tls,
-        detail: '请求：POST /api/ai/chat\n'
+        detail:
+            '请求：POST /api/ai/chat\n'
             '服务器：qfli.suanxiwanjie.cn\n'
             '失败步骤：TLS 握手',
       );
@@ -1014,7 +1016,10 @@ void main() {
       await tester.pump();
 
       expect(runtime.diagnoseCount, 1);
-      expect(find.byKey(const ValueKey('chat-error-diagnosis')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('chat-error-diagnosis')),
+        findsOneWidget,
+      );
       expect(find.textContaining('TLS 握手：失败'), findsOneWidget);
 
       await unmount(tester);
@@ -1028,9 +1033,7 @@ void main() {
       final meta = await store.create('p1');
       final runtime = runtimeFor(store);
       final facade = FakeAgentFacade(sessionId: meta.id)
-        ..seed(const [
-          AgentMessageView(id: 'm0', role: 'user', text: '最后一条'),
-        ]);
+        ..seed(const [AgentMessageView(id: 'm0', role: 'user', text: '最后一条')]);
       runtime.facades[meta.id] = facade;
 
       await tester.pumpWidget(
@@ -1044,6 +1047,7 @@ void main() {
         AgentMessageView(id: 'e0', role: 'assistant', text: '更早的一条'),
       ]);
       await tester.pump();
+      await tester.pump();
       expect(find.byKey(const ValueKey('chat-load-earlier')), findsOneWidget);
 
       await tester.tap(find.byKey(const ValueKey('chat-load-earlier')));
@@ -1055,7 +1059,7 @@ void main() {
       await unmount(tester);
     });
 
-    testWidgets('对话流用 ListView.builder，长对话只建可见条目', (tester) async {
+    testWidgets('对话流按需构建，长对话只建可见条目', (tester) async {
       final auth = await loggedIn();
       final store = MemoryAgentSessionStore();
       final meta = await store.create('p1');
@@ -1076,7 +1080,7 @@ void main() {
       );
       await settle(tester);
 
-      expect(find.byType(ListView), findsOneWidget);
+      expect(find.byType(CustomScrollView), findsOneWidget);
       final built = tester.widgetList(find.byType(ChatMessageTile)).length;
       expect(built, lessThan(200));
       // 末尾一条在可视区内。
@@ -1094,7 +1098,12 @@ void main() {
         ..seed(const [
           AgentMessageView(id: 'm0', role: 'user', text: '把输出改成大写'),
           AgentMessageView(id: 'm1', role: 'assistant', text: '先读一下文件。'),
-          AgentMessageView(id: 'm2', role: 'assistant', text: '正在', pending: true),
+          AgentMessageView(
+            id: 'm2',
+            role: 'assistant',
+            text: '正在',
+            pending: true,
+          ),
         ]);
       runtime.facades[meta.id] = facade;
 
@@ -1149,7 +1158,7 @@ void main() {
       expect(facade.loadEarlierCount, 0);
 
       // 往上拖到顶，触发 loadEarlier。
-      await tester.drag(find.byType(ListView), const Offset(0, 4000));
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 4000));
       await tester.pump();
 
       expect(facade.loadEarlierCount, 1);
@@ -1213,11 +1222,7 @@ void main() {
       );
       final facade = FakeAgentFacade(sessionId: meta.id)
         ..seed(const [
-          AgentMessageView(
-            id: 'm0',
-            role: 'user',
-            text: '把输出改成大写，并补一个测试。',
-          ),
+          AgentMessageView(id: 'm0', role: 'user', text: '把输出改成大写，并补一个测试。'),
           AgentMessageView(
             id: 'm1',
             role: 'tool',
@@ -1273,10 +1278,7 @@ void main() {
       await tester.pumpWidget(wrap(active: false));
       await settle(tester);
       runtime.seenSessions.clear();
-      facade.seedError(
-        message: '网络不可用',
-        kind: AgentErrorKind.offline,
-      );
+      facade.seedError(message: '网络不可用', kind: AgentErrorKind.offline);
       await tester.pump();
       expect(runtime.seenSessions, isNot(contains(meta.id)));
 
@@ -1289,10 +1291,7 @@ void main() {
       runtime.seenSessions.clear();
       facade.state = AgentRunState.running;
       await tester.pump();
-      facade.seedError(
-        message: '超时',
-        kind: AgentErrorKind.timeout,
-      );
+      facade.seedError(message: '超时', kind: AgentErrorKind.timeout);
       await tester.pump();
       expect(runtime.seenSessions, contains(meta.id));
 

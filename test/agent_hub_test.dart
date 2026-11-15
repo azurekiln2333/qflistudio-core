@@ -110,6 +110,48 @@ void main() {
     expect(hub.liveFacade(meta.id), same(first));
   });
 
+  test('concurrent open of one session returns one instance', () async {
+    // 回归：三个调用同时进来时，缓存要到 readTail 之后才写入，
+    // 于是各自建了一个 facade。两个实例各持一条 _persistChain，
+    // 向同一个 .jsonl 交错追加，还会各装一份监听器。
+    final meta = await store.create('p1');
+    await store.appendMessage(meta.id, {
+      'id': 'm0',
+      'role': 'user',
+      'text': '甲',
+    });
+    await store.flush();
+    final hub = runtime(_Relay());
+
+    final opened = await Future.wait([
+      hub.open('p1', meta.id),
+      hub.open('p1', meta.id),
+      hub.open('p1', meta.id),
+    ]);
+
+    expect(opened[1], same(opened[0]));
+    expect(identityHashCode(opened[2]), identityHashCode(opened[0]));
+    expect(hub.liveFacade(meta.id), same(opened.first));
+  });
+
+  test('an evicted instance is replaced cleanly', () async {
+    // 回归：旧实例的监听器没摘干净时，它仍会改写状态并并发写盘；
+    // 而且重新 open 必须拿到新实例，不能复用已销毁的。
+    final first = await store.create('p1');
+    final second = await store.create('p1');
+    final hub = runtime(_Relay(), maxIdleFacades: 1);
+
+    final a = await hub.open('p1', first.id);
+    await hub.open('p1', second.id);
+    expect(hub.liveFacade(first.id), isNull, reason: '应当已驱逐');
+
+    final again = await hub.open('p1', first.id);
+    expect(again, isNot(same(a)), reason: '驱逐后应重新建实例');
+    expect(hub.liveFacade(first.id), same(again));
+    // hub 只跟新实例：状态表里仍能读到它。
+    expect(hub.statusOf(first.id), AgentLiveStatus.idle);
+  });
+
   test('maps run state to the sidebar status', () async {
     final meta = await store.create('p1');
     final relay = _Relay()..add(_textReply('好。'), gate: Completer<void>());
@@ -118,7 +160,10 @@ void main() {
 
     expect(hub.statusOf(meta.id), AgentLiveStatus.idle);
 
-    final send = facade.send('跑一下', permission: AgentPermissionMode.autoAcceptEdits);
+    final send = facade.send(
+      '跑一下',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
     await waitFor(() => Future.value(facade.state == AgentRunState.running));
     expect(hub.statusOf(meta.id), AgentLiveStatus.running);
 
@@ -164,48 +209,50 @@ void main() {
     await waitFor(() => Future.value(facade.state == AgentRunState.idle));
   });
 
-  test('E4 the second session gets a conflict and the file is not overwritten',
-      () async {
-    final first = await store.create('p1');
-    final second = await store.create('p1');
-    final relay = _Relay()
-      // 会话一：写 a.txt，等用户确认（此时持有租约）。
-      ..add(_writeCall('c1', 'a.txt', '甲的正文\n'))
-      // 会话二：写同一个文件，自动接受，应该拿到冲突。
-      ..add(_writeCall('c2', 'a.txt', '乙的正文\n'))
-      // 请求按发出顺序取回复：先接会话二收尾，再接会话一收尾。
-      ..add(_textReply('写不了。'))
-      ..add(_textReply('写好了。'));
-    final hub = runtime(relay);
+  test(
+    'E4 the second session gets a conflict and the file is not overwritten',
+    () async {
+      final first = await store.create('p1');
+      final second = await store.create('p1');
+      final relay = _Relay()
+        // 会话一：写 a.txt，等用户确认（此时持有租约）。
+        ..add(_writeCall('c1', 'a.txt', '甲的正文\n'))
+        // 会话二：写同一个文件，自动接受，应该拿到冲突。
+        ..add(_writeCall('c2', 'a.txt', '乙的正文\n'))
+        // 请求按发出顺序取回复：先接会话二收尾，再接会话一收尾。
+        ..add(_textReply('写不了。'))
+        ..add(_textReply('写好了。'));
+      final hub = runtime(relay);
 
-    final a = await hub.open('p1', first.id);
-    final b = await hub.open('p1', second.id);
+      final a = await hub.open('p1', first.id);
+      final b = await hub.open('p1', second.id);
 
-    await a.send('写 a.txt', permission: AgentPermissionMode.askEveryWrite);
-    await waitFor(
-      () => Future.value(a.state == AgentRunState.awaitingApproval),
-    );
+      await a.send('写 a.txt', permission: AgentPermissionMode.askEveryWrite);
+      await waitFor(
+        () => Future.value(a.state == AgentRunState.awaitingApproval),
+      );
 
-    await b.send('也写 a.txt', permission: AgentPermissionMode.autoAcceptEdits);
-    await waitFor(
-      () => Future.value(b.messages.any((m) => m.role == 'tool')),
-      reason: '会话二没有产生工具结果',
-    );
-    await waitFor(() => Future.value(b.state == AgentRunState.idle));
+      await b.send('也写 a.txt', permission: AgentPermissionMode.autoAcceptEdits);
+      await waitFor(
+        () => Future.value(b.messages.any((m) => m.role == 'tool')),
+        reason: '会话二没有产生工具结果',
+      );
+      await waitFor(() => Future.value(b.state == AgentRunState.idle));
 
-    final conflict = b.messages.firstWhere((m) => m.role == 'tool');
-    expect(conflict.isError, isTrue);
-    expect(conflict.text, contains('文件正被会话'));
-    expect(conflict.text, contains('稍后再试'));
-    expect(File(p.join(project.path, 'a.txt')).existsSync(), isFalse);
+      final conflict = b.messages.firstWhere((m) => m.role == 'tool');
+      expect(conflict.isError, isTrue);
+      expect(conflict.text, contains('文件正被会话'));
+      expect(conflict.text, contains('稍后再试'));
+      expect(File(p.join(project.path, 'a.txt')).existsSync(), isFalse);
 
-    a.resolveApproval(true);
-    await waitFor(() => Future.value(a.state == AgentRunState.idle));
-    expect(
-      File(p.join(project.path, 'a.txt')).readAsStringSync(),
-      contains('甲的正文'),
-    );
-  });
+      a.resolveApproval(true);
+      await waitFor(() => Future.value(a.state == AgentRunState.idle));
+      expect(
+        File(p.join(project.path, 'a.txt')).readAsStringSync(),
+        contains('甲的正文'),
+      );
+    },
+  );
 
   test('E5 deleting a running session stops it before destroying it', () async {
     final meta = await store.create('p1');
@@ -213,7 +260,10 @@ void main() {
     final hub = runtime(relay);
     final facade = await hub.open('p1', meta.id);
 
-    final send = facade.send('跑一下', permission: AgentPermissionMode.autoAcceptEdits);
+    final send = facade.send(
+      '跑一下',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
     await waitFor(() => Future.value(facade.state == AgentRunState.running));
 
     await store.delete(meta.id);
@@ -253,7 +303,10 @@ void main() {
     final relay = _Relay()..add(_textReply('好。'), gate: Completer<void>());
     final hub = runtime(relay, maxIdleFacades: 1);
     final facade = await hub.open('p1', running.id);
-    final send = facade.send('跑一下', permission: AgentPermissionMode.autoAcceptEdits);
+    final send = facade.send(
+      '跑一下',
+      permission: AgentPermissionMode.autoAcceptEdits,
+    );
     await waitFor(() => Future.value(facade.state == AgentRunState.running));
 
     for (var index = 0; index < 4; index++) {
@@ -294,56 +347,68 @@ void main() {
     expect(b.state, isNot(AgentRunState.running));
   });
 
-  test('cancelling a running session leaves it idle, never finishedUnread', () async {
-    final meta = await store.create('p1');
-    final relay = _Relay()..add(_textReply('不会到达'), gate: Completer<void>());
-    final hub = runtime(relay);
-    final facade = await hub.open('p1', meta.id);
-    final observed = <AgentLiveStatus>[];
-    hub.liveChanges.addListener(() {
-      observed.add(hub.statusOf(meta.id));
-    });
+  test(
+    'cancelling a running session leaves it idle, never finishedUnread',
+    () async {
+      final meta = await store.create('p1');
+      final relay = _Relay()..add(_textReply('不会到达'), gate: Completer<void>());
+      final hub = runtime(relay);
+      final facade = await hub.open('p1', meta.id);
+      final observed = <AgentLiveStatus>[];
+      hub.liveChanges.addListener(() {
+        observed.add(hub.statusOf(meta.id));
+      });
 
-    final send = facade.send('跑一下', permission: AgentPermissionMode.autoAcceptEdits);
-    await waitFor(() => Future.value(facade.state == AgentRunState.running));
+      final send = facade.send(
+        '跑一下',
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      await waitFor(() => Future.value(facade.state == AgentRunState.running));
 
-    final cancelling = facade.cancel();
-    relay.releaseAll();
-    await cancelling;
-    await send;
-    await facade.flush();
+      final cancelling = facade.cancel();
+      relay.releaseAll();
+      await cancelling;
+      await send;
+      await facade.flush();
 
-    expect(facade.state, AgentRunState.idle);
-    expect(hub.statusOf(meta.id), AgentLiveStatus.idle);
-    expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
-  });
+      expect(facade.state, AgentRunState.idle);
+      expect(hub.statusOf(meta.id), AgentLiveStatus.idle);
+      expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
+    },
+  );
 
-  test('starting send does not flicker finishedUnread before completion', () async {
-    final meta = await store.create('p1');
-    final relay = _Relay()
-      ..add(_textReply('第一轮'))
-      ..add(_textReply('第二轮'), gate: Completer<void>());
-    final hub = runtime(relay);
-    final facade = await hub.open('p1', meta.id);
+  test(
+    'starting send does not flicker finishedUnread before completion',
+    () async {
+      final meta = await store.create('p1');
+      final relay = _Relay()
+        ..add(_textReply('第一轮'))
+        ..add(_textReply('第二轮'), gate: Completer<void>());
+      final hub = runtime(relay);
+      final facade = await hub.open('p1', meta.id);
 
-    await facade.send('一', permission: AgentPermissionMode.autoAcceptEdits);
-    await waitFor(() => Future.value(facade.state == AgentRunState.idle));
-    hub.markSeen(meta.id);
+      await facade.send('一', permission: AgentPermissionMode.autoAcceptEdits);
+      await waitFor(() => Future.value(facade.state == AgentRunState.idle));
+      hub.markSeen(meta.id);
 
-    final observed = <AgentLiveStatus>[];
-    hub.liveChanges.addListener(() {
-      observed.add(hub.statusOf(meta.id));
-    });
+      final observed = <AgentLiveStatus>[];
+      hub.liveChanges.addListener(() {
+        observed.add(hub.statusOf(meta.id));
+      });
 
-    final second = facade.send('二', permission: AgentPermissionMode.autoAcceptEdits);
-    await waitFor(() => Future.value(facade.state == AgentRunState.running));
-    expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
+      final second = facade.send(
+        '二',
+        permission: AgentPermissionMode.autoAcceptEdits,
+      );
+      await waitFor(() => Future.value(facade.state == AgentRunState.running));
+      expect(observed, isNot(contains(AgentLiveStatus.finishedUnread)));
 
-    relay.releaseAll();
-    await second;
-    await waitFor(() => Future.value(facade.state == AgentRunState.idle));
-    expect(hub.statusOf(meta.id), AgentLiveStatus.finishedUnread);
-  });
+      relay.releaseAll();
+      await second;
+      await waitFor(() => Future.value(facade.state == AgentRunState.idle));
+      expect(hub.statusOf(meta.id), AgentLiveStatus.finishedUnread);
+    },
+  );
 }
 
 Map<String, dynamic> _textReply(String text) => {
