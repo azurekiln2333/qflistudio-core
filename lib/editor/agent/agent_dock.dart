@@ -19,6 +19,7 @@ class AgentEntryButton extends StatelessWidget {
     required this.host,
     required this.active,
     required this.onPressed,
+    this.switchesPane = false,
   });
 
   final EditorAgentHost host;
@@ -27,6 +28,9 @@ class AgentEntryButton extends StatelessWidget {
   final bool active;
 
   final VoidCallback onPressed;
+
+  /// 窄屏和中屏切回编辑器。宽屏收起右栏。
+  final bool switchesPane;
 
   @override
   Widget build(BuildContext context) {
@@ -48,11 +52,13 @@ class AgentEntryButton extends StatelessWidget {
 
   Widget _button(int badge) => IconButton(
     key: const ValueKey('editor-agent-toggle'),
-    tooltip: active ? '收起 Agent 面板' : '打开 Agent 面板',
+    tooltip: active ? (switchesPane ? '返回编辑器' : '收起 Agent 面板') : '打开 Agent 面板',
     onPressed: onPressed,
     icon: AgentBadgeIcon(
       badgeCount: badge,
-      icon: active ? Icons.smart_toy : Icons.smart_toy_outlined,
+      icon: active && switchesPane
+          ? Icons.code
+          : (active ? Icons.smart_toy : Icons.smart_toy_outlined),
     ),
   );
 
@@ -66,7 +72,7 @@ class AgentEntryButton extends StatelessWidget {
 
 /// 后台待确认或失败的会话数。
 ///
-/// 顶栏图标和中窄屏分段条的「Agent」段共用这一份计数，数字必须一致。
+/// 顶栏图标和宽屏侧栏共用这一份计数。
 /// 用户正在眼前看的会话（[foregroundSessionId]）不算后台未读。
 int agentBadgeCount(
   AgentRuntime runtime,
@@ -83,49 +89,6 @@ int agentBadgeCount(
     }
   }
   return count;
-}
-
-/// 中窄屏分段条上「Agent」段的图标：角标挂在这里。
-///
-/// 窄屏和中屏已经有「编辑器 | Agent」分段，顶栏不再重复放机器人图标。
-/// 见第四轮 brief 的 pi-A 第 2 条。
-class AgentSegmentIcon extends StatelessWidget {
-  const AgentSegmentIcon({super.key, required this.host});
-
-  final EditorAgentHost host;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: host,
-      builder: (context, _) {
-        final runtime = host.runtime;
-        if (runtime == null) return _icon(0);
-        final foregroundSessionId = host.state.mainPane == MainPane.agent
-            ? host.state.sessionId
-            : null;
-        return AnimatedBuilder(
-          animation: Listenable.merge([
-            runtime.liveChanges,
-            runtime.sessions,
-          ]),
-          builder: (context, _) => _icon(
-            agentBadgeCount(
-              runtime,
-              host.project.id,
-              foregroundSessionId: foregroundSessionId,
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _icon(int badge) => AgentBadgeIcon(
-    badgeCount: badge,
-    icon: Icons.smart_toy_outlined,
-    iconSize: 18,
-  );
 }
 
 /// 宽屏右栏：会话标题、新建、收起，下面是对话流。

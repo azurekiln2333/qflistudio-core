@@ -20,12 +20,10 @@ import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
 import 'support/fake_agent.dart';
 
-/// 窄屏顶栏不再重复放机器人图标，标题不被挤扁。
+/// 面板切换并入顶栏，保留标题宽度和后台角标。
 ///
-/// 覆盖第四轮 brief 的 pi-A 第 1-5 条：
-/// 424 逻辑宽下开关开、关两种情况的标题渲染宽度相同；
-/// 分段条不溢出，触摸目标不小于 44；
-/// 宽屏的顶栏图标与角标照旧。
+/// 424 逻辑宽下开关开、关两种情况的标题渲染宽度相同。
+/// 切换按钮的触摸目标不小于 44。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -96,6 +94,7 @@ void main() {
     required Size size,
     bool agentEnabled = true,
     double textScale = 1,
+    Brightness brightness = Brightness.light,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -106,6 +105,7 @@ void main() {
     });
     await tester.pumpWidget(
       MaterialApp(
+        theme: ThemeData(brightness: brightness),
         builder: (context, child) => MediaQuery.withClampedTextScaling(
           minScaleFactor: textScale,
           maxScaleFactor: textScale,
@@ -145,83 +145,69 @@ void main() {
     final withAgent = titleWidth(tester);
     expect(
       find.byKey(const ValueKey('editor-agent-toggle')),
-      findsNothing,
-      reason: '窄屏顶栏不再放机器人图标，它和分段条重复',
-    );
-    expect(
-      find.byKey(const ValueKey('editor-main-pane-switch')),
       findsOneWidget,
+      reason: '面板切换并入顶栏',
     );
+    expect(find.byKey(const ValueKey('editor-main-pane-switch')), findsNothing);
 
     await mount(tester, size: size, agentEnabled: false);
     final withoutAgent = titleWidth(tester);
-    expect(
-      withoutAgent,
-      withAgent,
-      reason: '顶栏少了机器人图标，开关开和关的标题必须一样宽',
-    );
+    expect(withoutAgent, withAgent, reason: '切换按钮复用撤销的位置，标题宽度不变');
     expect(withoutAgent, greaterThan(0));
-    expect(
-      titleTruncated(tester),
-      isFalse,
-      reason: '去掉重复的机器人图标后，项目名不该再被挤成「Ba…」',
-    );
+    expect(titleTruncated(tester), isFalse, reason: '项目名不应被切换按钮挤压');
     expect(tester.takeException(), isNull, reason: '424 宽不应有溢出');
   });
 
-  testWidgets('424 宽：分段条不溢出，触摸目标不小于 44', (tester) async {
-    await mount(tester, size: const Size(424, 900));
-
-    final bar = find.byKey(const ValueKey('editor-main-pane-switch'));
-    expect(bar, findsOneWidget);
-    expect(tester.takeException(), isNull, reason: '分段条不应溢出');
-
-    final barRect = tester.getRect(bar);
-    expect(barRect.right, lessThanOrEqualTo(424));
-    expect(barRect.height, greaterThanOrEqualTo(44), reason: '触摸目标不能低于 44');
-
-    // 每一段单独都不小于 44 宽。
-    final editorSegment = find.text('编辑器');
-    final agentSegment = find.text('Agent');
-    expect(tester.getSize(editorSegment).width, greaterThanOrEqualTo(24));
-    expect(tester.getSize(agentSegment).width, greaterThanOrEqualTo(24));
-    for (final segment in [editorSegment, agentSegment]) {
-      final center = tester.getCenter(segment);
-      expect(barRect.contains(center), isTrue);
+  testWidgets('手机顶栏适配浅深主题与大字，触摸目标不小于 44', (tester) async {
+    for (final brightness in Brightness.values) {
+      for (final width in [320.0, 360.0, 424.0]) {
+        await mount(
+          tester,
+          size: Size(width, 900),
+          textScale: 1.3,
+          brightness: brightness,
+        );
+        final toggle = find.byKey(const ValueKey('editor-agent-toggle'));
+        final toolbar = find.byType(AppBar);
+        expect(find.ancestor(of: toggle, matching: toolbar), findsOneWidget);
+        final rect = tester.getRect(toggle);
+        expect(rect.right, lessThanOrEqualTo(width));
+        expect(rect.width, greaterThanOrEqualTo(44));
+        expect(rect.height, greaterThanOrEqualTo(44));
+        expect(
+          tester
+              .getTopLeft(find.byKey(const ValueKey('editor-pane-editor')))
+              .dy,
+          tester.getBottomLeft(toolbar).dy,
+          reason: '内容区紧接顶栏，不再预留切换行',
+        );
+        expect(tester.takeException(), isNull);
+      }
     }
   });
 
-  testWidgets('424 宽：角标挂在分段条的 Agent 段上', (tester) async {
+  testWidgets('424 宽：后台角标显示在顶栏', (tester) async {
     final waiting = await sessions.create(project.id, title: '等确认的');
     runtime.liveStatuses[waiting.id] = AgentLiveStatus.awaitingApproval;
 
     await mount(tester, size: const Size(424, 900));
-    // 打开 Agent 分段才会解析运行时，角标随之出现。
-    await tester.tap(find.text('Agent'));
+    await tester.tap(find.byTooltip('打开 Agent 面板'));
     await pumpFrames(tester);
 
-    expect(find.byKey(const ValueKey('editor-main-pane-switch')),
-        findsOneWidget);
+    expect(find.byKey(const ValueKey('editor-main-pane-switch')), findsNothing);
     expect(
       find.byKey(const ValueKey('editor-agent-badge')),
       findsOneWidget,
-      reason: '窄屏的角标挂在分段条上，不是顶栏',
+      reason: '窄屏顶栏保留后台会话角标',
     );
-    expect(find.byKey(const ValueKey('editor-agent-toggle')), findsNothing);
+    expect(find.byTooltip('返回编辑器'), findsOneWidget);
   });
 
-  testWidgets('中屏 900 宽也没有顶栏机器人图标', (tester) async {
+  testWidgets('中屏 900 宽使用顶栏入口', (tester) async {
     await mount(tester, size: const Size(900, 900));
 
-    expect(
-      find.byKey(const ValueKey('editor-agent-toggle')),
-      findsNothing,
-      reason: '中屏仍是分段布局，没有并排右栏',
-    );
-    expect(
-      find.byKey(const ValueKey('editor-main-pane-switch')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('editor-agent-toggle')), findsOneWidget);
+    expect(find.byKey(const ValueKey('editor-main-pane-switch')), findsNothing);
   });
 
   testWidgets('1280 宽保留顶栏图标与角标', (tester) async {
@@ -245,43 +231,48 @@ void main() {
       findsOneWidget,
       reason: '宽屏的角标仍在顶栏图标上',
     );
+    await tester.tap(find.byKey(const ValueKey('editor-agent-toggle')));
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('editor-agent-expand')), findsOneWidget);
   });
 
-  testWidgets('424 宽：当前正在看的前台会话失败不显示分段角标，切回编辑器后才提示', (tester) async {
+  testWidgets('当前会话失败时，切回编辑器才显示角标', (tester) async {
     final meta = await sessions.create(project.id, title: '当前会话');
     final facade = FakeAgentFacade(sessionId: meta.id);
     runtime.facades[meta.id] = facade;
 
     await mount(tester, size: const Size(424, 900));
-    await tester.tap(find.text('Agent'));
+    await tester.tap(find.byTooltip('打开 Agent 面板'));
     await pumpFrames(tester);
 
     // 侧边栏打开刚创建的唯一会话，让它成为前台正在看的会话。
     await tester.tap(find.byTooltip('打开文件树'));
     await pumpFrames(tester);
-    await tester.tap(find.byKey(const ValueKey('editor-sidebar-section-sessions')));
+    await tester.tap(
+      find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+    );
     await pumpFrames(tester);
     await tester.tap(find.byKey(ValueKey('session-${meta.id}')));
     await pumpFrames(tester);
 
-    // 用户正停在 Agent 分段看它，即使状态仍是 failed 也不应亮角标。
+    // 用户正在看当前会话，不显示它的失败角标。
     runtime.liveStatuses[meta.id] = AgentLiveStatus.failed;
     runtime.notifyLive();
     await pumpFrames(tester);
     expect(
       find.byKey(const ValueKey('editor-agent-badge')),
       findsNothing,
-      reason: '用户正在看着该会话的错误卡片，不应该在 Agent 分段显示 1 角标',
+      reason: '当前会话的错误不计入后台角标',
     );
 
-    // 切回编辑器分段时，该会话变成后台未处理，分段条提示角标。
-    await tester.tap(find.text('编辑器'));
+    // 返回编辑器后，该会话计入后台角标。
+    await tester.tap(find.byTooltip('返回编辑器'));
     await pumpFrames(tester);
     expect(find.byKey(const ValueKey('editor-agent-badge')), findsOneWidget);
 
-    // 切回 Agent 分段：调用 markSeen 后恢复已读。
+    // 会话恢复空闲后，顶栏清除角标。
     runtime.liveStatuses[meta.id] = AgentLiveStatus.idle;
-    await tester.tap(find.text('Agent'));
+    await tester.tap(find.byTooltip('打开 Agent 面板'));
     await pumpFrames(tester);
     expect(find.byKey(const ValueKey('editor-agent-badge')), findsNothing);
   });
@@ -302,7 +293,8 @@ class _MemoryComposerDefaults implements ComposerDefaultsStore {
   final Map<String, ComposerDefaults> _byProject = {};
 
   @override
-  Future<ComposerDefaults?> read(String projectId) async => _byProject[projectId];
+  Future<ComposerDefaults?> read(String projectId) async =>
+      _byProject[projectId];
 
   @override
   Future<void> write(String projectId, ComposerDefaults defaults) async {

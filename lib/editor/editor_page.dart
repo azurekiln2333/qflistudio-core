@@ -1336,6 +1336,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
+  void _toggleAgentPanel() {
+    final host = _agentHost;
+    if (host == null) return;
+    if (!_agentPanelActive) {
+      _showAgentPanel();
+    } else if (layoutOf(MediaQuery.sizeOf(context).width) ==
+        WorkbenchLayout.wide) {
+      _collapseAgentPanel();
+    } else {
+      host.state.showMainPane(MainPane.editor);
+    }
+  }
+
   /// 收起宽屏右栏。
   void _collapseAgentPanel() {
     final host = _agentHost;
@@ -2615,11 +2628,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
-    // 只有真正并排显示右栏的宽屏才在顶栏放机器人图标。
-    // 窄屏和中屏已有「编辑器 | Agent」分段，顶栏再放一个是重复的，
-    // 而且会把项目名挤成「Ba…」。见第四轮 brief 的 pi-A 第 2 条。
     final wideAgentPane =
         layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide;
+    // 窄屏用原撤销按钮的位置切换面板。
+    // 标题保留原宽度。
+    final undoInMenu = _agentHost != null && !wide;
+    final editorVisible = wideAgentPane || !_agentPanelActive;
     final focusMode = _inlineFocusDocuments.contains(_editor.current);
     final sidebarVisible = !focusMode && (_explorerVisible ?? false);
     return Shortcuts(
@@ -2674,10 +2688,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                   // 槽位是定宽的，换成 0 宽的 widget 仍会占 56px。两者归零加上
                   // titleSpacing: 0，title 槽位才等于屏幕宽度。
                   final hasSelection =
+                      editorVisible &&
                       controller != null &&
                       !controller.selection.isCollapsed &&
                       controller.selectedText.isNotEmpty;
-                  final selected = hasSelection || _pasteToolbarVisible
+                  final selected =
+                      editorVisible && (hasSelection || _pasteToolbarVisible)
                       ? controller
                       : null;
                   final inlineOpen = _editor.current;
@@ -2726,26 +2742,27 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                if (wideAgentPane)
-                                  if (_agentHost case final host?)
-                                    AgentEntryButton(
-                                      host: host,
-                                      active: _agentPanelActive,
-                                      onPressed: _showAgentPanel,
-                                    ),
+                                if (_agentHost case final host?)
+                                  AgentEntryButton(
+                                    host: host,
+                                    active: _agentPanelActive,
+                                    switchesPane: !wideAgentPane,
+                                    onPressed: _toggleAgentPanel,
+                                  ),
                                 if (widget.onMinimize != null)
                                   IconButton(
                                     tooltip: '暂时收起编辑器',
                                     onPressed: widget.onMinimize,
                                     icon: const Icon(Icons.minimize),
                                   ),
-                                IconButton(
-                                  tooltip: '撤销 (Ctrl+Z)',
-                                  onPressed: _editor.current == null
-                                      ? null
-                                      : _undoCurrent,
-                                  icon: const Icon(Icons.undo),
-                                ),
+                                if (!undoInMenu)
+                                  IconButton(
+                                    tooltip: '撤销 (Ctrl+Z)',
+                                    onPressed: _editor.current == null
+                                        ? null
+                                        : _undoCurrent,
+                                    icon: const Icon(Icons.undo),
+                                  ),
                                 if (inlineEditor != null)
                                   for (final action in inlineActions)
                                     IconButton(
@@ -2828,6 +2845,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                       return;
                                     }
                                     switch (value) {
+                                      case 'undo':
+                                        _undoCurrent();
                                       case 'save':
                                         _saveCurrent();
                                       case 'recover_orphan':
@@ -2918,6 +2937,18 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                     }
                                   },
                                   itemBuilder: (context) => [
+                                    if (undoInMenu)
+                                      PopupMenuItem(
+                                        value: 'undo',
+                                        enabled: _editor.current != null,
+                                        child: const Row(
+                                          children: [
+                                            Icon(Icons.undo, size: 20),
+                                            SizedBox(width: 12),
+                                            Text('撤销'),
+                                          ],
+                                        ),
+                                      ),
                                     for (final action in inlineMenu)
                                       PopupMenuItem<String>(
                                         key: ValueKey('inline-menu-${action.id}'),
@@ -3521,15 +3552,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                         state: agentHost.state,
                         editor: body,
                         agent: agentPane!,
-                        // 顶栏不再放机器人图标，角标改挂在「Agent」段上。
-                        agentIcon: AgentSegmentIcon(host: agentHost),
-                        onPaneSelected: (pane) {
-                          if (pane == MainPane.agent) {
-                            agentHost.activate();
-                            agentHost.state.setAgentPaneCollapsed(false);
-                          }
-                        },
-                        showBar: !focusMode,
                       );
                     }
                     return body;

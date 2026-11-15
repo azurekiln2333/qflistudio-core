@@ -91,87 +91,36 @@ class SidebarSectionSwitch extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
+    return SegmentedButton<SidebarSection>(
       key: const ValueKey('editor-sidebar-section-switch'),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
+      showSelectedIcon: false,
+      style: const ButtonStyle(
+        minimumSize: WidgetStatePropertyAll(Size(44, 44)),
       ),
-      padding: const EdgeInsets.all(2),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _segment(
-            context,
-            value: SidebarSection.files,
-            icon: Icons.folder_outlined,
-            label: '文件',
-          ),
-          _segment(
-            context,
-            value: SidebarSection.sessions,
-            icon: Icons.forum_outlined,
-            label: '会话',
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _segment(
-    BuildContext context, {
-    required SidebarSection value,
-    required IconData icon,
-    required String label,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    final selected = section == value;
-    return Tooltip(
-      message: label,
-      child: Semantics(
-        button: true,
-        selected: selected,
-        label: label,
-        child: InkWell(
-          key: ValueKey('editor-sidebar-section-${value.name}'),
-          borderRadius: BorderRadius.circular(10),
-          onTap: () => onChanged(value),
-          child: Container(
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            padding: EdgeInsets.symmetric(horizontal: showLabels ? 10 : 0),
-            decoration: BoxDecoration(
-              color: selected ? scheme.secondaryContainer : null,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  icon,
-                  size: 18,
-                  color: selected
-                      ? scheme.onSecondaryContainer
-                      : scheme.onSurfaceVariant,
-                ),
-                if (showLabels) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    label,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
+      segments: [
+        ButtonSegment(
+          value: SidebarSection.files,
+          label: showLabels ? const Text('文件') : null,
+          tooltip: '文件',
+          icon: const Icon(
+            Icons.folder_outlined,
+            key: ValueKey('editor-sidebar-section-files'),
+            size: 18,
           ),
         ),
-      ),
+        ButtonSegment(
+          value: SidebarSection.sessions,
+          label: showLabels ? const Text('会话') : null,
+          tooltip: '会话',
+          icon: const Icon(
+            Icons.forum_outlined,
+            key: ValueKey('editor-sidebar-section-sessions'),
+            size: 18,
+          ),
+        ),
+      ],
+      selected: {section},
+      onSelectionChanged: (selection) => onChanged(selection.first),
     );
   }
 }

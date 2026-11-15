@@ -202,19 +202,24 @@ void main() {
       expect(find.byType(WorkbenchAgentPane), findsOneWidget);
     });
 
-    testWidgets('窄屏用分段条切换编辑器与 Agent', (tester) async {
+    testWidgets('窄屏用顶栏切换编辑器与 Agent', (tester) async {
       await mount(tester, size: const Size(500, 900));
 
       expect(
         find.byKey(const ValueKey('editor-main-pane-switch')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.byType(AgentDock), findsNothing);
 
-      await tester.tap(find.text('Agent'));
+      await tester.tap(find.byTooltip('打开 Agent 面板'));
       await pumpFrames(tester);
 
       expect(find.byType(WorkbenchAgentPane), findsOneWidget);
+
+      await tester.tap(find.byTooltip('返回编辑器'));
+      await pumpFrames(tester);
+      expect(find.byType(WorkbenchAgentPane), findsNothing);
+      expect(find.byTooltip('打开 Agent 面板'), findsOneWidget);
     });
   });
 
@@ -359,8 +364,8 @@ void main() {
       );
       final editorBefore = tester.state<State>(find.byType(CodeEditor));
 
-      // 切到 Agent 分段，写一段草稿。
-      await tester.tap(find.text('Agent'));
+      // 打开 Agent 面板，写一段草稿。
+      await tester.tap(find.byTooltip('打开 Agent 面板'));
       await pumpFrames(tester);
       await tester.enterText(
         find.byKey(const ValueKey('composer-input')),

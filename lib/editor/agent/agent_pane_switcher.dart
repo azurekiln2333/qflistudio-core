@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../shell/workbench_state.dart';
 
-/// 中屏与窄屏：顶部分段条，下面用 Offstage 保活两块。
+/// 中屏与窄屏的内容区。顶栏负责切换面板。
 ///
 /// 编辑器列和 Agent 面板都常驻树上，只切换可见性，所以跨断点或来回切换都
 /// 不会重建。见 design.md §11.2 第 3、7 点。
@@ -12,9 +12,6 @@ class AgentPaneSwitcher extends StatelessWidget {
     required this.state,
     required this.editor,
     required this.agent,
-    this.agentIcon,
-    this.onPaneSelected,
-    this.showBar = true,
   });
 
   final WorkbenchState state;
@@ -25,15 +22,6 @@ class AgentPaneSwitcher extends StatelessWidget {
   /// Agent 面板。为 null 时该分段只显示等待占位。
   final Widget? agent;
 
-  /// 「Agent」段的图标。中窄屏把后台会话角标挂在这里。
-  final Widget? agentIcon;
-
-  /// 分段被切换后的回调。打开 Agent 分段时由外层开始解析运行时。
-  final ValueChanged<MainPane>? onPaneSelected;
-
-  /// 专注模式下分段条也隐藏。
-  final bool showBar;
-
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -43,7 +31,6 @@ class AgentPaneSwitcher extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (showBar) _buildBar(context),
             Expanded(
               child: Stack(
                 fit: StackFit.expand,
@@ -68,43 +55,6 @@ class AgentPaneSwitcher extends StatelessWidget {
           ],
         );
       },
-    );
-  }
-
-  Widget _buildBar(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-      child: Row(
-        children: [
-          SegmentedButton<MainPane>(
-            key: const ValueKey('editor-main-pane-switch'),
-            showSelectedIcon: false,
-            // 分段是手机上唯一的 Agent 入口，触摸目标不能低于 44。
-            style: const ButtonStyle(
-              minimumSize: WidgetStatePropertyAll(Size(0, 44)),
-            ),
-            segments: [
-              const ButtonSegment(
-                value: MainPane.editor,
-                label: Text('编辑器'),
-                icon: Icon(Icons.code, size: 18),
-              ),
-              ButtonSegment(
-                value: MainPane.agent,
-                label: const Text('Agent'),
-                icon:
-                    agentIcon ?? const Icon(Icons.smart_toy_outlined, size: 18),
-              ),
-            ],
-            selected: {state.mainPane},
-            onSelectionChanged: (selection) {
-              final pane = selection.first;
-              state.showMainPane(pane);
-              onPaneSelected?.call(pane);
-            },
-          ),
-        ],
-      ),
     );
   }
 
