@@ -137,6 +137,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a drag before the saved order is read keeps the rest of it', (
+    tester,
+  ) async {
+    // A backend that only becomes readable after the user has already dragged,
+    // which is what a start that is still resolving its storage looks like.
+    final backend = _DeferredBackend(
+      jsonEncode({
+        'version': 1,
+        'order': ['cloud', 'favorite', 'history', 'workspace', 'all'],
+      }),
+    );
+    await _mount(tester, _Fixture.create(root), backend: backend);
+    // The store could not read yet, so the default order is what is shown.
+    expect(_tabLabels(tester), ['全部项目', '历史项目', '收藏项目', '工作区', '云端项目']);
+
+    backend.release();
+    await _dragTab(tester, from: '全部项目', to: '收藏项目');
+
+    // 全部项目 moves behind 收藏项目; the untouched tabs keep the saved order
+    // (云端项目 first) instead of snapping back to the default.
+    final payload = jsonDecode(backend.payload!) as Map<String, dynamic>;
+    expect(payload['order'], [
+      'cloud',
+      'favorite',
+      'all',
+      'history',
+      'workspace',
+    ]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+    await _mount(tester, _Fixture.create(root), backend: backend);
+    expect(_tabLabels(tester), ['云端项目', '收藏项目', '全部项目', '历史项目', '工作区']);
+  });
+
   testWidgets('the overflow menu no longer offers a new cloud project', (
     tester,
   ) async {
@@ -327,4 +361,24 @@ class _TemporaryPaths extends PathProviderPlatform {
   Future<String?> getApplicationDocumentsPath() async => root;
   @override
   Future<String?> getTemporaryPath() async => p.join(root, 'tmp');
+}
+
+/// A stored payload that can only be read after [release].
+///
+/// Stands in for a start that has not resolved its storage location yet: the
+/// page must not block on the read, and the first drag must still honour the
+/// order that was stored earlier.
+class _DeferredBackend extends LocalMemoryBackend {
+  _DeferredBackend(String initial) : _content = initial;
+
+  final String _content;
+  bool _released = false;
+
+  void release() => _released = true;
+
+  @override
+  bool get isReady => _released;
+
+  @override
+  Future<String?> read() async => _released ? (payload ?? _content) : null;
 }

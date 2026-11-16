@@ -15,6 +15,15 @@ abstract interface class LocalStoreBackend {
 
   /// Replaces the stored payload.
   Future<void> write(String payload);
+
+  /// Whether [read] can start right now without looking for a storage location
+  /// first.
+  ///
+  /// A backend that can always answer (in-memory, or a caller that already
+  /// knows its directory) returns true. A backend that has to resolve a path
+  /// returns false until that path is resolved, so a caller on a startup path
+  /// can skip a read instead of starting a probe no frame should wait for.
+  bool get isReady => true;
 }
 
 /// The production backend: a JSON file in the app storage directory.
@@ -23,6 +32,15 @@ class LocalFileBackend implements LocalStoreBackend {
 
   /// File name under `AppPaths.storageDirectory()`.
   final String fileName;
+
+  /// True once the app has resolved its storage directory.
+  ///
+  /// [read] and [write] resolve it themselves by probing, which is right for a
+  /// user action and wrong for the first frame: the probe writes temporary files
+  /// and arms timeouts. A startup path therefore checks this and defers the read
+  /// until a later frame or a user action.
+  @override
+  bool get isReady => AppPaths.storageDirectoryIfResolved != null;
 
   @override
   Future<String?> read() async {
@@ -58,6 +76,9 @@ class LocalMemoryBackend implements LocalStoreBackend {
   String? get payload => _payload;
 
   bool get hasWrite => _payload != null;
+
+  @override
+  bool get isReady => true;
 
   @override
   Future<String?> read() async => _payload;

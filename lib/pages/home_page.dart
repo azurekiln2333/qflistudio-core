@@ -342,17 +342,35 @@ class _HomeTabState extends State<HomeTab>
     if (_loggedIn && StudioProfile.current?.offlineOnly != true) {
       unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
     }
-    // The app leaves [HomeTab.tabOrderStore] null: reading the file during the
-    // first frame would delay the list for a cosmetic preference, and the
-    // order is only needed once the user drags a tab. An injected store (tests)
-    // is read eagerly so a saved order applies to the first build.
-    if (widget.tabOrderStore != null) unawaited(_applySavedTabOrder());
   }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _applySavedTabOrderIfReady();
+  }
+
+  /// Reads the saved tab order once, as soon as the store can read without a
+  /// storage probe.
+  ///
+  /// A normal start resolves its storage location during bootstrap, so the order
+  /// is applied shortly after the first frame. When the location is not resolved
+  /// yet (widget tests, or a platform still probing) the read is skipped: it
+  /// would start a probe this frame has no reason to wait for, and the order is
+  /// read on the first drag instead.
+  void _applySavedTabOrderIfReady() {
+    if (_savedTabOrderRequested || !_tabOrderStore.canReadNow) return;
+    _savedTabOrderRequested = true;
+    unawaited(_applySavedTabOrder());
+  }
+
+  bool _savedTabOrderRequested = false;
 
   /// Applies the saved tab order once the store has read it. A product whose
   /// scopes change still gets a valid bar: missing scopes are appended and
   /// unknown saved identifiers are dropped.
   Future<void> _applySavedTabOrder() async {
+    _savedTabOrderRequested = true;
     await _tabOrderStore.load();
     if (!mounted) return;
     final saved = _tabOrderStore.order;

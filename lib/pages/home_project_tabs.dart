@@ -92,9 +92,9 @@ List<ProjectScope> mergeProjectScopeOrder({
 /// corrupt or older payload is treated as "no saved order" rather than an error,
 /// because losing a cosmetic preference must never block Home.
 ///
-/// Reading is deferred: dragging is the only thing that needs the saved order,
-/// so Home asks for it on the first reorder instead of putting a file read (and
-/// the storage-path probe behind it) on the first frame's critical path.
+/// Home reads the order as soon as [canReadNow] allows it and otherwise on the
+/// first drag, so a start whose storage location is already resolved shows the
+/// saved order, and a start that is still probing does not wait on it.
 class HomeTabOrderStore {
   HomeTabOrderStore({LocalStoreBackend? backend})
     : _backend = backend ?? const LocalFileBackend('home_project_tabs.json');
@@ -109,6 +109,9 @@ class HomeTabOrderStore {
   bool _loaded = false;
 
   bool get isLoaded => _loaded;
+
+  /// Whether [load] can read right now instead of starting a storage probe.
+  bool get canReadNow => _backend.isReady;
 
   /// The saved order as far as it could be read; empty before [load] runs.
   List<ProjectScope> get order => List.unmodifiable(_order);
