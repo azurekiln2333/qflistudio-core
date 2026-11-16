@@ -16,6 +16,7 @@ import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/services/code_formatter.dart';
 import 'package:qfli_studio_core/editor/editor_controller.dart';
 import 'package:qfli_studio_core/models/project.dart';
+import 'package:qfli_studio_core/pages/local_content_pages.dart';
 import 'package:qfli_studio_core/pages/profile_page.dart';
 import 'package:qfli_studio_core/services/app_paths.dart';
 import 'package:qfli_studio_core/services/file_backup.dart';
@@ -216,7 +217,9 @@ void main() {
     expect(find.text('src'), findsOneWidget);
   });
 
-  testWidgets('底部导航：主页/工具/教程/示例代码/我的 五个 Tab 切换', (tester) async {
+  testWidgets('底部导航：主页/工具/教程/我的 四个 Tab 切换，教程页内切示例代码', (
+    tester,
+  ) async {
     final store = ProjectStore(storageFile: storage);
     await tester.runAsync(() => store.load());
     await mountApp(tester, store);
@@ -228,7 +231,9 @@ void main() {
 
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(find.byKey(const ValueKey('home-page-view')), findsOneWidget);
-    expect(find.byType(NavigationDestination), findsNWidgets(5));
+    // Tutorials and example code share one page (R6), so there are four
+    // destinations and no separate example-code icon.
+    expect(find.byType(NavigationDestination), findsNWidgets(4));
     expect(find.byIcon(Icons.forum_outlined), findsNothing);
     final l10n = StudioLocalizations.of(
       tester.element(find.byType(NavigationBar)),
@@ -252,7 +257,10 @@ void main() {
     );
     expect(find.text(l10n.tutorial), findsWidgets);
 
-    await tester.tap(find.byIcon(Icons.code_outlined));
+    // The example-code section lives on that same page.
+    await tester.tap(find
+        .byKey(TutorialCenterPage.examplesSectionKey)
+        .hitTestable());
     // The bundled repository is in memory, but ExampleCodeStore still checks
     // its persisted file. Give real IO time to finish before settling frames.
     await _pumpIoUntil(

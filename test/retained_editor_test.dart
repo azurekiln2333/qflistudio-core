@@ -15,6 +15,7 @@ import 'package:qfli_studio_core/editor/retained_editor_host.dart';
 import 'package:qfli_studio_core/editor/terminal_pane.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/pages/content_tools_pages.dart';
+import 'package:qfli_studio_core/pages/local_content_pages.dart';
 import 'package:qfli_studio_core/pages/settings_page.dart';
 import 'package:qfli_studio_core/services/app_paths.dart';
 import 'package:qfli_studio_core/services/project_templates.dart';
@@ -291,7 +292,7 @@ void main() {
     await _pumpFrames(tester);
     expect(find.text('Read while the editor is hidden.'), findsOneWidget);
     await _back(tester);
-    await _tab(tester, Icons.code_outlined);
+    await _examplesSection(tester);
     await _pumpIoUntil(
       tester,
       () => find.text('Retained example').evaluate().isNotEmpty,
@@ -326,7 +327,7 @@ void main() {
       original.controller.text = '// keep original dirty text';
       await tester.pump();
       await _minimize(tester);
-      await _tab(tester, Icons.code_outlined);
+      await _examplesSection(tester);
       await _pumpIoUntil(
         tester,
         () => find.text('Retained example').evaluate().isNotEmpty,
@@ -663,6 +664,18 @@ EditorController _editor(WidgetTester tester) =>
 
 Future<void> _tab(WidgetTester tester, IconData icon) async {
   await tester.tap(find.byIcon(icon).first);
+  await _pumpFrames(tester);
+}
+
+/// Opens the example-code section of the shared tutorial page.
+///
+/// Tutorials and example code are one page (R6): the shell no longer offers an
+/// example destination, so the section switch inside the page is the entry.
+Future<void> _examplesSection(WidgetTester tester) async {
+  if (find.byType(TutorialCenterPage).evaluate().isEmpty) {
+    await _tab(tester, Icons.menu_book_outlined);
+  }
+  await tester.tap(find.byKey(TutorialCenterPage.examplesSectionKey));
   await _pumpFrames(tester);
 }
 

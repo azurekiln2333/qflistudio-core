@@ -100,6 +100,211 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
   }
 }
 
+/// 教程与示例代码的合并页（R6）。
+///
+/// 顶栏标题是「教程」；一条语言栏由教程和示例代码共用；两段内容在同一页内切换。
+/// 语言和搜索词在切换后保留，难度回到「全部」——难度选项按当前栏目计算。
+/// 每段各自加载，一段慢不阻塞另一段。
+class TutorialCenterPage extends StatefulWidget {
+  const TutorialCenterPage({
+    super.key,
+    required this.language,
+    this.repository,
+    this.store,
+    this.auth,
+    this.settings,
+    this.examples,
+    this.initialSection = TutorialCenterSection.tutorial,
+  });
+
+  final String language;
+  final ContentRepository? repository;
+  final ProjectStore? store;
+  final AuthStore? auth;
+  final SettingsStore? settings;
+  final ExampleCodeStore? examples;
+  final TutorialCenterSection initialSection;
+
+  /// 栏目标签栏的键：教程段。
+  static const tutorialSectionKey = ValueKey('tutorial-center-tutorial');
+
+  /// 栏目标签栏的键：示例代码段。
+  static const examplesSectionKey = ValueKey('tutorial-center-examples');
+
+  @override
+  State<TutorialCenterPage> createState() => _TutorialCenterPageState();
+}
+
+/// 合并页的两个栏目。
+enum TutorialCenterSection { tutorial, examples }
+
+class _TutorialCenterPageState extends State<TutorialCenterPage>
+    with SingleTickerProviderStateMixin {
+  late ContentRepository _repository;
+  late TabController _sections;
+  late Future<Tutorial?> _tutorial;
+  late Future<_ExampleCatalog> _examples;
+
+  /// 教程和示例代码共用的一份筛选状态（语言、难度、搜索词）。
+  final _filter = _ContentFilterSelection();
+
+  @override
+  void initState() {
+    super.initState();
+    _sections = TabController(
+      length: 2,
+      vsync: this,
+      initialIndex: widget.initialSection.index,
+    );
+    _repository = widget.repository ?? AssetContentRepository();
+    _tutorial = _loadTutorial();
+    _examples = _loadExamples();
+  }
+
+  @override
+  void didUpdateWidget(covariant TutorialCenterPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.language != widget.language ||
+        oldWidget.repository != widget.repository ||
+        oldWidget.examples != widget.examples) {
+      _repository = widget.repository ?? AssetContentRepository();
+      _tutorial = _loadTutorial();
+      _examples = _loadExamples();
+    }
+  }
+
+  @override
+  void dispose() {
+    _sections.dispose();
+    _filter.dispose();
+    super.dispose();
+  }
+
+  Future<Tutorial?> _loadTutorial() => LocalContentAdapter.loadTutorial(
+    repository: _repository,
+    language: widget.language,
+    displayName: _displayName(widget.language),
+    productKey: StudioProfile.current?.productKey,
+  );
+
+  Future<_ExampleCatalog> _loadExamples() async {
+    final catalog = await _loadExampleCatalog(
+      repository: _repository,
+      language: widget.language,
+      store: widget.examples,
+    );
+    if (catalog.savedUnavailable && mounted) _reportSavedExamplesUnavailable();
+    return catalog;
+  }
+
+  void _selectSection(int index) {
+    setState(() {
+      _sections.index = index;
+      // 难度选项按栏目计算：保留上一栏目的难度会把新栏目筛成空列表。
+      _filter.level = null;
+    });
+  }
+
+  void _reportSavedExamplesUnavailable() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _showSavedExamplesUnavailable(context);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = StudioLocalizations.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
+        centerTitle: false,
+        title: Text(
+          l10n.tutorial,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          TabBar(
+            key: const ValueKey('tutorial-center-sections'),
+            controller: _sections,
+            onTap: _selectSection,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            dividerColor: Colors.transparent,
+            labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+            tabs: [
+              Tab(
+                key: TutorialCenterPage.tutorialSectionKey,
+                height: 36,
+                child: Center(child: Text(l10n.tutorial)),
+              ),
+              Tab(
+                key: TutorialCenterPage.examplesSectionKey,
+                height: 36,
+                child: Center(child: Text(l10n.examples)),
+              ),
+            ],
+          ),
+          Expanded(
+            child: _sections.index == TutorialCenterSection.tutorial.index
+                ? _buildTutorialSection()
+                : _buildExamplesSection(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTutorialSection() => FutureBuilder<Tutorial?>(
+    future: _tutorial,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final tutorial = snapshot.data;
+      if (tutorial == null) {
+        return _LocalContentError(
+          message: StudioLocalizations.of(context).localTutorialMissing,
+        );
+      }
+      return _TutorialList(
+        tutorial: tutorial,
+        store: widget.store,
+        auth: widget.auth,
+        settings: widget.settings,
+        selection: _filter,
+      );
+    },
+  );
+
+  Widget _buildExamplesSection() => FutureBuilder<_ExampleCatalog>(
+    future: _examples,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState != ConnectionState.done) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      final catalog = snapshot.data;
+      if (catalog == null || catalog.items.isEmpty) {
+        return _LocalContentError(
+          message: StudioLocalizations.of(context).localExamplesMissing,
+        );
+      }
+      return _ExampleCodeList(
+        items: catalog.items,
+        store: widget.store,
+        auth: widget.auth,
+        settings: widget.settings,
+        examples: widget.examples,
+        selection: _filter,
+      );
+    },
+  );
+}
+
 /// 离线语言 App 的第三页：展示教程 JSON 中的可复制示例代码。
 class ExampleCodeTab extends StatefulWidget {
   const ExampleCodeTab({
@@ -146,49 +351,18 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
   }
 
   Future<List<ExampleCode>> _loadExamples() async {
-    final store = widget.examples;
-    final bundled = await LocalContentAdapter.loadExamples(
+    final catalog = await _loadExampleCatalog(
       repository: _repository,
       language: widget.language,
-      productKey: StudioProfile.current?.productKey,
+      store: widget.examples,
     );
-    if (mounted) {
-      try {
-        await store?.load(defaults: bundled);
-      } on FileSystemException {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                StudioLocalizations.of(context).savedExamplesUnavailable,
-              ),
-            ),
-          );
-        });
-      }
+    if (catalog.savedUnavailable && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showSavedExamplesUnavailable(context);
+      });
     }
-    final key = StudioProfile.current?.productKey;
-    final allowed = key == null || key == StudioProductCatalog.qfliStudioKey
-        ? null
-        : ContentProductTypes.byProduct[key];
-    final all = store?.items ?? bundled;
-    // 主 App 自己没有课程：`language` 等于产品 id 时返回各语言产品的合集，
-    // 交给页面筛选器。语言产品页面传的是内容语言，照常再筛一遍。
-    if (key == StudioProductCatalog.qfliStudioKey &&
-        widget.language.trim().toLowerCase() == key) {
-      return all.toList(growable: false);
-    }
-    return all
-        .where(
-          (example) => allowed == null
-              ? (example.language.isEmpty ? example.type : example.language)
-                        .trim()
-                        .toLowerCase() ==
-                    widget.language.trim().toLowerCase()
-              : allowed.contains(languageKey(example.type)),
-        )
-        .toList(growable: false);
+    return catalog.items;
   }
 
   @override
@@ -233,6 +407,7 @@ class _TutorialList extends StatefulWidget {
     this.store,
     this.auth,
     this.settings,
+    this.selection,
   });
 
   final Tutorial tutorial;
@@ -240,16 +415,23 @@ class _TutorialList extends StatefulWidget {
   final AuthStore? auth;
   final SettingsStore? settings;
 
+  /// 合并页传入的共用筛选状态；为 null 时该页自己持有（旧页面的行为）。
+  ///
+  /// 共用状态的生命周期归调用方，本组件不得 dispose 它。
+  final _ContentFilterSelection? selection;
+
   @override
   State<_TutorialList> createState() => _TutorialListState();
 }
 
 class _TutorialListState extends State<_TutorialList> {
-  final _filter = _ContentFilterSelection();
+  late final _ContentFilterSelection _ownFilter = _ContentFilterSelection();
+
+  _ContentFilterSelection get _filter => widget.selection ?? _ownFilter;
 
   @override
   void dispose() {
-    _filter.dispose();
+    _ownFilter.dispose();
     super.dispose();
   }
 
@@ -343,6 +525,7 @@ class _ExampleCodeList extends StatefulWidget {
     this.auth,
     this.settings,
     this.examples,
+    this.selection,
   });
 
   final List<ExampleCode> items;
@@ -351,16 +534,23 @@ class _ExampleCodeList extends StatefulWidget {
   final SettingsStore? settings;
   final ExampleCodeStore? examples;
 
+  /// 合并页传入的共用筛选状态；为 null 时该页自己持有（旧页面的行为）。
+  ///
+  /// 共用状态的生命周期归调用方，本组件不得 dispose 它。
+  final _ContentFilterSelection? selection;
+
   @override
   State<_ExampleCodeList> createState() => _ExampleCodeListState();
 }
 
 class _ExampleCodeListState extends State<_ExampleCodeList> {
-  final _filter = _ContentFilterSelection();
+  late final _ContentFilterSelection _ownFilter = _ContentFilterSelection();
+
+  _ContentFilterSelection get _filter => widget.selection ?? _ownFilter;
 
   @override
   void dispose() {
-    _filter.dispose();
+    _ownFilter.dispose();
     super.dispose();
   }
 
@@ -427,6 +617,73 @@ class _ExampleCodeListState extends State<_ExampleCodeList> {
 
 String _contentLanguage(String type, String language) =>
     languageKey(language.trim().isEmpty ? type : language);
+
+/// 示例代码的一次加载结果。
+class _ExampleCatalog {
+  const _ExampleCatalog({required this.items, this.savedUnavailable = false});
+
+  final List<ExampleCode> items;
+
+  /// 本地已保存的示例读不出来；页面继续用随包目录并提示一次。
+  final bool savedUnavailable;
+}
+
+/// 教程页和示例代码页共用的示例加载：随包目录 + 本地保存 + 产品过滤。
+///
+/// 合并后两段内容走同一条路径，避免各自的过滤规则再次漂移。
+Future<_ExampleCatalog> _loadExampleCatalog({
+  required ContentRepository repository,
+  required String language,
+  ExampleCodeStore? store,
+}) async {
+  final bundled = await LocalContentAdapter.loadExamples(
+    repository: repository,
+    language: language,
+    productKey: StudioProfile.current?.productKey,
+  );
+  var savedUnavailable = false;
+  try {
+    await store?.load(defaults: bundled);
+  } on FileSystemException {
+    savedUnavailable = true;
+  }
+  final key = StudioProfile.current?.productKey;
+  final allowed = key == null || key == StudioProductCatalog.qfliStudioKey
+      ? null
+      : ContentProductTypes.byProduct[key];
+  final all = store?.items ?? bundled;
+  // 主 App 自己没有课程：`language` 等于产品 id 时返回各语言产品的合集，
+  // 交给页面筛选器。语言产品页面传的是内容语言，照常再筛一遍。
+  if (key == StudioProductCatalog.qfliStudioKey &&
+      language.trim().toLowerCase() == key) {
+    return _ExampleCatalog(
+      items: all.toList(growable: false),
+      savedUnavailable: savedUnavailable,
+    );
+  }
+  return _ExampleCatalog(
+    items: all
+        .where(
+          (example) => allowed == null
+              ? (example.language.isEmpty ? example.type : example.language)
+                        .trim()
+                        .toLowerCase() ==
+                    language.trim().toLowerCase()
+              : allowed.contains(languageKey(example.type)),
+        )
+        .toList(growable: false),
+    savedUnavailable: savedUnavailable,
+  );
+}
+
+void _showSavedExamplesUnavailable(BuildContext context) =>
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          StudioLocalizations.of(context).savedExamplesUnavailable,
+        ),
+      ),
+    );
 
 class _ContentFilterSelection {
   final query = TextEditingController();
@@ -513,9 +770,8 @@ class _ContentFilterBar extends StatelessWidget {
           ),
           if (languageChoices.isNotEmpty) ...[
             const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
+            _SingleLineChipRow(
+              key: const ValueKey('content-language-row'),
               children: [
                 ChoiceChip(
                   key: const ValueKey('content-language-all'),
@@ -541,9 +797,8 @@ class _ContentFilterBar extends StatelessWidget {
           ],
           if (levelChoices.isNotEmpty) ...[
             const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
+            _SingleLineChipRow(
+              key: const ValueKey('content-level-row'),
               children: [
                 ChoiceChip(
                   key: const ValueKey('content-level-all'),
@@ -567,11 +822,14 @@ class _ContentFilterBar extends StatelessWidget {
               ],
             ),
           ],
-          Wrap(
-            spacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
+          Row(
             children: [
-              Text(resultLabel, style: Theme.of(context).textTheme.bodyMedium),
+              Expanded(
+                child: Text(
+                  resultLabel,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
               if (selection.active)
                 TextButton.icon(
                   key: const ValueKey('content-reset'),
@@ -588,6 +846,31 @@ class _ContentFilterBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 单行横向滚动的芯片栏（R6）。
+///
+/// 芯片再多也只占一行，超出部分横向滑动，不再折行铺满屏幕。
+class _SingleLineChipRow extends StatelessWidget {
+  const _SingleLineChipRow({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    // Row 不会折行：芯片再多也只有一行，超出部分横向滑动。
+    // 高度跟着芯片文字缩放长，但不是多行。
+    scrollDirection: Axis.horizontal,
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        for (final (index, child) in children.indexed) ...[
+          if (index > 0) const SizedBox(width: 8),
+          child,
+        ],
+      ],
+    ),
+  );
 }
 
 Widget _emptyResults(BuildContext context) => Padding(

@@ -61,7 +61,7 @@ void main() {
       addTearDown(stores.dispose);
       final repository = FixtureContentRepository(fixtureCatalog());
       await _mountHome(tester, stores, repository);
-      await _selectTab(tester, 3);
+      await _selectExamplesSection(tester);
       await _waitForExamples(tester);
       await _finishFiniteAnimations(tester);
       await _expectIdle(tester, 'examples catalog');
@@ -99,11 +99,11 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       await _expectAnimating(tester);
 
-      await _selectTab(tester, 3);
+      await _selectExamplesSection(tester);
       await _waitForExamples(tester);
       await _finishFiniteAnimations(tester);
       expect(
-        find.byType(LocalTutorialsTab, skipOffstage: false),
+        find.byType(TutorialCenterPage, skipOffstage: false),
         findsOneWidget,
       );
       expect(repository.tutorialsReady.isCompleted, isFalse);
@@ -114,7 +114,7 @@ void main() {
       await _expectIdle(tester, 'detail with a retained loading tutorial');
       await tester.pageBack();
       await _finishFiniteAnimations(tester);
-      await _selectTab(tester, 2);
+      await _selectSection(tester, TutorialCenterPage.tutorialSectionKey);
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       await _expectAnimating(tester);
       expect(repository.tutorialRequests, 1);
@@ -194,8 +194,26 @@ Future<void> _selectTab(WidgetTester tester, int index) async {
     of: find.byType(NavigationBar),
     matching: find.byWidgetPredicate((widget) => widget is InkResponse),
   );
-  expect(destinations, findsNWidgets(5));
+  expect(destinations, findsNWidgets(4));
   await tester.tap(destinations.at(index));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+  await tester.pump();
+}
+
+/// Opens the shell's content page first, then its example-code section.
+///
+/// Tutorials and example code are one page (R6), so the example section is
+/// reached from the shared section switch rather than from the navigation bar.
+Future<void> _selectExamplesSection(WidgetTester tester) async {
+  if (find.byType(TutorialCenterPage).evaluate().isEmpty) {
+    await _selectTab(tester, 2);
+  }
+  await _selectSection(tester, TutorialCenterPage.examplesSectionKey);
+}
+
+Future<void> _selectSection(WidgetTester tester, Key key) async {
+  await tester.tap(find.byKey(key));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 500));
   await tester.pump();
