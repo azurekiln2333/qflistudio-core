@@ -14,14 +14,16 @@ enum ProjectScope { all, history, favorite, workspace, cloud }
 
 /// The scopes a product offers, in the order Home sorts them by default.
 ///
-/// The cloud scope is a server feature, so it follows the same switch that
-/// hides the server surfaces in general; workspaces are purely local and follow
-/// their own opt-out.
+/// This is the order the user asked for: history, workspace, all, favorite,
+/// cloud. The order is also what launch shows, so 历史项目 is the first page.
+/// The cloud scope is a server feature, so it follows the same switch that hides
+/// the server surfaces in general; workspaces are purely local and follow their
+/// own opt-out.
 List<ProjectScope> defaultProjectScopes(StudioProfile? profile) => [
-  ProjectScope.all,
   ProjectScope.history,
-  ProjectScope.favorite,
   if (profile?.supportsSavedWorkspaces ?? true) ProjectScope.workspace,
+  ProjectScope.all,
+  ProjectScope.favorite,
   // The scope only appears for networked products, matching the old rule that
   // kept it out of offline-only builds.
   if (profile?.offlineOnly != true) ProjectScope.cloud,

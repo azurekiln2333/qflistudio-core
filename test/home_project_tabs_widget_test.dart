@@ -51,11 +51,20 @@ void main() {
     if (root.existsSync()) root.deleteSync(recursive: true);
   });
 
-  testWidgets('the default tab order is local scopes first and cloud last', (
+  testWidgets('the default tab order is history first and cloud last', (
     tester,
   ) async {
     await _mount(tester, _Fixture.create(root));
-    expect(_tabLabels(tester), ['全部项目', '历史项目', '收藏项目', '工作区', '云端项目']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+  });
+
+  testWidgets('launch opens the first tab of that order', (tester) async {
+    await _mount(tester, _Fixture.create(root));
+    expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 0);
+    expect(
+      find.byKey(const ValueKey('home-scope-page-history')).hitTestable(),
+      findsOneWidget,
+    );
   });
 
   testWidgets('the cloud scope can be missing without breaking the order', (
@@ -63,7 +72,7 @@ void main() {
   ) async {
     StudioProfile.current = _profile(offlineOnly: true);
     await _mount(tester, _Fixture.create(root));
-    expect(_tabLabels(tester), ['全部项目', '历史项目', '收藏项目', '工作区']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目']);
   });
 
   testWidgets('a saved order is applied on the next build', (tester) async {
@@ -89,7 +98,7 @@ void main() {
       await _mount(tester, _Fixture.create(root), backend: backend);
       // Unknown and duplicate entries are dropped; the rest is appended in
       // default order.
-      expect(_tabLabels(tester), ['云端项目', '工作区', '全部项目', '历史项目', '收藏项目']);
+      expect(_tabLabels(tester), ['云端项目', '工作区', '历史项目', '全部项目', '收藏项目']);
       expect(tester.takeException(), isNull);
     },
   );
@@ -100,40 +109,38 @@ void main() {
     final fixture = _Fixture.create(root);
     final backend = LocalMemoryBackend();
     await _mount(tester, fixture, backend: backend);
-    expect(_tabLabels(tester).first, '全部项目');
+    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
 
     await _dragTab(tester, from: '全部项目', to: '收藏项目');
-    expect(_tabLabels(tester), ['历史项目', '收藏项目', '全部项目', '工作区', '云端项目']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '收藏项目', '全部项目', '云端项目']);
 
     final payload = jsonDecode(backend.payload!) as Map<String, dynamic>;
-    expect(payload['order'], ['history', 'favorite', 'all', 'workspace', 'cloud']);
+    expect(payload['order'], ['history', 'workspace', 'favorite', 'all', 'cloud']);
 
     // Rebuilding the page against the same storage keeps the new order.
     await tester.pumpWidget(const SizedBox.shrink());
     await _settle(tester);
     await _mount(tester, fixture, backend: backend);
-    expect(_tabLabels(tester), ['历史项目', '收藏项目', '全部项目', '工作区', '云端项目']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '收藏项目', '全部项目', '云端项目']);
   });
 
-  testWidgets('dragging a tab after the selected one keeps that tab selected', (
+  testWidgets('dragging a tab in front of the selected one keeps it selected', (
     tester,
   ) async {
     await _mount(tester, _Fixture.create(root));
-    await tester.tap(_tabFinder('历史项目'));
+    await tester.tap(_tabFinder('工作区'));
     await _settle(tester);
-    expect(
-      tester.widget<TabBar>(find.byType(TabBar)).controller!.index,
-      1,
-    );
+    expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 1);
 
-    await _dragTab(tester, from: '全部项目', to: '收藏项目');
-    // 全部项目 moved behind 历史项目, so the selected scope is now index 0.
-    expect(_tabLabels(tester), ['历史项目', '收藏项目', '全部项目', '工作区', '云端项目']);
+    // 收藏项目 moves in front of the selected tab, so the selected scope stays
+    // selected at the index it moved to rather than at the old index.
+    await _dragTab(tester, from: '收藏项目', to: '历史项目');
+    expect(_tabLabels(tester), ['收藏项目', '历史项目', '工作区', '全部项目', '云端项目']);
+    expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 2);
     expect(
-      tester.widget<TabBar>(find.byType(TabBar)).controller!.index,
-      0,
+      find.byKey(const ValueKey('home-scope-page-workspace')).hitTestable(),
+      findsOneWidget,
     );
-    expect(find.text('Alpha').hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -150,7 +157,7 @@ void main() {
     );
     await _mount(tester, _Fixture.create(root), backend: backend);
     // The store could not read yet, so the default order is what is shown.
-    expect(_tabLabels(tester), ['全部项目', '历史项目', '收藏项目', '工作区', '云端项目']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
 
     backend.release();
     await _dragTab(tester, from: '全部项目', to: '收藏项目');
