@@ -102,6 +102,9 @@ class StudioLocalizations {
   String get favoriteProjectHint => _text('favoriteProjectHint');
   String get cloudProjectHint => _text('cloudProjectHint');
   String get searchProjectHint => _text('searchProjectHint');
+
+  /// Label of the collapsed search field on the tutorial page.
+  String get searchContent => _text('searchContent');
   /// Cloud empty-state hint that points at the FAB instead of the old menu item.
   String get cloudProjectHintFab => _text('cloudProjectHintFab');
   /// Shown when the FAB is tapped on the cloud tab without a session.
@@ -247,6 +250,7 @@ class StudioLocalizations {
     'favoriteProjectHint': '在项目卡片菜单中选择「收藏」',
     'cloudProjectHint': '登录后在更多菜单中「新建云端项目」，源码自动同步到服务器',
     'searchProjectHint': '搜索项目名称或路径',
+    'searchContent': '搜索标题、简介或知识点',
     'allLanguages': '全部语言',
     'removeFromList': '从列表移除',
     'backupAndDelete': '正在压缩备份并删除…',
@@ -369,6 +373,7 @@ class StudioLocalizations {
     'favoriteProjectHint': '在專案卡片選單中選擇「收藏」',
     'cloudProjectHint': '登入後在更多選單中「建立雲端專案」，原始碼會自動同步到伺服器',
     'searchProjectHint': '搜尋專案名稱或路徑',
+    'searchContent': '搜尋標題、簡介或知識點',
     'allLanguages': '全部語言',
     'removeFromList': '從清單移除',
     'backupAndDelete': '正在壓縮備份並刪除…',
@@ -496,6 +501,7 @@ class StudioLocalizations {
     'cloudProjectHint':
         'Sign in, then create a cloud project from More; source syncs automatically.',
     'searchProjectHint': 'Search project name or path',
+    'searchContent': 'Search titles, summaries or concepts',
     'allLanguages': 'All languages',
     'removeFromList': 'Remove from list',
     'backupAndDelete': 'Compressing a backup and deleting…',

@@ -10,6 +10,7 @@ import 'package:qfli_studio_core/pages/local_content_pages.dart';
 import 'package:qfli_studio_core/services/example_code_store.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/theme/app_theme.dart';
+import 'package:qfli_studio_core/widgets/collapsed_search_field.dart';
 import 'package:qfli_studio_core/widgets/language_badge.dart';
 
 import 'support/content_catalog_fixture.dart';
@@ -361,6 +362,168 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Java example 0'), findsOneWidget);
     expect(find.text('Java lesson 0-0'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the search collapses to an icon like Home', (tester) async {
+    tester.view.physicalSize = const Size(700, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      _app(
+        TutorialCenterPage(
+          language: 'java',
+          repository: FixtureContentRepository(fixtureCatalog()),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final l10n = StudioLocalizations.of(
+      tester.element(find.byType(TutorialCenterPage)),
+    );
+    // Collapsed: the title, a magnifier action and no field anywhere.
+    expect(find.byType(CollapsedSearchButton), findsOneWidget);
+    expect(find.byType(CollapsedSearchField), findsNothing);
+    expect(find.byKey(const ValueKey('content-query')), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text(l10n.tutorial), findsWidgets);
+
+    await tester.tap(find.byType(CollapsedSearchButton));
+    await tester.pumpAndSettle();
+
+    // Expanded: the shared field sits in the app bar, the title steps aside,
+    // and the filter bar keeps only the chips.
+    expect(find.byType(CollapsedSearchField), findsOneWidget);
+    final field = find.byKey(const ValueKey('content-query'));
+    expect(field, findsOneWidget);
+    final bar = tester.getRect(find.byType(AppBar));
+    final input = tester.getRect(field);
+    expect(input.top, greaterThanOrEqualTo(bar.top));
+    expect(input.bottom, lessThanOrEqualTo(bar.bottom));
+    expect(find.byType(CollapsedSearchButton), findsNothing);
+    expect(find.byKey(const ValueKey('content-language-row')), findsOneWidget);
+
+    await tester.enterText(field, '0-0');
+    await tester.pumpAndSettle();
+    expect(find.text('Java lesson 0-0'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('collapsing the search clears the query', (tester) async {
+    tester.view.physicalSize = const Size(700, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      _app(
+        TutorialCenterPage(
+          language: 'java',
+          repository: _CountingRepository(
+            ContentCatalog.fromJson(
+              tutorialsSource: _tutorials,
+              examplesSource: _examples,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('content-language-java')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(CollapsedSearchButton));
+    await tester.pumpAndSettle();
+    final field = find.byKey(const ValueKey('content-query'));
+    await tester.enterText(field, 'java');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      'java',
+    );
+
+    final l10n = StudioLocalizations.of(
+      tester.element(find.byType(TutorialCenterPage)),
+    );
+    await tester.tap(find.byTooltip(l10n.exitSearch));
+    await tester.pumpAndSettle();
+
+    // Collapsed again, and the search words are gone with the field. The
+    // language chip stays selected: collapsing clears the query only.
+    expect(find.byType(CollapsedSearchField), findsNothing);
+    expect(find.byKey(const ValueKey('content-no-results')), findsNothing);
+    expect(
+      tester
+          .widget<ChoiceChip>(
+            find.byKey(const ValueKey('content-language-java')),
+          )
+          .selected,
+      isTrue,
+    );
+
+    // Reopening starts from an empty field, the same as Home.
+    await tester.tap(find.byType(CollapsedSearchButton));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      isEmpty,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the search and the section switch share one query', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(700, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    StudioProfile.current = const StudioProfile(
+      id: StudioProductCatalog.qfliStudioKey,
+      appTitle: StudioProductCatalog.qfliStudio,
+      templates: [],
+      productKey: StudioProductCatalog.qfliStudioKey,
+    );
+
+    await tester.pumpWidget(
+      _app(
+        TutorialCenterPage(
+          language: StudioProductCatalog.qfliStudioKey,
+          repository: _CountingRepository(
+            ContentCatalog.fromJson(
+              tutorialsSource: _tutorials,
+              examplesSource: _examples,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(CollapsedSearchButton));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('content-query')),
+      'C++',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('C++ lesson'), findsOneWidget);
+    expect(find.text('Java lesson'), findsNothing);
+
+    // Switching sections keeps the query: the example list is filtered by it.
+    await tester.tap(find.byKey(TutorialCenterPage.examplesSectionKey));
+    await tester.pumpAndSettle();
+    expect(find.text('C++ example'), findsOneWidget);
+    expect(find.text('Java example'), findsNothing);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('content-query')))
+          .controller!
+          .text,
+      'C++',
+    );
     expect(tester.takeException(), isNull);
   });
 }

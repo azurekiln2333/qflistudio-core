@@ -13,6 +13,7 @@ import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import '../services/example_code_store.dart';
 import '../widgets/code_snippet.dart';
+import '../widgets/collapsed_search_field.dart';
 import '../widgets/language_badge.dart';
 
 /// 离线语言 App 的第二页：从随包 JSON 加载入门教程。
@@ -148,6 +149,9 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
   /// 教程和示例代码共用的一份筛选状态（语言、难度、搜索词）。
   final _filter = _ContentFilterSelection();
 
+  /// 搜索栏是否展开。折叠时顶栏只显示一个搜索图标（R6，与主页同一套控件）。
+  bool _searchOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -205,6 +209,21 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
     });
   }
 
+  void _openSearch() {
+    setState(() {
+      _searchOpen = true;
+      _filter.query.clear();
+    });
+  }
+
+  /// 折叠搜索栏会清空搜索词，和主页一致。
+  void _closeSearch() {
+    setState(() {
+      _searchOpen = false;
+      _filter.query.clear();
+    });
+  }
+
   void _reportSavedExamplesUnavailable() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -215,16 +234,46 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
   @override
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
+    final labels = _ContentLabels(context);
     return Scaffold(
       appBar: AppBar(
+        // 与主页相同的折叠搜索：折叠时只有一个放大镜图标。
+        toolbarHeight: _searchOpen
+            ? collapsedSearchToolbarHeight(context)
+            : null,
+        leading: _searchOpen
+            ? IconButton(
+                tooltip: l10n.exitSearch,
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _closeSearch,
+              )
+            : null,
+        automaticallyImplyLeading: false,
         // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
         centerTitle: false,
-        title: Text(
-          l10n.tutorial,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
+        title: _searchOpen
+            ? CollapsedSearchField(
+                fieldKey: const ValueKey('content-query'),
+                controller: _filter.query,
+                label: l10n.searchContent,
+                clearTooltip: labels.clear,
+                onChanged: (_) => setState(() {}),
+              )
+            : Text(
+                l10n.tutorial,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+        actions: _searchOpen
+            ? const [SizedBox(width: 8)]
+            : [
+                CollapsedSearchButton(
+                  tooltip: l10n.searchContent,
+                  onPressed: _openSearch,
+                ),
+                const SizedBox(width: 8),
+              ],
       ),
       body: Column(
         children: [
@@ -277,6 +326,7 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
         auth: widget.auth,
         settings: widget.settings,
         selection: _filter,
+        searchInToolbar: true,
       );
     },
   );
@@ -300,6 +350,7 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
         settings: widget.settings,
         examples: widget.examples,
         selection: _filter,
+        searchInToolbar: true,
       );
     },
   );
@@ -408,6 +459,7 @@ class _TutorialList extends StatefulWidget {
     this.auth,
     this.settings,
     this.selection,
+    this.searchInToolbar = false,
   });
 
   final Tutorial tutorial;
@@ -419,6 +471,9 @@ class _TutorialList extends StatefulWidget {
   ///
   /// 共用状态归调用方所有。本组件不得 dispose 它。
   final _ContentFilterSelection? selection;
+
+  /// 搜索框已在顶栏的折叠搜索里。筛选栏不再放第二个输入框。
+  final bool searchInToolbar;
 
   @override
   State<_TutorialList> createState() => _TutorialListState();
@@ -464,6 +519,7 @@ class _TutorialListState extends State<_TutorialList> {
             levels: [for (final lesson in lessons) lesson.level],
             resultLabel: labels.lessonCount(count),
             onChanged: () => setState(() {}),
+            searchInToolbar: widget.searchInToolbar,
           );
         }
         if (rows.isEmpty) return _emptyResults(context);
@@ -526,6 +582,7 @@ class _ExampleCodeList extends StatefulWidget {
     this.settings,
     this.examples,
     this.selection,
+    this.searchInToolbar = false,
   });
 
   final List<ExampleCode> items;
@@ -538,6 +595,9 @@ class _ExampleCodeList extends StatefulWidget {
   ///
   /// 共用状态归调用方所有。本组件不得 dispose 它。
   final _ContentFilterSelection? selection;
+
+  /// 搜索框已在顶栏的折叠搜索里。筛选栏不再放第二个输入框。
+  final bool searchInToolbar;
 
   @override
   State<_ExampleCodeList> createState() => _ExampleCodeListState();
@@ -581,6 +641,7 @@ class _ExampleCodeListState extends State<_ExampleCodeList> {
             levels: [for (final example in widget.items) example.level],
             resultLabel: l10n.examplesCount(items.length),
             onChanged: () => setState(() {}),
+            searchInToolbar: widget.searchInToolbar,
           );
         }
         if (items.isEmpty) return _emptyResults(context);
@@ -722,6 +783,7 @@ class _ContentFilterBar extends StatelessWidget {
     required this.levels,
     required this.resultLabel,
     required this.onChanged,
+    this.searchInToolbar = false,
   });
 
   final _ContentFilterSelection selection;
@@ -729,6 +791,9 @@ class _ContentFilterBar extends StatelessWidget {
   final List<String> levels;
   final String resultLabel;
   final VoidCallback onChanged;
+
+  /// 顶栏的折叠搜索已经提供输入框。筛选栏只留语言栏、难度栏和统计行。
+  final bool searchInToolbar;
 
   @override
   Widget build(BuildContext context) {
@@ -747,27 +812,28 @@ class _ContentFilterBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
-            key: const ValueKey('content-query'),
-            controller: selection.query,
-            onChanged: (_) => onChanged(),
-            textInputAction: TextInputAction.search,
-            decoration: InputDecoration(
-              labelText: labels.search,
-              prefixIcon: const Icon(Icons.search),
-              border: const OutlineInputBorder(),
-              suffixIcon: selection.query.text.isEmpty
-                  ? null
-                  : IconButton(
-                      tooltip: labels.clear,
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        selection.query.clear();
-                        onChanged();
-                      },
-                    ),
+          if (!searchInToolbar)
+            TextField(
+              key: const ValueKey('content-query'),
+              controller: selection.query,
+              onChanged: (_) => onChanged(),
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                labelText: labels.search,
+                prefixIcon: const Icon(Icons.search),
+                border: const OutlineInputBorder(),
+                suffixIcon: selection.query.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: labels.clear,
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          selection.query.clear();
+                          onChanged();
+                        },
+                      ),
+              ),
             ),
-          ),
           if (languageChoices.isNotEmpty) ...[
             const SizedBox(height: 10),
             _SingleLineChipRow(
