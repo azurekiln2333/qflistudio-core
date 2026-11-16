@@ -25,17 +25,27 @@ void main() {
     productKey: StudioProductCatalog.jvmxKey,
   );
 
+  // The user's order: history, workspace, all, favorite, cloud.
   const localOrder = [
-    ProjectScope.all,
     ProjectScope.history,
-    ProjectScope.favorite,
     ProjectScope.workspace,
+    ProjectScope.all,
+    ProjectScope.favorite,
     ProjectScope.cloud,
   ];
 
   group('default order', () {
-    test('a networked product offers local scopes first and cloud last', () {
+    test('a networked product lists history first and cloud last', () {
       expect(defaultProjectScopes(profile()), localOrder);
+    });
+
+    test('history is the first tab, so it is the page shown at launch', () {
+      expect(defaultProjectScopes(profile()).first, ProjectScope.history);
+      expect(defaultProjectScopes(profile(offlineOnly: true)).first, ProjectScope.history);
+      expect(
+        defaultProjectScopes(profile(supportsSavedWorkspaces: false)).first,
+        ProjectScope.history,
+      );
     });
 
     test('no saved order resolves to the default order', () {
@@ -43,17 +53,21 @@ void main() {
     });
 
     test('an offline-only product drops the cloud scope', () {
-      expect(
-        defaultProjectScopes(profile(offlineOnly: true)),
-        [ProjectScope.all, ProjectScope.history, ProjectScope.favorite, ProjectScope.workspace],
-      );
+      expect(defaultProjectScopes(profile(offlineOnly: true)), [
+        ProjectScope.history,
+        ProjectScope.workspace,
+        ProjectScope.all,
+        ProjectScope.favorite,
+      ]);
     });
 
     test('a product without saved workspaces drops the workspace scope', () {
-      expect(
-        defaultProjectScopes(profile(supportsSavedWorkspaces: false)),
-        [ProjectScope.all, ProjectScope.history, ProjectScope.favorite, ProjectScope.cloud],
-      );
+      expect(defaultProjectScopes(profile(supportsSavedWorkspaces: false)), [
+        ProjectScope.history,
+        ProjectScope.all,
+        ProjectScope.favorite,
+        ProjectScope.cloud,
+      ]);
     });
   });
 
@@ -92,9 +106,9 @@ void main() {
         resolveProjectScopes(const [ProjectScope.favorite], localOrder),
         const [
           ProjectScope.favorite,
-          ProjectScope.all,
           ProjectScope.history,
           ProjectScope.workspace,
+          ProjectScope.all,
           ProjectScope.cloud,
         ],
       );
@@ -109,8 +123,8 @@ void main() {
         const [
           ProjectScope.history,
           ProjectScope.all,
-          ProjectScope.favorite,
           ProjectScope.workspace,
+          ProjectScope.favorite,
           ProjectScope.cloud,
         ],
       );
@@ -136,12 +150,12 @@ void main() {
       ProjectScope.all,
     ];
     // What the default order looked like, and the same list after dragging
-    // 全部项目 from the front onto 收藏项目.
+    // 全部项目 from its slot onto 收藏项目.
     const draggedAll = [
       ProjectScope.history,
+      ProjectScope.workspace,
       ProjectScope.favorite,
       ProjectScope.all,
-      ProjectScope.workspace,
       ProjectScope.cloud,
     ];
 
@@ -167,10 +181,10 @@ void main() {
     test('a scope dragged to the front goes in front of the saved order', () {
       const next = [
         ProjectScope.cloud,
-        ProjectScope.all,
         ProjectScope.history,
-        ProjectScope.favorite,
         ProjectScope.workspace,
+        ProjectScope.all,
+        ProjectScope.favorite,
       ];
       expect(
         mergeProjectScopeOrder(

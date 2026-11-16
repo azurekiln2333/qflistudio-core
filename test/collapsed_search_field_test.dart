@@ -18,6 +18,7 @@ import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/widgets/collapsed_search_field.dart';
+import 'package:qfli_studio_core/widgets/project_card.dart';
 import 'package:qfli_studio_core/theme/app_theme.dart';
 
 /// Home search collapsed behind an icon (R5).
@@ -92,7 +93,7 @@ void main() {
     final field = find.byKey(const ValueKey('home-project-search-field'));
     await tester.enterText(field, 'alpha');
     await _settle(tester);
-    expect(_visibleNames(tester), ['Alpha']);
+    expect(_visibleNames(tester), unorderedEquals(['Alpha']));
 
     await tester.enterText(field, 'nothing-matches');
     await _settle(tester);
@@ -102,8 +103,32 @@ void main() {
     // The clear button empties the query without collapsing the bar.
     await tester.tap(find.byTooltip('清屏'));
     await _settle(tester);
-    expect(_visibleNames(tester), ['Alpha', 'Beta']);
+    expect(_visibleNames(tester), unorderedEquals(['Alpha', 'Beta']));
     expect(find.byType(CollapsedSearchField), findsOneWidget);
+    fixture.dispose();
+  });
+
+  testWidgets('searching shows the all-projects list, not the current tab', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester, root);
+    // The first tab is 历史项目, which lists projects in store order and has no
+    // language chips. Only the all-projects scope has the chips and sorts by
+    // name, so those two facts tell the lists apart.
+    expect(
+      find.byKey(const ValueKey('home-scope-page-history')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.byType(FilterChip), findsNothing);
+    final byName = [..._visibleNames(tester)]..sort();
+    expect(byName, ['Alpha', 'Beta']);
+    expect(_visibleNames(tester), isNot(equals(byName)));
+
+    await tester.tap(find.byType(CollapsedSearchButton));
+    await _settle(tester);
+    expect(find.byType(TabBar), findsNothing);
+    expect(find.byType(FilterChip), findsWidgets);
+    expect(_visibleNames(tester), byName);
     fixture.dispose();
   });
 
@@ -134,15 +159,16 @@ void main() {
     await tester.tap(find.byTooltip('退出搜索'));
     await _settle(tester);
     expect(find.byType(CollapsedSearchField), findsNothing);
-    expect(_visibleNames(tester), ['Alpha', 'Beta']);
-    // Reopening starts from an empty field.
+    expect(_visibleNames(tester), unorderedEquals(['Alpha', 'Beta']));
+    // Reopening starts from an empty field, and the unfiltered all-projects
+    // list is back.
     await tester.tap(find.byType(CollapsedSearchButton));
     await _settle(tester);
     final field = tester.widget<TextField>(
       find.byKey(const ValueKey('home-project-search-field')),
     );
     expect(field.controller!.text, isEmpty);
-    expect(_visibleNames(tester), ['Alpha', 'Beta']);
+    expect(_visibleNames(tester), unorderedEquals(['Alpha', 'Beta']));
     fixture.dispose();
   });
 
@@ -165,13 +191,15 @@ void main() {
   }
 }
 
+/// Names of the project cards on screen right now.
+///
+/// Reads the cards rather than the text widgets, so a neighbouring page that
+/// [TabBarView] keeps alive cannot contribute names to the result.
 List<String> _visibleNames(WidgetTester tester) => [
   for (final element in find
-      .descendant(of: find.byType(ListView), matching: find.byType(Text))
+      .byType(ProjectCard, skipOffstage: true)
       .evaluate())
-    if ((element.widget as Text).data == 'Alpha' ||
-        (element.widget as Text).data == 'Beta')
-      (element.widget as Text).data!,
+    (element.widget as ProjectCard).project.name,
 ];
 
 Future<_Fixture> _mount(

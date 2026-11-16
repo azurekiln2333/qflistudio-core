@@ -179,8 +179,8 @@ void main() {
           if (call.method == 'readUri') return bytes;
           return null;
         });
-        // Import switches back to All so the new unstarred project is visible
-        // even if the user starts the flow while browsing Favorites.
+        // 收藏项目 is not the first tab, so this also proves the jump after an
+        // import is a scope lookup rather than "go to the first tab".
         await tester.tap(find.text('收藏项目'));
         await _settle(tester);
         await _import(tester);
@@ -195,6 +195,16 @@ void main() {
         await _settle(tester);
         expect(extensions, ['qsz']);
         expect(find.text('Imported').hitTestable(), findsOneWidget);
+        // The imported project is unstarred, so it can only be on screen if the
+        // flow really switched to the all-projects scope.
+        expect(
+          tester.widget<TabBar>(find.byType(TabBar)).controller!.index,
+          2,
+        );
+        expect(
+          find.byKey(const ValueKey('home-scope-page-all')).hitTestable(),
+          findsOneWidget,
+        );
         expect(find.byType(EditorPage), findsNothing);
         final registered = fixture.projects.projects.singleWhere(
           (project) => project.name == 'Imported',
