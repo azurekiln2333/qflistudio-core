@@ -102,9 +102,9 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
 
 /// 教程与示例代码的合并页（R6）。
 ///
-/// 顶栏标题是「教程」；一条语言栏由教程和示例代码共用；两段内容在同一页内切换。
-/// 语言和搜索词在切换后保留，难度回到「全部」——难度选项按当前栏目计算。
-/// 每段各自加载，一段慢不阻塞另一段。
+/// 顶栏标题是「教程」。一条语言栏由教程和示例代码共用。两段内容在同一页内切换。
+/// 语言和搜索词在切换后保留。难度回到「全部」，因为难度选项按当前栏目计算。
+/// 每段各自加载。一段慢不阻塞另一段。
 class TutorialCenterPage extends StatefulWidget {
   const TutorialCenterPage({
     super.key,
@@ -125,10 +125,10 @@ class TutorialCenterPage extends StatefulWidget {
   final ExampleCodeStore? examples;
   final TutorialCenterSection initialSection;
 
-  /// 栏目标签栏的键：教程段。
+  /// 教程段的栏目标签键。
   static const tutorialSectionKey = ValueKey('tutorial-center-tutorial');
 
-  /// 栏目标签栏的键：示例代码段。
+  /// 示例代码段的栏目标签键。
   static const examplesSectionKey = ValueKey('tutorial-center-examples');
 
   @override
@@ -415,9 +415,9 @@ class _TutorialList extends StatefulWidget {
   final AuthStore? auth;
   final SettingsStore? settings;
 
-  /// 合并页传入的共用筛选状态；为 null 时该页自己持有（旧页面的行为）。
+  /// 合并页传入的共用筛选状态。为 null 时该页自己持有，即旧页面的行为。
   ///
-  /// 共用状态的生命周期归调用方，本组件不得 dispose 它。
+  /// 共用状态归调用方所有。本组件不得 dispose 它。
   final _ContentFilterSelection? selection;
 
   @override
@@ -534,9 +534,9 @@ class _ExampleCodeList extends StatefulWidget {
   final SettingsStore? settings;
   final ExampleCodeStore? examples;
 
-  /// 合并页传入的共用筛选状态；为 null 时该页自己持有（旧页面的行为）。
+  /// 合并页传入的共用筛选状态。为 null 时该页自己持有，即旧页面的行为。
   ///
-  /// 共用状态的生命周期归调用方，本组件不得 dispose 它。
+  /// 共用状态归调用方所有。本组件不得 dispose 它。
   final _ContentFilterSelection? selection;
 
   @override
@@ -624,13 +624,13 @@ class _ExampleCatalog {
 
   final List<ExampleCode> items;
 
-  /// 本地已保存的示例读不出来；页面继续用随包目录并提示一次。
+  /// 本地已保存的示例读不出来。页面继续用随包目录，并提示一次。
   final bool savedUnavailable;
 }
 
 /// 教程页和示例代码页共用的示例加载：随包目录 + 本地保存 + 产品过滤。
 ///
-/// 合并后两段内容走同一条路径，避免各自的过滤规则再次漂移。
+/// 合并后两段内容走同一条路径。各自的过滤规则不会再漂移。
 Future<_ExampleCatalog> _loadExampleCatalog({
   required ContentRepository repository,
   required String language,
@@ -850,7 +850,7 @@ class _ContentFilterBar extends StatelessWidget {
 
 /// 单行横向滚动的芯片栏（R6）。
 ///
-/// 芯片再多也只占一行，超出部分横向滑动，不再折行铺满屏幕。
+/// 芯片再多也只占一行。超出部分横向滑动，不折行铺满屏幕。
 class _SingleLineChipRow extends StatelessWidget {
   const _SingleLineChipRow({super.key, required this.children});
 
@@ -858,8 +858,8 @@ class _SingleLineChipRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
-    // Row 不会折行：芯片再多也只有一行，超出部分横向滑动。
-    // 高度跟着芯片文字缩放长，但不是多行。
+    // Row 不会折行。芯片再多也只有一行，超出部分横向滑动。
+    // 高度跟随文字缩放，行数不增加。
     scrollDirection: Axis.horizontal,
     child: Row(
       crossAxisAlignment: CrossAxisAlignment.center,
