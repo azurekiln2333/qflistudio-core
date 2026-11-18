@@ -2,110 +2,52 @@ import 'package:flutter/material.dart';
 
 import '../../shell/workbench_state.dart';
 
-/// 「文件 | 会话」切换控件，渲染在侧边栏卡片的标题行里。
+/// 「文件 ↔ 会话」切换按钮，落在侧边栏卡片的标题行右端。
 ///
-/// 每个分段至少 44×44，颜色只用主题 token。标题栏要和项目名、新建、搜索、
-/// 刷新共用一行，所以这里固定紧凑样式；文字只在确实放得下时显示，否则只留
-/// 图标加 tooltip，避免把标签挤成两行。
+/// 只画一个普通图标按钮。按钮指向「另一个」分段：当前在文件段就切到会话段，
+/// 当前在会话段就切到文件段。视觉与相邻的标题行动作完全一致：20 图标、
+/// 44×44 触摸目标、零内边距、标准视觉密度、收缩触摸目标。这里不画边框、
+/// 不加选中底色、不显示文字。
 class SidebarSectionSwitch extends StatelessWidget {
   const SidebarSectionSwitch({
     super.key,
     required this.section,
     required this.onChanged,
-    this.showLabels = false,
   });
 
+  /// 当前所在的分段。
   final SidebarSection section;
-  final ValueChanged<SidebarSection> onChanged;
 
-  /// 是否显示文字。标题栏空间紧张时只显示图标。
-  final bool showLabels;
+  final ValueChanged<SidebarSection> onChanged;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    // 自绘两段切换控件：Material 的 SegmentedButton 会强制留出 56 宽，
-    // 280 宽的侧边栏放不下，所以直接画两个 44×44 的方框。
-    return Container(
+    // 按钮的目标是另一个分段。
+    final target = section == SidebarSection.files
+        ? SidebarSection.sessions
+        : SidebarSection.files;
+    final toSessions = target == SidebarSection.sessions;
+    return IconButton(
       key: const ValueKey('editor-sidebar-section-switch'),
-      // 外框描边占 1px，容器 46 才能让里层触摸目标真的达到 44。
-      height: 46,
-      decoration: BoxDecoration(
-        border: Border.all(color: scheme.outlineVariant),
-        borderRadius: BorderRadius.circular(22),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _segment(
-            context,
-            section: SidebarSection.files,
-            icon: Icons.folder_outlined,
-            label: '文件',
-            iconKey: const ValueKey('editor-sidebar-section-files'),
-          ),
-          _segment(
-            context,
-            section: SidebarSection.sessions,
-            icon: Icons.forum_outlined,
-            label: '会话',
-            iconKey: const ValueKey('editor-sidebar-section-sessions'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _segment(
-    BuildContext context, {
-    required SidebarSection section,
-    required IconData icon,
-    required String label,
-    required Key iconKey,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    final selected = this.section == section;
-    return Tooltip(
-      message: label,
-      child: Semantics(
-        button: true,
-        selected: selected,
-        label: label,
-        child: InkWell(
-          onTap: () => onChanged(section),
-          child: Container(
-            // 44×44 的触摸目标，不给标签留挤压空间。
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-            padding: const EdgeInsets.symmetric(horizontal: 2),
-            alignment: Alignment.center,
-            color: selected ? scheme.secondaryContainer : null,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  icon,
-                  key: iconKey,
-                  size: 18,
-                  color: selected
-                      ? scheme.onSecondaryContainer
-                      : scheme.onSurfaceVariant,
-                ),
-                if (showLabels) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    label,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
+      tooltip: toSessions ? '切换到会话' : '切换到文件',
+      icon: Icon(
+        toSessions ? Icons.forum_outlined : Icons.folder_outlined,
+        // 子键标记目标分段，测试按目标找按钮。
+        key: ValueKey(
+          toSessions
+              ? 'editor-sidebar-section-sessions'
+              : 'editor-sidebar-section-files',
         ),
+      ),
+      iconSize: 20,
+      onPressed: () => onChanged(target),
+      // 与相邻标题行动作同一套几何参数：明确的 44×44、零内边距、
+      // 标准视觉密度，并把触摸目标收缩，避免被撑成 48。
+      style: IconButton.styleFrom(
+        fixedSize: const Size(44, 44),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.standard,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
     );
   }

@@ -1489,7 +1489,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     return _buildExplorerCard(
       context,
       onFileOpened: onFileOpened,
-      headerLeading: sectionSwitch(),
+      headerTrailing: sectionSwitch(),
       sections: FileExplorerSections(
         state: host.state,
         // 未激活时给出「会话」分段，点它才开始解析运行时；未解析好时主体
@@ -3862,11 +3862,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   Widget _buildExplorerCard(
     BuildContext context, {
     VoidCallback? onFileOpened,
-    Widget? headerLeading,
+    Widget? headerTrailing,
     FileExplorerSections? sections,
   }) {
     return FileExplorer(
-      headerLeading: headerLeading,
+      headerTrailing: headerTrailing,
       sections: sections,
       project: widget.project,
       editor: _editor,

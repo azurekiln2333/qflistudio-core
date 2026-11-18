@@ -166,26 +166,28 @@ void main() {
       expect(find.byType(AiPanel), findsOneWidget);
     });
 
-    testWidgets('开启：分段在侧边栏卡片标题行内，「AI 助手」开 Agent 面板', (tester) async {
+    testWidgets('开启：切换键在侧边栏卡片标题行内，「AI 助手」开 Agent 面板', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
-      final strip = find.byKey(const ValueKey('editor-sidebar-section-switch'));
-      expect(strip, findsOneWidget);
-      final stripRect = tester.getRect(strip);
+      final toggle = find.byKey(
+        const ValueKey('editor-sidebar-section-switch'),
+      );
+      expect(toggle, findsOneWidget);
+      final toggleRect = tester.getRect(toggle);
       final explorerRect = tester.getRect(find.byType(FileExplorer).first);
 
       expect(
-        stripRect.top,
+        toggleRect.top,
         greaterThanOrEqualTo(explorerRect.top),
-        reason: '分段要在文件树卡片内部，不再是卡片之上的独立条',
+        reason: '切换键要在文件树卡片内部，不再是卡片之上的独立条',
       );
       expect(
-        stripRect.bottom,
+        toggleRect.bottom,
         lessThan(explorerRect.top + 56),
-        reason: '分段要和卡片标题行同一行',
+        reason: '切换键要和卡片标题行同一行',
       );
-      expect(stripRect.left, lessThan(300), reason: '分段在侧边栏，不在顶栏');
+      expect(toggleRect.left, lessThan(300), reason: '切换键在侧边栏，不在顶栏');
 
       await _openMoreMenu(tester, 'AI 助手');
 
@@ -195,7 +197,7 @@ void main() {
   });
 
   group('布局', () {
-    testWidgets('宽屏有 Agent 入口与「文件 | 会话」分段', (tester) async {
+    testWidgets('宽屏有 Agent 入口与右侧切换键', (tester) async {
       await mount(tester);
 
       expect(find.byKey(const ValueKey('editor-agent-toggle')), findsOneWidget);
@@ -203,6 +205,7 @@ void main() {
         find.byKey(const ValueKey('editor-sidebar-section-switch')),
         findsOneWidget,
       );
+      // 文件模式下，切换键指向会话。
       expect(
         find.byKey(const ValueKey('editor-sidebar-section-sessions')),
         findsOneWidget,
@@ -472,9 +475,7 @@ void main() {
 
       await mount(tester);
       await _openSidebar(tester);
-      await tester.tap(
-        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
-      );
+      await tester.tap(_toggleTarget(tester));
       await pumpFrames(tester);
 
       expect(find.byType(SessionListView), findsOneWidget);
@@ -503,9 +504,7 @@ void main() {
     testWidgets('空会话列表给出说明和主操作', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
-      await tester.tap(
-        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
-      );
+      await tester.tap(_toggleTarget(tester));
       await pumpFrames(tester);
 
       expect(find.text('还没有会话'), findsOneWidget);
@@ -559,12 +558,16 @@ void main() {
         findsNothing,
       );
 
-      // 窄屏的抽屉里也不许出现分段：离线产品没有会话可言。
+      // 窄屏的抽屉里也不许出现切换键：离线产品没有会话可言。
       await mount(tester, size: const Size(500, 900));
       await tester.tap(find.byTooltip('打开文件树'));
       await pumpFrames(tester);
       expect(
         find.byKey(const ValueKey('editor-sidebar-section-switch')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
         findsNothing,
       );
     });
@@ -578,8 +581,14 @@ void main() {
       expect(
         find.byKey(const ValueKey('editor-sidebar-section-switch')),
         findsOneWidget,
-        reason: '分段在，但还没有解析运行时',
+        reason: '切换键在，但还没有解析运行时',
       );
+      // 还没解析运行时，会话列表还不存在，切换目标仍指向会话。
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsOneWidget,
+      );
+      expect(find.byType(SessionListView), findsNothing);
     });
 
     testWidgets('未登录时对话流显示登录引导，不发错误', (tester) async {
@@ -617,59 +626,80 @@ void main() {
       expect(notified, 1);
     });
   });
-  group('侧边栏分段在卡片标题行内', () {
-    testWidgets('文件段：分段与文件动作同行可达', (tester) async {
+  group('侧边栏标题行的单一切换键', () {
+    testWidgets('文件模式：切换键在最右，目标是会话', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
-      final switchFinder = find.byKey(
-        const ValueKey('editor-sidebar-section-switch'),
-      );
-      expect(switchFinder, findsOneWidget);
-
       final card = tester.getRect(find.byType(FileExplorer).first);
-      final switchRect = tester.getRect(switchFinder);
-      // 同一张卡片、同一个标题行，不是卡片之外的第二条。
-      expect(switchRect.top, greaterThanOrEqualTo(card.top));
-      expect(switchRect.bottom, lessThanOrEqualTo(card.top + 56));
+      final root = find.byKey(const ValueKey('editor-sidebar-section-switch'));
+      expect(root, findsOneWidget);
+      final rootRect = tester.getRect(root);
+      // 同一张卡片、同一个标题行。
+      expect(rootRect.top, greaterThanOrEqualTo(card.top));
+      expect(rootRect.bottom, lessThanOrEqualTo(card.top + 56));
 
-      expect(find.byTooltip('新建文件'), findsOneWidget);
-      // 侧边栏只有 280 宽，其余文件动作在溢出菜单里，仍然可达。
+      // 只画一个目标，不再两段并排。
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-files')),
+        findsNothing,
+        reason: '文件模式下切换键指向会话，不应再并排画两段',
+      );
+
+      // 最右：在所有标题动作的右边。
+      final newFile = _headerAction('新建文件');
+      expect(
+        rootRect.left,
+        greaterThanOrEqualTo(tester.getRect(newFile).right),
+        reason: '切换键排在最右端',
+      );
+
+      // 上下文动作：文件动作在，会话动作不混进来。
       expect(find.byKey(const ValueKey('file-explorer-more')), findsOneWidget);
-      // 会话动作不混进来。
       expect(find.byKey(const ValueKey('session-new')), findsNothing);
       expect(find.byKey(const ValueKey('session-list-menu')), findsNothing);
     });
 
-    testWidgets('会话段：同一个卡片外框，会话动作替换文件动作', (tester) async {
+    testWidgets('会话模式：同一卡片、同一位置，目标反过来变文件', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
       final cardBefore = tester.getRect(find.byType(FileExplorer).first);
-
-      await tester.tap(
-        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+      final rootBefore = tester.getRect(
+        find.byKey(const ValueKey('editor-sidebar-section-switch')),
       );
+
+      await tester.tap(_toggleTarget(tester));
       await pumpFrames(tester);
 
-      // 外框还是同一个：左边和宽度没有变，也没有第二张卡片。
+      // 外框还是同一个，不是第二张卡片。
       final cardAfter = tester.getRect(find.byType(FileExplorer));
       expect(cardAfter.left, cardBefore.left);
       expect(cardAfter.width, cardBefore.width);
-      expect(
+
+      // 切换键位置不跳，只是目标反了。
+      final rootAfter = tester.getRect(
         find.byKey(const ValueKey('editor-sidebar-section-switch')),
+      );
+      expect(rootAfter.left, moreOrLessEquals(rootBefore.left, epsilon: 0.5));
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-files')),
         findsOneWidget,
-        reason: '会话段仍要能切回文件',
+      );
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsNothing,
       );
 
-      // 会话动作可达。
+      // 会话动作可达，文件动作不再显示。
       expect(find.byKey(const ValueKey('session-new')), findsOneWidget);
       expect(find.byKey(const ValueKey('session-list-menu')), findsOneWidget);
-
-      // 文件动作不再显示，两个模式互不混杂。
-      expect(find.byTooltip('新建文件'), findsNothing);
-      expect(find.byTooltip('搜索文件'), findsNothing);
       expect(find.byKey(const ValueKey('file-explorer-more')), findsNothing);
+      expect(find.byTooltip('新建文件'), findsNothing);
 
       // 会话主体在卡片内部。
       expect(find.byType(SessionListView), findsOneWidget);
@@ -679,43 +709,82 @@ void main() {
       );
     });
 
-    testWidgets('会话段可以切回文件段，文件动作恢复', (tester) async {
+    testWidgets('再点一次切回文件模式，文件动作恢复', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
-      await tester.tap(
-        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
-      );
+      await tester.tap(_toggleTarget(tester));
       await pumpFrames(tester);
-      await tester.tap(
-        find.byKey(const ValueKey('editor-sidebar-section-files')),
-      );
+      await tester.tap(_toggleTarget(tester));
       await pumpFrames(tester);
 
       expect(find.byTooltip('新建文件'), findsOneWidget);
       expect(find.byKey(const ValueKey('session-new')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsOneWidget,
+      );
     });
 
-    testWidgets('分段触摸目标不小于 44', (tester) async {
+    // 真实渲染尺寸：只声明最小约束时控件会被默认尺寸撑大，所以这里直接量出来。
+    testWidgets('两种模式的标题动作与切换键都是 44×44、图标 20', (tester) async {
       await mount(tester);
       await _openSidebar(tester);
 
-      for (final key in const [
-        'editor-sidebar-section-files',
-        'editor-sidebar-section-sessions',
-      ]) {
-        final hit = tester.getSize(
-          find
-              .ancestor(
-                of: find.byKey(ValueKey(key)),
-                matching: find.byType(InkWell),
-              )
-              .first,
-        );
-        expect(hit.height, greaterThanOrEqualTo(44), reason: '$key 高度');
-        expect(hit.width, greaterThanOrEqualTo(44), reason: '$key 宽度');
-      }
+      final filesToggle = tester.getSize(_toggleTarget(tester));
+      _expectHeaderTarget(tester, _headerAction('新建文件'), '文件模式 新建文件');
+      _expectHeaderTarget(
+        tester,
+        find.byKey(const ValueKey('file-explorer-more')),
+        '文件模式 溢出菜单',
+      );
+      _expectHeaderTarget(tester, _toggleTarget(tester), '文件模式 切换键');
+
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+
+      final sessionsToggle = tester.getSize(_toggleTarget(tester));
+      _expectHeaderTarget(
+        tester,
+        find.byKey(const ValueKey('session-new')),
+        '会话模式 新会话',
+      );
+      _expectHeaderTarget(
+        tester,
+        find.byKey(const ValueKey('session-list-menu')),
+        '会话模式 会话菜单',
+      );
+      _expectHeaderTarget(tester, _toggleTarget(tester), '会话模式 切换键');
+
+      // 两种模式下切换键尺寸完全一致。
+      expect(sessionsToggle, filesToggle);
     });
+
+    // 窄侧边栏 + 字缩放 1.3：切换键不能缩水，也不能把动作挤没。
+    for (final (label, size) in const [
+      ('280 宽', Size(500, 900)),
+      ('320 宽', Size(560, 900)),
+    ]) {
+      testWidgets('$label · 字缩放 1.3：切换键仍 44×44 且能双向切', (tester) async {
+        await mount(tester, size: size, textScale: 1.3);
+        await _openSidebar(tester);
+
+        _expectHeaderTarget(tester, _toggleTarget(tester), '$label 切换键');
+        expect(
+          find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+          findsOneWidget,
+        );
+
+        await tester.tap(_toggleTarget(tester));
+        await pumpFrames(tester);
+
+        expect(
+          find.byKey(const ValueKey('editor-sidebar-section-files')),
+          findsOneWidget,
+        );
+        _expectHeaderTarget(tester, _toggleTarget(tester), '$label 会话模式切换键');
+      });
+    }
   });
 
   group('窄侧边栏标题行', () {
@@ -734,13 +803,19 @@ void main() {
       // 新建文件夹与刷新一定在溢出菜单里，而不是消失。
       expect(find.byTooltip('新建文件夹'), findsNothing);
       expect(find.byTooltip('刷新'), findsNothing);
+      // 搜索按剩余宽度决定就地还是进菜单，两条路都算可达。
+      final searchInline = find.byTooltip('搜索文件').evaluate().isNotEmpty;
       final more = find.byKey(const ValueKey('file-explorer-more'));
       expect(more, findsOneWidget);
       await tester.tap(more);
       await tester.pumpAndSettle();
       expect(find.text('新建文件夹'), findsOneWidget);
       expect(find.text('刷新'), findsOneWidget);
-      expect(find.text('搜索文件'), findsOneWidget, reason: '最窄时搜索仍可达');
+      if (searchInline) {
+        expect(find.text('搜索文件'), findsNothing, reason: '就地可达就不重复进菜单');
+      } else {
+        expect(find.text('搜索文件'), findsOneWidget, reason: '最窄时搜索仍可达');
+      }
     });
 
     // 两种宽度 × 字缩放 1.3，都要保证项目选择器可用、所有操作可达。
@@ -796,7 +871,7 @@ void main() {
   });
 
   group('共享标题行', () {
-    testWidgets('SidebarSectionSwitch 只画两个分段且不高出 44', (tester) async {
+    testWidgets('SidebarSectionSwitch 是单个图标按钮，点一下换到另一边', (tester) async {
       var current = SidebarSection.files;
       await tester.pumpWidget(
         MaterialApp(
@@ -810,17 +885,76 @@ void main() {
           ),
         ),
       );
-      final rect = tester.getRect(
-        find.byKey(const ValueKey('editor-sidebar-section-switch')),
-      );
-      expect(rect.height, lessThanOrEqualTo(48));
-      await tester.tap(
+
+      final root = find.byKey(const ValueKey('editor-sidebar-section-switch'));
+      expect(root, findsOneWidget);
+
+      // 普通图标按钮，不是自绘的两段条。
+      expect(tester.widget(_toggleTarget(tester)), isA<IconButton>());
+      _expectHeaderTarget(tester, _toggleTarget(tester), '独立切换键');
+
+      // 文件模式下只有指向会话的那一个 key。
+      expect(
         find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsOneWidget,
       );
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-files')),
+        findsNothing,
+      );
+
+      await tester.tap(_toggleTarget(tester));
       await tester.pumpAndSettle();
       expect(current, SidebarSection.sessions);
+
+      // 目标反过来。
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-files')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('editor-sidebar-section-sessions')),
+        findsNothing,
+      );
     });
   });
+}
+
+/// 标题行里由 tooltip 定位的动作按钮。
+Finder _headerAction(String tooltip) => find
+    .ancestor(of: find.byTooltip(tooltip), matching: find.byType(IconButton))
+    .first;
+
+/// 切换键的可点目标：根 key 可能就在 IconButton 上，也可能包在它外面。
+Finder _toggleTarget(WidgetTester tester) {
+  final root = find.byKey(const ValueKey('editor-sidebar-section-switch'));
+  expect(root, findsOneWidget);
+  final inner = find.descendant(of: root, matching: find.byType(IconButton));
+  if (inner.evaluate().isNotEmpty) return inner.first;
+  final outer = find.ancestor(of: root, matching: find.byType(IconButton));
+  if (outer.evaluate().isNotEmpty) return outer.first;
+  return root;
+}
+
+/// 量真实渲染尺寸：只写最小约束时，控件会被默认尺寸撑大，
+/// 所以这里比对等值而不是下限。
+void _expectHeaderTarget(WidgetTester tester, Finder target, String label) {
+  final size = tester.getSize(target);
+  expect(size.width, moreOrLessEquals(44, epsilon: 0.01), reason: '$label 宽度');
+  expect(size.height, moreOrLessEquals(44, epsilon: 0.01), reason: '$label 高度');
+  final icons = find.descendant(of: target, matching: find.byType(Icon));
+  expect(icons, findsOneWidget, reason: '$label 应该只有一个图标');
+  final iconSize = tester.getSize(icons);
+  expect(
+    iconSize.width,
+    moreOrLessEquals(20, epsilon: 0.01),
+    reason: '$label 图标宽度',
+  );
+  expect(
+    iconSize.height,
+    moreOrLessEquals(20, epsilon: 0.01),
+    reason: '$label 图标高度',
+  );
 }
 
 /// 记录路由推入次数。

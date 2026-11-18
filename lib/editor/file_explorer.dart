@@ -47,14 +47,15 @@ class FileExplorer extends StatefulWidget {
     this.workspaceStore,
     this.onWorkspaceChanged,
     this.onProjectSelected,
-    this.headerLeading,
+    this.headerTrailing,
     this.sections,
   });
 
-  /// 标题栏最左侧的控件，例如「文件 | 会话」分段。
+  /// 标题栏最右侧的控件：文件/会话切换按钮。
   ///
-  /// 放在卡片自己的标题行里，不额外加一条外层工具栏，这样只有一层标题。
-  final Widget? headerLeading;
+  /// 放在项目选择器之后、所有动作按钮的最右边，与相邻动作同一个触摸尺寸。
+  /// 标题栏里只有这一行，没有独立的分段条。
+  final Widget? headerTrailing;
 
   /// 有值时这个卡片同时装载「文件」和「会话」两种主体。
   ///
@@ -1325,11 +1326,12 @@ class _FileExplorerState extends State<FileExplorer> {
             child: Row(
               children: [
                 const SizedBox(width: 4),
-                // 「文件 | 会话」放在卡片自己的标题行里，与项目、新建、搜索、
-                // 刷新同一行，不另加外层分段条。
-                if (widget.headerLeading case final leading?) ...[leading],
+                // 项目选择器在最左，开着标题栏剩余宽度。
                 Expanded(child: _buildHeaderTitle(context, scheme, sections)),
                 ..._buildHeaderActions(context, sections, constraints.maxWidth),
+                // 文件/会话切换固定在右端，和动作按钮同一个尺寸。
+                if (widget.headerTrailing case final trailing?) ...[trailing],
+                const SizedBox(width: 4),
               ],
             ),
           ),
@@ -1493,16 +1495,14 @@ class _FileExplorerState extends State<FileExplorer> {
         sections.state.sidebarSection == SidebarSection.sessions) {
       return [
         if (sections.onNewSession != null)
-          IconButton(
+          _headerAction(
             key: const ValueKey('session-new'),
             tooltip: '新会话',
-            onPressed: sections.onNewSession,
-            icon: const Icon(Icons.add_comment_outlined, size: 20),
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            icon: Icons.add_comment_outlined,
+            onPressed: sections.onNewSession!,
           ),
         if (sections.onStopAllSessions != null)
-          PopupMenuButton<String>(
+          _headerMenu(
             key: const ValueKey('session-list-menu'),
             tooltip: '会话操作',
             itemBuilder: (context) => const [
@@ -1514,30 +1514,31 @@ class _FileExplorerState extends State<FileExplorer> {
           ),
       ];
     }
-    // 动作预算从实际可用宽度算：减去开关、内边距和项目选择器的最小宽度，
-    // 剩下的才是按钮能用的空间。四个按钮（含溢出菜单位）每个 44。
-    const horizontalChrome = 4.0 + 4.0; // 左内边距 + 右侧余量
+    // 动作预算从实际可用宽度算：减去左右内边距、右端切换按钮和项目选择器
+    // 的最小宽度，剩下的才是按钮能用的空间。每个按钮（含溢出）44。
+    const horizontalChrome = 4.0 + 4.0; // 左内边距 + 右内边距
     const pickerFloor = 96.0;
-    // 开关宽 90（两个 44 段 + 描边），由 SidebarSectionSwitch 固定。
-    final switchWidth = widget.headerLeading == null ? 0.0 : 90.0;
+    // 右端切换按钮就是一个 44 的动作按钮。
+    final switchWidth = widget.headerTrailing == null ? 0.0 : 44.0;
     final actionBudget =
         availableWidth - horizontalChrome - switchWidth - pickerFloor;
-    // 全部就地放置需要四个按钮：新建文件、新建文件夹、搜索、刷新。
+    // 四个动作都就地放：新建文件、新建文件夹、搜索、刷新。
     const fullActions = 44.0 * 4;
     final fitsAll = actionBudget >= fullActions;
-    // 新建、搜索和溢出按钮共占三个触摸目标。
-    final ultraCompact = actionBudget < 44.0 * 3;
+    // 三个触摸目标：新建文件 + 搜索 + 溢出菜单。
+    const compactActions = 44.0 * 3;
+    final ultraCompact = actionBudget < compactActions;
     final compact = !fitsAll;
     return [
-      _compactHeaderAction(
+      _headerAction(
         tooltip: '新建文件',
-        icon: const Icon(Icons.note_add_outlined, size: 20),
+        icon: Icons.note_add_outlined,
         onPressed: () => _create(null, false),
       ),
       if (!ultraCompact)
-        _compactHeaderAction(
+        _headerAction(
           tooltip: _searchOpen ? '退出搜索' : '搜索文件',
-          icon: Icon(_searchOpen ? Icons.close : Icons.search),
+          icon: _searchOpen ? Icons.close : Icons.search,
           onPressed: () {
             setState(() {
               _searchOpen = !_searchOpen;
@@ -1547,7 +1548,7 @@ class _FileExplorerState extends State<FileExplorer> {
           },
         ),
       if (compact)
-        PopupMenuButton<String>(
+        _headerMenu(
           key: const ValueKey('file-explorer-more'),
           tooltip: '更多文件操作',
           itemBuilder: (context) => [
@@ -1579,21 +1580,68 @@ class _FileExplorerState extends State<FileExplorer> {
             if (action == 'new-folder') _create(null, true);
             if (action == 'refresh') _refresh();
           },
-          icon: const Icon(Icons.more_vert, size: 20),
         )
       else ...[
-        _compactHeaderAction(
+        _headerAction(
           tooltip: '新建文件夹',
-          icon: const Icon(Icons.create_new_folder_outlined, size: 20),
+          icon: Icons.create_new_folder_outlined,
           onPressed: () => _create(null, true),
         ),
-        _compactHeaderAction(
-          tooltip: '刷新',
-          icon: const Icon(Icons.refresh, size: 20),
-          onPressed: _refresh,
-        ),
+        _headerAction(tooltip: '刷新', icon: Icons.refresh, onPressed: _refresh),
       ],
     ];
+  }
+
+  /// 标题栏动作的统一几何：44×44 触摸盒、零内边距、标准密度。
+  ///
+  /// 同时用于 [IconButton] 和 [PopupMenuButton]（后者内部就是 IconButton）。
+  /// 两种模式下尺寸、内边距、对齐都一致，按钮不会因为模式不同而跳动。
+  static const ButtonStyle _headerActionStyle = ButtonStyle(
+    minimumSize: WidgetStatePropertyAll(Size(44, 44)),
+    maximumSize: WidgetStatePropertyAll(Size(44, 44)),
+    padding: WidgetStatePropertyAll(EdgeInsets.zero),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    visualDensity: VisualDensity.standard,
+    alignment: Alignment.center,
+  );
+
+  /// 标题栏里的图标动作按钮。几何由 [_headerActionStyle] 统一。
+  Widget _headerAction({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onPressed,
+    Key? key,
+  }) {
+    return IconButton(
+      key: key,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      iconSize: 20,
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.standard,
+      constraints: const BoxConstraints.tightFor(width: 44, height: 44),
+      style: _headerActionStyle,
+      icon: Icon(icon),
+    );
+  }
+
+  /// 标题栏里的溢出菜单按钮。几何与图标动作完全一致。
+  Widget _headerMenu({
+    required Key key,
+    required String tooltip,
+    required List<PopupMenuEntry<String>> Function(BuildContext) itemBuilder,
+    required ValueChanged<String> onSelected,
+  }) {
+    return PopupMenuButton<String>(
+      key: key,
+      tooltip: tooltip,
+      itemBuilder: itemBuilder,
+      onSelected: onSelected,
+      iconSize: 20,
+      padding: EdgeInsets.zero,
+      style: _headerActionStyle,
+      icon: const Icon(Icons.more_vert),
+    );
   }
 
   /// 卡片主体：文件段是文件树，会话段是会话列表。
@@ -1663,24 +1711,6 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   /// 标题行里的紧凑动作按钮。
-  ///
-  /// 视觉尺寸 40 以便和项目名、分段控件共用一行；固定 44 的最小尺寸保证
-  /// 实际触摸区域不小于无障碍要求。
-  Widget _compactHeaderAction({
-    required String tooltip,
-    required Widget icon,
-    required VoidCallback onPressed,
-  }) {
-    return IconButton(
-      tooltip: tooltip,
-      icon: icon,
-      onPressed: onPressed,
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-    );
-  }
-
   Widget _buildNode(BuildContext context, FileNode node, int depth) {
     final expanded = node.isDir && _expanded.contains(node.path);
     return Column(
