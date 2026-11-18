@@ -275,11 +275,17 @@ void main() {
 
       if (scene.terminal) {
         // 打开终端面板：它的输入行是页面最下面的一条控件。
-        await tester.tap(find.byTooltip('更多').first);
-        final entry = find.widgetWithText(PopupMenuItem<String>, '打开终端');
-        await _pumpUntil(tester, () => entry.evaluate().isNotEmpty);
-        await tester.pump(const Duration(milliseconds: 400));
-        await tester.tap(entry.first);
+        // 快捷栏可见时直接点 quick-terminal；矮窗口退回 ⋮ 菜单。
+        final quick = find.byKey(const ValueKey('quick-terminal'));
+        if (quick.evaluate().isNotEmpty) {
+          await tester.tap(quick.first);
+        } else {
+          await tester.tap(find.byTooltip('更多').first);
+          final entry = find.widgetWithText(PopupMenuItem<String>, '打开终端');
+          await _pumpUntil(tester, () => entry.evaluate().isNotEmpty);
+          await tester.pump(const Duration(milliseconds: 400));
+          await tester.tap(entry.first);
+        }
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));
         await _pumpFrames(tester);
