@@ -64,6 +64,7 @@ import '../layout/breakpoints.dart';
 import '../shell/login_gate.dart';
 import '../shell/workbench_state.dart';
 import '../chat/composer_state.dart';
+import '../vibe_coding/agent_file_change.dart';
 import '../vibe_coding/vibe_agent_facade.dart';
 import 'agent/agent_dock.dart';
 import 'agent/agent_pane_switcher.dart';
@@ -289,6 +290,21 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 离线产品为 null，页面上不出现任何 agent 控件。
   EditorAgentHost? _agentHost;
 
+  /// agent 文件变更事件的订阅；换运行时或销毁时摘掉。
+  StreamSubscription<AgentFileChange>? _agentFileSub;
+
+  /// 已订阅的运行时。用来避免每帧重建宿主时重复订阅。
+  AgentRuntime? _agentFileRuntime;
+
+  /// 磁盘冲突提示的串行化：同时只会有一个对话框。
+  bool _diskPromptOpen = false;
+
+  /// 文件树刷新信号。agent 写入、新建或删除后递增。
+  final ValueNotifier<int> _treeRefresh = ValueNotifier<int>(0);
+
+  /// 上一次看到的窄屏主体分段，用来发现「回到编辑器」。
+  MainPane _lastMainPane = MainPane.editor;
+
   /// 输入卡片的选择记忆。构造不触 IO，磁盘读写延到首次读取。
   ///
   /// 文件实现按实例缓存整张表，多实例会互相覆盖，故全应用共用一个。
@@ -395,6 +411,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       );
       host.addListener(_onAgentHostChanged);
       _agentHost = host;
+      _lastMainPane = host.state.mainPane;
+      // 注入的运行时已就绪：现在就订阅它的文件变更事件。
+      _syncAgentFileEvents();
     }
     OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
@@ -848,6 +867,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   @override
   void dispose() {
     widget.retainedVisibility?.removeListener(_onRetainedVisibilityChanged);
+    _agentFileSub?.cancel();
+    _agentFileSub = null;
+    _treeRefresh.dispose();
     _agentHost?.removeListener(_onAgentHostChanged);
     _agentHost?.dispose();
     _agentHost = null;
@@ -1320,7 +1342,175 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   // ---- Agent 面板 ----
 
   void _onAgentHostChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    _syncAgentFileEvents();
+    // 从 Agent 分段切回编辑器：回到视图，对一次磁盘。
+    final host = _agentHost;
+    if (host != null) {
+      final pane = host.state.mainPane;
+      if (pane == MainPane.editor && _lastMainPane != MainPane.editor) {
+        unawaited(_recheckOpenTabsFromDisk());
+      }
+      _lastMainPane = pane;
+    }
+    setState(() {});
+  }
+
+  /// 宿主解析出运行时后订阅它的文件变更事件，重复调用无副作用。
+  void _syncAgentFileEvents() {
+    final runtime = _agentHost?.runtime;
+    if (identical(runtime, _agentFileRuntime)) return;
+    _agentFileSub?.cancel();
+    _agentFileSub = null;
+    _agentFileRuntime = runtime;
+    if (runtime == null) return;
+    _agentFileSub = runtime.fileChanges.listen(_onAgentFileChanged);
+  }
+
+  /// agent 写盘后：刷新文件树，再把打开的标签页对齐磁盘。
+  void _onAgentFileChanged(AgentFileChange change) {
+    if (!mounted) return;
+    if (!_belongsToThisPage(change)) return;
+    _treeRefresh.value++;
+    if (change.kind == AgentFileChangeKind.removed) {
+      _closeTabsRemovedOnDisk(change.absolutePath);
+      return;
+    }
+    unawaited(
+      _recheckOpenTabsFromDisk(
+        onlyPaths: {p.normalize(change.absolutePath)},
+      ),
+    );
+  }
+
+  /// 事件是否落在这个页面打开的项目里。工作区里其他项目的会话不属于本页。
+  bool _belongsToThisPage(AgentFileChange change) {
+    final root = p.normalize(widget.project.path);
+    return p.equals(change.projectRoot, root) ||
+        p.isWithin(root, p.normalize(change.projectRoot));
+  }
+
+  /// 把打开的标签页对齐磁盘。
+  ///
+  /// 干净缓冲静默重新读取；有未保存修改的缓冲先问用户，绝不静默覆盖。
+  /// [onlyPaths] 非空时只处理这些绝对路径。
+  Future<void> _recheckOpenTabsFromDisk({Set<String>? onlyPaths}) async {
+    if (!mounted) return;
+    for (final open in [..._editor.files]) {
+      if (!mounted || !_editor.files.contains(open)) return;
+      if (open.readOnly) continue;
+      final path = p.normalize(open.path);
+      if (onlyPaths != null && !onlyPaths.contains(path)) continue;
+      final file = File(open.path);
+      if (!file.existsSync()) continue;
+      if (!open.dirty) {
+        await _editor.reloadFromDisk(open);
+        continue;
+      }
+      if (!await _editor.differsFromDisk(open)) continue;
+      if (!mounted || !_editor.files.contains(open)) return;
+      if (await _askPrefersDiskVersion(open)) {
+        await _editor.reloadFromDisk(open, force: true);
+      }
+    }
+  }
+
+  /// 磁盘上的版本与用户未保存的修改冲突时问一句。
+  ///
+  /// 返回 true 表示用户选择载入磁盘上的版本；false 表示保留自己的修改。
+  /// 对话框一次只开一个：同一轮里多个脏标签排队询问。
+  Future<bool> _askPrefersDiskVersion(OpenFile open) async {
+    if (_diskPromptOpen) return false;
+    _diskPromptOpen = true;
+    try {
+      final takeDisk = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          key: const ValueKey('editor-disk-conflict'),
+          title: const Text('Agent 改写了这个文件'),
+          content: Text(
+            '「${open.name}」在编辑器里还有未保存的修改。'
+            '要保留你的修改，还是载入 Agent 的版本？',
+          ),
+          actions: [
+            TextButton(
+              key: const ValueKey('editor-disk-keep-mine'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('保留我的修改'),
+            ),
+            FilledButton(
+              key: const ValueKey('editor-disk-take-agent'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('载入 Agent 的版本'),
+            ),
+          ],
+        ),
+      );
+      return takeDisk ?? false;
+    } finally {
+      _diskPromptOpen = false;
+    }
+  }
+
+  /// 文件被删除后处理它的标签页。
+  ///
+  /// 干净缓冲直接关掉；有未保存修改的缓冲保留并提示，免得把用户敲的内容
+  /// 跟着删除动作一起丢掉。
+  void _closeTabsRemovedOnDisk(String absolutePath) {
+    final target = p.normalize(absolutePath);
+    final dirty = _editor.files.where(
+      (open) =>
+          (p.equals(p.normalize(open.path), target) ||
+              p.isWithin(target, p.normalize(open.path))) &&
+          open.dirty,
+    );
+    if (dirty.isNotEmpty) {
+      _showSnack('文件已被删除，未保存的修改仍保留在编辑器里');
+      return;
+    }
+    _editor.closePathsUnder(target);
+  }
+
+  /// 点开 Agent 写入的文件。
+  ///
+  /// 先在编辑器里打开，再让编辑器列成为可见内容；宽屏右栏本来就在，不动它。
+  Future<void> _openAgentFile(String relativePath) async {
+    final abs = p.isAbsolute(relativePath)
+        ? relativePath
+        : p.join(widget.project.path, relativePath);
+    if (!File(abs).existsSync()) {
+      _showSnack('文件已被删除：$relativePath');
+      return;
+    }
+    final error = await _editor.openPath(abs);
+    if (!mounted) return;
+    if (error != null) {
+      _showSnack(error);
+      return;
+    }
+    _showEditorPane();
+  }
+
+  /// 让编辑器列成为可见内容。
+  ///
+  /// 窄屏与中屏切主体分段；宽屏右栏与编辑器本来并排，只关抽屉。
+  /// [recheckDisk] 为假时不重新对磁盘：从文件树点文件是用户主动打开，
+  /// 不需要额外读盘，也就不会抢在用户新敲的字前面。
+  void _showEditorPane({bool recheckDisk = true}) {
+    final host = _agentHost;
+    final layout = layoutOf(MediaQuery.sizeOf(context).width);
+    if (layout == WorkbenchLayout.narrow) _closeDrawer();
+    if (host != null && layout != WorkbenchLayout.wide) {
+      host.state.showMainPane(MainPane.editor);
+    }
+    if (host != null) _lastMainPane = host.state.mainPane;
+    if (recheckDisk) unawaited(_recheckOpenTabsFromDisk());
+  }
+
+  /// 文件树里点开文件后：关抽屉并把内容区切回编辑器。
+  void _onTreeFileOpened() {
+    _showEditorPane(recheckDisk: false);
   }
 
   /// 展开 Agent 面板：宽屏展开右栏，中屏与窄屏切到 Agent 分段。
@@ -1528,9 +1718,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           error: host.error,
           onRetry: host.activate,
           composerDefaults: _composerDefaults,
+          onOpenFile: _openAgentFile,
+          fileExists: _agentFileExists,
           active: active,
         ),
       );
+
+  /// 相对项目根的路径现在是否还是一个文件。文件卡片据此决定可不可点。
+  bool _agentFileExists(String relativePath) {
+    final abs = p.isAbsolute(relativePath)
+        ? relativePath
+        : p.join(widget.project.path, relativePath);
+    try {
+      return File(abs).existsSync();
+    } on FileSystemException {
+      return false;
+    }
+  }
 
   // ---- 编辑动作 ----
 
@@ -3430,7 +3634,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                         padding: const EdgeInsets.all(_cardMargin),
                         child: _buildSidebar(
                           context,
-                          onFileOpened: _closeDrawer,
+                          onFileOpened: _onTreeFileOpened,
                         ),
                       ),
                     ),
@@ -3545,7 +3749,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                 child: SizedBox(
                                   key: const ValueKey('editor-sidebar-slot'),
                                   width: _sidebarWidth,
-                                  child: _buildSidebar(context),
+                                  child: _buildSidebar(
+                                    context,
+                                    onFileOpened: _onTreeFileOpened,
+                                  ),
                                 ),
                               ),
                             ),
@@ -3870,6 +4077,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     return FileExplorer(
       headerTrailing: headerTrailing,
       sections: sections,
+      refreshSignal: _treeRefresh,
       project: widget.project,
       editor: _editor,
       store: widget.store,

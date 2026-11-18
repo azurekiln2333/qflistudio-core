@@ -270,11 +270,12 @@ class EditorController extends ChangeNotifier {
   /// 文件被 AI 工具或外部程序改写后，重新从磁盘读取。
   ///
   /// 干净緩冲区直接替换；有未保存修改时拒绝，否则会把用户刚敲的内容丢掉。
+  /// [force] 为 true 时跳过该保护：调用方已经问过用户并得到了「载入磁盘版本」。
   /// 内容未变时不替换 `codeLines` 引用，选区与滚动位置自然保留。
-  Future<String?> reloadFromDisk(OpenFile open) async {
+  Future<String?> reloadFromDisk(OpenFile open, {bool force = false}) async {
     if (_disposed) return 'Editor closed';
     if (open.readOnly) return '历史快照只读';
-    if (open.dirty) return '文件有未保存的修改，未自动重新加载';
+    if (open.dirty && !force) return '文件有未保存的修改，未自动重新加载';
     final file = File(open.path);
     try {
       final stat = await file.stat();
@@ -285,6 +286,8 @@ class EditorController extends ChangeNotifier {
       }
       final bytes = await file.readAsBytes();
       if (_disposed || !files.contains(open)) return null;
+      // 读盘期间用户可能刚好敲了字：再判一次脏，不把新内容盖掉。
+      if (open.dirty && !force) return '文件有未保存的修改，未自动重新加载';
       if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
       final encoding = TextCodec.detect(bytes);
       final content = TextCodec.byName(encoding).decode(bytes);
@@ -313,6 +316,21 @@ class EditorController extends ChangeNotifier {
         open.focusNode.requestFocus();
       }
     });
+  }
+
+  /// 磁盘上的内容是否与当前缓冲不同。
+  ///
+  /// 已删除、读取失败或二进制文件一律视为「不同」：调用方据此决定要不要提示
+  /// 用户，绝不改写缓冲。
+  Future<bool> differsFromDisk(OpenFile open) async {
+    try {
+      final bytes = await File(open.path).readAsBytes();
+      if (_looksBinary(bytes)) return true;
+      final encoding = TextCodec.detect(bytes);
+      return TextCodec.byName(encoding).decode(bytes) != open.controller.text;
+    } on FileSystemException {
+      return false;
+    }
   }
 
   bool _looksBinary(List<int> bytes) {

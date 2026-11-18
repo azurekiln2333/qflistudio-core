@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -49,6 +50,7 @@ class FileExplorer extends StatefulWidget {
     this.onProjectSelected,
     this.headerTrailing,
     this.sections,
+    this.refreshSignal,
   });
 
   /// 标题栏最右侧的控件：文件/会话切换按钮。
@@ -62,6 +64,12 @@ class FileExplorer extends StatefulWidget {
   /// 卡片外框和标题行只有一套；切换只替换卡片内部的主体，不会出现两个
   /// 外框或第二层标题。
   final FileExplorerSections? sections;
+
+  /// 外部要求刷新文件树时递增。
+  ///
+  /// 编辑器页在 agent 写入、新建或删除文件后用它把磁盘变化拉进树里；
+  /// 树自己不需要知道事件从哪来。
+  final ValueListenable<int>? refreshSignal;
 
   /// 是否由本组件自绘 MD3 outlined 卡片外观（圆角 + 细描边）。
   ///
@@ -214,13 +222,21 @@ class _FileExplorerState extends State<FileExplorer> {
 
   @override
   void dispose() {
+    widget.refreshSignal?.removeListener(_onRefreshSignal);
     _searchController.dispose();
     super.dispose();
+  }
+
+  /// 外部要求刷新：重新读已展开目录，不动展开状态与滚动位置。
+  void _onRefreshSignal() {
+    if (!mounted) return;
+    unawaited(_refresh());
   }
 
   @override
   void initState() {
     super.initState();
+    widget.refreshSignal?.addListener(_onRefreshSignal);
     _applyWorkspaceState();
     // 恢复上次浏览的项目（失效则回落到当前项目）。
     // 先乐观地用记住的项目建树，再用异步校验纠正：`existsSync` 会在这里
@@ -243,6 +259,10 @@ class _FileExplorerState extends State<FileExplorer> {
   @override
   void didUpdateWidget(covariant FileExplorer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.refreshSignal != widget.refreshSignal) {
+      oldWidget.refreshSignal?.removeListener(_onRefreshSignal);
+      widget.refreshSignal?.addListener(_onRefreshSignal);
+    }
     final workspaceChanged = oldWidget.workspace?.id != widget.workspace?.id;
     final primaryChanged = !p.equals(
       oldWidget.project.path,
