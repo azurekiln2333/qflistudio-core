@@ -13,8 +13,10 @@ import 'package:path/path.dart' as p;
 
 import '../interop/interop_runner.dart';
 import '../services/api_client.dart';
+import '../services/file_backup.dart';
 import '../session/agent_perf.dart';
 import '../session/agent_session.dart';
+import 'agent_file_change.dart';
 import 'agent_request_scheduler.dart';
 import 'project_write_leases.dart';
 import 'vibe_coding_controller.dart';
@@ -327,6 +329,12 @@ abstract class AgentRuntime {
   /// 已经存在的会话实例，没有则返回 null。界面只借用，不得 dispose。
   AgentFacade? liveFacade(String sessionId);
 
+  /// Agent 写入或删除项目文件的事件流。
+  ///
+  /// 编辑器页用它刷新打开的标签页与文件树。事件只在本机产生，与网络无关：
+  /// 工具真正写盘后立即发出。
+  Stream<AgentFileChange> get fileChanges;
+
   /// 用户查看了这个会话。清除 `finishedUnread` 与 `failed`。
   void markSeen(String sessionId);
 
@@ -358,6 +366,8 @@ class VibeAgentFacade extends AgentFacade {
     bool hasEarlier = false,
     AgentRequestScheduler? scheduler,
     ProjectWriteLeases? leases,
+    void Function(String relativePath)? onFileChanged,
+    void Function(String? relativePath)? onFileRemoved,
   }) : _store = store,
        _meta = meta,
        _tokenProvider = tokenProvider,
@@ -374,8 +384,13 @@ class VibeAgentFacade extends AgentFacade {
          files: files,
          interopRunner: interopRunner,
          writeApproval: null,
+         onFileChanged: onFileChanged,
+         onFileRemoved: onFileRemoved,
        ) {
     _controller.writeApprovalHook = _handleApproval;
+    // 应用级版本历史：agent 的覆盖与用户手动保存走同一条备份路径。
+    _controller.files.historyBackup = (file) =>
+        FileBackup.backupBeforeOverwrite(file, projectName: projectName);
     _controller.requestScheduler = scheduler;
     _controller.schedulerKey = meta.id;
     // 路径租约接到既有的 shouldWrite 钩子上：被别的会话占着时拒绝覆盖。
@@ -1163,6 +1178,25 @@ class VibeAgentRuntime implements AgentRuntime {
   List<AgentModelOption>? _memoryModels;
   DateTime? _memoryModelsAt;
 
+  /// agent 文件变更事件。广播流：没有监听方时也不会卡住。
+  final StreamController<AgentFileChange> _fileChanges =
+      StreamController<AgentFileChange>.broadcast();
+
+  @override
+  Stream<AgentFileChange> get fileChanges => _fileChanges.stream;
+
+  /// 发出一条文件变更事件。运行时已释放时直接丢弃。
+  void _emitFileChange(
+    String root,
+    String relativePath,
+    AgentFileChangeKind kind,
+  ) {
+    if (_fileChanges.isClosed) return;
+    _fileChanges.add(
+      AgentFileChange(projectRoot: root, path: relativePath, kind: kind),
+    );
+  }
+
   final ValueNotifier<int> _liveTick = ValueNotifier<int>(0);
 
   @override
@@ -1318,6 +1352,12 @@ class VibeAgentRuntime implements AgentRuntime {
       hasEarlier: page.hasEarlier,
       scheduler: _scheduler,
       leases: _leasesFor(root),
+      onFileChanged: (relativePath) =>
+          _emitFileChange(root, relativePath, AgentFileChangeKind.written),
+      onFileRemoved: (relativePath) {
+        if (relativePath == null) return;
+        _emitFileChange(root, relativePath, AgentFileChangeKind.removed);
+      },
     );
     _facades[sessionId] = facade;
     _lastUsed[sessionId] = DateTime.now();

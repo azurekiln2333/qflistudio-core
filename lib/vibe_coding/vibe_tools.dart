@@ -56,6 +56,10 @@ class VibeSearchMatch {
   final String text;
 }
 
+/// 覆盖前的应用级版本历史备份。返回空串或 null 表示成功，返回文本表示原因；
+/// 失败不阻塞写入，与用户手动保存的行为一致。
+typedef VibeHistoryBackup = Future<String?> Function(File file);
+
 /// 项目内文件访问。一个会话共用一个实例，以便记录已读内容。
 class VibeProjectFiles {
   VibeProjectFiles({
@@ -74,6 +78,13 @@ class VibeProjectFiles {
   bool Function(String absolutePath)? _shouldWrite;
 
   bool Function(String absolutePath)? get shouldWrite => _shouldWrite;
+
+  /// 覆盖前的版本历史备份；为 null 时只留项目内 `.qfli/vibe-backups`。
+  ///
+  /// 编辑器集成把它接到用户手动保存同一条路径（[VibeHistoryBackup] 的实现
+  /// 是 `FileBackup.backupBeforeOverwrite`），这样 agent 的写入也会出现在
+  /// 文件历史里，和用户自己的保存一样能回滚。
+  VibeHistoryBackup? historyBackup;
 
   /// 叠加一条写盘保护；多条按「全部通过才放行」组合。
   ///
@@ -583,6 +594,13 @@ class VibeProjectFiles {
       backup = await _backup(absolute);
       if (backup == null) {
         throw const VibeToolException('备份失败，已取消写入', code: 'backup');
+      }
+      // 应用级版本历史与用户手动保存同一条路径。备份的是覆盖前的磁盘内容，
+      // 所以必须在真正写盘之前调用；失败不阻塞写入。
+      try {
+        await historyBackup?.call(file);
+      } on Object {
+        // 历史备份失败不影响本次写入。
       }
       // 备份也是 await：写盘前再对一次磁盘版本。
       final latest = _decodeText(await file.readAsBytes());

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:qfli_studio_core/session/agent_session.dart';
+import 'package:qfli_studio_core/vibe_coding/agent_file_change.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
 /// 记录调用参数的会话门面，供输入卡片与对话流的 widget 测试使用。
@@ -263,6 +264,22 @@ class FakeAgentRuntime implements AgentRuntime {
 
   @override
   AgentFacade? liveFacade(String sessionId) => facades[sessionId];
+
+  /// agent 文件变更事件。测试用 [emitFileChange] 手动发一条。
+  final StreamController<AgentFileChange> fileEvents =
+      StreamController<AgentFileChange>.broadcast();
+
+  @override
+  Stream<AgentFileChange> get fileChanges => fileEvents.stream;
+
+  /// 模拟 agent 写入或删除了一个项目文件。
+  void emitFileChange(
+    String projectRoot,
+    String path, {
+    AgentFileChangeKind kind = AgentFileChangeKind.written,
+  }) => fileEvents.add(
+    AgentFileChange(projectRoot: projectRoot, path: path, kind: kind),
+  );
 
   @override
   void markSeen(String sessionId) => seenSessions.add(sessionId);
