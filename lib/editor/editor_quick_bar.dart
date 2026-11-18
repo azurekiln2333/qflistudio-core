@@ -29,23 +29,25 @@ class EditorQuickBar extends StatelessWidget {
   /// Agent actions; ignored while [agentMode] is false.
   final List<EditorQuickBarAction> agentActions;
 
-  /// Height of the strip.
+  /// Height of the strip: the old app's 25 dp.
   ///
   /// The old app's fast-operation tabs are 25 dp tall
   /// (`qflistudio/src/main/res/layout/editor_activity.xml`,
   /// `android:id="@+id/editor_opeartions_bar"`, `android:layout_height="25dp"`).
-  /// A 20 dp glyph inside 25 dp leaves no room for its ripple, so the strip
-  /// keeps the same one-line look at 36 dp.
-  static const double height = 36;
+  /// The slot draws its own ink on the strip's [Material] instead of using an
+  /// `IconButton`, so nothing asks for the 48 dp tap target and the glyph fits.
+  static const double height = 25;
 
   /// Width of one slot.
   ///
   /// The old app's toolbar buttons are 55 dp wide, which a phone cannot spend
-  /// per icon; the slot follows the 44 dp minimum touch target instead.
+  /// per icon; the slot keeps 44 dp so the pressed ripple stays a comfortable
+  /// wide target on a 25 dp strip.
   static const double slotWidth = 44;
 
-  /// Glyph size of one slot.
-  static const double iconSize = 20;
+  /// Glyph size of one slot: 16 dp inside 25 dp leaves 4.5 dp of air above and
+  /// below the glyph.
+  static const double iconSize = 16;
 
   @override
   Widget build(BuildContext context) {
@@ -88,6 +90,13 @@ class EditorQuickBar extends StatelessWidget {
 }
 
 /// One slot of the quick bar.
+///
+/// A plain [InkWell], not an `IconButton`: a material button inflates its tap
+/// target towards 48 dp and paints its own [Material], and either one pushes
+/// the strip above 25 dp. The ink here is painted by the strip's [Material], so
+/// the ripple stays visible over the strip in light and dark, and
+/// [InkWell.customBorder] clips it to the slot. [Ink] paints the `active` fill
+/// as an ink feature too, which keeps it under the splash instead of hiding it.
 class _QuickBarSlot extends StatelessWidget {
   const _QuickBarSlot({required this.action});
 
@@ -96,29 +105,52 @@ class _QuickBarSlot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return SizedBox(
-      width: EditorQuickBar.slotWidth,
-      height: EditorQuickBar.height,
-      child: IconButton(
-        key: ValueKey('quick-${action.id}'),
-        tooltip: action.tooltip,
-        onPressed: action.onPressed,
-        padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        iconSize: EditorQuickBar.iconSize,
-        style: action.active
-            ? IconButton.styleFrom(
-                backgroundColor: scheme.secondaryContainer,
-                foregroundColor: scheme.onSecondaryContainer,
-              )
-            : null,
-        icon: action.badge > 0
-            ? EditorQuickBadge(
-                badgeCount: action.badge,
-                icon: action.icon,
-                iconSize: EditorQuickBar.iconSize,
-              )
-            : Icon(action.icon),
+    final enabled = action.onPressed != null;
+    final foreground = !enabled
+        ? scheme.onSurface.withValues(alpha: 0.38)
+        : action.active
+        ? scheme.onSecondaryContainer
+        : scheme.onSurfaceVariant;
+    return Tooltip(
+      message: action.tooltip,
+      child: SizedBox(
+        width: EditorQuickBar.slotWidth,
+        height: EditorQuickBar.height,
+        child: Ink(
+          decoration: action.active
+              ? BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(6),
+                )
+              : null,
+          child: Semantics(
+            button: true,
+            enabled: enabled,
+            child: InkWell(
+              key: ValueKey('quick-${action.id}'),
+              onTap: action.onPressed,
+              // 圆斑涟漪在 25 dp 的槽位里可预测，也随主题色走。
+              splashFactory: InkRipple.splashFactory,
+              splashColor: foreground.withValues(alpha: 0.16),
+              highlightColor: foreground.withValues(alpha: 0.12),
+              customBorder: const StadiumBorder(),
+              child: Center(
+                child: action.badge > 0
+                    ? EditorQuickBadge(
+                        badgeCount: action.badge,
+                        icon: action.icon,
+                        iconSize: EditorQuickBar.iconSize,
+                        color: foreground,
+                      )
+                    : Icon(
+                        action.icon,
+                        size: EditorQuickBar.iconSize,
+                        color: foreground,
+                      ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -160,11 +192,15 @@ class EditorQuickBadge extends StatelessWidget {
     required this.badgeCount,
     required this.icon,
     this.iconSize,
+    this.color,
   });
 
   final int badgeCount;
   final IconData icon;
   final double? iconSize;
+
+  /// Glyph colour, so the badge follows the slot's enabled / active state.
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -173,10 +209,12 @@ class EditorQuickBadge extends StatelessWidget {
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        Icon(icon, size: iconSize),
+        Icon(icon, size: iconSize, color: color),
         Positioned(
-          right: -6,
-          top: -6,
+          // A 16 dp glyph inside 25 dp has only 4.5 dp of air: keep the badge
+          // inside the slot instead of letting the strip's viewport clip it.
+          right: -4,
+          top: -4,
           child: Container(
             constraints: const BoxConstraints(minWidth: 14, minHeight: 14),
             padding: const EdgeInsets.symmetric(horizontal: 3),

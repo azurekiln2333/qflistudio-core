@@ -231,10 +231,8 @@ void main() {
 
     expect(hasSlot('save'), isTrue);
     for (final id in ['save', 'find', 'goto', 'format']) {
-      final button = tester.widget<IconButton>(
-        find.byKey(ValueKey('quick-$id')),
-      );
-      expect(button.onPressed, isNull, reason: '$id 没有文件时不可点');
+      final slot = tester.widget<InkWell>(find.byKey(ValueKey('quick-$id')));
+      expect(slot.onTap, isNull, reason: '$id 没有文件时不可点');
     }
     expect(tester.takeException(), isNull);
   });
@@ -347,17 +345,17 @@ void main() {
     await tester.tap(find.byTooltip('打开 Agent 面板'));
     await pumpFrames(tester);
 
-    IconButton stop() => tester.widget<IconButton>(
+    InkWell stop() => tester.widget<InkWell>(
       find.byKey(const ValueKey('quick-agent-stop')),
     );
 
-    expect(stop().onPressed, isNull, reason: '没有会话在跑时停止不可点');
+    expect(stop().onTap, isNull, reason: '没有会话在跑时停止不可点');
 
     final meta = await sessions.create(project.id, title: '在跑的会话');
     runtime.liveStatuses[meta.id] = AgentLiveStatus.running;
     runtime.notifyLive();
     await pumpFrames(tester, 6);
-    expect(stop().onPressed, isNotNull, reason: '会话运行中可以停止');
+    expect(stop().onTap, isNotNull, reason: '会话运行中可以停止');
     expectKnownComposerOverflow(tester);
   });
 
@@ -406,6 +404,59 @@ void main() {
     expectKnownComposerOverflow(tester);
   });
 
+  testWidgets('栏高就是旧版的 25 dp：手机与平板都是', (tester) async {
+    expect(EditorQuickBar.height, 25, reason: '旧版 editor_opeartions_bar 就是 25 dp');
+    for (final size in const [Size(393, 852), Size(1280, 800)]) {
+      await mount(
+        tester,
+        size: size,
+        openPath: p.join(directory.path, 'src', 'main.dart'),
+      );
+
+      final bar = find.byKey(const ValueKey('editor-quick-bar'));
+      expect(bar, findsOneWidget, reason: '$size 上快捷栏在');
+      expect(tester.getSize(bar).height, 25, reason: '$size 上渲染高度是 25 dp');
+
+      // 槽位没有被 48 dp 的触碰目标撑开。
+      final slot = find.byKey(const ValueKey('quick-save'));
+      expect(tester.getSize(slot).height, 25, reason: '$size 上槽位高 25 dp');
+      expect(tester.getSize(slot).width, EditorQuickBar.slotWidth);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('editor-quick-bar-editor')))
+            .height,
+        25,
+      );
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }
+  });
+
+  testWidgets('按住动作就在材质层画涟漪：浅色与深色都画', (tester) async {
+    for (final brightness in [Brightness.light, Brightness.dark]) {
+      await mount(
+        tester,
+        size: const Size(393, 852),
+        openPath: p.join(directory.path, 'src', 'main.dart'),
+        brightness: brightness,
+      );
+      await expectRipple(tester, 'save', visible: true);
+      expect(tester.takeException(), isNull);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    }
+  });
+
+  testWidgets('禁用的动作按住不画涟漪', (tester) async {
+    // 没有打开文件，保存是禁用的。
+    await mount(tester, size: const Size(393, 852));
+    await expectRipple(tester, 'save', visible: false);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('深色主题下快捷栏用主题色，不写死颜色', (tester) async {
     await mount(
       tester,
@@ -429,6 +480,31 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+}
+
+/// 按住一个槽位，看快捷栏自己的 Material 有没有画出涟漪。
+///
+/// 涟漪要落在快捷栏的材质层上：中间只要有一块不透明的 Container 就会把涟漪
+/// 挡住，所以这里直接量最近的 `Material` 的绘制记录。
+Future<void> expectRipple(
+  WidgetTester tester,
+  String id, {
+  required bool visible,
+}) async {
+  final slot = find.byKey(ValueKey('quick-$id'));
+  final gesture = await tester.startGesture(tester.getCenter(slot));
+  // 按住不放：分帧推进，涟漪真的淡入，而不只是刚建出来。
+  for (var i = 0; i < 10; i++) {
+    await tester.pump(const Duration(milliseconds: 20));
+  }
+  final ink = Material.of(tester.element(slot));
+  if (visible) {
+    expect(ink, paints..circle(), reason: '$id 按住时有涟漪');
+  } else {
+    expect(ink, isNot(paints..circle()), reason: '$id 禁用时没有涟漪');
+  }
+  await gesture.up();
+  await tester.pump();
 }
 
 /// 393 宽、Agent 面板可见时，输入卡片的选择器行报 1 px 横向溢出。

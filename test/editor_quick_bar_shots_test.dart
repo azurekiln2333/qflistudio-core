@@ -160,45 +160,52 @@ void main() {
     }
   });
 
-  for (final scene in _scenes) {
-    testWidgets('场景 ${scene.name}', (tester) async {
-      tester.view.physicalSize = scene.size;
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      addTearDown(() async {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-      });
+  /// 把带快捷栏的编辑器页挂起来：真实尺寸、真实主题。
+  Future<void> mountScene(
+    WidgetTester tester,
+    Size size,
+    Brightness brightness,
+  ) async {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
 
-      final running = await sessions.create(project.id, title: '补齐快捷栏动作');
-      runtime.liveStatuses[running.id] = AgentLiveStatus.running;
+    final running = await sessions.create(project.id, title: '补齐快捷栏动作');
+    runtime.liveStatuses[running.id] = AgentLiveStatus.running;
 
-      await tester.pumpWidget(
-        MaterialApp(
-          debugShowCheckedModeBanner: false,
-          theme: scene.brightness == Brightness.light
-              ? AppTheme.light
-              : AppTheme.dark,
-          home: Align(
-            alignment: Alignment.topLeft,
-            child: SizedBox(
-              width: scene.size.width,
-              height: scene.size.height,
-              child: EditorPage(
-                project: project,
-                auth: auth,
-                store: store,
-                settings: settings,
-                initialOpenPath: p.join(directory.path, 'src', 'main.dart'),
-                agentRuntime: runtime,
-                composerDefaults: composerDefaults,
-                agentEnabled: true,
-              ),
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: brightness == Brightness.light ? AppTheme.light : AppTheme.dark,
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: size.width,
+            height: size.height,
+            child: EditorPage(
+              project: project,
+              auth: auth,
+              store: store,
+              settings: settings,
+              initialOpenPath: p.join(directory.path, 'src', 'main.dart'),
+              agentRuntime: runtime,
+              composerDefaults: composerDefaults,
+              agentEnabled: true,
             ),
           ),
         ),
-      );
-      await _pumpFrames(tester);
+      ),
+    );
+    await _pumpFrames(tester);
+  }
+
+  for (final scene in _scenes) {
+    testWidgets('场景 ${scene.name}', (tester) async {
+      await mountScene(tester, scene.size, scene.brightness);
 
       if (scene.agent) {
         // 宽屏先展开右栏；窄屏直接切分段。
@@ -219,6 +226,30 @@ void main() {
       await _capture(tester, file);
       expect(file.existsSync(), isTrue);
       // 输入卡片在 393 宽下有 1 px 的已知溢出，与快捷栏无关。
+      tester.takeException();
+    }, skip: !_shotsEnabled);
+  }
+
+  // 按住一个动作时的涟漪：浅色与深色各一张，25 dp 的槽位里也要看得见。
+  for (final brightness in const [Brightness.light, Brightness.dark]) {
+    testWidgets('按压涟漪 ${brightness.name}', (tester) async {
+      await mountScene(tester, const Size(393, 852), brightness);
+      final slot = find.byKey(const ValueKey('quick-save'));
+      final gesture = await tester.startGesture(tester.getCenter(slot));
+      // 分帧推进：涟漪的淡入要真的跑完，截到的是可见的一帧。
+      for (var i = 0; i < 12; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+
+      final file = File(
+        p.join(_shotDirAbs(), '$_shotPrefix-press-${brightness.name}.png'),
+      );
+      file.parent.createSync(recursive: true);
+      await _capture(tester, file);
+      expect(file.existsSync(), isTrue);
+
+      await gesture.up();
+      await tester.pump();
       tester.takeException();
     }, skip: !_shotsEnabled);
   }

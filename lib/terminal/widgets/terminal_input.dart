@@ -1,8 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../config/ohos_platform.dart';
-
 /// Shared soft-keyboard behaviour for the terminal input fields (the editor
 /// terminal pane, the window terminal, and the full-page online terminal).
 ///

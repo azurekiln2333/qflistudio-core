@@ -3615,10 +3615,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     );
                     // 矮窗口下先让出可选镶边：顶栏 56 之后已经不够编辑器的最小高度时，
                     // 快捷栏整个不画（与标签栏、符号栏、状态栏的让位规则一致）。
+                    // 25 dp 的条要的就是 25 dp，不再按 36 dp 留位置。
                     final showQuickBar =
                         !focusMode &&
                         bodyHeight >=
-                            minEditorHeight + EditorQuickBar.height + 8;
+                            minEditorHeight +
+                                EditorQuickBar.height +
+                                _quickBarSlack;
                     final pane = agentEnabled && layout != WorkbenchLayout.wide
                         ? AgentPaneSwitcher(
                             state: agentHost.state,
@@ -3948,10 +3951,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _quickBarFits(BuildContext context) {
     final bodyHeight = MediaQuery.sizeOf(context).height - kToolbarHeight;
     return bodyHeight >=
-        _minEditorHeightForQuickBar + EditorQuickBar.height + 8;
+        _minEditorHeightForQuickBar + EditorQuickBar.height + _quickBarSlack;
   }
 
   static const double _minEditorHeightForQuickBar = 140;
+
+  /// 快捷栏之上与之下各留一点余量，免得贴着边框画。
+  static const double _quickBarSlack = 8;
 
   List<EditorQuickBarAction> _quickBarEditorActions(BuildContext context) {
     final host = _agentHost;
