@@ -23,8 +23,8 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 /// Offline-only gating for the two editor/settings entries that reach the
 /// network:
 ///
-///   * the editor «more» popup `Git` and `从云端拉取` items (GitPage runs
-///     push/pull/remote), and
+///   * the editor quick bar's `Git`, `从云端拉取` and `在线终端` actions (GitPage
+///     runs push/pull/remote; the online terminal runs on the server), and
 ///   * the profile tab's `设置 → AI 助手 → 个人 AI 接口` section.
 ///
 /// An offline-only product must not render either; a networked product must
@@ -63,26 +63,30 @@ void main() {
     if (pathRoot.existsSync()) pathRoot.deleteSync(recursive: true);
   });
 
-  group('editor popup', () {
+  group('editor quick bar', () {
     testWidgets('offline-only hides Git and cloud pull', (tester) async {
       fixture.installProfile(offlineOnly: true);
       await fixture.mountEditor(tester);
-      await _openPopup(tester);
 
-      expect(find.text('Git'), findsNothing);
-      expect(find.text('从云端拉取'), findsNothing);
-      // The popup still opens and offers the local entries.
-      expect(find.text('打开终端'), findsWidgets);
-      expect(find.text('设置'), findsWidgets);
+      expect(find.byKey(const ValueKey('quick-git')), findsNothing);
+      expect(find.byKey(const ValueKey('quick-cloud_pull')), findsNothing);
+      expect(find.byKey(const ValueKey('quick-online_terminal')), findsNothing);
+      expect(find.byKey(const ValueKey('quick-ai')), findsNothing);
+      // 本地动作仍然在快捷栏上。
+      expect(find.byKey(const ValueKey('quick-terminal')), findsOneWidget);
+      expect(find.byKey(const ValueKey('quick-settings')), findsOneWidget);
     });
 
     testWidgets('networked keeps Git', (tester) async {
       fixture.installProfile(offlineOnly: false);
       await fixture.mountEditor(tester);
-      await _openPopup(tester);
 
-      expect(find.text('Git'), findsOneWidget);
-      expect(find.text('设置'), findsWidgets);
+      expect(find.byKey(const ValueKey('quick-git')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('quick-online_terminal')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('quick-settings')), findsOneWidget);
     });
   });
 
@@ -116,13 +120,6 @@ void main() {
       expect(find.text('数据与存储'), findsOneWidget);
     });
   });
-}
-
-Future<void> _openPopup(WidgetTester tester) async {
-  await tester.tap(find.byIcon(Icons.more_vert).first);
-  for (var i = 0; i < 10; i++) {
-    await tester.pump(const Duration(milliseconds: 50));
-  }
 }
 
 Future<void> _mountProfile(WidgetTester tester, _Stores stores) async {

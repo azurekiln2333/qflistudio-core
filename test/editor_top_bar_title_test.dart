@@ -174,12 +174,20 @@ void main() {
         expect(rect.right, lessThanOrEqualTo(width));
         expect(rect.width, greaterThanOrEqualTo(44));
         expect(rect.height, greaterThanOrEqualTo(44));
+        // 内容区紧接快捷功能栏，栏紧接顶栏；不再预留切换行。
         expect(
           tester
               .getTopLeft(find.byKey(const ValueKey('editor-pane-editor')))
               .dy,
+          tester
+              .getBottomLeft(find.byKey(const ValueKey('editor-quick-bar')))
+              .dy,
+          reason: '快捷功能栏在顶栏与文件标签栏之间',
+        );
+        expect(
+          tester.getTopLeft(find.byKey(const ValueKey('editor-quick-bar'))).dy,
           tester.getBottomLeft(toolbar).dy,
-          reason: '内容区紧接顶栏，不再预留切换行',
+          reason: '快捷功能栏紧接顶栏',
         );
         expect(tester.takeException(), isNull);
       }

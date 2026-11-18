@@ -590,11 +590,20 @@ Finder _resizeHandleFinder() => find.byWidgetPredicate(
 );
 
 Future<void> _openTerminal(WidgetTester tester) async {
+  final bar = find.byKey(const ValueKey('quick-terminal'));
+  if (bar.evaluate().isNotEmpty) {
+    await tester.tap(bar);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+    return;
+  }
+  // 矮窗口下快捷栏让位，动作回到「更多」菜单。
   await tester.tap(find.byTooltip('更多'));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 200));
   final item = find.byWidgetPredicate(
-    (widget) => widget is PopupMenuItem<String> && widget.value == 'terminal',
+    (widget) =>
+        widget is PopupMenuItem<String> && widget.value == 'quick:terminal',
   );
   expect(item, findsOneWidget);
   await tester.ensureVisible(item);
@@ -614,6 +623,7 @@ class _RecordingPreview implements WebFilePreviewSession {
     defaults.add(root);
     throw StateError('factory default recorded before browser launch');
   }
+
   @override
   Stream<String> get debugStream => const Stream.empty();
   @override

@@ -33,6 +33,7 @@ import '../workspace/editor_workspace.dart';
 import '../workspace/saved_workspace.dart';
 import '../workspace/workspace_store.dart';
 import 'editor_fonts.dart';
+import 'editor_quick_bar.dart';
 import 'code_minimap.dart';
 import 'symbols_bar.dart';
 import 'editor_controller.dart';
@@ -1596,6 +1597,32 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 宽屏右栏的收起宽度。
   static const double _agentRailWidth = 48;
 
+  /// 宽屏上用户最后触到的面板。
+  ///
+  /// 宽屏两栏并排，快捷栏跟着用户正在用的那一栏换内容。窄屏只有一个分段可见，
+  /// 不需要这个标记。
+  bool _agentPaneTouched = false;
+
+  void _focusEditorPane() {
+    if (_agentPaneTouched) setState(() => _agentPaneTouched = false);
+  }
+
+  void _focusAgentPane() {
+    if (!_agentPaneTouched) setState(() => _agentPaneTouched = true);
+  }
+
+  /// 快捷栏是否显示 agent 动作。
+  ///
+  /// 窄屏与中屏看分段；宽屏看用户最后触到的面板。
+  bool get _quickBarAgentMode {
+    final host = _agentHost;
+    if (host == null) return false;
+    if (layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide) {
+      return _agentPaneTouched;
+    }
+    return host.state.mainPane == MainPane.agent;
+  }
+
   /// Agent 面板是否已经展开。
   bool get _agentPanelActive {
     final host = _agentHost;
@@ -1779,6 +1806,29 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final open = _editor.current;
     if (open == null) return;
     open.findController.findMode();
+  }
+
+  /// 快捷栏里的终端开关。菜单里的同一条目已并入快捷栏。
+  void _toggleTerminalPanel() {
+    _terminalCreated = true;
+    _closeTerminalWhenIdle = false;
+    final visible = _bottomPanel == _BottomPanel.terminal;
+    setState(
+      () => _bottomPanel = visible ? _BottomPanel.none : _BottomPanel.terminal,
+    );
+  }
+
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SettingsPage(
+          settings: widget.settings,
+          auth: widget.auth,
+          store: widget.store,
+          showAi: StudioProfile.current?.offlineOnly != true,
+        ),
+      ),
+    );
   }
 
   void _showGotoLineDialog() {
@@ -2648,9 +2698,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   bool get _canRunBackground {
     final runner = StudioProfile.current?.backgroundInteropRunner;
-    if (!isOhosPlatform ||
-        runner == null ||
-        !runner.isSupported) {
+    if (!isOhosPlatform || runner == null || !runner.isSupported) {
       return false;
     }
     final entry = _entryFileOf(
@@ -3102,10 +3150,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             return;
                                           }
                                           switch (value) {
-                                            case 'undo':
-                                              _undoCurrent();
-                                            case 'save':
-                                              _saveCurrent();
                                             case 'recover_orphan':
                                               unawaited(_recoverOrphanedFile());
                                             case 'interop_run':
@@ -3116,100 +3160,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                               );
                                             case 'run_online':
                                               unawaited(_runProjectOnline());
-                                            case 'close_editor':
-                                              unawaited(_closeEditor());
-                                            case 'find':
-                                              _openFind();
-                                            case 'goto':
-                                              _showGotoLineDialog();
-                                            case 'format':
-                                              _formatCurrent();
-                                            case 'content_tool':
-                                              _openContentTool();
-                                            case 'minimap':
-                                              widget.settings.setMinimap(
-                                                !widget.settings.minimap,
-                                              );
-                                            case 'output':
-                                              _showPanel(_BottomPanel.output);
-                                            case 'debug':
-                                              _showPanel(_BottomPanel.debug);
-                                            case 'debug_console':
-                                              _showPanel(
-                                                _BottomPanel.debugConsole,
-                                              );
-                                            case 'ports':
-                                              _showPanel(_BottomPanel.ports);
-                                            case 'terminal':
-                                              _terminalCreated = true;
-                                              _closeTerminalWhenIdle = false;
-                                              setState(
-                                                () => _bottomPanel =
-                                                    _bottomPanel ==
-                                                        _BottomPanel.terminal
-                                                    ? _BottomPanel.none
-                                                    : _BottomPanel.terminal,
-                                              );
-                                            case 'settings':
-                                              Navigator.of(context).push(
-                                                MaterialPageRoute(
-                                                  builder: (_) => SettingsPage(
-                                                    settings: widget.settings,
-                                                    auth: widget.auth,
-                                                    store: widget.store,
-                                                    showAi:
-                                                        StudioProfile
-                                                            .current
-                                                            ?.offlineOnly !=
-                                                        true,
-                                                  ),
-                                                ),
-                                              );
-                                            case 'ai':
-                                              // agent 打开时应用内只有一个 AI 入口，
-                                              // 菜单直接开 Agent 面板；否则维持旧面板。
-                                              if (_agentHost != null) {
-                                                _showAgentPanel();
-                                              } else {
-                                                setState(
-                                                  () => _bottomPanel =
-                                                      _bottomPanel ==
-                                                          _BottomPanel.ai
-                                                      ? _BottomPanel.none
-                                                      : _BottomPanel.ai,
-                                                );
-                                              }
-                                            case 'online_terminal':
-                                              unawaited(_openOnlineTerminal());
-                                            case 'git':
-                                              if (StudioProfile
-                                                      .current
-                                                      ?.offlineOnly !=
-                                                  true) {
-                                                _openGit();
-                                              }
-                                            case 'cloud_pull':
-                                              if (StudioProfile
-                                                      .current
-                                                      ?.offlineOnly !=
-                                                  true) {
-                                                _pullFromCloud();
-                                              }
                                           }
                                         },
                                         itemBuilder: (context) => [
-                                          if (undoInMenu)
-                                            PopupMenuItem(
-                                              value: 'undo',
-                                              enabled: _editor.current != null,
-                                              child: const Row(
-                                                children: [
-                                                  Icon(Icons.undo, size: 20),
-                                                  SizedBox(width: 12),
-                                                  Text('撤销'),
-                                                ],
-                                              ),
-                                            ),
                                           for (final action in inlineMenu)
                                             PopupMenuItem<String>(
                                               key: ValueKey(
@@ -3229,17 +3182,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             ),
                                           if (inlineMenu.isNotEmpty)
                                             const PopupMenuDivider(),
-                                          if (widget.onClose != null)
-                                            const PopupMenuItem(
-                                              value: 'close_editor',
-                                              child: Row(
-                                                children: [
-                                                  Icon(Icons.close, size: 20),
-                                                  SizedBox(width: 12),
-                                                  Text('关闭编辑器'),
-                                                ],
-                                              ),
-                                            ),
                                           for (final tool
                                               in StudioProfile
                                                       .current
@@ -3371,250 +3313,32 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                                 ],
                                               ),
                                             ),
-                                          const PopupMenuItem(
-                                            value: 'save',
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.save_outlined,
-                                                  size: 20,
+                                          // 矮窗口下快捷栏让位，这一批动作回到菜单，一个都不丢。
+                                          if (!focusMode &&
+                                              !_quickBarFits(context)) ...[
+                                            const PopupMenuDivider(),
+                                            for (final action
+                                                in _quickBarFallbackActions(
+                                                  context,
+                                                ))
+                                              PopupMenuItem<String>(
+                                                key: ValueKey(
+                                                  'quick-fallback-${action.id}',
                                                 ),
-                                                SizedBox(width: 12),
-                                                Flexible(
-                                                  child: Text('保存 (Ctrl+S)'),
+                                                value: 'quick:${action.id}',
+                                                child: Row(
+                                                  children: [
+                                                    Icon(action.icon, size: 20),
+                                                    const SizedBox(width: 12),
+                                                    Flexible(
+                                                      child: Text(
+                                                        action.tooltip,
+                                                      ),
+                                                    ),
+                                                  ],
                                                 ),
-                                              ],
-                                            ),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'find',
-                                            child: Row(
-                                              children: [
-                                                Icon(Icons.search, size: 20),
-                                                SizedBox(width: 12),
-                                                Flexible(
-                                                  child: Text('查找替换 (Ctrl+F)'),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'goto',
-                                            child: Row(
-                                              children: [
-                                                Icon(Icons.pin, size: 20),
-                                                SizedBox(width: 12),
-                                                Flexible(
-                                                  child: Text('跳转到行 (Ctrl+G)'),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'format',
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.format_align_left,
-                                                  size: 20,
-                                                ),
-                                                SizedBox(width: 12),
-                                                Flexible(
-                                                  child: Text('格式化 (Ctrl+I)'),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          if (inlineEditor == null &&
-                                              (p
-                                                          .extension(
-                                                            _editor
-                                                                    .current
-                                                                    ?.name ??
-                                                                '',
-                                                          )
-                                                          .toLowerCase() ==
-                                                      '.json' ||
-                                                  p
-                                                          .extension(
-                                                            _editor
-                                                                    .current
-                                                                    ?.name ??
-                                                                '',
-                                                          )
-                                                          .toLowerCase() ==
-                                                      '.md' ||
-                                                  p
-                                                          .extension(
-                                                            _editor
-                                                                    .current
-                                                                    ?.name ??
-                                                                '',
-                                                          )
-                                                          .toLowerCase() ==
-                                                      '.markdown'))
-                                            const PopupMenuItem(
-                                              value: 'content_tool',
-                                              child: Row(
-                                                children: [
-                                                  Icon(
-                                                    Icons.preview_outlined,
-                                                    size: 20,
-                                                  ),
-                                                  SizedBox(width: 12),
-                                                  Text('内容工具'),
-                                                ],
                                               ),
-                                            ),
-                                          PopupMenuItem(
-                                            value: 'minimap',
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  widget.settings.minimap
-                                                      ? Icons
-                                                            .visibility_off_outlined
-                                                      : Icons
-                                                            .visibility_outlined,
-                                                  size: 20,
-                                                ),
-                                                const SizedBox(width: 12),
-                                                Text(
-                                                  widget.settings.minimap
-                                                      ? '隐藏代码鸟瞰'
-                                                      : '显示代码鸟瞰',
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'output',
-                                            child: Text('Output · 输出'),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'debug',
-                                            child: Text('调试'),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'debug_console',
-                                            child: Text('Debug Console'),
-                                          ),
-                                          const PopupMenuItem(
-                                            value: 'ports',
-                                            child: Text('Ports · 本地端口'),
-                                          ),
-                                          PopupMenuItem(
-                                            value: 'terminal',
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  _terminalVisible
-                                                      ? Icons.terminal_outlined
-                                                      : Icons.terminal,
-                                                  size: 20,
-                                                ),
-                                                const SizedBox(width: 12),
-                                                Text(
-                                                  _terminalVisible
-                                                      ? '关闭终端'
-                                                      : '打开终端',
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          if (StudioProfile
-                                                  .current
-                                                  ?.offlineOnly !=
-                                              true)
-                                            const PopupMenuItem(
-                                              value: 'git',
-                                              child: Row(
-                                                children: [
-                                                  Icon(
-                                                    Icons.account_tree_outlined,
-                                                    size: 20,
-                                                  ),
-                                                  SizedBox(width: 12),
-                                                  Text('Git'),
-                                                ],
-                                              ),
-                                            ),
-                                          if (widget.project.isCloud &&
-                                              StudioProfile
-                                                      .current
-                                                      ?.offlineOnly !=
-                                                  true)
-                                            const PopupMenuItem(
-                                              value: 'cloud_pull',
-                                              child: Row(
-                                                children: [
-                                                  Icon(
-                                                    Icons
-                                                        .cloud_download_outlined,
-                                                    size: 20,
-                                                  ),
-                                                  SizedBox(width: 12),
-                                                  Text('从云端拉取'),
-                                                ],
-                                              ),
-                                            ),
-                                          const PopupMenuItem(
-                                            value: 'settings',
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.settings_outlined,
-                                                  size: 20,
-                                                ),
-                                                SizedBox(width: 12),
-                                                Text('设置'),
-                                              ],
-                                            ),
-                                          ),
-                                          if (StudioProfile
-                                                  .current
-                                                  ?.offlineOnly !=
-                                              true)
-                                            PopupMenuItem(
-                                              value: 'ai',
-                                              child: Row(
-                                                children: [
-                                                  Icon(
-                                                    _bottomPanel ==
-                                                            _BottomPanel.ai
-                                                        ? Icons
-                                                              .auto_awesome_outlined
-                                                        : Icons.auto_awesome,
-                                                    size: 20,
-                                                  ),
-                                                  const SizedBox(width: 12),
-                                                  Text(
-                                                    _bottomPanel ==
-                                                            _BottomPanel.ai
-                                                        ? '关闭 AI 助手'
-                                                        : 'AI 助手',
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-
-                                          if (StudioProfile
-                                                  .current
-                                                  ?.offlineOnly !=
-                                              true)
-                                            const PopupMenuItem(
-                                              value: 'online_terminal',
-                                              child: Row(
-                                                children: [
-                                                  Icon(
-                                                    Icons.cloud_outlined,
-                                                    size: 20,
-                                                  ),
-                                                  SizedBox(width: 12),
-                                                  Text('在线终端（服务器执行）'),
-                                                ],
-                                              ),
-                                            ),
+                                          ],
                                         ],
                                       ),
                                       const SizedBox(width: 8),
@@ -3761,103 +3485,112 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             ),
                           ),
                         Expanded(
-                          child: KeyedSubtree(
-                            key: _editorColumnKey,
-                            child: Column(
-                              key: const ValueKey('editor-right-column'),
-                              children: [
-                                Expanded(child: _buildEditorArea(context)),
-                                if (_terminalCreated)
-                                  Offstage(
-                                    // Hide the terminal entirely when the body
-                                    // cannot host both a useful terminal and the
-                                    // editor's minimum, so the code view never
-                                    // collapses to zero height.
-                                    //
-                                    // Never while the prompt holds focus: hiding
-                                    // it would detach the caret's element and
-                                    // close the keyboard the user is typing on.
-                                    // In that window the editor gives up height
-                                    // instead (the `Expanded` above shrinks),
-                                    // which is the lesser loss.
-                                    offstage:
-                                        _bottomPanel != _BottomPanel.terminal ||
-                                        (!_terminalInputHasFocus &&
-                                            bodyHeight -
-                                                    (bodyHeight <
-                                                            TerminalPanelMetrics
-                                                                .collapsedTotalHeight
-                                                        ? bodyHeight
-                                                        : TerminalPanelMetrics
-                                                              .collapsedTotalHeight) <
-                                                minEditorHeight),
-                                    child: _buildTerminalPanel(
-                                      terminalPanelHeight: terminalPanelHeight,
-                                      maxPanelHeight: maxPanelHeight,
-                                      collapsedPanelHeight:
-                                          collapsedPanelHeight,
-                                      compactPanel: compactPanel,
-                                    ),
-                                  ),
-                                if ({
-                                      _BottomPanel.debug,
-                                      _BottomPanel.output,
-                                      _BottomPanel.debugConsole,
-                                      _BottomPanel.ports,
-                                    }.contains(_bottomPanel) &&
-                                    bodyHeight >= minEditorHeight + 96)
-                                  SizedBox(
-                                    height: maxPanelHeight
-                                        .clamp(96.0, 300.0)
-                                        .toDouble(),
-                                    child: _buildActivityPanel(),
-                                  ),
-                                if (_bottomPanel == _BottomPanel.problems &&
-                                    bodyHeight >= minEditorHeight + 48)
-                                  SizedBox(
-                                    height: maxPanelHeight
-                                        .clamp(48.0, 240.0)
-                                        .toDouble(),
-                                    child: EditorProblemsPanel(
-                                      analysis: _analysis,
-                                      onClose: () => setState(
-                                        () => _bottomPanel = _BottomPanel.none,
+                          child: Listener(
+                            behavior: HitTestBehavior.translucent,
+                            onPointerDown: (_) => _focusEditorPane(),
+                            child: KeyedSubtree(
+                              key: _editorColumnKey,
+                              child: Column(
+                                key: const ValueKey('editor-right-column'),
+                                children: [
+                                  Expanded(child: _buildEditorArea(context)),
+                                  if (_terminalCreated)
+                                    Offstage(
+                                      // Hide the terminal entirely when the body
+                                      // cannot host both a useful terminal and the
+                                      // editor's minimum, so the code view never
+                                      // collapses to zero height.
+                                      //
+                                      // Never while the prompt holds focus: hiding
+                                      // it would detach the caret's element and
+                                      // close the keyboard the user is typing on.
+                                      // In that window the editor gives up height
+                                      // instead (the `Expanded` above shrinks),
+                                      // which is the lesser loss.
+                                      offstage:
+                                          _bottomPanel !=
+                                              _BottomPanel.terminal ||
+                                          (!_terminalInputHasFocus &&
+                                              bodyHeight -
+                                                      (bodyHeight <
+                                                              TerminalPanelMetrics
+                                                                  .collapsedTotalHeight
+                                                          ? bodyHeight
+                                                          : TerminalPanelMetrics
+                                                                .collapsedTotalHeight) <
+                                                  minEditorHeight),
+                                      child: _buildTerminalPanel(
+                                        terminalPanelHeight:
+                                            terminalPanelHeight,
+                                        maxPanelHeight: maxPanelHeight,
+                                        collapsedPanelHeight:
+                                            collapsedPanelHeight,
+                                        compactPanel: compactPanel,
                                       ),
                                     ),
-                                  ),
-                                if (_bottomPanel == _BottomPanel.ai &&
-                                    bodyHeight >= 36)
-                                  AnimatedContainer(
-                                    duration: const Duration(milliseconds: 150),
-                                    height: aiPanelHeight,
-                                    child: AiPanel(
-                                      projectPath: widget.project.path,
-                                      projectName: widget.project.name,
-                                      language: widget.project.language,
-                                      settings: widget.settings,
-                                      auth: widget.auth,
-                                      compact: aiCompact,
-                                      onCollapseChanged: (collapsed) {
-                                        if (mounted) {
-                                          setState(
-                                            () => _aiCollapsed = collapsed,
-                                          );
-                                        }
-                                      },
-                                      onClose: () {
-                                        if (mounted) {
-                                          setState(() {
-                                            _bottomPanel = _BottomPanel.none;
-                                            _aiCollapsed = false;
-                                          });
-                                        }
-                                      },
-                                      onFileCreated: (path) {
-                                        _editor.openPath(path);
-                                      },
+                                  if ({
+                                        _BottomPanel.debug,
+                                        _BottomPanel.output,
+                                        _BottomPanel.debugConsole,
+                                        _BottomPanel.ports,
+                                      }.contains(_bottomPanel) &&
+                                      bodyHeight >= minEditorHeight + 96)
+                                    SizedBox(
+                                      height: maxPanelHeight
+                                          .clamp(96.0, 300.0)
+                                          .toDouble(),
+                                      child: _buildActivityPanel(),
                                     ),
-                                  ),
-                              ],
+                                  if (_bottomPanel == _BottomPanel.problems &&
+                                      bodyHeight >= minEditorHeight + 48)
+                                    SizedBox(
+                                      height: maxPanelHeight
+                                          .clamp(48.0, 240.0)
+                                          .toDouble(),
+                                      child: EditorProblemsPanel(
+                                        analysis: _analysis,
+                                        onClose: () => setState(
+                                          () =>
+                                              _bottomPanel = _BottomPanel.none,
+                                        ),
+                                      ),
+                                    ),
+                                  if (_bottomPanel == _BottomPanel.ai &&
+                                      bodyHeight >= 36)
+                                    AnimatedContainer(
+                                      duration: const Duration(
+                                        milliseconds: 150,
+                                      ),
+                                      height: aiPanelHeight,
+                                      child: AiPanel(
+                                        projectPath: widget.project.path,
+                                        projectName: widget.project.name,
+                                        language: widget.project.language,
+                                        settings: widget.settings,
+                                        auth: widget.auth,
+                                        compact: aiCompact,
+                                        onCollapseChanged: (collapsed) {
+                                          if (mounted) {
+                                            setState(
+                                              () => _aiCollapsed = collapsed,
+                                            );
+                                          }
+                                        },
+                                        onClose: () {
+                                          if (mounted) {
+                                            setState(() {
+                                              _bottomPanel = _BottomPanel.none;
+                                              _aiCollapsed = false;
+                                            });
+                                          }
+                                        },
+                                        onFileCreated: (path) {
+                                          _editor.openPath(path);
+                                        },
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
@@ -3866,27 +3599,45 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             width: agentCollapsed
                                 ? _agentRailWidth
                                 : Breakpoints.agentPaneWidth,
-                            child: _buildAgentDockStack(
-                              agentHost,
-                              collapsed: agentCollapsed,
-                              pane: agentPane,
+                            child: Listener(
+                              behavior: HitTestBehavior.translucent,
+                              onPointerDown: (_) => _focusAgentPane(),
+                              child: _buildAgentDockStack(
+                                agentHost,
+                                collapsed: agentCollapsed,
+                                pane: agentPane,
+                              ),
                             ),
                           ),
                       ],
                     );
-                    // Body 铺到屏幕底边；Android 的导航条由这里让开，内部控件
-                    // （终端面板、输入卡片、底部面板）跟着一起上移。
-                    if (agentEnabled && layout != WorkbenchLayout.wide) {
-                      return EditorBottomInset(
-                        inset: bottomInset,
-                        child: AgentPaneSwitcher(
-                          state: agentHost.state,
-                          editor: body,
-                          agent: agentPane!,
-                        ),
-                      );
-                    }
-                    return EditorBottomInset(inset: bottomInset, child: body);
+                    // 矮窗口下先让出可选镶边：顶栏 56 之后已经不够编辑器的最小高度时，
+                    // 快捷栏整个不画（与标签栏、符号栏、状态栏的让位规则一致）。
+                    final showQuickBar =
+                        !focusMode &&
+                        bodyHeight >=
+                            minEditorHeight + EditorQuickBar.height + 8;
+                    final pane = agentEnabled && layout != WorkbenchLayout.wide
+                        ? AgentPaneSwitcher(
+                            state: agentHost.state,
+                            editor: body,
+                            agent: agentPane!,
+                          )
+                        : body;
+                    // 快捷栏在顶栏与标签栏之间；Body 铺到屏幕底边，Android 的
+                    // 导航条由 EditorBottomInset 让开，终端面板、输入卡片和底部
+                    // 面板跟着一起上移。
+                    return EditorBottomInset(
+                      inset: bottomInset,
+                      child: Column(
+                        key: const ValueKey('editor-pane-with-quick-bar'),
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (showQuickBar) _buildQuickBar(context),
+                          Expanded(child: pane),
+                        ],
+                      ),
+                    );
                   },
                 );
               },
@@ -4154,6 +3905,130 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         ],
       ),
     );
+  }
+
+  /// 顶栏与文件标签栏之间的快捷功能栏。
+  ///
+  /// 内容与菜单共用同一批动作和同一套开关（离线档位、平台、产品密钥），
+  /// 所以搬过来的动作不会在某一种档位下冒出来或消失。
+  Widget _buildQuickBar(BuildContext context) {
+    final host = _agentHost;
+    final runtime = host?.runtime;
+    return AnimatedBuilder(
+      // 会话的开始 / 结束、后台角标、当前文件都会改变快捷栏的内容与可用状态，
+      // 所以栏自己盯运行时，不靠外层重建。
+      animation: Listenable.merge([
+        _editor,
+        if (runtime != null) runtime.liveChanges,
+        if (runtime != null) runtime.sessions,
+      ]),
+      builder: (context, _) => EditorQuickBar(
+        agentMode: _quickBarAgentMode,
+        editorActions: _quickBarEditorActions(context),
+        agentActions: _quickBarAgentActions(),
+      ),
+    );
+  }
+
+  /// 快捷栏没有空间时（矮窗口），同一批动作回到「更多」菜单。
+  List<EditorQuickBarAction> _quickBarFallbackActions(BuildContext context) {
+    final agentMode = _quickBarAgentMode;
+    final actions = agentMode
+        ? _quickBarAgentActions()
+        : _quickBarEditorActions(context);
+    return [
+      for (final action in actions)
+        if (action.onPressed != null) action,
+    ];
+  }
+
+  /// 快捷栏能不能画：矮窗口先让出可选镶边，与标签栏、符号栏的规则一致。
+  bool _quickBarFits(BuildContext context) {
+    final bodyHeight = MediaQuery.sizeOf(context).height - kToolbarHeight;
+    return bodyHeight >=
+        _minEditorHeightForQuickBar + EditorQuickBar.height + 8;
+  }
+
+  static const double _minEditorHeightForQuickBar = 140;
+
+  List<EditorQuickBarAction> _quickBarEditorActions(BuildContext context) {
+    final host = _agentHost;
+    final open = _editor.current;
+    final extension = p.extension(open?.name ?? '').toLowerCase();
+    final panelOpen = {
+      _BottomPanel.output,
+      _BottomPanel.debug,
+      _BottomPanel.debugConsole,
+      _BottomPanel.ports,
+    }.contains(_bottomPanel);
+    return EditorQuickBarSource(
+      offlineOnly: StudioProfile.current?.offlineOnly == true,
+      hasDocument: open != null,
+      readOnly: open?.readOnly == true,
+      brokenProject: open != null && _isOrphaned(open),
+      undoInMenu:
+          host != null && MediaQuery.sizeOf(context).width < _wideBreakpoint,
+      minimapVisible: widget.settings.minimap,
+      terminalVisible: _terminalVisible,
+      contentPanelOpen: panelOpen,
+      aiPanelOpen: _bottomPanel == _BottomPanel.ai || _agentPanelActive,
+      isCloudProject: widget.project.isCloud,
+      contentToolAvailable:
+          _inlineDocumentFor(open) == null &&
+          const {'.json', '.md', '.markdown'}.contains(extension),
+      canCloseEditor: widget.onClose != null,
+      onUndo: _undoCurrent,
+      onSave: _saveCurrent,
+      onFind: _openFind,
+      onGoto: _showGotoLineDialog,
+      onFormat: _formatCurrent,
+      onContentTool: _openContentTool,
+      onToggleMinimap: () =>
+          widget.settings.setMinimap(!widget.settings.minimap),
+      onTerminal: _toggleTerminalPanel,
+      onOutput: () => _showPanel(_BottomPanel.output),
+      onDebug: () => _showPanel(_BottomPanel.debug),
+      onDebugConsole: () => _showPanel(_BottomPanel.debugConsole),
+      onPorts: () => _showPanel(_BottomPanel.ports),
+      onGit: _openGit,
+      onCloudPull: _pullFromCloud,
+      onOnlineTerminal: () => unawaited(_openOnlineTerminal()),
+      onSettings: _openSettings,
+      onAi: () {
+        // 有 agent 运行时应用内只有一个 AI 入口，快捷栏也开它。
+        if (host != null) {
+          _showAgentPanel();
+        } else {
+          final visible = _bottomPanel == _BottomPanel.ai;
+          setState(
+            () => _bottomPanel = visible ? _BottomPanel.none : _BottomPanel.ai,
+          );
+        }
+      },
+      onCloseEditor: () => unawaited(_closeEditor()),
+    ).build();
+  }
+
+  List<EditorQuickBarAction> _quickBarAgentActions() {
+    final host = _agentHost;
+    final runtime = host?.runtime;
+    final running =
+        runtime != null &&
+        runtime.sessions.sessionsOf(widget.project.id).any((meta) {
+          final status = runtime.statusOf(meta.id);
+          return status == AgentLiveStatus.queued ||
+              status == AgentLiveStatus.running;
+        });
+    return EditorQuickBarAgentSource(
+      hasRuntime: runtime != null,
+      running: running,
+      failedToLoad: host?.error != null,
+      badgeCount: _agentBadgeCount(),
+      onNewSession: () => unawaited(_createAgentSession()),
+      onSessions: () => _showSidebarSection(SidebarSection.sessions),
+      onStopAll: () => _stopAllAgentSessions(runtime),
+      onRetry: host?.activate,
+    ).build();
   }
 
   Widget _buildEditorArea(BuildContext context) {

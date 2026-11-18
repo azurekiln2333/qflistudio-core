@@ -325,9 +325,11 @@ void main() {
         );
         Directory(secondary.path).createSync();
         final source = File(
-          p.join(secondary.path, saveAction == 'document' ? 'main.md' : 'main.py'),
-        )
-          ..writeAsStringSync(_source);
+          p.join(
+            secondary.path,
+            saveAction == 'document' ? 'main.md' : 'main.py',
+          ),
+        )..writeAsStringSync(_source);
         final originalBytes = source.readAsBytesSync();
         late SavedWorkspace workspace;
         await tester.runAsync(() async {
@@ -660,13 +662,26 @@ void main() {
 }
 
 Future<void> _panel(WidgetTester tester, String value) async {
+  // 这些动作已从「更多」菜单移到顶栏下方的快捷功能栏；矮窗口下栏让位，
+  // 同一批动作回到菜单，所以两个入口都要走。
+  final quick = find.byKey(ValueKey('quick-$value'));
+  if (quick.evaluate().isNotEmpty) {
+    // 栏是横向滚动的，靠后的动作在窄屏大字下会先滚进来。
+    await tester.ensureVisible(quick);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(quick);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    return;
+  }
   await tester.tap(find.byTooltip('更多'));
   // A running worker intentionally keeps an activity indicator animating.
   // Advance the route transition without requiring the whole editor to idle.
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 300));
   final item = find.byWidgetPredicate(
-    (widget) => widget is PopupMenuItem<String> && widget.value == value,
+    (widget) =>
+        widget is PopupMenuItem<String> && widget.value == 'quick:$value',
   );
   await tester.ensureVisible(item);
   await tester.tap(item);
