@@ -54,14 +54,20 @@ void main() {
       StudioProfile.current = _profile(offlineOnly: true, showHomeTabs: false);
       final fixture = await _mount(tester, root);
 
-      _expectScopeLabels(['全部项目', '历史项目', '收藏项目', '工作区']);
+      _expectScopeLabels(tester, ['历史项目', '工作区', '全部项目', '收藏项目']);
       expect(find.text('云端项目'), findsNothing);
+      // Launch opens the first tab of the default order. The registry is
+      // deliberately not in name or recency order, and history must keep
+      // ProjectStore's newest-first order rather than reuse All.
+      expect(_visibleProjectNames(tester), ['Zulu', 'Middle', 'Alpha']);
+      // Language chips belong to the all-projects scope, which is not shown.
       expect(find.byType(FilterChip), findsNothing);
+
+      await _selectScope(tester, '全部项目');
       expect(_visibleProjectNames(tester), ['Alpha', 'Middle', 'Zulu']);
+      expect(find.byType(FilterChip), findsNothing);
 
       await _selectScope(tester, '历史项目');
-      // The registry is deliberately not in name or recency order. History
-      // must keep ProjectStore's newest-first order rather than reuse All.
       expect(_visibleProjectNames(tester), ['Zulu', 'Middle', 'Alpha']);
 
       await _selectScope(tester, '收藏项目');
@@ -92,7 +98,23 @@ void main() {
         );
         await _mount(tester, root);
 
-        _expectScopeLabels(['全部项目', '历史项目', '收藏项目', '工作区', '云端项目']);
+        _expectScopeLabels(tester, [
+          '历史项目',
+          '工作区',
+          '全部项目',
+          '收藏项目',
+          '云端项目',
+        ]);
+        // Launch opens history, newest first, cloud projects included.
+        expect(_visibleProjectNames(tester), [
+          'CloudOnly',
+          'Zulu',
+          'Middle',
+          'Alpha',
+        ]);
+        expect(find.byType(FilterChip), findsNothing);
+
+        await _selectScope(tester, '全部项目');
         expect(
           find.byType(FilterChip),
           showHomeTabs ? findsWidgets : findsNothing,
@@ -121,9 +143,9 @@ void main() {
         );
         await _mount(tester, root);
 
-        _expectScopeLabels([
-          '全部项目',
+        _expectScopeLabels(tester, [
           '历史项目',
+          '全部项目',
           '收藏项目',
           if (!offlineOnly) '云端项目',
         ]);
@@ -196,17 +218,29 @@ Future<_Fixture> _mount(WidgetTester tester, Directory root) async {
   return fixture;
 }
 
-void _expectScopeLabels(List<String> labels) {
+/// The tab labels, left to right.
+///
+/// The order is part of the contract: it is the order the tabs were asked to
+/// have, and the first one is the page launch opens.
+List<String> _scopeLabels(WidgetTester tester) {
   final bar = find.byType(TabBar);
   expect(bar, findsOneWidget);
-  for (final label in labels) {
-    expect(
-      find.descendant(of: bar, matching: find.text(label)),
-      findsOneWidget,
-    );
-  }
+  final entries = [
+    for (final element in find
+        .descendant(of: bar, matching: find.byType(Text))
+        .evaluate())
+      (
+        (element.renderObject! as RenderBox).localToGlobal(Offset.zero).dx,
+        (element.widget as Text).data ?? '',
+      ),
+  ]..sort((a, b) => a.$1.compareTo(b.$1));
+  return [for (final entry in entries) entry.$2];
+}
+
+void _expectScopeLabels(WidgetTester tester, List<String> labels) {
+  expect(_scopeLabels(tester), labels);
   expect(
-    find.descendant(of: bar, matching: find.byType(Tab)),
+    find.descendant(of: find.byType(TabBar), matching: find.byType(Tab)),
     findsNWidgets(labels.length),
   );
 }

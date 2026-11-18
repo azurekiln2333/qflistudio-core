@@ -24,11 +24,21 @@ String languageLabel(String value) => switch (languageKey(value)) {
   _ => value.trim().toUpperCase(),
 };
 
-/// Shared circular language marker for project and offline content titles.
+/// Shared capsule language marker for project and offline content titles.
+///
+/// The pill's height is [size] and its width follows the localised label, so a
+/// long name such as "TypeScript" stays readable instead of being shrunk to fit
+/// a fixed circle. Text is single-line and never clipped: the container grows.
 class LanguageBadge extends StatelessWidget {
-  const LanguageBadge({super.key, required this.language, this.size = 30});
+  const LanguageBadge({super.key, required this.language, this.size = 26});
+
+  /// Font size of the label. Sits below the previous fixed 11 so the marker
+  /// reads as a secondary annotation next to the project name.
+  static const double labelFontSize = 9.5;
 
   final String language;
+
+  /// Badge height. The width is intrinsic.
   final double size;
 
   @override
@@ -39,21 +49,27 @@ class LanguageBadge extends StatelessWidget {
       label: label,
       child: ExcludeSemantics(
         child: Container(
-          width: size,
+          key: const ValueKey('language-badge'),
           height: size,
-          padding: const EdgeInsets.all(4),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          constraints: const BoxConstraints(minWidth: 0),
           decoration: BoxDecoration(
             color: scheme.secondaryContainer,
-            shape: BoxShape.circle,
+            borderRadius: BorderRadius.circular(size / 2),
           ),
-          alignment: Alignment.center,
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
+          // widthFactor 1 keeps the capsule as wide as its label while still
+          // centring the text in the fixed height. A bare `alignment` would
+          // stretch the box to the incoming width instead.
+          child: Center(
+            widthFactor: 1,
+            heightFactor: 1,
             child: Text(
               label,
               maxLines: 1,
+              softWrap: false,
               style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                fontSize: 11,
+                fontSize: labelFontSize,
+                height: 1.1,
                 fontWeight: FontWeight.w600,
                 color: scheme.onSecondaryContainer,
               ),

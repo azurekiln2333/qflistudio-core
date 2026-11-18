@@ -102,6 +102,10 @@ class StudioLocalizations {
   String get favoriteProjectHint => _text('favoriteProjectHint');
   String get cloudProjectHint => _text('cloudProjectHint');
   String get searchProjectHint => _text('searchProjectHint');
+  /// Cloud empty-state hint that points at the FAB instead of the old menu item.
+  String get cloudProjectHintFab => _text('cloudProjectHintFab');
+  /// Shown when the FAB is tapped on the cloud tab without a session.
+  String get cloudSignInRequired => _text('cloudSignInRequired');
   String get allLanguages => _text('allLanguages');
   String get removeFromList => _text('removeFromList');
   String get backupAndDelete => _text('backupAndDelete');
@@ -301,6 +305,8 @@ class StudioLocalizations {
     'sqlSource': 'SQL 语句',
     'executeQuery': '执行查询',
     'applyToEditor': '应用到编辑器',
+    'cloudProjectHintFab': '点击下方按钮新建云端项目，源码自动同步到服务器',
+    'cloudSignInRequired': '请先在「我的」页登录，再新建云端项目',
   };
 
   static const _zhTw = <String, String>{
@@ -421,6 +427,8 @@ class StudioLocalizations {
     'sqlSource': 'SQL 語句',
     'executeQuery': '執行查詢',
     'applyToEditor': '套用到編輯器',
+    'cloudProjectHintFab': '點擊下方按鈕建立雲端專案，原始碼會自動同步到伺服器',
+    'cloudSignInRequired': '請先在「我的」頁登入，再建立雲端專案',
   };
 
   static const _en = <String, String>{
@@ -551,6 +559,10 @@ class StudioLocalizations {
     'sqlSource': 'SQL statement',
     'executeQuery': 'Run query',
     'applyToEditor': 'Apply to editor',
+    'cloudProjectHintFab':
+        'Tap the button below to create a cloud project; source syncs automatically.',
+    'cloudSignInRequired':
+        'Sign in from the Profile tab before creating a cloud project.',
   };
 }
 

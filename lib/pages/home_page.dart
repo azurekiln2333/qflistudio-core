@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -20,6 +21,8 @@ import '../services/task_activity_service.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
+import '../widgets/collapsed_search_field.dart';
+import 'home_project_tabs.dart';
 import 'local_content_pages.dart';
 import 'quick_tools_page.dart';
 import 'terminax_terminal_page.dart';
@@ -32,7 +35,6 @@ import 'profile_page.dart';
 import '../services/local_audit_service.dart';
 import '../editor/open_performance.dart';
 import '../services/local_stats_service.dart';
-import '../workspace/saved_workspace.dart';
 import '../workspace/saved_workspaces_tab.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
@@ -285,24 +287,29 @@ class _HomePageState extends State<HomePage> {
 
 /// 主页 Tab：项目列表 + 搜索 + 更多操作。
 /// 项目页签：全部项目 / 历史项目 / 收藏项目，联网产品另有云端项目。
+/// 页签顺序可由用户长按拖动调整，并保存在本机。
 class HomeTab extends StatefulWidget {
   const HomeTab({
     super.key,
     required this.store,
     required this.auth,
     required this.settings,
+    this.tabOrderStore,
   });
 
   final ProjectStore store;
   final AuthStore auth;
   final SettingsStore settings;
 
+  /// Where the dragged tab order is saved. The app leaves this null and uses
+  /// the file-backed store; tests inject an in-memory backend.
+  final HomeTabOrderStore? tabOrderStore;
+
   @override
   State<HomeTab> createState() => _HomeTabState();
 }
 
-enum _ProjectScope { all, history, favorite, workspace, cloud }
-
+/// 主页 Tab 的状态：项目列表 + 搜索 + 更多操作 + 可拖动的项目页签。
 class _HomeTabState extends State<HomeTab>
     with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
   final _searchController = TextEditingController();
@@ -312,15 +319,15 @@ class _HomeTabState extends State<HomeTab>
   String? _archiveBusyLabel;
   late bool _loggedIn;
   Future<void>? _refreshRequest;
-  late final List<_ProjectScope> _scopes = [
-    _ProjectScope.all,
-    _ProjectScope.history,
-    _ProjectScope.favorite,
-    if (supportsSavedWorkspaces) _ProjectScope.workspace,
-    if (StudioProfile.current?.offlineOnly != true) _ProjectScope.cloud,
-  ];
+  late final HomeTabOrderStore _tabOrderStore =
+      widget.tabOrderStore ?? HomeTabOrderStore();
+
+  /// Scopes this product offers, in default order.
+  late List<ProjectScope> _orderedScopes = defaultProjectScopes(
+    StudioProfile.current,
+  );
   late final TabController _projectTabs = TabController(
-    length: _scopes.length,
+    length: _orderedScopes.length,
     vsync: this,
   );
 
@@ -334,6 +341,59 @@ class _HomeTabState extends State<HomeTab>
     widget.auth.addListener(_onAuthChanged);
     if (_loggedIn && StudioProfile.current?.offlineOnly != true) {
       unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _applySavedTabOrderIfReady();
+  }
+
+  /// Reads the saved tab order once, as soon as the store can read without a
+  /// storage probe.
+  ///
+  /// A normal start resolves its storage location during bootstrap, so the order
+  /// is applied shortly after the first frame. When the location is not resolved
+  /// yet (widget tests, or a platform still probing) the read is skipped: it
+  /// would start a probe this frame has no reason to wait for, and the order is
+  /// read on the first drag instead.
+  void _applySavedTabOrderIfReady() {
+    if (_savedTabOrderRequested || !_tabOrderStore.canReadNow) return;
+    _savedTabOrderRequested = true;
+    unawaited(_applySavedTabOrder());
+  }
+
+  bool _savedTabOrderRequested = false;
+
+  /// Applies the saved tab order once the store has read it. A product whose
+  /// scopes change still gets a valid bar: missing scopes are appended and
+  /// unknown saved identifiers are dropped.
+  Future<void> _applySavedTabOrder() async {
+    _savedTabOrderRequested = true;
+    await _tabOrderStore.load();
+    if (!mounted) return;
+    final saved = _tabOrderStore.order;
+    if (saved.isEmpty) return;
+    _applyTabOrder(saved);
+  }
+
+
+  /// Re-derives the rendered order from [saved] and the scopes the product
+  /// offers right now. Keeps the selected scope selected when it still exists.
+  void _applyTabOrder(List<ProjectScope> saved) {
+    final ordered = resolveProjectScopes(
+      saved,
+      defaultProjectScopes(StudioProfile.current),
+    );
+    final selected = _orderedScopes.isEmpty
+        ? ProjectScope.all
+        : _orderedScopes[_projectTabs.index.clamp(0, _orderedScopes.length - 1)];
+    final nextIndex = ordered.indexOf(selected);
+    if (listEquals(ordered, _orderedScopes)) return;
+    setState(() => _orderedScopes = ordered);
+    if (nextIndex >= 0 && nextIndex != _projectTabs.index) {
+      _projectTabs.index = nextIndex;
     }
   }
 
@@ -386,17 +446,10 @@ class _HomeTabState extends State<HomeTab>
   Widget build(BuildContext context) {
     super.build(context);
     final l10n = StudioLocalizations.of(context);
-    final searchStyle = Theme.of(context).textTheme.bodyLarge;
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: _searchOpen
-            ? (MediaQuery.textScalerOf(
-                            context,
-                          ).scale(searchStyle?.fontSize ?? 16) *
-                          (searchStyle?.height ?? 1.5) +
-                      28)
-                  .clamp(kToolbarHeight, double.infinity)
-                  .toDouble()
+            ? collapsedSearchToolbarHeight(context)
             : null,
         leading: _searchOpen
             ? IconButton(
@@ -418,9 +471,8 @@ class _HomeTabState extends State<HomeTab>
         actions: _searchOpen
             ? const [SizedBox(width: 8)]
             : [
-                IconButton(
+                CollapsedSearchButton(
                   tooltip: l10n.searchProjects,
-                  icon: const Icon(Icons.search),
                   onPressed: _openSearch,
                 ),
                 PopupMenuButton<String>(
@@ -432,8 +484,6 @@ class _HomeTabState extends State<HomeTab>
                         showAddExistingDialog(context, widget.store);
                       case 'remove_missing':
                         _removeMissingProjects(context);
-                      case 'new_cloud':
-                        _createCloudProject(context);
                       case 'import_project':
                         unawaited(_importProjectArchive());
                     }
@@ -463,18 +513,6 @@ class _HomeTabState extends State<HomeTab>
                           ],
                         ),
                       ),
-                    if (StudioProfile.current?.offlineOnly != true &&
-                        widget.auth.isLoggedIn)
-                      PopupMenuItem(
-                        value: 'new_cloud',
-                        child: Row(
-                          children: [
-                            Icon(Icons.cloud_upload_outlined, size: 20),
-                            SizedBox(width: 12),
-                            Flexible(child: Text(l10n.newCloudProject)),
-                          ],
-                        ),
-                      ),
                     PopupMenuItem(
                       value: 'remove_missing',
                       child: Row(
@@ -493,7 +531,7 @@ class _HomeTabState extends State<HomeTab>
       floatingActionButton: _searchOpen
           ? null
           : FloatingActionButton.extended(
-              onPressed: () => _createProject(context),
+              onPressed: () => _createFromCurrentScope(context),
               icon: const Icon(Icons.create_new_folder_outlined),
               label: Text(l10n.createProject),
             ),
@@ -525,55 +563,36 @@ class _HomeTabState extends State<HomeTab>
                 if (_searchOpen) {
                   return _buildProjectList(
                     context,
-                    scope: _ProjectScope.all,
+                    scope: ProjectScope.all,
                     keyword: _query,
                   );
                 }
                 return Column(
                   children: [
-                    TabBar(
-                      controller: _projectTabs,
-                      isScrollable: true,
-                      tabAlignment: TabAlignment.start,
-                      dividerColor: Colors.transparent,
-                      labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                      tabs: [
-                        Tab(
-                          height: 36,
-                          child: Center(child: Text(l10n.allProjects)),
-                        ),
-                        Tab(
-                          height: 36,
-                          child: Center(child: Text(l10n.historyProjects)),
-                        ),
-                        Tab(
-                          height: 36,
-                          child: Center(child: Text(l10n.favoriteProjects)),
-                        ),
-                        if (_scopes.contains(_ProjectScope.workspace))
-                          const Tab(
-                            height: 36,
-                            child: Center(child: Text('工作区')),
-                          ),
-                        if (_scopes.contains(_ProjectScope.cloud))
-                          Tab(
-                            height: 36,
-                            child: Center(child: Text(l10n.cloudProjects)),
-                          ),
-                      ],
-                    ),
+                    _buildScopeTabBar(context, l10n),
                     Expanded(
                       child: TabBarView(
                         controller: _projectTabs,
                         children: [
-                          for (final scope in _scopes)
-                            scope == _ProjectScope.workspace
+                          for (final scope in _orderedScopes)
+                            scope == ProjectScope.workspace
                                 ? SavedWorkspacesTab(
+                                    key: const ValueKey(
+                                      'home-scope-page-workspace',
+                                    ),
                                     store: widget.store,
                                     auth: widget.auth,
                                     settings: widget.settings,
                                   )
-                                : _buildProjectList(context, scope: scope),
+                                : KeyedSubtree(
+                                    key: ValueKey(
+                                      'home-scope-page-${scope.name}',
+                                    ),
+                                    child: _buildProjectList(
+                                      context,
+                                      scope: scope,
+                                    ),
+                                  ),
                         ],
                       ),
                     ),
@@ -587,58 +606,133 @@ class _HomeTabState extends State<HomeTab>
     );
   }
 
-  Widget _buildSearchField() {
-    final scheme = Theme.of(context).colorScheme;
-    final l10n = StudioLocalizations.of(context);
-    return TextField(
-      key: const ValueKey('home-project-search-field'),
-      controller: _searchController,
-      autofocus: true,
-      textAlign: TextAlign.start,
-      textAlignVertical: TextAlignVertical.center,
-      textInputAction: TextInputAction.search,
-      maxLines: 1,
-      onChanged: (value) => setState(() => _query = value),
-      style: Theme.of(context).textTheme.bodyLarge,
-      decoration: InputDecoration(
-        hintText: l10n.searchProjectHint,
-        hintMaxLines: 1,
-        isDense: true,
-        filled: true,
-        fillColor: scheme.surfaceContainerHighest,
-        suffixIcon: _query.isEmpty
-            ? null
-            : IconButton(
-                tooltip: l10n.clear,
-                icon: const Icon(Icons.close, size: 20),
-                onPressed: () {
-                  _searchController.clear();
-                  setState(() => _query = '');
-                },
-              ),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
+  /// The project scope bar.
+  ///
+  /// Long-press starts a drag reorder: each tab carries a [LongPressDraggable]
+  /// and a [DragTarget] sits between neighbouring tabs, because this Flutter
+  /// version's `TabBar` reports `onLongPress` but has no `onReorder` of its own.
+  /// A short tap still selects, a horizontal drag still scrolls the strip.
+  Widget _buildScopeTabBar(BuildContext context, StudioLocalizations l10n) {
+    String labelOf(ProjectScope scope) => switch (scope) {
+      ProjectScope.all => l10n.allProjects,
+      ProjectScope.history => l10n.historyProjects,
+      ProjectScope.favorite => l10n.favoriteProjects,
+      ProjectScope.workspace => '工作区',
+      ProjectScope.cloud => l10n.cloudProjects,
+    };
+    Widget content(ProjectScope scope) => Tab(
+      key: ValueKey('home-scope-tab-${scope.name}'),
+      height: 36,
+      child: Center(child: Text(labelOf(scope))),
+    );
+    Widget target(int index, Widget child) => DragTarget<int>(
+      key: ValueKey('home-scope-drop-$index'),
+      onWillAcceptWithDetails: (details) => details.data != index,
+      onAcceptWithDetails: (details) => _dropScopeTab(details.data, index),
+      builder: (context, candidate, _) => Container(
+        decoration: BoxDecoration(
+          border: Border(
+            left: BorderSide(
+              color: candidate.isEmpty
+                  ? Colors.transparent
+                  : Theme.of(context).colorScheme.primary,
+              width: 2,
+            ),
+          ),
         ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
-        ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 12,
-        ),
-        hintStyle: TextStyle(color: scheme.onSurfaceVariant),
+        child: Center(child: child),
       ),
+    );
+    return TabBar(
+      controller: _projectTabs,
+      isScrollable: true,
+      tabAlignment: TabAlignment.start,
+      dividerColor: Colors.transparent,
+      labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+      tabs: [
+        for (var index = 0; index < _orderedScopes.length; index++)
+          target(
+            index,
+            LongPressDraggable<int>(
+              key: ValueKey('home-scope-drag-${_orderedScopes[index].name}'),
+              data: index,
+              feedback: Material(
+                color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                elevation: 4,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Text(labelOf(_orderedScopes[index])),
+                ),
+              ),
+              childWhenDragging: Opacity(
+                opacity: 0.4,
+                child: content(_orderedScopes[index]),
+              ),
+              child: content(_orderedScopes[index]),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Completes a drag reorder: moves the rendered order and saves it.
+  ///
+  /// The selected scope stays selected, so its index moves with it rather than
+  /// jumping to whatever tab now occupies the old position. Dropping a tab
+  /// before the selected one shifts the selection, so the index is recomputed
+  /// from the scope that was selected before the move.
+  Future<void> _dropScopeTab(int oldIndex, int newIndex) async {
+    if (oldIndex == newIndex) return;
+    if (oldIndex < 0 || oldIndex >= _orderedScopes.length) return;
+    if (newIndex < 0 || newIndex >= _orderedScopes.length) return;
+    final previous = List<ProjectScope>.of(_orderedScopes);
+    final selected = previous[_projectTabs.index];
+    final ordered = List<ProjectScope>.of(previous);
+    // Remove first so `newIndex` is read against the shortened list, which is
+    // what dropping on the target's slot means for both drag directions.
+    final moved = ordered.removeAt(oldIndex);
+    ordered.insert(newIndex, moved);
+    final nextIndex = ordered.indexOf(selected);
+    setState(() => _orderedScopes = ordered);
+    if (nextIndex >= 0 && nextIndex != _projectTabs.index) {
+      _projectTabs.index = nextIndex;
+    }
+    // The saved order may not have been read yet: the first frame must not wait
+    // on a file read, so it is fetched here, where it is actually needed.
+    await _tabOrderStore.load();
+    if (!mounted) return;
+    final merged = mergeProjectScopeOrder(
+      previous: previous,
+      applied: _tabOrderStore.order,
+      next: ordered,
+      available: defaultProjectScopes(StudioProfile.current),
+      moved: previous[oldIndex],
+    );
+    unawaited(_tabOrderStore.save(merged));
+  }
+
+  /// The expanded search bar.
+  ///
+  /// Uses the shared [CollapsedSearchField] so Home and the tutorial page show
+  /// the same field. The filter itself is unchanged: [_query] is still matched
+  /// against project names and paths in [_buildProjectList].
+  Widget _buildSearchField() {
+    final l10n = StudioLocalizations.of(context);
+    return CollapsedSearchField(
+      fieldKey: const ValueKey('home-project-search-field'),
+      controller: _searchController,
+      label: l10n.searchProjectHint,
+      clearTooltip: l10n.clear,
+      onChanged: (value) => setState(() => _query = value),
     );
   }
 
   /// 按页签取项目列表。
-  List<Project> _projectsFor(_ProjectScope scope) {
+  List<Project> _projectsFor(ProjectScope scope) {
     final all = widget.store.projects
         .where(
           (project) =>
@@ -646,18 +740,18 @@ class _HomeTabState extends State<HomeTab>
         )
         .toList();
     switch (scope) {
-      case _ProjectScope.all:
+      case ProjectScope.all:
         final list = [
           ...all,
         ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
         return list;
-      case _ProjectScope.history:
+      case ProjectScope.history:
         return [...all];
-      case _ProjectScope.favorite:
+      case ProjectScope.favorite:
         return all.where((p) => p.favorite).toList();
-      case _ProjectScope.workspace:
+      case ProjectScope.workspace:
         return const [];
-      case _ProjectScope.cloud:
+      case ProjectScope.cloud:
         return all.where((p) => p.isCloud).toList();
     }
   }
@@ -672,7 +766,7 @@ class _HomeTabState extends State<HomeTab>
 
   Widget _buildProjectList(
     BuildContext context, {
-    required _ProjectScope scope,
+    required ProjectScope scope,
     String keyword = '',
   }) {
     var projects = _projectsFor(scope);
@@ -687,7 +781,7 @@ class _HomeTabState extends State<HomeTab>
           )
           .toList();
     }
-    if (scope == _ProjectScope.all) {
+    if (scope == ProjectScope.all) {
       // 语言筛选 chips（全部项目页签），始终显示全部语言。
       final chipList = [
         Padding(
@@ -745,17 +839,17 @@ class _HomeTabState extends State<HomeTab>
     }
     if (projects.isEmpty) {
       final empty = switch (scope) {
-        _ProjectScope.favorite => _buildSimpleEmpty(
+        ProjectScope.favorite => _buildSimpleEmpty(
           context,
           Icons.star_border_outlined,
           StudioLocalizations.of(context).favoriteProjects,
           StudioLocalizations.of(context).favoriteProjectHint,
         ),
-        _ProjectScope.cloud => _buildSimpleEmpty(
+        ProjectScope.cloud => _buildSimpleEmpty(
           context,
           Icons.cloud_outlined,
           StudioLocalizations.of(context).cloudProjects,
-          StudioLocalizations.of(context).cloudProjectHint,
+          StudioLocalizations.of(context).cloudProjectHintFab,
         ),
         _ =>
           searching
@@ -767,7 +861,7 @@ class _HomeTabState extends State<HomeTab>
     return _refreshable(scope, _buildGridOrList(context, projects));
   }
 
-  Widget _refreshable(_ProjectScope scope, Widget child) =>
+  Widget _refreshable(ProjectScope scope, Widget child) =>
       RefreshIndicator(onRefresh: () => _refreshProjects(scope), child: child);
 
   Widget _emptyScrollable(Widget child) => CustomScrollView(
@@ -780,7 +874,7 @@ class _HomeTabState extends State<HomeTab>
     ],
   );
 
-  Future<void> _refreshProjects(_ProjectScope scope) async {
+  Future<void> _refreshProjects(ProjectScope scope) async {
     if (_refreshRequest != null) return _refreshRequest;
     final request = _reloadProjects(scope);
     _refreshRequest = request;
@@ -791,13 +885,13 @@ class _HomeTabState extends State<HomeTab>
     }
   }
 
-  Future<void> _reloadProjects(_ProjectScope scope) async {
+  Future<void> _reloadProjects(ProjectScope scope) async {
     try {
       await widget.store.refresh();
       if (StudioProfile.current?.offlineOnly == true) return;
       final token = widget.auth.token;
       if (token == null ||
-          (scope != _ProjectScope.cloud && scope != _ProjectScope.all)) {
+          (scope != ProjectScope.cloud && scope != ProjectScope.all)) {
         return;
       }
       final remote = await ApiClient.instance.cloudProjects(token);
@@ -996,7 +1090,7 @@ class _HomeTabState extends State<HomeTab>
         _searchController.clear();
         _searchOpen = false;
       });
-      _projectTabs.animateTo(_scopes.indexOf(_ProjectScope.all));
+      _projectTabs.animateTo(_orderedScopes.indexOf(ProjectScope.all));
       _showArchiveMessage('已导入项目「${result.project!.name}」');
     } on Object catch (error) {
       _showArchiveMessage('导入失败：$error');
@@ -1010,6 +1104,33 @@ class _HomeTabState extends State<HomeTab>
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Creates what the visible tab implies.
+  ///
+  /// On the cloud scope the FAB opens the cloud project flow that used to live
+  /// in the overflow menu; everywhere else it keeps the local project dialog it
+  /// always opened. A cloud scope only exists for a logged-in networked
+  /// product, and tapping before the session lands asks the user to sign in
+  /// rather than silently creating something local.
+  Future<void> _createFromCurrentScope(BuildContext context) async {
+    final index = _projectTabs.index;
+    final scope = index >= 0 && index < _orderedScopes.length
+        ? _orderedScopes[index]
+        : ProjectScope.all;
+    if (scope != ProjectScope.cloud) {
+      await _createProject(context);
+      return;
+    }
+    if (!widget.auth.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(StudioLocalizations.of(context).cloudSignInRequired),
+        ),
+      );
+      return;
+    }
+    await _createCloudProject(context);
   }
 
   Future<void> _createProject(BuildContext context) async {
