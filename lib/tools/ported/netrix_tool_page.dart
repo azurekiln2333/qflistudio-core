@@ -23,20 +23,36 @@ class NetrixToolPage extends StatefulWidget {
 
 class _NetrixToolPageState extends State<NetrixToolPage> {
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
-  late final Map<String, TextEditingController> _controllers;
+  late Map<String, TextEditingController> _controllers;
   ToolResult? _result;
   bool _running = false;
 
   @override
   void initState() {
     super.initState();
-    _controllers = <String, TextEditingController>{
-      for (final ToolField field in widget.tool.fields)
-        field.id: TextEditingController(text: field.initialValue),
-    };
+    _controllers = _controllersFor(widget.tool);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_recordRecent());
     });
+  }
+
+  /// 一个工具一张表：字段状态按工具重建。
+  Map<String, TextEditingController> _controllersFor(ToolDefinition tool) =>
+      <String, TextEditingController>{
+        for (final ToolField field in tool.fields)
+          field.id: TextEditingController(text: field.initialValue),
+      };
+
+  /// 同一个页面被复用时（换工具但不换路由），旧字段不能带到新工具上。
+  @override
+  void didUpdateWidget(covariant NetrixToolPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tool.id == widget.tool.id) return;
+    for (final TextEditingController controller in _controllers.values) {
+      controller.dispose();
+    }
+    _controllers = _controllersFor(widget.tool);
+    _result = null;
   }
 
   Future<void> _recordRecent() async {
