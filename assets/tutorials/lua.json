@@ -44,8 +44,8 @@
           "summary": "用 local 变量保存数据并输出。",
           "concepts": ["local", "变量", "字符串拼接"],
           "explain": "Lua 使用 local 声明局部变量。字符串可以用两个点连接，局部变量能让代码更容易阅读，也不会污染全局环境。",
-          "code": "local name = \"QFLIStudio+\"\nprint(\"Hello, \" .. name .. \"!\")\n",
-          "output": "Hello, QFLIStudio+!\n",
+          "code": "local name = \"QFLIStudioN\"\nprint(\"Hello, \" .. name .. \"!\")\n",
+          "output": "Hello, QFLIStudioN!\n",
           "tasks": [
             {
               "prompt": "增加一个 language 变量并把它打印出来。",

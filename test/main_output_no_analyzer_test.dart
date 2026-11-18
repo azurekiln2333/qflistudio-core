@@ -28,7 +28,7 @@ void main() {
     // Main product; `codeAnalyzer` stays null on purpose.
     StudioProfile.current = const StudioProfile(
       id: 'main-no-analyzer-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [],
       productKey: StudioProductCatalog.qfliStudioKey,
     );

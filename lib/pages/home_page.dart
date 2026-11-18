@@ -452,7 +452,7 @@ class _HomeTabState extends State<HomeTab>
         title: _searchOpen
             ? _buildSearchField()
             : Text(
-                StudioProfile.current?.appTitle ?? 'QFLIStudio+',
+                StudioProfile.current?.appTitle ?? 'QFLIStudioN',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                   color: Theme.of(context).colorScheme.primary,
                 ),

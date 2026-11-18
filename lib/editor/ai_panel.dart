@@ -238,7 +238,7 @@ class AiPanelState extends State<AiPanel> {
       StudioProfile.current?.allowCustomAiEndpoint == true;
 
   String get _systemPrompt =>
-      '你是 QFLIStudio+ 内置的 AI 编程助手，运行在移动端代码编辑器中。'
+      '你是 QFLIStudioN 内置的 AI 编程助手，运行在移动端代码编辑器中。'
       '当前项目：${widget.projectName}（语言：${widget.language.isEmpty ? "未指定" : widget.language}）。\n'
       '回答使用中文，简洁直接。需要创建或修改文件时，用如下格式给出完整文件内容：\n'
       '```语言:相对路径\n代码\n```\n'

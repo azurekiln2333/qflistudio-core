@@ -201,7 +201,7 @@ class _ProfileTabState extends State<ProfileTab> {
                         _entry(
                           icon: Icons.info_outline,
                           title:
-                              '关于 ${StudioProfile.current?.appTitle ?? 'QFLIStudio+'}',
+                              '关于 ${StudioProfile.current?.appTitle ?? 'QFLIStudioN'}',
                           onTap: () => showQfliAbout(context),
                         ),
                       ],

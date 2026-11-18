@@ -235,7 +235,7 @@ class _LoginPageState extends State<LoginPage> {
           ),
           const SizedBox(height: 22),
           Text(
-            '欢迎回到 QFLIStudio+',
+            '欢迎回到 QFLIStudioN',
             style: Theme.of(context).textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),

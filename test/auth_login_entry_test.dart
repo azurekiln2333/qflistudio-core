@@ -83,7 +83,7 @@ void main() {
 
       expect(find.text('其他方式登录'), findsNothing);
       expect(find.textContaining('注册'), findsNothing);
-      expect(find.text('欢迎回到 QFLIStudio+'), findsOneWidget);
+      expect(find.text('欢迎回到 QFLIStudioN'), findsOneWidget);
 
       // Starts the avoid-area listener, which owns pending timers. Drop the
       // tree and let them finish inside this test.

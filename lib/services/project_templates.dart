@@ -147,14 +147,14 @@ enum ProjectTemplate {
 const String _javaMain = '''
 public class Main {
     public static void main(String[] args) {
-        System.out.println("Hello, QFLIStudio+!");
+        System.out.println("Hello, QFLIStudioN!");
     }
 }
 ''';
 
 const String _pythonMain = '''
 def main():
-    print("Hello, QFLIStudio+!")
+    print("Hello, QFLIStudioN!")
 
 
 if __name__ == "__main__":
@@ -165,7 +165,7 @@ const String _cMain = '''
 #include <stdio.h>
 
 int main(void) {
-    printf("Hello, QFLIStudio+!\\n");
+    printf("Hello, QFLIStudioN!\\n");
     return 0;
 }
 ''';
@@ -174,7 +174,7 @@ const String _cppMain = '''
 #include <iostream>
 
 int main() {
-    std::cout << "Hello, QFLIStudio+!" << std::endl;
+    std::cout << "Hello, QFLIStudioN!" << std::endl;
     return 0;
 }
 ''';
@@ -185,12 +185,12 @@ const String _htmlIndex = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QFLIStudio+</title>
+    <title>QFLIStudioN</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>Hello, QFLIStudio+!</h1>
-    <p>由 QFLIStudio+ 创建的初始页面。</p>
+    <h1>Hello, QFLIStudioN!</h1>
+    <p>由 QFLIStudioN 创建的初始页面。</p>
     <script src="main.js"></script>
 </body>
 </html>
@@ -208,32 +208,32 @@ body {
 ''';
 
 const String _htmlJs = '''
-console.log('Hello, QFLIStudio+!');
+console.log('Hello, QFLIStudioN!');
 ''';
 
 const String _dartMain = '''
 void main() {
-  print('Hello, QFLIStudio+!');
+  print('Hello, QFLIStudioN!');
 }
 ''';
 
 const String _luaMain = '''
-print("Hello, QFLIStudio+!")
+print("Hello, QFLIStudioN!")
 ''';
 
 const String _jsMain = '''
-console.log('Hello, QFLIStudio+!');
+console.log('Hello, QFLIStudioN!');
 ''';
 
 const String _tsMain = '''
-const greet = (name: string): string => `Hello, QFLIStudio+! \${name}`;
+const greet = (name: string): string => `Hello, QFLIStudioN! \${name}`;
 
 console.log(greet('world'));
 ''';
 
 const String _shellMain = '''
 #!/usr/bin/env sh
-printf 'Hello, QFLIStudio+!\\n'
+printf 'Hello, QFLIStudioN!\\n'
 ''';
 
 const String _jsonData = '''
@@ -260,7 +260,7 @@ SELECT name FROM sqlite_master WHERE type = 'table';
 
 const String _kotlinMain = '''
 fun main() {
-    println("Hello, QFLIStudio+!")
+    println("Hello, QFLIStudioN!")
 }
 ''';
 
@@ -270,13 +270,13 @@ package main
 import "fmt"
 
 func main() {
-    fmt.Println("Hello, QFLIStudio+!")
+    fmt.Println("Hello, QFLIStudioN!")
 }
 ''';
 
 const String _rustMain = '''
 fn main() {
-    println!("Hello, QFLIStudio+!");
+    println!("Hello, QFLIStudioN!");
 }
 ''';
 
@@ -285,16 +285,16 @@ using System;
 
 class Program {
     static void Main() {
-        Console.WriteLine("Hello, QFLIStudio+!");
+        Console.WriteLine("Hello, QFLIStudioN!");
     }
 }
 ''';
 
 const String _phpMain = '''
 <?php
-echo "Hello, QFLIStudio+!\n";
+echo "Hello, QFLIStudioN!\n";
 ''';
 
 const String _rubyMain = '''
-puts 'Hello, QFLIStudio+!'
+puts 'Hello, QFLIStudioN!'
 ''';

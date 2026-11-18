@@ -41,7 +41,7 @@ void main() {
     previousProfile = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'editor-top-bar-title-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [],
       productKey: StudioProductCatalog.qfliStudioKey,
       isOffline: false,

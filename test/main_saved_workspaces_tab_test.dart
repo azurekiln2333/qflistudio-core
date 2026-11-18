@@ -31,7 +31,7 @@ void main() {
     previous = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'main-workspaces-tab-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [],
       productKey: StudioProductCatalog.qfliStudioKey,
     );

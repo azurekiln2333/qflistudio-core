@@ -209,7 +209,7 @@ void main() {
     final generic = AppBackupInfo(
       formatVersion: 1,
       productKey: 'qflistudio',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       profileId: '',
       runtimeKind: 'unavailable',
       createdAt: DateTime.fromMillisecondsSinceEpoch(0),

@@ -4,7 +4,7 @@ import 'package:path/path.dart' as p;
 
 import '../config/api_config.dart';
 
-/// 一个已注册到 QFLIStudio+ 的项目。
+/// 一个已注册到 QFLIStudioN 的项目。
 class Project {
   Project({
     required this.id,

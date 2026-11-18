@@ -79,7 +79,7 @@ void main() {
 
     final networked = StudioProfile(
       id: 'studio',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: const [ProjectTemplate.empty],
     );
     expect(networked.offlineOnly, isFalse);
@@ -87,7 +87,7 @@ void main() {
     // An explicit value still wins.
     final optedIn = StudioProfile(
       id: 'studio',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: const [ProjectTemplate.empty],
       offlineOnly: true,
     );

@@ -1,5 +1,5 @@
 name: qfli_studio_core
-description: "QFLIStudio+ 的共享 IDE 内核：编辑器、文件树、高亮、主题、项目管理与社区客户端。各语言专属 App 都依赖本包。"
+description: "QFLIStudioN 的共享 IDE 内核：编辑器、文件树、高亮、主题、项目管理与社区客户端。各语言专属 App 都依赖本包。"
 publish_to: 'none'
 version: 1.0.0+1
 

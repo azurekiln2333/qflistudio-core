@@ -22,7 +22,7 @@ class _HighlightSettingsPageState extends State<HighlightSettingsPage> {
 <style>
   .hello { color: #2196f3; padding: 16px; }
 </style>
-<div class="hello">QFLIStudio+</div>
+<div class="hello">QFLIStudioN</div>
 <script>
   const message = "Hello, world!";
   console.log(message);

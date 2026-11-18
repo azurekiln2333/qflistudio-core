@@ -28,7 +28,7 @@ void main() {
     previous = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'main-short-height-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [],
       productKey: StudioProductCatalog.qfliStudioKey,
     );

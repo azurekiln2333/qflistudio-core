@@ -49,7 +49,7 @@ void main() {
     previous = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'pad-layout-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [],
       productKey: StudioProductCatalog.qfliStudioKey,
       isOffline: false,
@@ -355,7 +355,7 @@ void main() {
     // an action and fires it through the real toolbar button.
     StudioProfile.current = StudioProfile(
       id: 'pad-focus-test',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: const [],
       productKey: StudioProductCatalog.qfliStudioKey,
       isOffline: false,

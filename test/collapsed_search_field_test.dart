@@ -45,7 +45,7 @@ void main() {
     originalProfile = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'studio',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [ProjectTemplate.java],
       isOffline: false,
       productKey: StudioProductCatalog.qfliStudioKey,
@@ -70,13 +70,13 @@ void main() {
     expect(find.byType(CollapsedSearchField), findsNothing);
     expect(find.byKey(const ValueKey('home-project-search-field')), findsNothing);
     // The collapsed state keeps the product title.
-    expect(find.text('QFLIStudio+'), findsOneWidget);
+    expect(find.text('QFLIStudioN'), findsOneWidget);
 
     await tester.tap(find.byType(CollapsedSearchButton));
     await _settle(tester);
 
     expect(find.byType(CollapsedSearchField), findsOneWidget);
-    expect(find.text('QFLIStudio+'), findsNothing);
+    expect(find.text('QFLIStudioN'), findsNothing);
     // Expanding hides the FAB and the overflow menu, as before.
     expect(find.byType(FloatingActionButton), findsNothing);
     expect(find.byType(PopupMenuButton<String>), findsNothing);

@@ -199,7 +199,7 @@ void main() {
 
 StudioProfile _profile({bool offlineOnly = false}) => StudioProfile(
   id: 'studio',
-  appTitle: 'QFLIStudio+',
+  appTitle: 'QFLIStudioN',
   templates: const [ProjectTemplate.java],
   isOffline: false,
   offlineOnly: offlineOnly,

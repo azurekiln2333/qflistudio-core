@@ -29,7 +29,7 @@ abstract final class StudioProductCatalog {
   static const jsonKey = 'json';
   static const noteKey = 'note';
 
-  static const qfliStudio = 'QFLIStudio+';
+  static const qfliStudio = 'QFLIStudioN';
   static const qfliStudioDescription = '多语言编辑器（暂定）';
   static const script = 'QFLIScript';
   static const rustCore = 'QFLIRustCore';
@@ -129,7 +129,7 @@ class StudioProfile {
   final String id;
 
   /// 产品名：窗口标题、任务切换器和应用内顶栏都用它，
-  /// 例如联网全能版 `QFLIStudio+`、C/C++ 工具 `QFLIForge`。
+  /// 例如联网全能版 `QFLIStudioN`、C/C++ 工具 `QFLIForge`。
   final String appTitle;
 
   /// Stable product key used by platform identifiers and exported metadata.

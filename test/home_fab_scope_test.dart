@@ -43,7 +43,7 @@ void main() {
     originalProfile = StudioProfile.current;
     StudioProfile.current = const StudioProfile(
       id: 'studio',
-      appTitle: 'QFLIStudio+',
+      appTitle: 'QFLIStudioN',
       templates: [ProjectTemplate.java],
       isOffline: false,
       productKey: StudioProductCatalog.qfliStudioKey,
