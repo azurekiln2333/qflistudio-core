@@ -20,11 +20,15 @@ transcript paging, composer controls or user-message actions.
 
 ## 3. Contracts
 
-Files and Sessions share one sidebar card and header on desktop and in the
-drawer. Switching replaces the body and header actions. Keep tree expansion,
-search and browsing state, lazy Agent activation and offline gating. Reserve
-usable project-selector width. Move file actions to a labeled overflow menu
-when the header is narrow.
+Files and Sessions share one sidebar card and one header row on desktop and in
+the drawer. Keep the project selector on the left and put one ordinary
+Files/Sessions icon toggle at the far right. Do not add a segmented capsule or
+a second switch row. Switching replaces the body and contextual actions. Give
+every header action a 44x44 target and a 20px icon in both modes. Set explicit
+size, padding and density on popup menu buttons. Keep at least 96px for the
+project selector at narrow widths. Preserve tree expansion, search and
+browsing state, lazy Agent activation and offline gating. Move file actions to
+a labeled overflow menu when the header is narrow.
 
 Opening a session reads only the message tail. Do not scan the whole file for
 compaction on that path. Reverse line reading accumulates byte chunks and joins
