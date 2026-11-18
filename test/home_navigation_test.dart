@@ -117,8 +117,10 @@ void main() {
     // Home shows the profile's app title.
     expect(find.text('QFLIJVMX'), findsWidgets);
 
-    // The other tabs must not repeat it.
-    for (final index in [1, 2, 3, 4]) {
+    // The other tabs must not repeat it. Tutorials and example code are one
+    // page now, so the shell has four destinations: home, tools, content and
+    // profile.
+    for (final index in [1, 2, 3]) {
       await _selectTab(tester, index);
       expect(
         find.text('QFLIJVMX'),
@@ -139,9 +141,10 @@ void main() {
     }
 
     // The destinations carry the labels, and the tool tab's page titles itself.
+    // Example code shares the tutorial page, so it has no destination label.
     expect(find.text('工具'), findsWidgets);
     expect(find.text('教程'), findsWidgets);
-    expect(find.text('示例代码'), findsWidgets);
+    expect(find.text('示例代码'), findsNothing);
     expect(find.text('我的'), findsWidgets);
   });
 
@@ -157,9 +160,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 50));
     }
 
-    // Five destinations, and the last one is the profile page rather than the
-    // examples tab that used to replace it.
-    await _selectTab(tester, 4);
+    // Four destinations: the last one is the profile page. Example code used to
+    // sit between the tutorial and the profile page and was never the last
+    // destination after the page index was fixed.
+    await _selectTab(tester, 3);
     expect(find.byType(ProfileTab), findsOneWidget);
     expect(find.text('未登录'), findsNothing);
   });
@@ -341,7 +345,7 @@ Future<void> _selectTab(WidgetTester tester, int index) async {
     of: find.byType(NavigationBar),
     matching: find.byWidgetPredicate((widget) => widget is InkResponse),
   );
-  expect(items, findsNWidgets(5), reason: 'five destinations are tappable');
+  expect(items, findsNWidgets(4), reason: 'four destinations are tappable');
   await tester.tap(items.at(index));
   // `pumpAndSettle` never settles here: the home shell keeps a periodic
   // activity/cloud timer running. Pump a bounded number of frames instead, long

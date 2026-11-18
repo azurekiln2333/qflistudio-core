@@ -88,11 +88,10 @@ class _HomePageState extends State<HomePage> {
   Widget _createPageView() => PageView.builder(
     key: const ValueKey('home-page-view'),
     controller: _pageController,
-    // Five pages: home, tools, tutorial, examples and profile. This used to be
-    // 4, which made the profile page unreachable no matter what the navigation
-    // bar offered — the destination existed but the PageView would not scroll to
-    // it.
-    itemCount: 5,
+    // Four pages: home, tools, content and profile. Tutorials and example code
+    // share one page (R6), so the separate example destination is gone; the
+    // remaining pages keep their old indexes.
+    itemCount: 4,
     onPageChanged: (index) => _currentIndex.value = index,
     itemBuilder: (context, index) => _pages.putIfAbsent(index, () {
       final profile = StudioProfile.current;
@@ -162,11 +161,8 @@ class _HomePageState extends State<HomePage> {
         selectedIcon: const Icon(Icons.menu_book),
         label: l10n.tutorial,
       ),
-      NavigationDestination(
-        icon: const Icon(Icons.code_outlined),
-        selectedIcon: const Icon(Icons.code),
-        label: l10n.examples,
-      ),
+      // Tutorials and example code are one page; there is no separate example
+      // destination any more (R6).
       // The profile page is always offered, including for offline-only products.
       // It used to be replaced by the examples tab under `isOffline`, which made
       // the account/settings entry unreachable; the page itself now hides its
@@ -250,23 +246,16 @@ class _HomePageState extends State<HomePage> {
       ),
       2 =>
         offline
-            ? LocalTutorialsTab(
+            ? TutorialCenterPage(
                 language: profile!.id,
                 store: widget.store,
                 auth: widget.auth,
                 settings: widget.settings,
+                examples: _examples,
                 repository: _sharedContentRepository,
               )
             : TutorialsTab(auth: widget.auth),
-      3 => ExampleCodeTab(
-        language: profile!.id,
-        store: widget.store,
-        auth: widget.auth,
-        settings: widget.settings,
-        examples: _examples,
-        repository: _sharedContentRepository,
-      ),
-      4 => ProfileTab(
+      3 => ProfileTab(
         auth: widget.auth,
         settings: widget.settings,
         store: widget.store,

@@ -1357,12 +1357,26 @@ Future<void> _homeDetail(
   );
   await tester.pump();
   final l10n = _l10n(tester);
+  // Tutorials and example code share one page (R6): open it from the tutorial
+  // destination, then pick the section for example code.
   await tester.tap(
     find.descendant(
       of: find.byType(NavigationBar),
-      matching: find.text(examplesPage ? l10n.examples : l10n.tutorial),
+      matching: find.text(l10n.tutorial),
     ),
   );
+  if (examplesPage) {
+    await _waitFor(
+      tester,
+      () => find
+          .byKey(TutorialCenterPage.examplesSectionKey)
+          .evaluate()
+          .isNotEmpty,
+      'merged content page',
+    );
+    await tester.tap(find.byKey(TutorialCenterPage.examplesSectionKey));
+    await tester.pump(const Duration(milliseconds: 400));
+  }
   final title = examplesPage ? _exampleTitle : _lessonTitle;
   await _waitFor(
     tester,

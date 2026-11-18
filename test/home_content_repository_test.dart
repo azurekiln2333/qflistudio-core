@@ -74,7 +74,7 @@ void main() {
   });
 
   testWidgets(
-    'Home calls the custom content factory once for both retained tabs',
+    'Home calls the custom content factory once for the content page',
     (tester) async {
       _useCompactSurface(tester);
       var calls = 0;
@@ -89,16 +89,14 @@ void main() {
       addTearDown(stores.dispose);
       await tester.pumpWidget(_app(stores));
       await _selectTab(tester, 2);
-      final tutorials = tester.widget<LocalTutorialsTab>(
-        find.byType(LocalTutorialsTab),
+      // Tutorials and example code share one page now (R6): one repository and
+      // one content load feed both sections.
+      final content = tester.widget<TutorialCenterPage>(
+        find.byType(TutorialCenterPage),
       );
-      expect(tutorials.repository, same(repository));
+      expect(content.repository, same(repository));
       expect(find.text('Java lesson 0-0'), findsOneWidget);
-      await _selectTab(tester, 3);
-      final examples = tester.widget<ExampleCodeTab>(
-        find.byType(ExampleCodeTab),
-      );
-      expect(examples.repository, same(repository));
+      await tester.tap(find.byKey(TutorialCenterPage.examplesSectionKey));
       await _waitFor(
         tester,
         () => find.text('Java example 0').evaluate().isNotEmpty,
@@ -106,7 +104,6 @@ void main() {
       expect(calls, 1);
       await _selectTab(tester, 0);
       await _selectTab(tester, 2);
-      await _selectTab(tester, 3);
       expect(calls, 1);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -122,22 +119,25 @@ void main() {
       addTearDown(stores.dispose);
       await tester.pumpWidget(_app(stores));
       await _selectTab(tester, 2);
-      final tutorials = tester.widget<LocalTutorialsTab>(
-        find.byType(LocalTutorialsTab),
+      final content = tester.widget<TutorialCenterPage>(
+        find.byType(TutorialCenterPage),
       );
-      expect(tutorials.repository, isA<AssetContentRepository>());
+      expect(content.repository, isA<AssetContentRepository>());
       await _waitFor(
         tester,
         () => find.text('Java lesson 0-0').evaluate().isNotEmpty,
       );
-      await _selectTab(tester, 3);
-      final examples = tester.widget<ExampleCodeTab>(
-        find.byType(ExampleCodeTab),
-      );
-      expect(examples.repository, same(tutorials.repository));
+      await tester.tap(find.byKey(TutorialCenterPage.examplesSectionKey));
       await _waitFor(
         tester,
         () => find.text('Java example 0').evaluate().isNotEmpty,
+      );
+      // The merged page keeps one repository for both sections.
+      expect(
+        tester
+            .widget<TutorialCenterPage>(find.byType(TutorialCenterPage))
+            .repository,
+        same(content.repository),
       );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -188,7 +188,7 @@ Future<void> _selectTab(WidgetTester tester, int index) async {
     of: find.byType(NavigationBar),
     matching: find.byWidgetPredicate((widget) => widget is InkResponse),
   );
-  expect(destinations, findsNWidgets(5));
+  expect(destinations, findsNWidgets(4));
   await tester.tap(destinations.at(index));
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 500));
