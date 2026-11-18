@@ -6,6 +6,8 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:qfli_studio_core/services/app_private_roots.dart';
 
+import 'support/ohos_target.dart';
+
 class _Paths extends PathProviderPlatform {
   _Paths(
     this.support,
@@ -56,7 +58,7 @@ void main() {
   });
 
   test('OHOS does not duplicate nested flutter directory', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.ohos;
+    debugDefaultTargetPlatformOverride = ohosPlatform;
     final paths = _Paths(
       p.join(base, 'files'),
       p.join(base, 'files', 'flutter'),

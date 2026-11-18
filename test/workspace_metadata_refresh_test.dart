@@ -19,6 +19,8 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/workspace/saved_workspace.dart';
 import 'package:qfli_studio_core/workspace/workspace_store.dart';
 
+import 'support/ohos_target.dart';
+
 void main() {
   StudioProfile? previous;
   setUp(() {
@@ -393,7 +395,7 @@ class _Fixture {
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       MaterialApp(
-        theme: ThemeData(platform: TargetPlatform.ohos),
+        theme: ThemeData(platform: ohosPlatform),
         locale: const Locale('zh', 'CN'),
         supportedLocales: const [Locale('zh', 'CN')],
         localizationsDelegates: GlobalMaterialLocalizations.delegates,

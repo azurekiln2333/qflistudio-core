@@ -6,6 +6,8 @@ import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/models/tutorial.dart';
 import 'package:qfli_studio_core/widgets/code_snippet.dart';
 
+import 'support/ohos_target.dart';
+
 const _example = ExampleCode(
   id: 'idle-code',
   type: 'java',
@@ -19,7 +21,7 @@ void main() {
   final binding = TestWidgetsFlutterBinding.ensureInitialized();
   final platforms = TargetPlatformVariant({
     TargetPlatform.android,
-    TargetPlatform.ohos,
+    ohosPlatform,
   });
   String? copiedText;
 

@@ -8,6 +8,8 @@ import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/ohos_safe_area.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 
+import 'support/ohos_target.dart';
+
 const _channel = MethodChannel(OhosSafeArea.channelName);
 const _huaweiChannel = MethodChannel('qflistudio/huawei_account');
 
@@ -77,7 +79,7 @@ void main() {
   ) async {
     _answerSafeAreaChannel();
 
-    await _withPlatform(TargetPlatform.ohos, () async {
+    await _withPlatform(ohosPlatform, () async {
       await tester.pumpWidget(MaterialApp(home: LoginPage(auth: AuthStore())));
       await _pumpHostAnswer(tester);
 

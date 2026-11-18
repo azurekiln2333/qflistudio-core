@@ -15,6 +15,8 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/workspace/saved_workspace.dart';
 import 'package:qfli_studio_core/workspace/workspace_store.dart';
 
+import 'support/ohos_target.dart';
+
 void main() {
   StudioProfile? previous;
   setUp(() {
@@ -29,8 +31,8 @@ void main() {
   tearDown(() => StudioProfile.current = previous);
 
   for (final scenario in [
-    (platform: TargetPlatform.ohos, size: const Size(390, 720)),
-    (platform: TargetPlatform.ohos, size: const Size(1100, 720)),
+    (platform: ohosPlatform, size: const Size(390, 720)),
+    (platform: ohosPlatform, size: const Size(1100, 720)),
     (platform: TargetPlatform.android, size: const Size(390, 720)),
   ]) {
     testWidgets(
@@ -276,14 +278,14 @@ class _Fixture {
   Future<void> mount(
     WidgetTester tester, {
     Size size = const Size(390, 720),
-    TargetPlatform platform = TargetPlatform.ohos,
+    TargetPlatform? platform,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       MaterialApp(
-        theme: ThemeData(platform: platform),
+        theme: ThemeData(platform: platform ?? ohosPlatform),
         locale: const Locale('zh', 'CN'),
         supportedLocales: const [Locale('zh', 'CN')],
         localizationsDelegates: GlobalMaterialLocalizations.delegates,

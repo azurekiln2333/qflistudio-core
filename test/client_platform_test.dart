@@ -13,6 +13,8 @@ import 'package:qfli_studio_core/config/client_platform.dart';
 import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 
+import 'support/ohos_target.dart';
+
 /// Contract C 节：every request carries `X-Client-Platform: <platform>-app/<版本>`.
 ///
 /// The server records this header as the login platform (整改任务书 §4 第 1 条),
@@ -33,7 +35,7 @@ void main() {
   group('ClientPlatform.header', () {
     test('maps every runtime platform to a documented prefix', () {
       expect(
-        ClientPlatform.fromTargetPlatform(TargetPlatform.ohos),
+        ClientPlatform.fromTargetPlatform(ohosPlatform),
         'harmonyos',
       );
       expect(

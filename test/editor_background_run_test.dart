@@ -19,10 +19,12 @@ import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 
+import 'support/ohos_target.dart';
+
 void main() {
   late _Fixture fixture;
   setUp(() {
-    debugDefaultTargetPlatformOverride = TargetPlatform.ohos;
+    debugDefaultTargetPlatformOverride = ohosPlatform;
     fixture = _Fixture();
   });
   tearDown(() async {

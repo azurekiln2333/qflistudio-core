@@ -2,7 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qfli_studio_core/config/ohos_platform.dart';
 import 'package:qfli_studio_core/terminal/widgets/terminal_input.dart';
+
+import 'support/ohos_target.dart';
 
 /// Contract tests for the shared terminal soft-keyboard behaviour.
 ///
@@ -23,8 +26,8 @@ void main() {
     tearDown(() => debugDefaultTargetPlatformOverride = null);
 
     test('is true only for the ohos target', () {
-      debugDefaultTargetPlatformOverride = TargetPlatform.ohos;
-      expect(TerminalInputBehavior.isOhosPlatform, isTrue);
+      debugDefaultTargetPlatformOverride = ohosPlatform;
+      expect(isOhosPlatform, isTrue);
 
       for (final platform in [
         TargetPlatform.android,
@@ -35,7 +38,7 @@ void main() {
       ]) {
         debugDefaultTargetPlatformOverride = platform;
         expect(
-          TerminalInputBehavior.isOhosPlatform,
+          isOhosPlatform,
           isFalse,
           reason: '$platform must not be treated as ohos',
         );

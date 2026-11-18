@@ -22,6 +22,7 @@ import 'package:qfli_studio_core/theme/app_theme.dart';
 import 'package:qfli_studio_core/widgets/code_snippet.dart';
 
 import 'support/content_catalog_fixture.dart';
+import 'support/ohos_target.dart';
 
 // Run this suite again with --dart-define=CONTENT_IDLE_OHOS=true. Each process
 // initializes AppTheme's cached ThemeData under its actual target platform.
@@ -33,7 +34,7 @@ void main() {
   late PathProviderPlatform originalPaths;
   StudioProfile? originalProfile;
   final platformVariant = TargetPlatformVariant.only(
-    _useOhos ? TargetPlatform.ohos : TargetPlatform.android,
+    _useOhos ? ohosPlatform : TargetPlatform.android,
   );
 
   setUpAll(() async {
@@ -185,7 +186,7 @@ Future<void> _mountHome(
   await _finishFiniteAnimations(tester);
   expect(
     Theme.of(tester.element(find.byType(HomePage))).platform,
-    _useOhos ? TargetPlatform.ohos : TargetPlatform.android,
+    _useOhos ? ohosPlatform : TargetPlatform.android,
   );
 }
 

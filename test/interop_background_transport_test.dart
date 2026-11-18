@@ -13,6 +13,8 @@ import 'package:qfli_studio_core/interop/interop_runner.dart';
 import 'package:qfli_studio_core/interop/interop_targets.dart';
 import 'package:qfli_studio_core/interop/interop_transport.dart';
 
+import 'support/ohos_target.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late _Bridge bridge;
@@ -23,7 +25,7 @@ void main() {
   );
 
   setUp(() {
-    debugDefaultTargetPlatformOverride = TargetPlatform.ohos;
+    debugDefaultTargetPlatformOverride = ohosPlatform;
     originalPaths = PathProviderPlatform.instance;
     bridge = _Bridge()..install();
     PathProviderPlatform.instance = _Paths(bridge.directory.path);
