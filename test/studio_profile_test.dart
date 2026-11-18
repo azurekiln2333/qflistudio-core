@@ -9,6 +9,19 @@ import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/services/tutorial_service.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 
+/// 工具页的页面列表。
+///
+/// 工具页是 [ToolsBrowser] 的 `CustomScrollView`，带 `tools-scroll` 存储键。
+/// 搜索框和分类条各自带一个 `Scrollable`，所以滚动必须限定到页面列表，
+/// 不能再用全页唯一的 `find.byType(Scrollable)`。页面自己的 `Scrollable`
+/// 是最近的祖先，排在第一位；`.first` 取到的就是它。
+Finder _pageList() => find
+    .descendant(
+      of: find.byKey(const PageStorageKey<String>('tools-scroll')),
+      matching: find.byType(Scrollable),
+    )
+    .first;
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -163,7 +176,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.text(l10n.functions).first,
         200,
-        scrollable: find.byType(Scrollable),
+        scrollable: _pageList(),
       );
       await tester.pump();
       expect(find.text(l10n.functions), findsWidgets);
@@ -205,7 +218,7 @@ void main() {
       await tester.scrollUntilVisible(
         find.text(l10n.functions).first,
         200,
-        scrollable: find.byType(Scrollable),
+        scrollable: _pageList(),
       );
       await tester.pump();
       expect(find.text(l10n.functions), findsWidgets);

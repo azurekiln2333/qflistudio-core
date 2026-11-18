@@ -36,6 +36,9 @@ class FunctionsTab extends StatelessWidget {
       inlineTools == null || store != null,
       'FunctionsTab requires a ProjectStore when toolsTabBuilder is provided.',
     );
+    // 共享工具页（netrix 风格）对所有产品开放：两种显示密度对语言 App 的
+    // 现有工具同样生效。移植来的 netrix 工具由可见范围过滤，语言 App 下
+    // 一个都不显示（见 ToolAudience）。
     return Scaffold(
       appBar: AppBar(
         title: Text(

@@ -52,6 +52,28 @@ void main() {
         throwsA(isA<FormatException>()),
       );
     });
+
+    test('component style keeps spaces as %20 and plus as plus', () {
+      expect(OfflineUrlCodec.encodeComponent('a b'), 'a%20b');
+      expect(OfflineUrlCodec.encodeComponent('a+b c'), 'a%2Bb%20c');
+      expect(OfflineUrlCodec.decodeComponent('a%20b'), 'a b');
+      expect(OfflineUrlCodec.decodeComponent('a+b'), 'a+b');
+      for (final text in ['a b', 'café', 'a=1&b=2', '中 文']) {
+        expect(
+          OfflineUrlCodec.decodeComponent(
+            OfflineUrlCodec.encodeComponent(text),
+          ),
+          text,
+        );
+      }
+    });
+
+    test('component style rejects a malformed escape', () {
+      expect(
+        () => OfflineUrlCodec.decodeComponent('%ZZ'),
+        throwsA(isA<FormatException>()),
+      );
+    });
   });
 
   group('OfflineDigest', () {
@@ -78,6 +100,19 @@ void main() {
         OfflineDigest.sha256(''),
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
       );
+      expect(
+        OfflineDigest.sha512(''),
+        'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce'
+            '47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e',
+      );
+    });
+
+    test('sha512 joins the SHA-2 family from FIPS 180-4', () {
+      expect(
+        OfflineDigest.sha512('abc'),
+        'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a'
+            '2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f',
+      );
     });
 
     test('handles input past one 64-byte block', () {
@@ -97,9 +132,9 @@ void main() {
       );
     });
 
-    test('all() reports the three digests together', () {
+    test('all() reports the four digests together', () {
       final result = OfflineDigest.all('abc');
-      expect(result.keys, ['MD5', 'SHA-1', 'SHA-256']);
+      expect(result.keys, ['MD5', 'SHA-1', 'SHA-256', 'SHA-512']);
       expect(result['MD5'], '900150983cd24fb0d6963f7d28e17f72');
     });
   });

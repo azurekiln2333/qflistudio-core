@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../tools/tool_state_store.dart';
 import '../widgets/tool_widgets.dart';
+import '../widgets/tools_browser.dart';
 import 'content_tools_pages.dart';
 import 'offline_tool_pages.dart';
 
@@ -51,7 +55,7 @@ final List<ToolDefinition> commonTools = List.unmodifiable([
   ToolDefinition(
     icon: Icons.link,
     title: UrlToolPage.title,
-    description: '百分号编解码，空格转 +',
+    description: '百分号编解码：表单风格与组件风格',
     builder: (_) => const UrlToolPage(),
   ),
   ToolDefinition(
@@ -69,7 +73,7 @@ final List<ToolDefinition> commonTools = List.unmodifiable([
   ToolDefinition(
     icon: Icons.tag,
     title: HashToolPage.title,
-    description: 'MD5 / SHA-1 / SHA-256 摘要',
+    description: 'MD5 / SHA-1 / SHA-256 / SHA-512 摘要',
     builder: (_) => const HashToolPage(),
   ),
   ToolDefinition(
@@ -93,59 +97,84 @@ final List<ToolDefinition> commonTools = List.unmodifiable([
 ]);
 
 /// A single scroll body suitable for embedding in the shell's tools tab.
-class ToolsGrid extends StatelessWidget {
-  const ToolsGrid({super.key, this.sections = const [], this.onOpenTerminal});
+///
+/// The body is the netrix-style browser ([ToolsBrowser]): a search field, a
+/// category filter, a display-density switch, the product's own tool groups and
+/// the shared offline group. Ported netrix tools are appended when the current
+/// product is the main app; see [ToolsBrowser].
+class ToolsGrid extends StatefulWidget {
+  const ToolsGrid({
+    super.key,
+    this.sections = const [],
+    this.onOpenTerminal,
+    this.state,
+  });
 
   final List<ToolSection> sections;
   final VoidCallback? onOpenTerminal;
 
+  /// 显示密度、收藏和使用记录。null 时用 [ToolStateStore.instance]。
+  final ToolStateStore? state;
+
+  @override
+  State<ToolsGrid> createState() => _ToolsGridState();
+}
+
+class _ToolsGridState extends State<ToolsGrid> {
+  ToolStateStore get _state => widget.state ?? ToolStateStore.instance;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首次打开工具页时读取一次本地状态；重复调用是空操作。
+    // ignore: discarded_futures
+    unawaited(_state.load());
+  }
+
   @override
   Widget build(BuildContext context) {
-    final groups = <ToolSection>[
-      if (onOpenTerminal != null)
-        ToolSection(
-          title: '快捷入口',
-          icon: Icons.widgets_outlined,
-          tools: [
-            ToolDefinition(
-              icon: Icons.terminal,
-              title: '终端',
-              description: '在本机沙盒中运行命令',
-              onTap: onOpenTerminal!,
-            ),
-          ],
-        ),
-      ...sections.where((section) => section.tools.isNotEmpty),
-      ToolSection(title: '通用', icon: Icons.build_outlined, tools: commonTools),
-    ];
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final horizontal = ToolsTheme.horizontalPadding(constraints.maxWidth);
-        return CustomScrollView(
-          key: const PageStorageKey<String>('tools-scroll'),
-          slivers: [
-            for (final section in groups) ...[
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(horizontal, 20, horizontal, 8),
-                sliver: SliverToBoxAdapter(
-                  child: ToolsSectionHeading(
-                    icon: section.icon,
-                    title: section.title,
-                  ),
+    return ToolsBrowser(
+      state: _state,
+      sections: <ToolsBrowserSection>[
+        for (final section in [
+          if (widget.onOpenTerminal != null)
+            ToolSection(
+              title: '快捷入口',
+              icon: Icons.widgets_outlined,
+              tools: [
+                ToolDefinition(
+                  icon: Icons.terminal,
+                  title: '终端',
+                  description: '在本机沙盒中运行命令',
+                  onTap: widget.onOpenTerminal!,
                 ),
-              ),
-              SliverPadding(
-                padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, 8),
-                sliver: ToolsGridSliver(tools: section.tools),
-              ),
-            ],
-            SliverPadding(
-              padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 32),
-              sliver: const SliverToBoxAdapter(child: _OfflineNote()),
+              ],
             ),
-          ],
-        );
-      },
+          ...widget.sections,
+          ToolSection(
+            title: '通用',
+            icon: Icons.build_outlined,
+            tools: commonTools,
+          ),
+        ])
+          if (section.tools.isNotEmpty)
+            ToolsBrowserSection(
+              title: section.title,
+              icon: section.icon,
+              entries: [
+                for (final tool in section.tools)
+                  ToolsBrowserEntry(
+                    id: 'builtin:${tool.title}',
+                    icon: tool.icon,
+                    title: tool.title,
+                    subtitle: tool.description,
+                    description: tool.description,
+                    builder: tool.builder,
+                    onTap: tool.onTap,
+                  ),
+              ],
+            ),
+      ],
     );
   }
 }
@@ -191,33 +220,6 @@ class ToolsGridSliver extends StatelessWidget {
         crossAxisSpacing: ToolsTheme.cardSpacing,
         mainAxisSpacing: ToolsTheme.cardSpacing,
       ),
-    );
-  }
-}
-
-class _OfflineNote extends StatelessWidget {
-  const _OfflineNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Row(
-      children: [
-        Icon(
-          Icons.offline_bolt_outlined,
-          size: 18,
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            '通用工具均在本机离线计算，不会上传任何内容。',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
