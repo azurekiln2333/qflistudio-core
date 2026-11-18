@@ -854,9 +854,6 @@ class _ToolRowFit {
 /// 模型按钮至少留出的宽度：图标加约五个字。
 const double _modelChipMinWidth = 84;
 
-/// 模型按钮在极窄时的绝对下界：图标加一两个字，不再往下缩。
-const double _modelChipFloorWidth = 56;
-
 /// 选择器组内部的按钮间距：比组间的空隙小，看起来是一组。
 const double _selectorGap = 6;
 
@@ -881,6 +878,12 @@ const double _minOuterGap = 8;
 /// 刚好塞满时字体会压线，留一点余量再换下一档。空隙已经算在 required()
 /// 里，这里的余量只需覆盖四舍五入误差，不用再放大。
 const double _toolFitSlack = 0;
+
+/// 模型名吃剩余宽度时额外扣掉的像素。
+///
+/// 文字度量与真正排版之间可能差 1px（真字体下尤其明显），刚好塞满时
+/// 工具行会画出溢出条。宁可让模型名少 1px。
+const double _toolRowRoundingSlack = 1;
 
 /// 生成一套按钮宽度：文字用真实的字体度量，已含字体缩放。
 class _ToolRowMetrics {
@@ -1005,20 +1008,20 @@ _ToolRowFit _fitFor(
 
   // 模型名拿剩下的宽度。
   //
-  // 三种情况：放得下就按下界与封顶值取一个；原本就挤时先缩到
-  // _modelChipFloorWidth（还剩图标加一两个字），把腾出来的宽度让给
-  // 组间空隙和发送键。宁可模型名短一点，也不让两个 chip 贴在一起。
+  // 三种情况：放得下就按下界与封顶值取一个；原本就挤时把剩下的宽度
+  // 全部给模型名。宁可模型名短一点，也不让两个 chip 贴在一起。
   final used =
       required(addLabel: addLabel, permission: permission, effort: effort) -
       _modelChipMinWidth;
-  final room = available - used;
+  final room = available - used - _toolRowRoundingSlack;
   final double modelWidth;
   if (room >= _modelChipMinWidth) {
     final modelCap = math.max(_modelChipMinWidth, available * 0.36);
     modelWidth = math.min(modelCap, room);
   } else {
-    // 放不下完整下界：先保证图标可见，剩余宽度全部留给模型名。
-    modelWidth = math.max(_modelChipFloorWidth, room);
+    // 放不下完整下界：图标优先，剩下的宽度全给模型名，但绝不撑过可用宽度。
+    // 393 宽的手机上这里原来会多出 1px，工具行画出溢出条。
+    modelWidth = math.max(0, room);
   }
   return _ToolRowFit(
     addLabel: addLabel,
