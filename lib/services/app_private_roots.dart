@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../config/ohos_platform.dart';
+
 /// Resolves only provider-owned durable directories, never a shared fallback.
 abstract final class AppPrivateRoots {
   static Future<Map<String, String>> resolve(String storagePath) async {
@@ -16,12 +18,12 @@ abstract final class AppPrivateRoots {
       }
     }
 
-    final mobile = switch (defaultTargetPlatform) {
-      TargetPlatform.android ||
-      TargetPlatform.ohos ||
-      TargetPlatform.iOS => true,
-      _ => false,
-    };
+    final androidOrIos =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    // HarmonyOS is a mobile sandbox too, but its enum value only exists on the
+    // OHOS fork.
+    final mobile = isOhosPlatform || androidOrIos;
     final support = await read(getApplicationSupportDirectory);
     // Desktop Documents belongs to the user, not the application.
     final documents = mobile

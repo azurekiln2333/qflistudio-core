@@ -1,10 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../config/agreement_config.dart';
+import '../../config/ohos_platform.dart';
 import '../../community/models.dart';
 import '../../services/api_client.dart';
 import '../../services/ohos_safe_area.dart';
@@ -191,7 +191,7 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final isOhos = defaultTargetPlatform == TargetPlatform.ohos;
+    final isOhos = isOhosPlatform;
     // On HarmonyOS the account is created only through Huawei one-tap login,
     // so alternate sign-in entries (and the registration form behind them)
     // are not offered there.

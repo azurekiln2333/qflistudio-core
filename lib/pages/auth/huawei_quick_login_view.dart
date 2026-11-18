@@ -1,8 +1,9 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import '../../config/ohos_platform.dart';
 
 const _viewType = 'qflistudio/huawei_quick_login';
 
@@ -114,7 +115,7 @@ class _HuaweiQuickLoginViewState extends State<HuaweiQuickLoginView> {
 
   @override
   Widget build(BuildContext context) {
-    if (defaultTargetPlatform != TargetPlatform.ohos) {
+    if (!isOhosPlatform) {
       return const SizedBox.shrink();
     }
     return OhosView(

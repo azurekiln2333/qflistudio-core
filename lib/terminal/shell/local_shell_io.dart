@@ -74,17 +74,17 @@ ShellBackend createSandboxShell({
 /// would be untestable.
 bool localShellAvailable() {
   if (kIsWeb) return false;
+  // HarmonyOS: the shell at /bin/sh or /system/bin/sh usually exists but the
+  // app is not permitted to exec it, so this is a no as well.
+  if (isOhosPlatform) return false;
   switch (defaultTargetPlatform) {
     case TargetPlatform.windows:
     case TargetPlatform.macOS:
     case TargetPlatform.linux:
       return true;
-    // HarmonyOS: the shell at /bin/sh or /system/bin/sh usually exists but the
-    // app is not permitted to exec it, so this is a no as well.
-    case TargetPlatform.ohos:
-    case TargetPlatform.android:
-    case TargetPlatform.iOS:
-    case TargetPlatform.fuchsia:
+    default:
+      // The mobile sandboxes have either no shell or one the app process is
+      // forbidden to exec.
       return false;
   }
 }

@@ -1,6 +1,7 @@
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
+import '../../config/ohos_platform.dart';
 
 /// Shared soft-keyboard behaviour for the terminal input fields (the editor
 /// terminal pane, the window terminal, and the full-page online terminal).
@@ -43,15 +44,6 @@ import 'package:flutter/services.dart';
 /// the keyboard stays up.
 class TerminalInputBehavior {
   TerminalInputBehavior._();
-
-  /// Whether the app is running on the HarmonyOS (ohos) target.
-  ///
-  /// Uses [defaultTargetPlatform] rather than `Platform.isOhos` because this is
-  /// the same signal `vendor/re_editor` keys its own OHOS handling off
-  /// (`kIsOhosMobileLike`), and because it stays correct under widget tests
-  /// where `dart:io`'s platform differs from the target being built.
-  static bool get isOhosPlatform =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.ohos;
 
   /// Non-dismissing, submit-capable action; see the class doc for the full
   /// reasoning and the two actions that must not be used.

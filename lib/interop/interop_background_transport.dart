@@ -4,11 +4,11 @@ library;
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../config/ohos_platform.dart';
 import 'interop_protocol.dart';
 import 'interop_targets.dart';
 import 'interop_transport.dart';
@@ -28,7 +28,7 @@ class MethodChannelBackgroundInteropTransport implements InteropTransport {
   final Duration cancellationGrace;
 
   @override
-  bool get isSupported => defaultTargetPlatform == TargetPlatform.ohos;
+  bool get isSupported => isOhosPlatform;
 
   @override
   Future<InteropProbe> probe(InteropTarget target) async =>

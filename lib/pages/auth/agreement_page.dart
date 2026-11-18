@@ -1,6 +1,7 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+import '../../config/ohos_platform.dart';
 
 /// 应用内协议阅读页。
 ///
@@ -45,7 +46,7 @@ class _AgreementPageState extends State<AgreementPage> {
       setState(() => _error = '协议地址无效');
       return;
     }
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.ohos) {
+    if (!isOhosPlatform) {
       setState(() {
         _error = null;
         _manualUrl = uri.toString();

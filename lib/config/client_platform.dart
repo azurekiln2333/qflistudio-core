@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../services/studio_profile.dart';
+import 'ohos_platform.dart';
 
 /// 请求头 `X-Client-Platform` 的取值来源。
 ///
@@ -49,16 +50,30 @@ abstract final class ClientPlatform {
     return sanitizeVersion(raw);
   }
 
-  /// 运行时平台映射。[TargetPlatform.ohos] 是 Flutter 鸿蒙分支的枚举值。
-  static String fromTargetPlatform(TargetPlatform target) => switch (target) {
-    TargetPlatform.ohos => 'harmonyos',
-    TargetPlatform.android => 'android',
-    TargetPlatform.iOS => 'ios',
-    TargetPlatform.windows => 'windows',
-    TargetPlatform.macOS => 'macos',
-    TargetPlatform.linux => 'linux',
-    TargetPlatform.fuchsia => 'linux',
-  };
+  /// 运行时平台映射。
+  ///
+  /// 鸿蒙由 [isOhosTarget] 先行判定：枚举值本身只存在于 Flutter 鸿蒙分支，
+  /// 直接写会编译不过官方 Flutter。
+  static String fromTargetPlatform(TargetPlatform target) {
+    if (isOhosTarget(target)) return 'harmonyos';
+    switch (target) {
+      case TargetPlatform.android:
+        return 'android';
+      case TargetPlatform.iOS:
+        return 'ios';
+      case TargetPlatform.windows:
+        return 'windows';
+      case TargetPlatform.macOS:
+        return 'macos';
+      case TargetPlatform.linux:
+      case TargetPlatform.fuchsia:
+        // fuchsia 没有独立的协议前缀，沿用 linux。
+        return 'linux';
+      default:
+        // 鸿蒙分支的枚举多一个值；官方分支走不到这里。
+        return 'linux';
+    }
+  }
 
   /// 只保留 ASCII 可见字符（0x21–0x7E），并限制长度。
   ///

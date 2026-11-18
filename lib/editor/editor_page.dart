@@ -4,12 +4,12 @@ import 'dart:io';
 import 'package:qfli_studio_core/editor/editor_page_diag.dart';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart'
-    show ValueListenable, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 
+import '../config/ohos_platform.dart';
 import '../models/project.dart';
 import '../pages/git_page.dart';
 import '../store/auth_store.dart';
@@ -48,7 +48,6 @@ import 'open_file.dart';
 import 'editor_problems_bar.dart';
 import 'project_history.dart';
 import 'terminal_pane.dart';
-import '../terminal/widgets/terminal_input.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../pages/settings_page.dart';
@@ -1165,7 +1164,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     // its IME connection synchronously from a FocusNode listener, so without
     // this ordering the terminal's teardown runs after the editor's
     // TextInput.show and the OHOS IME dismisses the keyboard it just raised.
-    if (TerminalInputBehavior.isOhosPlatform && _terminalVisible) {
+    if (isOhosPlatform && _terminalVisible) {
       _terminalKey.currentState?.unfocusInput();
     }
     _activePointers[event.pointer] = event.position;
@@ -2444,7 +2443,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   bool get _canRunBackground {
     final runner = StudioProfile.current?.backgroundInteropRunner;
-    if (defaultTargetPlatform != TargetPlatform.ohos ||
+    if (!isOhosPlatform ||
         runner == null ||
         !runner.isSupported) {
       return false;

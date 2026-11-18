@@ -8,10 +8,10 @@ library;
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../config/ohos_platform.dart';
 import 'interop_protocol.dart';
 import 'interop_targets.dart';
 import 'interop_zip.dart';
@@ -141,13 +141,9 @@ class MethodChannelInteropTransport implements InteropTransport {
   static const MethodChannel methods = MethodChannel('qfli_interop/bridge');
   static const EventChannel events = EventChannel('qfli_interop/bridge/events');
 
-  static const Set<TargetPlatform> _supported = <TargetPlatform>{
-    TargetPlatform.ohos,
-  };
-
   @override
   bool get isSupported {
-    if (_supported.contains(defaultTargetPlatform)) return true;
+    if (isOhosPlatform) return true;
     // HarmonyOS reports as ohos once the engine is patched; a manual override
     // keeps the channel reachable in a debug build on an older engine.
     return Platform.environment['QFLI_INTEROP'] == '1';
