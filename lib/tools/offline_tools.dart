@@ -6,6 +6,8 @@ library;
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart' as crypto;
+
 // ---------------------------------------------------------------------------
 // Base64
 // ---------------------------------------------------------------------------
@@ -76,13 +78,29 @@ abstract final class OfflineUrlCodec {
     }
     return utf8.decode(bytes);
   }
+
+  /// Component encoding as [Uri.encodeComponent]: spaces become `%20`.
+  static String encodeComponent(String text) => Uri.encodeComponent(text);
+
+  /// Decodes [encodeComponent]'s notation. A `+` stays a literal plus.
+  static String decodeComponent(String text) {
+    try {
+      return Uri.decodeComponent(text);
+    } on ArgumentError {
+      throw const FormatException('无效的百分号转义');
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Message digests
 // ---------------------------------------------------------------------------
 
-/// Pure-Dart MD5, SHA-1 and SHA-256 digests of UTF-8 input.
+/// MD5, SHA-1, SHA-256 and SHA-512 digests of UTF-8 input.
+///
+/// The first three are implemented here in pure Dart. SHA-512 comes from
+/// `package:crypto`, which is pure Dart as well, so the whole class stays free
+/// of platform channels and network access.
 ///
 /// Byte-oriented entry points support binary namespace hashing for UUIDs.
 abstract final class OfflineDigest {
@@ -92,6 +110,9 @@ abstract final class OfflineDigest {
 
   static String sha256(String text) => _hex(_sha256(utf8.encode(text)));
 
+  static String sha512(String text) =>
+      crypto.sha512.convert(utf8.encode(text)).toString();
+
   /// Raw-byte entry points, used by the UUID generators which hash binary
   /// namespace bytes rather than text.
   static List<int> md5Bytes(List<int> bytes) => _md5(bytes);
@@ -100,11 +121,13 @@ abstract final class OfflineDigest {
 
   static List<int> sha256Bytes(List<int> bytes) => _sha256(bytes);
 
-  /// MD5, SHA-1 and SHA-256 for one input, in the order the UI lists them.
+  /// MD5, SHA-1, SHA-256 and SHA-512 for one input, in the order the UI lists
+  /// them.
   static Map<String, String> all(String text) => {
     'MD5': md5(text),
     'SHA-1': sha1(text),
     'SHA-256': sha256(text),
+    'SHA-512': sha512(text),
   };
 
   static String _hex(List<int> bytes) =>

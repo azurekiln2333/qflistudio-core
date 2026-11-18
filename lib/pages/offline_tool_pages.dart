@@ -277,7 +277,7 @@ class UrlToolPage extends StatefulWidget {
   const UrlToolPage({super.key});
 
   static const String title = 'URL 编解码';
-  static const String description = '表单风格百分号编解码，空格编码为 +。';
+  static const String description = '百分号编解码：表单风格（空格转 +）与组件风格（空格转 %20）。';
 
   @override
   State<UrlToolPage> createState() => _UrlToolPageState();
@@ -313,6 +313,11 @@ class _UrlToolPageState extends State<UrlToolPage> {
           children: [
             ResultRow(label: '编码', value: OfflineUrlCodec.encode(_plain.text)),
             ResultRow(label: '解码', value: _decodedOrError()),
+            ResultRow(
+              label: '组件编码',
+              value: OfflineUrlCodec.encodeComponent(_plain.text),
+            ),
+            ResultRow(label: '组件解码', value: _decodedComponentOrError()),
           ],
         ),
       ],
@@ -322,6 +327,14 @@ class _UrlToolPageState extends State<UrlToolPage> {
   String _decodedOrError() {
     try {
       return OfflineUrlCodec.decode(_plain.text);
+    } on FormatException catch (error) {
+      return '无法解码：${error.message}';
+    }
+  }
+
+  String _decodedComponentOrError() {
+    try {
+      return OfflineUrlCodec.decodeComponent(_plain.text);
     } on FormatException catch (error) {
       return '无法解码：${error.message}';
     }
@@ -336,7 +349,8 @@ class HashToolPage extends StatefulWidget {
   const HashToolPage({super.key});
 
   static const String title = '哈希摘要';
-  static const String description = 'MD5 / SHA-1 / SHA-256 摘要（纯 Dart 实现，用于校验）。';
+  static const String description =
+      'MD5 / SHA-1 / SHA-256 / SHA-512 摘要（离线计算，用于校验）。';
 
   @override
   State<HashToolPage> createState() => _HashToolPageState();

@@ -156,6 +156,128 @@ class ToolCard extends StatelessWidget {
   }
 }
 
+/// 紧密显示（compact）下的一行工具。
+///
+/// 布局与 netrix 的 `_ToolRow` 一致：左侧 40 宽的图标列、标题一行、
+/// `英文名 · 分类` 副标题一行、收藏按钮和打开按钮。整行高 68，外面再留
+/// 10 的间距（由调用方给出），与 netrix 的 78 槽位相同。
+class ToolRow extends StatelessWidget {
+  const ToolRow({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.isFavorite,
+    this.onToggleFavorite,
+    this.favoriteTooltip,
+    this.openTooltip,
+    this.margin = EdgeInsets.zero,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  /// 非空时显示收藏按钮。
+  final bool? isFavorite;
+  final VoidCallback? onToggleFavorite;
+  final String? favoriteTooltip;
+  final String? openTooltip;
+  final EdgeInsetsGeometry margin;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SizedBox(
+      height: 68,
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        margin: margin,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 40,
+                  child: Icon(icon, color: theme.colorScheme.primary),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                if (isFavorite != null && onToggleFavorite != null)
+                  IconButton(
+                    tooltip: favoriteTooltip,
+                    onPressed: onToggleFavorite,
+                    icon: Icon(
+                      isFavorite! ? Icons.star : Icons.star_border,
+                    ),
+                  ),
+                IconButton(
+                  tooltip: openTooltip,
+                  onPressed: onTap,
+                  icon: const Icon(Icons.arrow_forward_outlined),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 工具卡片右上角的收藏切换按钮。
+///
+/// netrix 的宽松显示把收藏放在卡片内部；本项目的 [ToolCard] 布局由旧测试
+/// 固定，所以收藏按钮用叠加方式放在卡片右上角，不改卡片自身的几何。
+class ToolFavoriteButton extends StatelessWidget {
+  const ToolFavoriteButton({
+    super.key,
+    required this.isFavorite,
+    required this.onPressed,
+    this.addTooltip,
+    this.removeTooltip,
+  });
+
+  final bool isFavorite;
+  final VoidCallback onPressed;
+  final String? addTooltip;
+  final String? removeTooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      visualDensity: VisualDensity.compact,
+      tooltip: isFavorite ? removeTooltip : addTooltip,
+      onPressed: onPressed,
+      icon: Icon(isFavorite ? Icons.star : Icons.star_border),
+    );
+  }
+}
+
 /// A labelled result row with its own copy button.
 ///
 /// Used by every tool page, so a value is always one tap from the clipboard.
