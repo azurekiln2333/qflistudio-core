@@ -248,6 +248,8 @@ class EditorAgentPane extends StatelessWidget {
     this.error,
     this.onRetry,
     this.composerDefaults,
+    this.onOpenFile,
+    this.fileExists,
     this.active = true,
   });
 
@@ -264,6 +266,12 @@ class EditorAgentPane extends StatelessWidget {
 
   /// 按项目记住的模型 / 推理强度 / 权限模式。
   final ComposerDefaultsStore? composerDefaults;
+
+  /// 点开工具写入的文件；为空时文件卡片不可点。
+  final void Function(String path)? onOpenFile;
+
+  /// 文件现在是否还在磁盘上。
+  final bool Function(String path)? fileExists;
 
   /// 当前会话面板是否处于可见状态。
   final bool active;
@@ -315,6 +323,8 @@ class EditorAgentPane extends StatelessWidget {
       settings: settings,
       sessionId: sessionId,
       onSessionOpened: onSessionOpened,
+      onOpenFile: onOpenFile,
+      fileExists: fileExists,
       composerDefaults: composerDefaults,
       active: active,
     );

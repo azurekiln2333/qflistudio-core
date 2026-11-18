@@ -29,6 +29,8 @@ class WorkbenchAgentPane extends StatefulWidget {
     this.draft = ComposerDraft.empty,
     this.composerDefaults,
     this.onSessionOpened,
+    this.onOpenFile,
+    this.fileExists,
     this.active = true,
   });
 
@@ -47,6 +49,12 @@ class WorkbenchAgentPane extends StatefulWidget {
 
   /// 首次发送时新建了会话，通知外层记住 id。
   final ValueChanged<String>? onSessionOpened;
+
+  /// 点开工具写入的文件；为空时文件卡片不可点。
+  final void Function(String path)? onOpenFile;
+
+  /// 文件现在是否还在磁盘上；用于禁用已删除文件的卡片。
+  final bool Function(String path)? fileExists;
 
   /// 面板当前是否在屏幕上可见。
   ///
@@ -655,6 +663,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
             onResend: (message, id) =>
                 _resendUserMessage(message, id, menuSession),
             onEdit: (message, id) => _editUserMessage(message, menuSession),
+            onOpenFile: widget.onOpenFile,
+            fileExists: widget.fileExists,
             busy: _working || _resendingId != null,
             sessionKey: _sessionId,
             emptyTitle: '开始一个新的会话',

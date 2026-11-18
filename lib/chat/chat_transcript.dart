@@ -28,6 +28,8 @@ class ChatTranscript extends StatefulWidget {
     this.onDiagnose,
     this.onResend,
     this.onEdit,
+    this.onOpenFile,
+    this.fileExists,
     this.busy = false,
     this.sessionKey,
     this.emptyTitle = '开始一个新的会话',
@@ -82,6 +84,15 @@ class ChatTranscript extends StatefulWidget {
 
   /// 把一条用户消息放进输入卡片等用户确认发送。为空时不显示「编辑后重发」。
   final void Function(AgentUserMessage message, String id)? onEdit;
+
+  /// 点开工具写入的文件。参数是相对项目根的路径。
+  ///
+  /// 为空时文件卡片只显示路径，不可点。
+  final void Function(String path)? onOpenFile;
+
+  /// 文件现在是否还在磁盘上。已删除的文件显示为禁用的卡片。
+  /// 为空时按存在处理。
+  final bool Function(String path)? fileExists;
 
   /// 会话正在跑：消息动作只能复制，编辑与重发要等这一轮结束。
   final bool busy;
@@ -239,6 +250,8 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     final tile = ChatMessageTile(
       key: ValueKey('chat-message-${message.id}'),
       message: message,
+      onOpenFile: widget.onOpenFile,
+      fileExists: widget.fileExists,
       actions: ChatMessageActions(
         canEdit: canEdit,
         canResend: canResend,
@@ -842,12 +855,24 @@ class AgentUserMessage {
 
 /// 一条消息：用户气泡、助手正文或工具调用条目。
 class ChatMessageTile extends StatelessWidget {
-  const ChatMessageTile({super.key, required this.message, this.actions});
+  const ChatMessageTile({
+    super.key,
+    required this.message,
+    this.actions,
+    this.onOpenFile,
+    this.fileExists,
+  });
 
   final AgentMessageView message;
 
   /// 消息动作；为空或全部不可用时只显示正文。
   final ChatMessageActions? actions;
+
+  /// 点开工具写入的文件；为空表示卡片不可点。
+  final void Function(String path)? onOpenFile;
+
+  /// 文件现在是否还在磁盘上；为空时按存在处理。
+  final bool Function(String path)? fileExists;
 
   /// 测试用：累计 build 次数，用来证明流式更新只重建末尾条目。
   static int debugBuildCount = 0;
@@ -1011,14 +1036,18 @@ class ChatMessageTile extends StatelessWidget {
           if (message.changedPaths.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                message.changedPaths.join('\n'),
-                maxLines: 4,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  fontFamily: 'monospace',
-                  color: scheme.onSurfaceVariant,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final path in message.changedPaths)
+                    _ChangedFileCard(
+                      path: path,
+                      available: fileExists?.call(path) ?? true,
+                      onTap: onOpenFile == null
+                          ? null
+                          : () => onOpenFile!(path),
+                    ),
+                ],
               ),
             ),
           if (detail.isNotEmpty)
@@ -1035,6 +1064,102 @@ class ChatMessageTile extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// 一条工具条目里被写入的一个文件。
+///
+/// 可点时打开编辑器里的那个文件；文件已被删除时只显示禁用状态，
+/// 不确定剩下一个能点的死路径。
+class _ChangedFileCard extends StatelessWidget {
+  const _ChangedFileCard({
+    required this.path,
+    required this.available,
+    this.onTap,
+  });
+
+  final String path;
+
+  /// 文件现在是否还在磁盘上。
+  final bool available;
+
+  final VoidCallback? onTap;
+
+  bool get _enabled => available && onTap != null;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final foreground = _enabled
+        ? scheme.onSurface
+        : scheme.onSurfaceVariant.withValues(alpha: 0.7);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          key: ValueKey('chat-file-card-$path'),
+          onTap: _enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(
+                  alpha: _enabled ? 1 : 0.5,
+                ),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  available
+                      ? Icons.description_outlined
+                      : Icons.delete_outline,
+                  size: 16,
+                  color: _enabled ? scheme.primary : scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    path,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                      color: foreground,
+                    ),
+                  ),
+                ),
+                if (!available)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Text(
+                      '已删除',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                else if (_enabled)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
