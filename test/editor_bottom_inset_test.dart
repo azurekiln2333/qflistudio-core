@@ -142,9 +142,14 @@ void main() {
 
       // Scaffold 没有底部导航栏，body 原来铺到 852；现在停在导航条上方。
       expect(bodyRect(tester).bottom, closeTo(height - navBar, 0.5));
+      // 顶栏与 body 之间可能还有快捷栏，它的高度不算进 body。
+      final bar = find.byKey(const ValueKey('editor-quick-bar'));
+      final barHeight = bar.evaluate().isEmpty
+          ? 0.0
+          : tester.getRect(bar.first).height;
       expect(
         bodyRect(tester).height,
-        closeTo(height - kToolbarHeight - navBar, 1),
+        closeTo(height - kToolbarHeight - navBar - barHeight, 1),
       );
     });
 
@@ -176,11 +181,17 @@ void main() {
       await mount(tester, bottomInset: navBar);
 
       // 打开终端：它是页面最下面的一条面板，底边必须停在导航条上方。
-      await tester.tap(find.byTooltip('更多').first);
-      final entry = find.widgetWithText(PopupMenuItem<String>, '打开终端');
-      await _pumpUntil(tester, () => entry.evaluate().isNotEmpty);
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(entry.first);
+      // 快捷栏可见时直接点 quick-terminal；矮窗口退回 ⋮ 菜单。
+      final quick = find.byKey(const ValueKey('quick-terminal'));
+      if (quick.evaluate().isNotEmpty) {
+        await tester.tap(quick.first);
+      } else {
+        await tester.tap(find.byTooltip('更多').first);
+        final entry = find.widgetWithText(PopupMenuItem<String>, '打开终端');
+        await _pumpUntil(tester, () => entry.evaluate().isNotEmpty);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.tap(entry.first);
+      }
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       await _pumpFrames(tester);

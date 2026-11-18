@@ -1507,6 +1507,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       host.state.showMainPane(MainPane.editor);
     }
     if (host != null) _lastMainPane = host.state.mainPane;
+    // 宽屏右栏不收起，但用户此刻在编辑器里干活：快捷栏跟着换成编辑器动作。
+    _focusEditorPane();
     if (recheckDisk) unawaited(_recheckOpenTabsFromDisk());
   }
 
