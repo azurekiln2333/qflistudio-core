@@ -290,7 +290,7 @@ class TextStatsToolPage extends StatefulWidget {
 
 class _TextStatsToolPageState extends State<TextStatsToolPage> {
   final _input = TextEditingController(
-    text: 'QFLI Studio 多语言编辑器\nSecond line: 12345!',
+    text: 'QFLIStudio+ 多语言编辑器\nSecond line: 12345!',
   );
 
   @override
