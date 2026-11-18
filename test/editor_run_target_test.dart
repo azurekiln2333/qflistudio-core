@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/editor/editor_page.dart';
+import 'package:qfli_studio_core/editor/terminal_pane.dart';
 import 'package:qfli_studio_core/interop/interop_protocol.dart';
 import 'package:qfli_studio_core/interop/interop_runner.dart';
+import 'package:qfli_studio_core/interop/interop_sibling_memory.dart';
 import 'package:qfli_studio_core/interop/interop_targets.dart';
 import 'package:qfli_studio_core/interop/interop_transport.dart';
 import 'package:qfli_studio_core/models/project.dart';
@@ -19,24 +21,37 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 
 /// The Run button has one gesture owner but two destinations.
 ///
-/// Product decision: when the project entry's language has a sibling app that
-/// answers, Run compiles and runs there; every other case keeps the previous
-/// path. These tests fire the real button and record which path was taken, so
-/// a future change cannot move the decision without failing here.
+/// Product decision: Run sends the run straight to the sibling app that owns the
+/// entry's toolchain, and the start call reports a missing app as `app_missing`.
+/// Nothing probes first, because the probe was a real ability start and the run
+/// sent after it was refused with error 201. These tests fire the real button
+/// and record which path was taken, so a future change cannot move the decision
+/// without failing here.
+///
+/// The contract under test:
+///
+///   1. an installed sibling app takes the run, with no probe at all;
+///   2. a missing sibling app falls back to Studio's own path for this run and
+///      is remembered, so later runs and the tooltip use that path at once;
+///   3. any other failure is shown to the user and nothing runs twice.
 void main() {
   late _Fixture fixture;
 
   setUp(() {
+    InteropSiblingMemory.instance.clear();
     fixture = _Fixture();
   });
 
   tearDown(() async {
     StudioProfile.current = null;
+    InteropSiblingMemory.instance.clear();
     await fixture.dispose();
   });
 
-  testWidgets('an installed sibling app takes the run tap', (tester) async {
-    fixture.install(probe: const InteropProbe.installed(protocol: kInteropProtocol));
+  testWidgets('the sibling app takes the run tap without a probe', (
+    tester,
+  ) async {
+    fixture.install();
     await tester.pumpWidget(fixture.app());
     await _pumpUntil(tester, () => find.byType(EditorPage).evaluate().isNotEmpty);
 
@@ -44,7 +59,8 @@ void main() {
     await _pumpUntil(tester, () => fixture.transport.started);
 
     expect(fixture.transport.started, isTrue);
-    expect(fixture.transport.probedLanguages, contains('java'));
+    // No probe: the probe itself was the ability start that caused error 201.
+    expect(fixture.transport.probedLanguages, isEmpty);
     // The local runner must not have run: one gesture, one destination.
     expect(fixture.runner.entries, isEmpty);
     // The dialog names the app, so the target of the run is never ambiguous.
@@ -55,28 +71,67 @@ void main() {
     expect(find.textContaining('QFLIJVMX'), findsWidgets);
   });
 
-  testWidgets('a missing sibling app keeps the original path', (tester) async {
-    fixture.install(probe: const InteropProbe.missing('未安装 QFLIJVMX'));
+  testWidgets('a missing sibling app falls back and is remembered', (
+    tester,
+  ) async {
+    fixture.install(
+      startFailure: const InteropException(
+        InteropErrorCode.appMissing,
+        '未检测到 QFLIJVMX（com.azurekiln.qfli.java）。',
+      ),
+    );
     await tester.pumpWidget(fixture.app());
     await _pumpUntil(tester, () => find.byType(EditorPage).evaluate().isNotEmpty);
 
     await tester.tap(find.byTooltip(fixture.runTooltip));
+    // The app is not installed, so this run falls back to the local path.
     await _pumpUntil(tester, () => fixture.runner.entries.isNotEmpty);
-
-    expect(fixture.transport.started, isFalse);
+    expect(fixture.transport.started, isTrue);
     expect(fixture.runner.entries, hasLength(1));
+    await _waitForRunToFinish(tester);
+
+    // The answer outlives the run: the tooltip no longer names the absent app.
+    await _pumpUntil(
+      tester,
+      () => find.byTooltip(_plainTooltip).evaluate().isNotEmpty,
+    );
+    expect(find.byTooltip(_plainTooltip), findsOneWidget);
+
+    // A later run takes the local path at once, without trying the app again.
+    await tester.tap(find.byTooltip(_plainTooltip));
+    await _pumpUntil(tester, () => fixture.runner.entries.length == 2);
+    expect(fixture.transport.startCount, 1);
+    expect(fixture.runner.entries, hasLength(2));
   });
 
-  testWidgets('an unknown probe keeps the original path', (tester) async {
-    fixture.install(probe: const InteropProbe.unknown('无法确认是否已安装'));
+  testWidgets('any other start failure is shown and never runs twice', (
+    tester,
+  ) async {
+    fixture.install(
+      startFailure: const InteropException(
+        InteropErrorCode.transportFailure,
+        '跨应用启动被拒绝（201）',
+      ),
+    );
     await tester.pumpWidget(fixture.app());
     await _pumpUntil(tester, () => find.byType(EditorPage).evaluate().isNotEmpty);
 
     await tester.tap(find.byTooltip(fixture.runTooltip));
-    await _pumpUntil(tester, () => fixture.runner.entries.isNotEmpty);
+    // A refusal is a real failure of a run the user asked for: it is shown, and
+    // nothing quietly runs a second time in the background.
+    await _pumpUntil(
+      tester,
+      () => find.textContaining('201').evaluate().isNotEmpty,
+    );
+    expect(find.textContaining('201'), findsWidgets);
+    expect(fixture.runner.entries, isEmpty);
 
-    expect(fixture.transport.started, isFalse);
-    expect(fixture.runner.entries, hasLength(1));
+    await tester.tap(find.text('关闭'));
+    await tester.pump();
+    expect(fixture.transport.startCount, 1);
+    expect(fixture.runner.entries, isEmpty);
+    // The tooltip still names the app: a refusal is not proof it is missing.
+    expect(find.byTooltip(_plainTooltip), findsNothing);
   });
 
   testWidgets('no sibling app for the entry means no probe at all', (
@@ -87,7 +142,7 @@ void main() {
     await tester.pumpWidget(fixture.app());
     await _pumpUntil(tester, () => find.byType(EditorPage).evaluate().isNotEmpty);
 
-    await tester.tap(find.byTooltip(fixture.runTooltip));
+    await tester.tap(find.byTooltip(_plainTooltip));
     await _pumpUntil(tester, () => fixture.runner.entries.isNotEmpty);
 
     expect(fixture.transport.probedLanguages, isEmpty);
@@ -109,12 +164,26 @@ Future<void> _pumpUntil(WidgetTester tester, bool Function() condition) async {
   expect(condition(), isTrue, reason: 'the editor operation did not finish');
 }
 
-class _RecordingTransport implements InteropTransport {
-  _RecordingTransport(this.answer);
+/// Waits until the local fallback run has released the editor, so the next tap
+/// is not swallowed by the running-project guard.
+Future<void> _waitForRunToFinish(WidgetTester tester) async {
+  final paneFinder = find.byType(TerminalPane);
+  if (paneFinder.evaluate().isEmpty) return;
+  final pane = tester.state<TerminalPaneState>(paneFinder);
+  await _pumpUntil(tester, () => !pane.hasRunningWork);
+}
 
-  final InteropProbe answer;
+class _RecordingTransport implements InteropTransport {
+  _RecordingTransport({this.startFailure});
+
+  /// Thrown by [start] when set, which is how the platform reports a missing
+  /// app (`app_missing`) or a refusal (`transport_failure`).
+  final InteropException? startFailure;
+
   final List<String> probedLanguages = <String>[];
-  bool started = false;
+  int startCount = 0;
+
+  bool get started => startCount > 0;
 
   @override
   bool get isSupported => true;
@@ -122,7 +191,7 @@ class _RecordingTransport implements InteropTransport {
   @override
   Future<InteropProbe> probe(InteropTarget target) async {
     probedLanguages.add(target.language);
-    return answer;
+    return const InteropProbe.installed(protocol: kInteropProtocol);
   }
 
   @override
@@ -130,7 +199,9 @@ class _RecordingTransport implements InteropTransport {
     InteropTarget target,
     InteropRequest request,
   ) async {
-    started = true;
+    startCount++;
+    final failure = startFailure;
+    if (failure != null) throw failure;
     // A run that never finishes keeps the dialog open, which is what the test
     // inspects: the user needs to see which app is running.
     final controller = StreamController<InteropEvent>();
@@ -182,22 +253,20 @@ class _Fixture {
   final settings = SettingsStore();
   late final Project project;
 
-  _RecordingTransport transport = _RecordingTransport(
-    const InteropProbe.missing('未安装'),
-  );
+  _RecordingTransport transport = _RecordingTransport();
 
   /// Entry file written into the project config, chosen per test.
   String projectEntry = 'Main.java';
 
-  /// Tooltip of the Run button. It names the sibling app once a probe confirmed
-  /// it, so the finder depends on the recorded probe answer.
+  /// Tooltip of the Run button. It names the sibling app unless this session
+  /// already found that app missing.
   String get runTooltip {
-    if (!transport.answer.isInstalled) return _plainTooltip;
+    if (InteropSiblingMemory.instance.isMissing('java')) return _plainTooltip;
     return '运行（在 QFLIJVMX 中，长按运行当前文件）';
   }
 
-  void install({InteropProbe? probe}) {
-    if (probe != null) transport = _RecordingTransport(probe);
+  void install({InteropException? startFailure}) {
+    transport = _RecordingTransport(startFailure: startFailure);
     final config = File(ProjectConfig.configPath(project.path));
     config.writeAsStringSync(
       jsonEncode({'version': 1, 'entryFile': projectEntry}),
@@ -215,7 +284,12 @@ class _Fixture {
   }
 
   Widget app() => MaterialApp(
-    home: EditorPage(project: project, auth: auth, store: store, settings: settings),
+    home: EditorPage(
+      project: project,
+      auth: auth,
+      store: store,
+      settings: settings,
+    ),
   );
 
   Future<void> dispose() async {

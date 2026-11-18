@@ -14,9 +14,30 @@ import 'interop_protocol.dart';
 import 'interop_runner.dart';
 import 'interop_targets.dart';
 
-/// Shows the running state and returns the real exit code when the user
-/// closes it, or null when the platform has no receiver for [language].
-Future<int?> showInteropRunDialog({
+/// What the cross-app dialog reports back to its caller.
+///
+/// The exit code is the program's own code. [appMissing] is the one failure the
+/// caller acts on instead of showing: nothing was started because the sibling
+/// app is not installed, so the caller can run the project on its own path.
+class InteropRunOutcome {
+  const InteropRunOutcome({
+    required this.exitCode,
+    this.appMissing = false,
+    this.diagnostic,
+  });
+
+  final int exitCode;
+
+  /// True when the sibling app is not installed, so no program ran.
+  final bool appMissing;
+
+  /// The install hint that names what to install, when one was reported.
+  final String? diagnostic;
+}
+
+/// Shows the running state and returns the real outcome when the user closes
+/// it, or null when the platform has no receiver for [language].
+Future<InteropRunOutcome?> showInteropRunDialog({
   required BuildContext context,
   required String projectRoot,
   required String language,
@@ -41,7 +62,7 @@ Future<int?> showInteropRunDialog({
     );
     return null;
   }
-  return showDialog<int>(
+  return showDialog<InteropRunOutcome>(
     context: context,
     barrierDismissible: false,
     builder: (_) => InteropRunDialog(
@@ -122,10 +143,22 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
       );
     } on InteropException catch (error) {
       if (!mounted) return;
+      if (error.code == InteropErrorCode.appMissing) {
+        _closeMissing(error.message);
+        return;
+      }
       setState(() {
         _lines.add(error.message);
         _exitCode = kInteropNotRunExitCode;
       });
+      return;
+    }
+    // Nothing started because the sibling app is not installed, so there is no
+    // progress to watch and no output to read. Close at once and let the caller
+    // run the project on its own path; an idle dialog would only stall it.
+    if (run.appMissing) {
+      if (!mounted) return;
+      _closeMissing(run.diagnostics.isEmpty ? null : run.diagnostics.first);
       return;
     }
     if (!mounted) return;
@@ -144,6 +177,18 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
     final code = await run.exitCode;
     if (!mounted) return;
     setState(() => _exitCode = code);
+  }
+
+  /// Reports a missing sibling app and closes: no program ran, so there is
+  /// nothing to watch and the caller decides what to do instead.
+  void _closeMissing(String? diagnostic) {
+    Navigator.of(context).pop(
+      InteropRunOutcome(
+        exitCode: kInteropNotRunExitCode,
+        appMissing: true,
+        diagnostic: diagnostic,
+      ),
+    );
   }
 
   Future<void> _cancel() async {
@@ -215,7 +260,9 @@ class _InteropRunDialogState extends State<InteropRunDialog> {
                     FilledButton(
                       onPressed: _exitCode == null
                           ? null
-                          : () => Navigator.of(context).pop(_exitCode),
+                          : () => Navigator.of(context).pop(
+                              InteropRunOutcome(exitCode: _exitCode!),
+                            ),
                       child: const Text('关闭'),
                     ),
                   ],

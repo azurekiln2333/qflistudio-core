@@ -59,6 +59,7 @@ import '../services/picker_service.dart';
 import 'ai_panel.dart';
 import 'open_performance.dart';
 import '../interop/interop_run_dialog.dart';
+import '../interop/interop_sibling_memory.dart';
 import '../interop/interop_targets.dart';
 import '../layout/breakpoints.dart';
 import '../shell/login_gate.dart';
@@ -1896,9 +1897,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// (the active file captured by a long press) through the same save and
   /// runtime routing. Calls with an override must validate it first.
   ///
-  /// A normal tap first asks whether a sibling app answers for this entry. When
-  /// one does, the same button compiles and runs the project inside it; every
-  /// other case keeps the original path untouched.
+  /// A normal tap sends the run straight to the sibling app that owns the
+  /// entry's toolchain. Nothing probes first: the probe was a real ability
+  /// start, and the run sent after it was refused with error 201 whenever the
+  /// sibling app had not gone back to the background yet. The start call is the
+  /// honest test, and `app_missing` means the app is not installed: that answer
+  /// is remembered and this run falls back to Studio's own path. Every other
+  /// failure is shown to the user. One gesture never runs twice.
   Future<void> _runProject({String? entryOverride}) async {
     if (_runningProject ||
         _runningFileTool ||
@@ -1915,13 +1920,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
     final projectPath = active?.projectRootPath ?? widget.project.path;
     final projectName = active?.ownerProjectName ?? widget.project.name;
-    final sibling = await _answeringSiblingApp(
-      entryOverride ?? _entryFileOf(projectPath),
-    );
-    if (!mounted) return;
+    final sibling = _siblingAppFor(entryOverride ?? _entryFileOf(projectPath));
     if (sibling != null) {
-      await _runInSiblingApp();
-      return;
+      final outcome = await _runInSiblingApp();
+      if (!mounted || outcome == null || !outcome.appMissing) return;
+      // The sibling app is not installed. Remember it so later runs and the
+      // tooltip take this path at once, then run here instead of nowhere.
+      InteropSiblingMemory.instance.markMissing(sibling.language);
+      setState(() {});
     }
     if (!Directory(projectPath).existsSync()) {
       setState(() {
@@ -2316,14 +2322,18 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// the user can see where the button will run the project before pressing
   /// it. The name comes from the static target map on purpose: probing here
   /// would start the sibling app in the foreground on every project open,
-  /// which reads as a crash to the user. A missing app is reported honestly
-  /// when Run is actually pressed.
+  /// which reads as a crash to the user. An app this session already found
+  /// missing is never named, because the button would then promise a run in an
+  /// app that is not installed.
   String get _runButtonTooltip {
     final target = _interopTargetFor(
       _entryFileOf(_editor.current?.projectRootPath ?? widget.project.path),
     );
     final product = target?.productName;
-    if (product == null) return '运行（长按运行当前文件）';
+    if (product == null ||
+        InteropSiblingMemory.instance.isMissing(target!.language)) {
+      return '运行（长按运行当前文件）';
+    }
     return '运行（在 $product 中，长按运行当前文件）';
   }
 
@@ -2345,61 +2355,49 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     return entry == null ? null : p.normalize(p.absolute(entry));
   }
 
-  /// The sibling app a normal Run would use for [entryFile], when one answers.
+  /// The sibling app a normal Run sends [entryFile] to, without asking it.
   ///
-  /// Run is one button, so the decision must happen before the button's own
-  /// path starts:
-  ///
-  ///   - probe `installed` -> cross-app compile and run;
-  ///   - probe `missing`   -> unchanged path, with the install hint;
-  ///   - probe `unknown`   -> unchanged path, with one hint that says why the
-  ///     answer was unconfirmed. A confident switch into another app the user
-  ///     may not have installed is worse than the path that already works.
-  /// The device app that owns this project's toolchain, or null when none does.
-  ///
-  /// The entry file decides: a project can hold several files and only one of
-  /// them names a toolchain. An entry that matches no receiver must produce no
-  /// menu item, because an action that can only fail is worse than none.
-  ///
-  /// No probe here on purpose. The probe is a real ability start: it pulls the
-  /// sibling app to the foreground, which pushes Studio into the background,
-  /// and a background application may not start another application's UI
-  /// ability — the run sent right after the probe was refused with error 201
-  /// whenever the sibling app had not exited yet. A missing app is reported
-  /// honestly by the start itself (`app_missing` → install hint).
-  Future<InteropTarget?> _answeringSiblingApp(String? entryFile) {
+  /// The decision is static: the entry file names the toolchain, and the start
+  /// call reports a missing app as `app_missing`. No probe runs here on
+  /// purpose. The probe is a real ability start: it pulls the sibling app to the
+  /// foreground, which pushes Studio into the background, and a background
+  /// application may not start another application's UI ability — the run sent
+  /// right after the probe was refused with error 201 whenever the sibling app
+  /// had not exited yet.
+  InteropTarget? _siblingAppFor(String? entryFile) {
+    final runner = StudioProfile.current?.interopRunner;
+    if (runner == null || !runner.isSupported) return null;
     final target = _interopTargetFor(entryFile);
-    if (target == null || p.extension(entryFile!).toLowerCase() == '.html') {
-      return Future<InteropTarget?>.value();
-    }
-    return Future<InteropTarget?>.value(target);
+    if (target == null) return null;
+    if (InteropSiblingMemory.instance.isMissing(target.language)) return null;
+    return target;
   }
 
   /// Compiles and runs the open project inside the sibling app that owns the
-  /// toolchain.
+  /// toolchain, and reports how the dialog ended.
   ///
-  /// The probe runs first. Without it an uninstalled sibling app would look
-  /// like a run that started and produced nothing, so the user gets an install
-  /// hint instead.
-  Future<void> _runInSiblingApp() async {
+  /// A missing app is not a dialog result but a decision for the caller: the
+  /// caller may run the project on its own path instead. The install hint is
+  /// shown here so the user learns why the app it expected did not start.
+  Future<InteropRunOutcome?> _runInSiblingApp() async {
     final runner = StudioProfile.current?.interopRunner;
-    if (runner == null) return;
+    if (runner == null) return null;
     if (_runningProject ||
         _runningFileTool ||
         _debugger.busy ||
         _terminalKey.currentState?.hasRunningWork == true) {
       _showSnack('请先停止当前运行任务');
-      return;
+      return null;
     }
     final active = _editor.current;
     if (active != null && _isOrphaned(active)) {
       _showSnack('项目已从工作区移除，请先通过「另存为…」导出未保存的改动');
-      return;
+      return null;
     }
     final projectPath = active?.projectRootPath ?? widget.project.path;
     if (!Directory(projectPath).existsSync()) {
       _showSnack('项目文件夹已不可用（$projectPath）');
-      return;
+      return null;
     }
     // The payload is built from disk, so an unsaved buffer would compile bytes
     // the user cannot see. Refuse instead of guessing which version to run.
@@ -2409,34 +2407,39 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         .toList();
     if (unsaved.isNotEmpty) {
       _showSnack('请先保存 ${unsaved.length} 个未保存的文件');
-      return;
+      return null;
     }
     final entry = _entryFileOf(projectPath);
     final target = _interopTargetFor(entry);
     if (entry == null || target == null) {
       _showSnack('没有支持该项目入口的配套应用');
-      return;
+      return null;
     }
     // An explicit request from the menu runs even without a probe: probing
     // would pull the sibling app to the foreground and get the real start
     // refused with error 201. A missing app is reported by the start itself.
-    final code = await showInteropRunDialog(
+    final outcome = await showInteropRunDialog(
       context: context,
       projectRoot: projectPath,
       language: target.language,
       entryFile: entry,
       runner: runner,
     );
-    if (!mounted || code == null) return;
+    if (!mounted || outcome == null) return null;
+    if (outcome.appMissing) {
+      _showSnack(outcome.diagnostic ?? '配套应用未安装，无法在本机编译运行。');
+      return outcome;
+    }
     _output.append(
-      '跨应用运行 · ${p.basename(entry)} · ${target.productName} · 退出码 $code\n',
+      '跨应用运行 · ${p.basename(entry)} · ${target.productName} · 退出码 ${outcome.exitCode}\n',
     );
     unawaited(
       LocalStatsService.instance.recordRun(
-        succeeded: code == 0,
+        succeeded: outcome.exitCode == 0,
         project: active?.ownerProjectName ?? widget.project.name,
       ),
     );
+    return outcome;
   }
 
   bool get _canRunBackground {

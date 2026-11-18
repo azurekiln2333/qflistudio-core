@@ -31,6 +31,7 @@ class InteropRun {
     required this.exitCode,
     this.cancel,
     this.diagnostics = const <String>[],
+    this.appMissing = false,
   });
 
   /// Title for the terminal header.
@@ -46,15 +47,27 @@ class InteropRun {
   /// Empty on a successful start.
   final List<String> diagnostics;
 
+  /// Whether nothing started because the sibling app is not installed.
+  ///
+  /// The platform reports it as `app_missing` from the start call itself. The
+  /// caller may run the project on its own path instead, and it may remember
+  /// the answer: a retry against the same absent app can only fail again.
+  final bool appMissing;
+
   /// A run that never started. The terminal shows [diagnostics] and the exit
   /// code says the program did not run.
-  factory InteropRun.failed(String title, List<String> diagnostics) =>
+  factory InteropRun.failed(
+    String title,
+    List<String> diagnostics, {
+    bool appMissing = false,
+  }) =>
       InteropRun._(
         title: title,
         stdout: const Stream<String>.empty(),
         stderr: Stream<String>.fromIterable(diagnostics),
         exitCode: Future<int>.value(kInteropNotRunExitCode),
         diagnostics: List<String>.unmodifiable(diagnostics),
+        appMissing: appMissing,
       );
 }
 
@@ -161,7 +174,11 @@ class InteropRunner {
     try {
       launch = await _transport.start(target, request);
     } on InteropException catch (error) {
-      return InteropRun.failed(title, <String>[error.message]);
+      return InteropRun.failed(
+        title,
+        <String>[error.message],
+        appMissing: error.code == InteropErrorCode.appMissing,
+      );
     }
 
     late final InteropLaunch started;
