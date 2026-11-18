@@ -703,6 +703,14 @@ Future<void> _menu(
   String value, {
   String tooltip = '更多',
 }) async {
+  // 部分动作已从「更多」菜单搬到顶栏下的快捷功能栏：先找栏上的按钮。
+  final quick = find.byKey(ValueKey('quick-$value'));
+  if (quick.evaluate().isNotEmpty) {
+    await tester.tap(quick);
+    await tester.pump();
+    await _pumpFrames(tester);
+    return;
+  }
   await tester.tap(find.byTooltip(tooltip));
   await tester.pump();
   await _pumpFrames(tester);

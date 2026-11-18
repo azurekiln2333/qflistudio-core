@@ -110,7 +110,10 @@ void main() {
         ),
       ),
     );
-    await _pumpUntil(tester, () => find.byType(CodeEditor).evaluate().isNotEmpty);
+    await _pumpUntil(
+      tester,
+      () => find.byType(CodeEditor).evaluate().isNotEmpty,
+    );
     // The sidebar reveal is an AnimatedAlign(200ms). Measuring before it
     // settles reads a half-width or zero-left column, which looks like a
     // layout failure but is only the animation mid-flight.
@@ -147,8 +150,8 @@ void main() {
     );
   }
 
-  TerminalPaneState terminalState(WidgetTester tester) => tester
-      .state<TerminalPaneState>(
+  TerminalPaneState terminalState(WidgetTester tester) =>
+      tester.state<TerminalPaneState>(
         // The terminal is deliberately offstage while another panel is shown,
         // so the finder must look through offstage widgets.
         find.byType(TerminalPane, skipOffstage: false),
@@ -265,7 +268,7 @@ void main() {
   ) async {
     await mount(tester, const Size(1280, 900));
     await ensureSidebarVisible(tester);
-    await _openPanelMenu(tester, 'Output · 输出');
+    await _openPanelMenu(tester, 'output');
 
     final column = slot(tester, 'editor-right-column');
     final card = tester.getRect(find.byType(FileExplorer).first);
@@ -285,7 +288,7 @@ void main() {
   ) async {
     await mount(tester, const Size(1280, 900));
     await ensureSidebarVisible(tester);
-    await _openPanelMenu(tester, '打开终端');
+    await _openPanelMenu(tester, 'terminal');
 
     final column = slot(tester, 'editor-right-column');
     final body = slot(tester, 'editor-body-wide');
@@ -314,7 +317,7 @@ void main() {
   ) async {
     await mount(tester, const Size(1280, 900));
     await ensureSidebarVisible(tester);
-    await _openPanelMenu(tester, 'AI 助手');
+    await _openPanelMenu(tester, 'ai');
 
     final column = slot(tester, 'editor-right-column');
     final card = tester.getRect(find.byType(FileExplorer).first);
@@ -348,7 +351,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('focus mode keeps panels inside the right column', (tester) async {
+  testWidgets('focus mode keeps panels inside the right column', (
+    tester,
+  ) async {
     // Focus mode is owned by an inline document contribution. The product's
     // editor calls `InlineDocumentRequest.setFocusMode` from one of its
     // actions, so the test builds the smallest contribution that exposes such
@@ -367,7 +372,7 @@ void main() {
     await mount(tester, const Size(1280, 900));
     // Expand the sidebar first, so entering focus mode is what removes it.
     await ensureSidebarVisible(tester);
-    await _openPanelMenu(tester, 'Output · 输出');
+    await _openPanelMenu(tester, 'output');
 
     // Enter focus mode through the contribution's own action.
     final focusAction = find.byKey(
@@ -402,16 +407,13 @@ void main() {
     await mount(tester, const Size(1280, 900));
 
     // Open the real terminal through its menu entry.
-    await _openPanelMenu(tester, '打开终端');
-    expect(
-      find.byType(TerminalPane, skipOffstage: false),
-      findsOneWidget,
-    );
+    await _openPanelMenu(tester, 'terminal');
+    expect(find.byType(TerminalPane, skipOffstage: false), findsOneWidget);
     final terminalBefore = terminalState(tester);
 
     // Switch to the AI panel. The terminal is kept, only offstage, so its
     // state object must be the same one.
-    await _openPanelMenu(tester, 'AI 助手');
+    await _openPanelMenu(tester, 'ai');
     expect(find.byType(AiPanel), findsOneWidget);
     expect(
       identical(terminalBefore, terminalState(tester)),
@@ -428,11 +430,8 @@ void main() {
       reason: 'switching to Problems must not recreate the terminal',
     );
 
-    await _openPanelMenu(tester, '打开终端');
-    expect(
-      find.byType(TerminalPane, skipOffstage: false),
-      findsOneWidget,
-    );
+    await _openPanelMenu(tester, 'terminal');
+    expect(find.byType(TerminalPane, skipOffstage: false), findsOneWidget);
     expect(
       identical(terminalBefore, terminalState(tester)),
       isTrue,
@@ -521,14 +520,23 @@ Future<void> _openProblems(WidgetTester tester) async {
   );
 }
 
-/// Opens a bottom panel through its real More-menu entry.
+/// Opens a bottom panel through its real quick-bar slot.
 ///
-/// The finder is scoped to `PopupMenuItem` because several labels also appear
-/// inside the panels themselves, and a bare `find.text` can match more than
-/// one element or hit the popup barrier instead of the item.
-Future<void> _openPanelMenu(WidgetTester tester, String label) async {
+/// These actions moved out of the «more» menu into the strip under the top bar;
+/// on a short viewport the strip yields and the same actions come back in the
+/// menu, so both entry points are exercised here.
+Future<void> _openPanelMenu(WidgetTester tester, String id) async {
+  final quick = find.byKey(ValueKey('quick-$id'));
+  if (quick.evaluate().isNotEmpty) {
+    await tester.tap(quick);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    return;
+  }
   await tester.tap(find.byTooltip('更多'));
-  final entry = find.widgetWithText(PopupMenuItem<String>, label);
+  final entry = find.byWidgetPredicate(
+    (widget) => widget is PopupMenuItem<String> && widget.value == 'quick:$id',
+  );
   await _pumpUntil(tester, () => entry.evaluate().isNotEmpty);
   // Let the popup route finish its open transition before tapping. Tapping a
   // mid-flight item lands on the modal barrier and silently does nothing.

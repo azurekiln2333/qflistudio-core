@@ -986,8 +986,15 @@ Future<void> _openSidebar(WidgetTester tester) async {
   await pumpFrames(tester);
 }
 
-/// 打开「更多」菜单并点其中一项。
+/// 打开 AI 面板。动作已从「更多」菜单搬到快捷功能栏。
 Future<void> _openMoreMenu(WidgetTester tester, String label) async {
+  final quick = find.byKey(const ValueKey('quick-ai'));
+  if (quick.evaluate().isNotEmpty) {
+    await tester.tap(quick);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    return;
+  }
   await tester.tap(find.byTooltip('更多'));
   final entry = find.widgetWithText(PopupMenuItem<String>, label);
   await pumpUntil(tester, () => entry.evaluate().isNotEmpty);

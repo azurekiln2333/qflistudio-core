@@ -81,18 +81,14 @@ void main() {
       }
       expect(find.byType(CodeEditor), findsOneWidget);
 
-      // Real gesture: more menu -> Output.
-      await tester.tap(find.byTooltip('更多'));
+      // Real gesture: quick bar -> Output.
+      final outputChip = find.byKey(const ValueKey('quick-output'));
       for (var attempt = 0; attempt < 40; attempt++) {
         await tester.pump(const Duration(milliseconds: 20));
-        if (find.text('Output · 输出').evaluate().isNotEmpty) break;
+        if (outputChip.evaluate().isNotEmpty) break;
       }
-      expect(find.text('Output · 输出'), findsOneWidget);
-      // The more-menu is taller than the test viewport; bring the item into
-      // view before tapping so the gesture lands on it.
-      await tester.ensureVisible(find.text('Output · 输出'));
-      await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(find.text('Output · 输出'));
+      expect(outputChip, findsOneWidget);
+      await tester.tap(outputChip);
       for (var attempt = 0; attempt < 40; attempt++) {
         await tester.pump(const Duration(milliseconds: 20));
         if (find.byType(EditorOutputPanel).evaluate().isNotEmpty) break;
@@ -102,7 +98,8 @@ void main() {
       expect(
         find.textContaining('未安装本地代码检查器'),
         findsNothing,
-        reason: 'main product has no analyzer; Output must not claim one is missing',
+        reason:
+            'main product has no analyzer; Output must not claim one is missing',
       );
       expect(find.textContaining('检查不可用'), findsNothing);
       // The normal editor child is still mounted behind the panel.

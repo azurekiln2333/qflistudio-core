@@ -57,66 +57,61 @@ void main() {
     }
   });
 
-  testWidgets(
-    'actual editor page lays out at 1100x175 without overflow',
-    (tester) async {
-      tester.view.physicalSize = const Size(1100, 175);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
+  testWidgets('actual editor page lays out at 1100x175 without overflow', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1100, 175);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: EditorPage(
-            project: project,
-            auth: auth,
-            store: store,
-            settings: settings,
-            initialOpenPath: p.join(project.path, 'src', 'main.dart'),
-          ),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: EditorPage(
+          project: project,
+          auth: auth,
+          store: store,
+          settings: settings,
+          initialOpenPath: p.join(project.path, 'src', 'main.dart'),
         ),
-      );
+      ),
+    );
 
-      for (var attempt = 0; attempt < 300; attempt++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (find.byType(CodeEditor).evaluate().isNotEmpty) break;
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 5)),
-        );
-      }
-      expect(find.byType(CodeEditor), findsOneWidget);
-      // Wide layout: the sidebar card lives inside the same 175px page.
-      expect(find.byType(FileExplorer), findsWidgets);
-      expect(
-        tester.takeException(),
-        isNull,
-        reason: 'editor page overflows at 1100x175 (sidebar + tabs + status)',
+    for (var attempt = 0; attempt < 300; attempt++) {
+      await tester.pump(const Duration(milliseconds: 20));
+      if (find.byType(CodeEditor).evaluate().isNotEmpty) break;
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 5)),
       );
+    }
+    expect(find.byType(CodeEditor), findsOneWidget);
+    // Wide layout: the sidebar card lives inside the same 175px page.
+    expect(find.byType(FileExplorer), findsWidgets);
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'editor page overflows at 1100x175 (sidebar + tabs + status)',
+    );
 
-      // Same geometry with the Output panel requested through the real menu.
-      await tester.tap(find.byTooltip('更多'));
-      for (var attempt = 0; attempt < 60; attempt++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (find.text('Output · 输出').evaluate().isNotEmpty) break;
-      }
-      await tester.ensureVisible(find.text('Output · 输出'));
-      await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(find.text('Output · 输出'));
-      await tester.pump(const Duration(milliseconds: 300));
-      // At 175px the activity panel is intentionally suppressed by the page's
-      // height gate (bodyHeight >= minEditorHeight + 96), so the invariant here
-      // is that the request is handled without overflow and the editor stays.
-      expect(find.byType(CodeEditor), findsOneWidget);
-      expect(
-        tester.takeException(),
-        isNull,
-        reason: 'opening Output must not overflow the 1100x175 page',
-      );
+    // Same geometry with the Output panel requested. At 175px the quick bar
+    // hides itself (the body cannot host it plus the editor minimum) and the
+    // activity panel is suppressed by the page's own height gate, so the
+    // invariant is that neither the bar nor the request overflows the page.
+    expect(
+      find.byKey(const ValueKey('editor-quick-bar')),
+      findsNothing,
+      reason: '矮窗口先让出快捷栏',
+    );
+    expect(find.byType(CodeEditor), findsOneWidget);
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'opening Output must not overflow the 1100x175 page',
+    );
 
-      FocusManager.instance.primaryFocus?.unfocus();
-      await tester.pump(const Duration(seconds: 6));
-      await tester.pump();
-      await tester.pumpWidget(const SizedBox.shrink());
-      tester.takeException();
-    },
-  );
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump(const Duration(seconds: 6));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    tester.takeException();
+  });
 }
