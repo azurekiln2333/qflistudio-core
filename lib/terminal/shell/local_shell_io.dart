@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../../config/ohos_platform.dart';
 import '../../services/process_supervisor.dart';
 import 'command_parser.dart';
 import 'portable_filesystem.dart';
