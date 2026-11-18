@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
+import 'package:qfli_studio_core/pages/quick_tools_page.dart';
 import 'package:qfli_studio_core/services/local_store_backend.dart';
 import 'package:qfli_studio_core/services/project_templates.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/tools/ported/batch1.dart';
 import 'package:qfli_studio_core/tools/ported/catalog.dart';
 import 'package:qfli_studio_core/tools/ported/netrix_tool_page.dart';
@@ -268,6 +270,80 @@ void main() {
       expect(store.density, ToolCardDensity.compact);
       expect(find.byType(ToolRow), findsWidgets);
       await store.settled();
+    });
+  });
+
+  group('shell tools tab', () {
+    late StudioProfile? previousProfile;
+
+    setUp(() => previousProfile = StudioProfile.current);
+
+    tearDown(() {
+      StudioProfile.current = previousProfile;
+      ToolStateStore.instance.clearRecent();
+    });
+
+    Future<void> mountShell(WidgetTester tester, StudioProfile profile) async {
+      StudioProfile.current = profile;
+      tester.view.physicalSize = const Size(1200, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: const Locale('zh', 'CN'),
+          supportedLocales: StudioLocalizations.supportedLocales,
+          localizationsDelegates: const [
+            StudioLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          home: FunctionsTab(
+            store: ProjectStore(),
+            onOpenTerminal: () {},
+            onOpenContentTool: () {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the main app shell lists the ported tools', (tester) async {
+      await mountShell(
+        tester,
+        const StudioProfile(
+          id: StudioProductCatalog.qfliStudioKey,
+          appTitle: StudioProductCatalog.qfliStudio,
+          templates: <ProjectTemplate>[],
+          isOffline: true,
+        ),
+      );
+      for (final PortedToolEntry entry in portedToolsInScope(isMainApp: true)) {
+        expect(find.text(entry.tool.title), findsOneWidget);
+      }
+      // 分类筛选条和分组标题都会出现这个分类名。
+      expect(find.text('文本与编码'), findsWidgets);
+    });
+
+    testWidgets('a language app shell lists none of them', (tester) async {
+      await mountShell(
+        tester,
+        StudioProfile(
+          id: StudioProductCatalog.forgeKey,
+          productKey: StudioProductCatalog.forgeKey,
+          appTitle: StudioProductCatalog.forge,
+          templates: const <ProjectTemplate>[],
+          isOffline: true,
+        ),
+      );
+      for (final PortedToolEntry entry in allPortedTools) {
+        expect(find.text(entry.tool.title), findsNothing);
+      }
+      expect(find.text('文本与编码'), findsNothing);
+      expect(find.text('字符/Unicode'), findsOneWidget);
     });
   });
 }
