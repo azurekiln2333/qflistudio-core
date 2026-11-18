@@ -221,21 +221,21 @@ void main() {
       reason: 'the sidebar card must span the body height minus its margins',
     );
 
-    // The card is exactly 280 px wide, inset 12 px on the left. A layout that
-    // stretches the sidebar by an extra margin must fail here, not pass with a
-    // loosened expectation.
-    expect(card.width, closeTo(280, 1.5));
+    // The card is exactly 300 px wide (Breakpoints.sidebarWidth), inset 12 px
+    // on the left. A layout that stretches the sidebar by an extra margin must
+    // fail here, not pass with a loosened expectation.
+    expect(card.width, closeTo(300, 1.5));
     expect(card.left, closeTo(12, 1.5));
 
     // The right column starts after the card and its 12 px right margin. The
-    // sidebar cell is 12 + 280 + 12 = 304 px, and nothing about it may move
+    // sidebar cell is 12 + 300 + 12 = 324 px, and nothing about it may move
     // the column further right.
     expect(
       card.right,
       lessThanOrEqualTo(column.left + 0.5),
       reason: 'the sidebar card must not extend into the right column',
     );
-    expect(column.left, closeTo(304, 1.5));
+    expect(column.left, closeTo(324, 1.5));
   });
 
   testWidgets('Problems panel is laid out inside the right column', (

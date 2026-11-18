@@ -175,6 +175,9 @@ class FileExplorerSections {
 }
 
 class _FileExplorerState extends State<FileExplorer> {
+  /// 标题行文字的水平入场内边距。文件段与会话段共用，切段时标题不跳位。
+  static const double _headerTitleInset = 8;
+
   final Map<String, List<FileNode>> _children = {};
   final Set<String> _expanded = {};
   final TextEditingController _searchController = TextEditingController();
@@ -1413,6 +1416,9 @@ class _FileExplorerState extends State<FileExplorer> {
   }
 
   /// 共享标题栏左侧的主标题：文件段是项目选择器，会话段是会话标题。
+  ///
+  /// 两段用同一条左侧线、同一个字号：[_headerTitleInset] 与 `labelLarge`。
+  /// 切段时标题不跳位。
   Widget _buildHeaderTitle(
     BuildContext context,
     ColorScheme scheme,
@@ -1420,11 +1426,18 @@ class _FileExplorerState extends State<FileExplorer> {
   ) {
     if (sections != null &&
         sections.state.sidebarSection == SidebarSection.sessions) {
-      return Text(
-        '会话',
-        style: Theme.of(context).textTheme.titleSmall,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: _headerTitleInset),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            '会话',
+            key: const ValueKey('sidebar-sessions-title'),
+            style: Theme.of(context).textTheme.labelLarge,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
       );
     }
     if (_savedWorkspace != null) {
@@ -1476,7 +1489,10 @@ class _FileExplorerState extends State<FileExplorer> {
 
   Widget _buildTitleChip(BuildContext context, ColorScheme scheme) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(
+        horizontal: _headerTitleInset,
+        vertical: 4,
+      ),
       decoration: BoxDecoration(
         color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(8),
@@ -1750,6 +1766,7 @@ class _FileExplorerState extends State<FileExplorer> {
     final selected = !node.isDir && widget.editor.current?.path == node.path;
     final dirty = !node.isDir && widget.editor.isDirty(node.path);
     final row = GestureDetector(
+      key: ValueKey('file-row-${node.path}'),
       onLongPressStart: (details) => _showMenu(node, details.globalPosition),
       child: Ink(
         decoration: BoxDecoration(

@@ -870,6 +870,143 @@ void main() {
     });
   });
 
+  group('会话列表的节奏', () {
+    testWidgets('会话标题与文件标题同一条左侧线、同一字号', (tester) async {
+      await mount(tester);
+      await _openSidebar(tester);
+
+      final fileTitle = find.descendant(
+        of: find.byKey(const ValueKey('file-explorer-project-picker')),
+        matching: find.text('Demo'),
+      );
+      expect(fileTitle, findsOneWidget);
+      final fileRect = tester.getRect(fileTitle);
+      final fileStyle = tester.widget<Text>(fileTitle).style;
+
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+
+      final sessionsTitle = find.byKey(
+        const ValueKey('sidebar-sessions-title'),
+      );
+      expect(sessionsTitle, findsOneWidget);
+      final sessionsRect = tester.getRect(sessionsTitle);
+      final sessionsStyle = tester.widget<Text>(sessionsTitle).style;
+
+      expect(
+        sessionsRect.left,
+        moreOrLessEquals(fileRect.left, epsilon: 0.5),
+        reason: '两段标题共用同一个水平入场内边距',
+      );
+      expect(
+        sessionsRect.center.dy,
+        moreOrLessEquals(fileRect.center.dy, epsilon: 0.5),
+        reason: '两段标题在同一高度',
+      );
+      expect(sessionsStyle?.fontSize, fileStyle?.fontSize);
+      expect(sessionsStyle?.fontWeight, fileStyle?.fontWeight);
+    });
+
+    testWidgets('会话行与文件树行同高、同内边距', (tester) async {
+      final first = await sessions.create(project.id, title: '第一个会话');
+      await sessions.create(project.id, title: '第二个会话');
+      await mount(tester);
+      await _openSidebar(tester);
+
+      // 文件树的根行：一行 34，外层 4 的横向内边距。
+      final fileRow = find.byKey(ValueKey('file-row-${project.path}'));
+      expect(fileRow, findsOneWidget);
+      final fileRect = tester.getRect(fileRow);
+
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+
+      final sessionRow = find.byKey(ValueKey('session-${first.id}'));
+      expect(sessionRow, findsOneWidget);
+      final sessionRect = tester.getRect(sessionRow);
+
+      expect(
+        sessionRect.left,
+        moreOrLessEquals(fileRect.left, epsilon: 0.5),
+        reason: '会话行与文件行同一条左边线',
+      );
+      expect(
+        sessionRect.right,
+        moreOrLessEquals(fileRect.right, epsilon: 0.5),
+        reason: '会话行与文件行同一条右边线',
+      );
+      expect(
+        sessionRect.height,
+        lessThanOrEqualTo(fileRect.height + 2),
+        reason: '会话行不能比文件行高出一截',
+      );
+      expect(sessionRect.height, greaterThanOrEqualTo(34));
+    });
+
+    testWidgets('会话行是一行标题，不是两行列表项', (tester) async {
+      final meta = await sessions.create(project.id, title: '只占一行的标题');
+      await mount(tester);
+      await _openSidebar(tester);
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+
+      final row = find.byKey(ValueKey('session-${meta.id}'));
+      expect(
+        find.descendant(of: row, matching: find.byType(ListTile)),
+        findsNothing,
+        reason: '带副标题的 ListTile 太高，改用紧凑行',
+      );
+      expect(
+        find.descendant(of: row, matching: find.text('只占一行的标题')),
+        findsOneWidget,
+      );
+      // 标题只占一行：行高接近文件树的 34。
+      expect(tester.getRect(row).height, lessThan(44));
+      // 次要信息（时间）仍在行内。
+      expect(
+        find.descendant(of: row, matching: find.textContaining('刚刚')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('状态文字仍在行内，与行高不冲突', (tester) async {
+      final waiting = await sessions.create(project.id, title: '等确认的');
+      runtime.liveStatuses[waiting.id] = AgentLiveStatus.awaitingApproval;
+      await mount(tester);
+      await _openSidebar(tester);
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+
+      final row = find.byKey(ValueKey('session-${waiting.id}'));
+      expect(
+        find.descendant(of: row, matching: find.text('待确认')),
+        findsOneWidget,
+      );
+      expect(tester.getRect(row).height, lessThan(44));
+    });
+
+    testWidgets('会话列表与会话段共用同一张卡片宽度', (tester) async {
+      await sessions.create(project.id, title: '宽度对比');
+      await mount(tester);
+      await _openSidebar(tester);
+
+      final filesCard = tester.getRect(find.byType(FileExplorer).first);
+      await tester.tap(_toggleTarget(tester));
+      await pumpFrames(tester);
+      final sessionsCard = tester.getRect(find.byType(FileExplorer).first);
+
+      expect(
+        sessionsCard.width,
+        moreOrLessEquals(filesCard.width, epsilon: 0.5),
+      );
+      expect(sessionsCard.left, moreOrLessEquals(filesCard.left, epsilon: 0.5));
+      expect(
+        sessionsCard.height,
+        moreOrLessEquals(filesCard.height, epsilon: 0.5),
+      );
+    });
+  });
+
   group('共享标题行', () {
     testWidgets('SidebarSectionSwitch 是单个图标按钮，点一下换到另一边', (tester) async {
       var current = SidebarSection.files;

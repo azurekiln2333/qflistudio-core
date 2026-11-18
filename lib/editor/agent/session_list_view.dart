@@ -51,10 +51,10 @@ class SessionListView extends StatelessWidget {
             Expanded(
               child: sessions.isEmpty
                   ? _buildEmpty(context)
-                  : ListView.separated(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
+                  : ListView.builder(
+                      // 与文件树同一套纵向节奏：上下各 8，行间不加分隔。
+                      padding: const EdgeInsets.symmetric(vertical: 8),
                       itemCount: sessions.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 2),
                       itemBuilder: (context, index) => _SessionRow(
                         meta: sessions[index],
                         status: runtime.statusOf(sessions[index].id),
@@ -72,31 +72,59 @@ class SessionListView extends StatelessWidget {
     );
   }
 
+  /// 独立使用（未嵌入文件树卡片）时的标题行。
+  ///
+  /// 几何与文件树卡片标题行一致：左右各 12 的入场内边距、48 的最小高度、
+  /// `labelLarge` 字号。嵌入时标题行由文件树卡片提供，见
+  /// [FileExplorerSections]。
   Widget _buildHeader(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
-      child: Row(
-        children: [
-          Expanded(child: Text('会话', style: theme.textTheme.titleSmall)),
-          if (onCreate != null)
-            IconButton(
-              key: const ValueKey('session-new'),
-              tooltip: '新会话',
-              onPressed: () => onCreate!(),
-              icon: const Icon(Icons.add_comment_outlined, size: 20),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 48),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '会话',
+                style: theme.textTheme.labelLarge,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
-          PopupMenuButton<String>(
-            key: const ValueKey('session-list-menu'),
-            tooltip: '会话操作',
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 'stop_all', height: 44, child: Text('全部停止')),
-            ],
-            onSelected: (action) {
-              if (action == 'stop_all') runtime.cancelAll();
-            },
-          ),
-        ],
+            if (onCreate != null)
+              IconButton(
+                key: const ValueKey('session-new'),
+                tooltip: '新会话',
+                onPressed: () => onCreate!(),
+                icon: const Icon(Icons.add_comment_outlined, size: 20),
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.standard,
+                constraints: const BoxConstraints.tightFor(
+                  width: 44,
+                  height: 44,
+                ),
+              ),
+            PopupMenuButton<String>(
+              key: const ValueKey('session-list-menu'),
+              tooltip: '会话操作',
+              padding: EdgeInsets.zero,
+              iconSize: 20,
+              constraints: const BoxConstraints.tightFor(width: 44, height: 44),
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: 'stop_all',
+                  height: 44,
+                  child: Text('全部停止'),
+                ),
+              ],
+              onSelected: (action) {
+                if (action == 'stop_all') runtime.cancelAll();
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -174,76 +202,165 @@ class _SessionRow extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final label = _statusLabel(status);
+    final time = _relativeTime(meta.updatedAt);
+    // 右侧次要信息：有状态时显示状态，否则显示相对时间。两种都只占一行。
+    final muted = theme.textTheme.labelSmall?.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      child: ListTile(
-        key: ValueKey('session-${meta.id}'),
-        dense: true,
-        selected: selected,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        leading: SessionStatusMarker(
-          key: ValueKey('session-status-${meta.id}'),
-          status: status,
-        ),
-        title: Text(
-          meta.title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.bodyMedium,
-        ),
-        subtitle: Text(
-          label == null
-              ? _relativeTime(meta.updatedAt)
-              : '${_relativeTime(meta.updatedAt)} · $label',
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.labelSmall?.copyWith(
-            color: scheme.onSurfaceVariant,
+      // 与文件树行同一套横向内边距。
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: GestureDetector(
+        // 长按和右端菜单同源：两种手势打开同一个菜单。
+        onLongPressStart: (details) =>
+            _showMenu(context, details.globalPosition),
+        child: Ink(
+          decoration: BoxDecoration(
+            color: selected
+                ? scheme.surfaceContainerHighest.withValues(alpha: 0.6)
+                : null,
+            borderRadius: BorderRadius.circular(8),
           ),
-        ),
-        onTap: onSelect == null ? null : () => onSelect!(meta.id),
-        trailing: PopupMenuButton<String>(
-          key: ValueKey('session-menu-${meta.id}'),
-          tooltip: '会话操作',
-          itemBuilder: (context) => const [
-            PopupMenuItem(value: 'rename', height: 44, child: Text('重命名')),
-            PopupMenuItem(value: 'delete', height: 44, child: Text('删除')),
-          ],
-          onSelected: (action) async {
-            if (action == 'rename') {
-              final title = await showDialog<String>(
-                context: context,
-                builder: (_) => _RenameDialog(initialTitle: meta.title),
-              );
-              if (title == null || title.trim().isEmpty) return;
-              await onRename(title);
-            }
-            if (action == 'delete') {
-              if (!context.mounted) return;
-              final confirmed = await showDialog<bool>(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('删除会话'),
-                  content: Text('「${meta.title}」的消息会一起删除，无法恢复。'),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(false),
-                      child: const Text('取消'),
+          child: InkWell(
+            key: ValueKey('session-${meta.id}'),
+            borderRadius: BorderRadius.circular(8),
+            onTap: onSelect == null ? null : () => onSelect!(meta.id),
+            child: ConstrainedBox(
+              // 与文件树行同高：一行标题 34，字缩放时可以再长。
+              constraints: const BoxConstraints(minHeight: 34),
+              child: Padding(
+                // 竖向不留内边距：行高由 34 的下限决定，与文件树行同高。
+                padding: const EdgeInsets.only(left: 8, right: 4),
+                child: Row(
+                  children: [
+                    SessionStatusMarker(
+                      key: ValueKey('session-status-${meta.id}'),
+                      status: status,
+                      size: 16,
                     ),
-                    FilledButton(
-                      key: const ValueKey('session-delete-confirm'),
-                      onPressed: () => Navigator.of(context).pop(true),
-                      child: const Text('删除'),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        meta.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: selected
+                              ? scheme.onSurface
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
                     ),
+                    const SizedBox(width: 6),
+                    // 次要信息可收缩，标题优先。
+                    Flexible(
+                      child: Text(
+                        label ?? time,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.end,
+                        style: label == null
+                            ? muted
+                            : muted?.copyWith(
+                                color: switch (status) {
+                                  AgentLiveStatus.awaitingApproval =>
+                                    scheme.tertiary,
+                                  AgentLiveStatus.failed => scheme.error,
+                                  AgentLiveStatus.finishedUnread =>
+                                    scheme.primary,
+                                  _ => scheme.onSurfaceVariant,
+                                },
+                              ),
+                      ),
+                    ),
+                    _buildMenu(context),
                   ],
                 ),
-              );
-              if (confirmed == true) await onDelete();
-            }
-          },
+              ),
+            ),
+          ),
         ),
       ),
     );
+  }
+
+  /// 右端菜单：与行同一高度感。
+  Widget _buildMenu(BuildContext context) {
+    return PopupMenuButton<String>(
+      key: ValueKey('session-menu-${meta.id}'),
+      tooltip: '会话操作',
+      iconSize: 16,
+      padding: EdgeInsets.zero,
+      icon: const Icon(Icons.more_horiz),
+      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+      // M3 的 IconButton 默认把触摸区撑到 48，这里收缩到 32，行高回到 34。
+      style: IconButton.styleFrom(
+        fixedSize: const Size(32, 32),
+        padding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        alignment: Alignment.center,
+      ),
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'rename', height: 44, child: Text('重命名')),
+        PopupMenuItem(value: 'delete', height: 44, child: Text('删除')),
+      ],
+      onSelected: (action) => _onMenuAction(context, action),
+    );
+  }
+
+  Future<void> _onMenuAction(BuildContext context, String action) async {
+    if (action == 'rename') {
+      final title = await showDialog<String>(
+        context: context,
+        builder: (_) => _RenameDialog(initialTitle: meta.title),
+      );
+      if (title == null || title.trim().isEmpty) return;
+      await onRename(title);
+    }
+    if (action == 'delete') {
+      if (!context.mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('删除会话'),
+          content: Text('「${meta.title}」的消息会一起删除，无法恢复。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const ValueKey('session-delete-confirm'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('删除'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true) await onDelete();
+    }
+  }
+
+  /// 长按菜单：同一个菜单在鼠标位置弹出，省一次瞄准。
+  Future<void> _showMenu(BuildContext context, Offset position) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        overlay.size.width - position.dx,
+        overlay.size.height - position.dy,
+      ),
+      items: const [
+        PopupMenuItem(value: 'rename', height: 44, child: Text('重命名')),
+        PopupMenuItem(value: 'delete', height: 44, child: Text('删除')),
+      ],
+    );
+    if (action == null || !context.mounted) return;
+    await _onMenuAction(context, action);
   }
 
   static String? _statusLabel(AgentLiveStatus status) => switch (status) {
@@ -268,24 +385,30 @@ class _SessionRow extends StatelessWidget {
 
 /// 会话状态标记：运行中转圈，排队显示时钟，待确认橙点，失败红点，未读蓝点。
 class SessionStatusMarker extends StatelessWidget {
-  const SessionStatusMarker({super.key, required this.status});
+  const SessionStatusMarker({super.key, required this.status, this.size = 20});
 
   final AgentLiveStatus status;
+
+  /// 占位边长。侧边栏的紧凑行用 16，其余地方保持 20。
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return SizedBox.square(dimension: 20, child: Center(child: _build(scheme)));
+    return SizedBox.square(
+      dimension: size,
+      child: Center(child: _build(scheme)),
+    );
   }
 
   Widget _build(ColorScheme scheme) => switch (status) {
     AgentLiveStatus.running => SizedBox.square(
-      dimension: 14,
+      dimension: size * 0.7,
       child: CircularProgressIndicator(strokeWidth: 2, color: scheme.primary),
     ),
     AgentLiveStatus.queued => Icon(
       Icons.schedule,
-      size: 16,
+      size: size * 0.8,
       color: scheme.onSurfaceVariant,
     ),
     AgentLiveStatus.awaitingApproval => _dot(scheme.tertiary),
@@ -293,14 +416,14 @@ class SessionStatusMarker extends StatelessWidget {
     AgentLiveStatus.finishedUnread => _dot(scheme.primary),
     AgentLiveStatus.idle => Icon(
       Icons.chat_bubble_outline,
-      size: 16,
+      size: size * 0.8,
       color: scheme.onSurfaceVariant,
     ),
   };
 
   Widget _dot(Color color) => Container(
-    width: 10,
-    height: 10,
+    width: size * 0.5,
+    height: size * 0.5,
     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
   );
 }

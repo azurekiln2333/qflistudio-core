@@ -37,6 +37,7 @@ import 'code_minimap.dart';
 import 'symbols_bar.dart';
 import 'editor_controller.dart';
 import 'editor_analysis_controller.dart';
+import 'editor_bottom_inset.dart';
 import 'editor_debug_controller.dart';
 import 'editor_debug_widgets.dart';
 import 'editor_output_panel.dart';
@@ -230,7 +231,7 @@ class EditorPage extends StatefulWidget {
 }
 
 class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
-  static const double _sidebarWidth = 280;
+  static const double _sidebarWidth = Breakpoints.sidebarWidth;
   static const double _cardMargin = 12;
   static const double _wideBreakpoint = 720;
 
@@ -2868,6 +2869,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final editorVisible = wideAgentPane || !_agentPanelActive;
     final focusMode = _inlineFocusDocuments.contains(_editor.current);
     final sidebarVisible = !focusMode && (_explorerVisible ?? false);
+    // Android 的窗口铺到屏幕底边，导航条会压住最后一屏内容，由编辑器自己让位。
+    final bottomInset = EditorBottomInset.insetOf(context);
     return Shortcuts(
       shortcuts: const {
         SingleActivator(LogicalKeyboardKey.keyS, control: true): SaveIntent(),
@@ -3871,14 +3874,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                           ),
                       ],
                     );
+                    // Body 铺到屏幕底边；Android 的导航条由这里让开，内部控件
+                    // （终端面板、输入卡片、底部面板）跟着一起上移。
                     if (agentEnabled && layout != WorkbenchLayout.wide) {
-                      return AgentPaneSwitcher(
-                        state: agentHost.state,
-                        editor: body,
-                        agent: agentPane!,
+                      return EditorBottomInset(
+                        inset: bottomInset,
+                        child: AgentPaneSwitcher(
+                          state: agentHost.state,
+                          editor: body,
+                          agent: agentPane!,
+                        ),
                       );
                     }
-                    return body;
+                    return EditorBottomInset(inset: bottomInset, child: body);
                   },
                 );
               },

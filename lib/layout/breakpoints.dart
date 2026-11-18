@@ -9,7 +9,9 @@ abstract final class Breakpoints {
   static const double threePane = 1100;
 
   /// 侧边栏常驻时的宽度。
-  static const double sidebarWidth = 280;
+  ///
+  /// 300 而不是 280：280 下深层文件的文件名经常被截成省略号。
+  static const double sidebarWidth = 300;
 
   /// 宽屏下对话流栏的宽度。
   ///
