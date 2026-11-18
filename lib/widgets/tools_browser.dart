@@ -306,29 +306,28 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
     );
   }
 
-  /// 宽松显示：卡片网格，几何与既有工具页相同。
+  /// 宽松显示：卡片网格，几何与 netrix 的「全部工具」页相同。
   Widget _cardsSliver(List<ToolsBrowserEntry> entries) {
+    final strings = NetrixLocalizations.of(context);
     final textTheme = Theme.of(context).textTheme;
     final scaler = MediaQuery.textScalerOf(context);
     final extraTextHeight =
-        _extraLineHeight(scaler, textTheme.titleSmall, 14) +
+        _extraLineHeight(scaler, textTheme.titleMedium, 16) +
         2 * _extraLineHeight(scaler, textTheme.bodySmall, 12);
     return SliverGrid(
       delegate: SliverChildBuilderDelegate((context, index) {
         final entry = entries[index];
-        // 卡片保持与既有工具页完全相同的几何（旧测试固定了宽高），
-        // 收藏按钮只是叠加在右上角，不参与卡片布局。
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            ToolCard(
-              icon: entry.icon,
-              title: entry.title,
-              description: entry.description,
-              onTap: () => _open(context, entry),
-            ),
-            Positioned(top: 2, right: 2, child: _favoriteButton(entry)),
-          ],
+        final isFavorite = _state.favorites.contains(entry.id);
+        return ToolCard(
+          icon: entry.icon,
+          title: entry.title,
+          description: entry.description,
+          onTap: () => _open(context, entry),
+          isFavorite: isFavorite,
+          onToggleFavorite: () => _state.toggleFavorite(entry.id),
+          favoriteTooltip:
+              isFavorite ? strings.removeFavorite : strings.addFavorite,
+          openTooltip: strings.openTool,
         );
       }, childCount: entries.length),
       gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
@@ -382,17 +381,6 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
     final size = style?.fontSize ?? fallbackSize;
     return (scaler.scale(size) - size).clamp(0.0, double.infinity) *
         (style?.height ?? 1.5);
-  }
-
-  Widget _favoriteButton(ToolsBrowserEntry entry) {
-    final strings = NetrixLocalizations.of(context);
-    final isFavorite = _state.favorites.contains(entry.id);
-    return ToolFavoriteButton(
-      isFavorite: isFavorite,
-      onPressed: () => _state.toggleFavorite(entry.id),
-      addTooltip: strings.addFavorite,
-      removeTooltip: strings.removeFavorite,
-    );
   }
 
   /// 打开一个条目：既有工具用自带页面或回调，移植工具用 netrix 详情页。

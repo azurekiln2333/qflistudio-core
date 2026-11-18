@@ -151,7 +151,12 @@ void main() {
         home: FunctionsTab(onOpenTerminal: () => terminalTaps++),
       );
       expect(tester.takeException(), isNull);
-      expect(tester.getSize(_card('终端')).height, greaterThan(132));
+      // 宽松显示的卡片高度已对齐 netrix（`ToolsTheme.cardHeight`），
+      // 大字号时再按行高追加。
+      expect(
+        tester.getSize(_card('终端')).height,
+        greaterThan(ToolsTheme.cardHeight),
+      );
       await tester.tap(_card('终端'));
       expect(terminalTaps, 1);
       for (final (title, _) in _sharedPages) {
@@ -241,7 +246,8 @@ void main() {
         expect(find.byType(Scaffold), findsOneWidget);
         expect(find.byType(AppBar), findsOneWidget);
         final terminal = tester.getRect(_card('终端'));
-        expect(terminal.height, 132);
+        // 宽松显示卡片高度 176：与 netrix 的「全部工具」页一致。
+        expect(terminal.height, ToolsTheme.cardHeight);
         await _revealCard(tester, '字符/Unicode');
         final first = tester.getRect(_card('字符/Unicode'));
         final second = tester.getRect(_card('Base64'));

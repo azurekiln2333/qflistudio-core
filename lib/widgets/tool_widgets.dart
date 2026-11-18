@@ -18,12 +18,16 @@ abstract final class ToolsTheme {
   /// Card grid geometry. `maxCrossAxisExtent` lets Flutter pick the column
   /// count, so the same code is a single column on a phone and three or four on
   /// a tablet without a breakpoint table.
-  static const double cardMaxWidth = 320;
-  static const double cardHeight = 132;
-  static const double cardSpacing = 12;
+  ///
+  /// The three values match netrix's “全部工具” page (`_standardSliver` in
+  /// `netrix/lib/ui/home_page.dart`): `maxCrossAxisExtent: 360`,
+  /// `mainAxisExtent: 176`, `crossAxisSpacing` / `mainAxisSpacing: 14`.
+  static const double cardMaxWidth = 360;
+  static const double cardHeight = 176;
+  static const double cardSpacing = 14;
 
   static const double cardRadius = 12;
-  static const double cardPadding = 16;
+  static const double cardPadding = 14;
 
   /// The card surface: flat, outlined, and tinted from the scheme so it works
   /// in light and dark without hard-coded colours.
@@ -85,6 +89,10 @@ class ToolsSectionHeading extends StatelessWidget {
 
 /// One tool tile: icon, name and a one-line description.
 ///
+/// Layout copied from netrix's `_ToolCard`: a 14 px padded `Card`, a header row
+/// with the category icon, the favourite toggle and the open button, then the
+/// title (`titleMedium`) and a two-line description (`bodySmall`).
+///
 /// The whole tile is the tap target, and it is deliberately flat rather than
 /// Material-elevated so a grid of them reads as a single surface.
 class ToolCard extends StatelessWidget {
@@ -94,6 +102,10 @@ class ToolCard extends StatelessWidget {
     required this.title,
     required this.description,
     required this.onTap,
+    this.isFavorite,
+    this.onToggleFavorite,
+    this.favoriteTooltip,
+    this.openTooltip,
   });
 
   final IconData icon;
@@ -101,53 +113,64 @@ class ToolCard extends StatelessWidget {
   final String description;
   final VoidCallback onTap;
 
+  /// 非空时在头部右侧显示收藏按钮，与 netrix 一致。
+  final bool? isFavorite;
+  final VoidCallback? onToggleFavorite;
+  final String? favoriteTooltip;
+  final String? openTooltip;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
     return Semantics(
       button: true,
       label: title,
-      child: Material(
-        color: Colors.transparent,
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        margin: EdgeInsets.zero,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(ToolsTheme.cardRadius),
-          child: Ink(
-            decoration: ToolsTheme.cardDecoration(scheme),
-            child: Padding(
-              padding: const EdgeInsets.all(ToolsTheme.cardPadding),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: scheme.primaryContainer.withValues(alpha: 0.55),
-                      borderRadius: BorderRadius.circular(10),
+          child: Padding(
+            padding: const EdgeInsets.all(ToolsTheme.cardPadding),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, color: theme.colorScheme.primary),
+                    const Spacer(),
+                    if (isFavorite != null && onToggleFavorite != null)
+                      IconButton(
+                        tooltip: favoriteTooltip,
+                        onPressed: onToggleFavorite,
+                        icon: Icon(
+                          isFavorite! ? Icons.star : Icons.star_border,
+                        ),
+                      ),
+                    IconButton(
+                      tooltip: openTooltip,
+                      onPressed: onTap,
+                      icon: const Icon(Icons.arrow_forward_outlined),
                     ),
-                    child: Icon(icon, size: 20, color: scheme.primary),
+                  ],
+                ),
+                const Spacer(),
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  description,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
                   ),
-                  const Spacer(),
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

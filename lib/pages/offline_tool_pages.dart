@@ -73,7 +73,8 @@ class TimestampToolPage extends StatefulWidget {
   const TimestampToolPage({super.key});
 
   static const String title = '时间戳';
-  static const String description = '毫秒/秒时间戳与本地日期时间互转。';
+  static const String description =
+      '毫秒/秒时间戳与本地日期时间互转，并给出 UTC ISO-8601 时间。';
 
   @override
   State<TimestampToolPage> createState() => _TimestampToolPageState();
@@ -98,16 +99,30 @@ class _TimestampToolPageState extends State<TimestampToolPage> {
     String? error;
     String? localText;
     String? epochText;
+    // netrix `timestamp-converter` 的四行结果，与现有时间戳工具合并。
+    String? unitText;
+    String? utcText;
+    String? secondsText;
+    String? millisecondsText;
     final raw = _epoch.text.trim();
     if (raw.isNotEmpty) {
       final value = int.tryParse(raw);
       if (value == null) {
         error = '时间戳必须是整数';
       } else {
+        final epochMilliseconds = _seconds ? value * 1000 : value;
         localText = OfflineTimestamp.toLocal(
-          DateTime.fromMillisecondsSinceEpoch(_seconds ? value * 1000 : value),
+          DateTime.fromMillisecondsSinceEpoch(epochMilliseconds),
           milliseconds: !_seconds,
         );
+        // 以下三行照搬 netrix：单位按数值大小识别，时间固定用 UTC。
+        unitText = value.abs() >= 100000000000 ? 'milliseconds' : 'seconds';
+        utcText = DateTime.fromMillisecondsSinceEpoch(
+          epochMilliseconds,
+          isUtc: true,
+        ).toIso8601String();
+        secondsText = '${epochMilliseconds ~/ 1000}';
+        millisecondsText = '$epochMilliseconds';
       }
     }
     final localInput = _local.text.trim();
@@ -152,6 +167,12 @@ class _TimestampToolPageState extends State<TimestampToolPage> {
           children: [
             if (localText != null) ResultRow(label: '本地时间', value: localText),
             if (epochText != null) ResultRow(label: '时间戳', value: epochText),
+            if (unitText != null) ResultRow(label: '识别单位', value: unitText),
+            if (utcText != null) ResultRow(label: 'UTC ISO-8601', value: utcText),
+            if (secondsText != null)
+              ResultRow(label: 'Unix 秒', value: secondsText),
+            if (millisecondsText != null)
+              ResultRow(label: 'Unix 毫秒', value: millisecondsText),
             if (localText == null && epochText == null)
               const ResultRow(label: '提示', value: '输入任一字段即可换算'),
           ],
