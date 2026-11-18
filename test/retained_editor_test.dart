@@ -240,6 +240,8 @@ void main() {
     await _tab(tester, Icons.apps_outlined);
     final jsonCard = find.text('JSON 格式化');
     await tester.ensureVisible(jsonCard);
+    // 工具卡片按 netrix 的密度长高（176 dp），滚动后要等一帧再点。
+    await tester.pump();
     await tester.tap(jsonCard);
     await _pumpFrames(tester);
     expect(find.byType(JsonToolPage), findsOneWidget);
