@@ -69,9 +69,16 @@ List<String> get unclaimedNetrixIds => <String>[
 /// | `base64` | Base64（`Base64ToolPage`） | `encode` / `decode` 两个方向，由「编码 / 解码」按钮提供 |
 /// | `url-codec` | URL 编解码（`UrlToolPage`） | 组件风格百分号编码（空格转 `%20`），新增两行结果 |
 /// | `digest` | 哈希摘要（`HashToolPage`） | SHA-512，新增一行结果 |
+///
+/// 第 3 批的 1 个重复项：
+///
+/// | netrix 标识 | 并入的现有工具 | 并集里的 netrix 能力 |
+/// |---|---|---|
+/// | `timestamp-converter` | 时间戳（`TimestampToolPage`） | 识别单位、UTC ISO-8601、Unix 秒与毫秒四行结果 |
 const Set<String> mergedNetrixIds = <String>{
   'json',
   'base64',
   'url-codec',
   'digest',
+  'timestamp-converter',
 };
