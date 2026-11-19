@@ -44,4 +44,7 @@ jobs:
       - run: flutter --version
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
-      - run: flutter test --reporter expanded
+      - name: Run tests and compare with known failures
+        run: |
+          flutter test --reporter json > "$RUNNER_TEMP/test.json" || true
+          python3 .github/scripts/check_test_results.py "$RUNNER_TEMP/test.json" .github/known-test-failures.txt

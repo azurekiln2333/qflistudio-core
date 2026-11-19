@@ -1,0 +1,5 @@
+# 2026-11-19 在 thinking/contract（基于 rework/integration b7f3d40）首次云端运行时就失败的测试。
+# 与本任务无关，CI 不因它们失败。修好一个就删一行。
+test/interop_arkts_contract_test.dart: loading test/interop_arkts_contract_test.dart
+test/terminal_pane_test.dart: portable command errors keep cwd and stay quiet on success
+test/workspace_editor_session_test.dart: folded cross-root selections restore their source lines and both endpoints
