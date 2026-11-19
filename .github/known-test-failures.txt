@@ -1,0 +1,7 @@
+# 2026-11-19 在 thinking/contract（基于 rework/integration b7f3d40）首次云端运行时就失败的测试。
+# 它们依赖并列仓库或本机路径，与本任务无关，CI 不因它们失败。修好一个就删一行。
+test/interop_arkts_contract_test.dart: loading test/interop_arkts_contract_test.dart
+test/chat_composer_card_test.dart: an absolute attachment shows its tail, not the whole path
+test/editor_run_target_test.dart: a missing sibling app keeps the original path
+test/editor_run_target_test.dart: an installed sibling app takes the run tap
+test/editor_run_target_test.dart: an unknown probe keeps the original path
