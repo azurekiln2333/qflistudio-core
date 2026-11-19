@@ -270,9 +270,13 @@ void main() {
       ],
     );
 
-    // `_sanitizeHistory` 从尾部丢掉没答完的一组，所以取倒数两条。
-    final first = controller.history[controller.history.length - 2];
-    final second = controller.history.last;
+    // 历史带系统提示，按下标取容易算错，直接找两条助手条目。
+    final assistants = controller.history
+        .where((entry) => entry['role'] == 'assistant')
+        .toList();
+    expect(assistants, hasLength(2));
+    final first = assistants.first;
+    final second = assistants.last;
     expect(first['reasoning_content'], '想到过');
     final blocks = first['reasoning_blocks'] as List;
     expect(blocks, hasLength(1));

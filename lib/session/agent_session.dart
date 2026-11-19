@@ -536,7 +536,7 @@ class FileAgentSessionStore extends AgentSessionStore {
         final header = jsonEncode(_headerRecord(meta));
         final length = await file.length();
         final payload = length > _isolateThreshold
-            ? await Isolate.run(() => _compactInIsolate(file.path, header))
+            ? await _compactOffIsolate(file.path, header)
             : _compactPayloadSync(await file.readAsString(), header);
         await _writePayload(file, payload);
       });
@@ -546,6 +546,13 @@ class FileAgentSessionStore extends AgentSessionStore {
       _compacting.remove(sessionId);
     }
   }
+
+  /// 在独立 isolate 里拼好重写文本。
+  ///
+  /// 单独开一个同步方法建闭包：在异步帧里建闭包会连带捕住 Future，
+  /// 那就不可发送，`Isolate.run` 会直接抛异常。
+  static Future<String> _compactOffIsolate(String path, String header) =>
+      Isolate.run(() => _compactInIsolate(path, header));
 
   /// 后台排队做一次坏行扫描；真正的扫描由 [compactIfNeeded] 去重。
   void _scheduleCompaction(String sessionId) {

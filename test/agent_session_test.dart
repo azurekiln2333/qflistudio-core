@@ -383,6 +383,8 @@ void main() {
       );
       expect(jsonlOf(meta.id).lengthSync(), greaterThan(200 * 1024));
 
+      // 大文件走独立 isolate 拼重写文本。这里会在异步帧里建闭包，
+      // 闭包不能连带捕住 Future，否则 isolate 发送会抛异常（回归项）。
       await store.compactIfNeeded(meta.id);
 
       final raw = jsonlOf(meta.id).readAsStringSync();
