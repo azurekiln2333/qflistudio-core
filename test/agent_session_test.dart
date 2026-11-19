@@ -388,6 +388,11 @@ void main() {
       final raw = jsonlOf(meta.id).readAsStringSync();
       expect(raw, isNot(contains('junk line')));
       expect(raw, contains(padding.substring(0, 20)));
+      // 重写后每条记录占一行，行内不能出现裸换行。
+      for (final line in raw.split('\n')) {
+        if (line.trim().isEmpty) continue;
+        expect(line, startsWith('{"t":'));
+      }
     },
   );
 

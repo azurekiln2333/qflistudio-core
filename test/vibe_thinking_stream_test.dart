@@ -255,15 +255,24 @@ void main() {
         {
           'role': 'assistant',
           'content': '第二轮回复',
+          'tool_calls': [
+            {
+              'id': 'call-1',
+              'type': 'function',
+              'function': {'name': 'read_file', 'arguments': '{}'},
+            },
+          ],
           // 类型不对的字段整条丢掉。
           'reasoning_content': 42,
           'reasoning_blocks': 'not-a-list',
         },
+        {'role': 'tool', 'tool_call_id': 'call-1', 'content': '读好了'},
       ],
     );
 
-    final first = controller.history[1];
-    final second = controller.history[2];
+    // `_sanitizeHistory` 从尾部丢掉没答完的一组，所以取倒数两条。
+    final first = controller.history[controller.history.length - 2];
+    final second = controller.history.last;
     expect(first['reasoning_content'], '想到过');
     final blocks = first['reasoning_blocks'] as List;
     expect(blocks, hasLength(1));
