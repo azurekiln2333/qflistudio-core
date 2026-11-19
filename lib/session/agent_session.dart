@@ -209,10 +209,12 @@ class FileAgentSessionStore extends AgentSessionStore {
   /// 单条记录超过这个字节数就放到独立 isolate 解析。
   static const int _isolateThreshold = 200 * 1024;
 
-  /// 同一个文件里允许保留的历史快照行数；超过就重写（prd R14）。
+  /// 同一个文件里允许保留的历史快照行数。
+  /// 超过这个数就重写（prd R14）。
   static const int _maxHistoryRows = 20;
 
-  /// 会话文件大小上限；超过就重写。
+  /// 会话文件大小上限。
+  /// 超过这个大小就重写。
   static const int _maxSessionBytes = 8 * 1024 * 1024;
 
   /// 读历史时最多取多少条；控制器自己还会再裁一次。
@@ -729,7 +731,8 @@ class FileAgentSessionStore extends AgentSessionStore {
     return _serialize(() => _writePayload(_jsonlFor(sessionId), payload));
   }
 
-  /// 写一份完整的文件内容；调用方负责串行化。
+  /// 写一份完整的文件内容。
+  /// 调用方负责串行化。
   Future<void> _writePayload(File target, String payload) async {
     if (!await _root.exists()) await _root.create(recursive: true);
     final temp = File('${target.path}.tmp');
@@ -1049,7 +1052,9 @@ enum _RecordKind { header, message, history }
 (int, int, int) _scanRowsInIsolate(String path) =>
     _scanRowsSync(File(path).readAsStringSync());
 
-/// 这一行记录的 `t` 值；读不出来时返回 null。与 `_decodeLine` 同口径。
+/// 这一行记录的 `t` 值。读不出来时返回 null。
+///
+/// 与 `_decodeLine` 同口径。
 String? _rowKind(String line) {
   final trimmed = line.trim();
   if (trimmed.isEmpty) return null;

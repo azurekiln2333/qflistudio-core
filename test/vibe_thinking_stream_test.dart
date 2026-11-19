@@ -318,7 +318,7 @@ void main() {
     second.send('第二个会话');
     await waitFor(() => scheduler.isWaiting('b'), reason: '第二个会话没有排队');
 
-    // 流还没结束，名额不能被释放。
+    // 流还没结束，名额必须一直占着。
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(scheduler.activeCount, 1);
     expect(api.turns, hasLength(1));

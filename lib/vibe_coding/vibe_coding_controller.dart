@@ -234,7 +234,8 @@ class VibeCodingController extends ChangeNotifier {
 
   bool _liveFlushScheduled = false;
 
-  /// 正在流式输出的消息的实时文本；不在流式中时返回 null。
+  /// 正在流式输出的消息的实时文本。
+  /// 不在流式中时返回 null。
   ValueListenable<String>? liveText(int index) => _liveText[index];
 
   /// 模型请求的并发门闸；为 null 时不限并发（现有行为）。
@@ -1543,7 +1544,7 @@ class VibeCodingController extends ChangeNotifier {
     }
     final result = completed;
     if (result == null) {
-      // 取消或被中断：交给调用方按现有规则收尾。
+      // 取消或被中断。交给调用方按现有规则收尾。
       throw ApiException(
         'AI 回合没有返回结果',
         details: const {'code': 'AI_STREAM_INCOMPLETE'},
@@ -1629,7 +1630,8 @@ class VibeCodingController extends ChangeNotifier {
     _retireLive(index);
   }
 
-  /// 回合结束后用权威结果校准正文；没有增量时补一条消息。
+  /// 回合结束后用权威结果校准正文。
+  /// 没有增量时补一条消息。
   void _calibrateContent(_StreamTurn turn, AiChatResult result) {
     final text = result.content.trim().isNotEmpty
         ? result.content.trim()
@@ -1697,7 +1699,7 @@ class VibeCodingController extends ChangeNotifier {
     _notify();
   }
 
-  /// 记下新的实时文本；下一帧合并写入，每帧最多一次。
+  /// 记下新的实时文本。下一帧合并写入，每帧最多一次。
   void _pushLive(int index, String text) {
     if (!_liveText.containsKey(index)) return;
     _liveBuffer[index] = text;
@@ -1738,7 +1740,7 @@ class VibeCodingController extends ChangeNotifier {
     _retiredLive.add(notifier);
   }
 
-  /// 帧调度器；没有绑定（纯单元测试）时返回 null，直接写入。
+  /// 帧调度器。没有绑定（纯单元测试）时返回 null，直接写入。
   static SchedulerBinding? get _frames {
     try {
       return SchedulerBinding.instance;
@@ -1858,7 +1860,7 @@ class VibeCodingController extends ChangeNotifier {
       ..addAll(kept);
   }
 
-  /// 历史的字节预算；给中转的 512 KiB 请求体留出余量。
+  /// 历史的字节预算。给中转的 512 KiB 请求体留出余量。
   static const int _maxHistoryBytes = 448 * 1024;
 
   /// 把思考内容写进助手历史条目，下一轮原样回传。
@@ -2099,7 +2101,8 @@ class _StreamTurn {
   String contentText = '';
   bool reasoningClosed = false;
 
-  /// 本轮是否已经发出过增量。已发出增量的回合不重试。
+  /// 本轮是否已经发出过增量。
+  /// 已发出增量的回合不重试。
   bool emitted = false;
 
   void reset() {
