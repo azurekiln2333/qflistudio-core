@@ -209,6 +209,12 @@ class FileAgentSessionStore extends AgentSessionStore {
   /// 单条记录超过这个字节数就放到独立 isolate 解析。
   static const int _isolateThreshold = 200 * 1024;
 
+  /// 同一个文件里允许保留的历史快照行数；超过就重写（prd R14）。
+  static const int _maxHistoryRows = 20;
+
+  /// 会话文件大小上限；超过就重写。
+  static const int _maxSessionBytes = 8 * 1024 * 1024;
+
   /// 读历史时最多取多少条；控制器自己还会再裁一次。
   static const int _maxHistoryEntries = 200;
 
@@ -228,6 +234,12 @@ class FileAgentSessionStore extends AgentSessionStore {
 
   /// 已经检查过垃圾行比例的会话，避免反复全量扫。
   final Set<String> _compactChecked = {};
+
+  /// 每个会话现有的历史快照行数。追加 `hs` 时累加。
+  final Map<String, int> _historyRows = {};
+
+  /// 正在重写的会话，避免同时排两次重写。
+  final Set<String> _compacting = {};
 
   Directory get root => _root;
 
@@ -362,12 +374,7 @@ class FileAgentSessionStore extends AgentSessionStore {
       preview: _previewOf(transcript.messages),
     );
     _metas[sessionId] = next;
-    final buffer = StringBuffer()..writeln(jsonEncode(_headerRecord(next)));
-    for (final message in transcript.messages) {
-      buffer.writeln(jsonEncode({'t': 'm', 'v': message}));
-    }
-    buffer.writeln(jsonEncode({'t': 'hs', 'v': transcript.history}));
-    await _rewrite(sessionId, buffer.toString());
+    await _rewrite(sessionId, _payloadOf(next, transcript));
     await _writeIndexNow();
     notifyListeners();
   }
@@ -458,6 +465,21 @@ class FileAgentSessionStore extends AgentSessionStore {
   ) async {
     if (_metas[sessionId] == null) return;
     await _appendRecord(sessionId, {'t': 'hs', 'v': history});
+    final rows = (_historyRows[sessionId] ?? 0) + 1;
+    _historyRows[sessionId] = rows;
+    if (rows <= _maxHistoryRows && await _sizeWithinLimit(sessionId)) return;
+    await _compactNow(sessionId);
+  }
+
+  /// 文件还在大小上限以内时返回真。
+  Future<bool> _sizeWithinLimit(String sessionId) async {
+    try {
+      final file = _jsonlFor(sessionId);
+      if (!await file.exists()) return true;
+      return await file.length() <= _maxSessionBytes;
+    } on FileSystemException {
+      return true;
+    }
   }
 
   @override
@@ -468,7 +490,7 @@ class FileAgentSessionStore extends AgentSessionStore {
     await _chain;
   }
 
-  /// 坏行比例过半时压缩重写：只留好记录。
+  /// 坏行比例过半、快照行数过多或文件过大时重写。
   ///
   /// 这里会读全文件，所以它不挂在打开会话的路径上，也不会在界面 isolate
   /// 上做：大于阈值的文件交给独立 isolate 扫。
@@ -477,17 +499,49 @@ class FileAgentSessionStore extends AgentSessionStore {
     try {
       final file = _jsonlFor(sessionId);
       if (!await file.exists()) return;
-      final rows = await _scanRows(file);
-      if (rows == null) return;
-      final (total, bad) = rows;
-      if (bad == 0 || bad * 2 <= total) return;
-      final meta = _metas[sessionId];
-      if (meta == null) return;
-      await _rewrite(sessionId, _payloadOf(meta, await _readJsonl(file)));
+      final scan = await _scanRows(file);
+      if (scan == null) return;
+      final (total, bad, historyRows) = scan;
+      _historyRows[sessionId] = historyRows;
+      final broken = bad > 0 && bad * 2 > total;
+      if (!broken &&
+          historyRows <= _maxHistoryRows &&
+          await _sizeWithinLimit(sessionId)) {
+        return;
+      }
+      await _compactNow(sessionId);
     } on FileSystemException {
       // 压缩失败就下次再说。
     } on FormatException {
       // 同上。
+    }
+  }
+
+  /// 重写文件：只保留文件头、全部 `m` 行和最后一份 `hs`。
+  ///
+  /// 读写都在串行链上做，中途不会插进追加写入。大文件交给独立 isolate
+  /// 拼好文本，只把结果拷回来。
+  ///
+  /// 快照计数不重置：越过上限后每次追加都留下唯一一份快照。
+  Future<void> _compactNow(String sessionId) async {
+    if (!_compacting.add(sessionId)) return;
+    try {
+      final meta = _metas[sessionId];
+      if (meta == null) return;
+      final file = _jsonlFor(sessionId);
+      await _serialize(() async {
+        if (!await file.exists()) return;
+        final header = jsonEncode(_headerRecord(meta));
+        final length = await file.length();
+        final payload = length > _isolateThreshold
+            ? await Isolate.run(() => _compactInIsolate(file.path, header))
+            : _compactPayloadSync(await file.readAsString(), header);
+        await _writePayload(file, payload);
+      });
+    } on FileSystemException {
+      // 下次再试。
+    } finally {
+      _compacting.remove(sessionId);
     }
   }
 
@@ -497,10 +551,10 @@ class FileAgentSessionStore extends AgentSessionStore {
     unawaited(compactIfNeeded(sessionId));
   }
 
-  /// 扫一遍全文件，返回（总行数, 坏行数）。空文件返回 null。
+  /// 扫一遍全文件，返回（总行数, 坏行数, 快照行数）。空文件返回 null。
   ///
   /// 大文件放到独立 isolate，避免占住界面 isolate 的一帧。
-  Future<(int, int)?> _scanRows(File file) async {
+  Future<(int, int, int)?> _scanRows(File file) async {
     final length = await file.length();
     if (length == 0) return null;
     if (length <= _isolateThreshold) {
@@ -509,7 +563,7 @@ class FileAgentSessionStore extends AgentSessionStore {
     return Isolate.run(() => _scanRowsInIsolate(file.path));
   }
 
-  /// 把会话正文编码成完整的 jsonl 文本（重写与建文件用）。
+  /// 把会话正文编码成完整的 jsonl 文本（建文件用）。
   String _payloadOf(AgentSessionMeta meta, AgentTranscript transcript) {
     final buffer = StringBuffer()..writeln(jsonEncode(_headerRecord(meta)));
     for (final message in transcript.messages) {
@@ -670,16 +724,18 @@ class FileAgentSessionStore extends AgentSessionStore {
     });
   }
 
-  /// 整文件重写：只在 `write()` 与迁移时使用。
+  /// 整文件重写：只在 `write()`、迁移与压缩时使用。
   Future<void> _rewrite(String sessionId, String payload) {
-    return _serialize(() async {
-      if (!await _root.exists()) await _root.create(recursive: true);
-      final target = _jsonlFor(sessionId);
-      final temp = File('${target.path}.tmp');
-      await temp.writeAsString(payload, flush: true);
-      if (await target.exists()) await target.delete();
-      await temp.rename(target.path);
-    });
+    return _serialize(() => _writePayload(_jsonlFor(sessionId), payload));
+  }
+
+  /// 写一份完整的文件内容；调用方负责串行化。
+  Future<void> _writePayload(File target, String payload) async {
+    if (!await _root.exists()) await _root.create(recursive: true);
+    final temp = File('${target.path}.tmp');
+    await temp.writeAsString(payload, flush: true);
+    if (await target.exists()) await target.delete();
+    await temp.rename(target.path);
   }
 
   /// 索引是派生数据：写不进去只影响下次启动的列表速度，不该把调用方炸掉。
@@ -969,40 +1025,73 @@ class FileAgentSessionStore extends AgentSessionStore {
 
 enum _RecordKind { header, message, history }
 
-/// 扫一遍 jsonl 文本，返回（总行数, 坏行数）。
+/// 扫一遍 jsonl 文本，返回（总行数, 坏行数, 快照行数）。
 ///
 /// 单独拿出来是因为隔离 isolate 只能调顶层函数。
-(int, int) _scanRowsSync(String text) {
+(int, int, int) _scanRowsSync(String text) {
   var bad = 0;
   var total = 0;
+  var history = 0;
   for (final row in const LineSplitter().convert(text)) {
     if (row.trim().isEmpty) continue;
     total++;
-    if (_isGoodRow(row)) continue;
-    bad++;
+    final kind = _rowKind(row);
+    if (kind == null) {
+      bad++;
+      continue;
+    }
+    if (kind == 'hs') history++;
   }
-  return (total, bad);
+  return (total, bad, history);
 }
 
 /// 在独立 isolate 里扫文件：不把整份文本回传到界面 isolate。
-(int, int) _scanRowsInIsolate(String path) =>
+(int, int, int) _scanRowsInIsolate(String path) =>
     _scanRowsSync(File(path).readAsStringSync());
 
-/// 一行到底能不能用。与 `_decodeLine` 同口径，但不构造对象。
-bool _isGoodRow(String line) {
+/// 这一行记录的 `t` 值；读不出来时返回 null。与 `_decodeLine` 同口径。
+String? _rowKind(String line) {
   final trimmed = line.trim();
-  if (trimmed.isEmpty) return false;
+  if (trimmed.isEmpty) return null;
   try {
     final decoded = jsonDecode(trimmed);
-    if (decoded is! Map) return false;
-    return switch (decoded['t']) {
-      'm' || 'hs' || 'hdr' => true,
-      _ => false,
-    };
+    if (decoded is! Map) return null;
+    final kind = decoded['t'];
+    if (kind != 'm' && kind != 'hs' && kind != 'hdr') return null;
+    return kind as String;
   } on FormatException {
-    return false;
+    return null;
   }
 }
+
+/// 重写用的完整文本：文件头、全部 `m` 行、最后一份 `hs`。
+///
+/// 坏行与未知类型直接丢掉，所以压缩也顺带修好了坏行。
+String _compactPayloadSync(String text, String headerLine) {
+  final messages = <String>[];
+  String? history;
+  for (final row in const LineSplitter().convert(text)) {
+    final trimmed = row.trim();
+    if (trimmed.isEmpty) continue;
+    final kind = _rowKind(trimmed);
+    if (kind == 'm') {
+      messages.add(trimmed);
+    } else if (kind == 'hs') {
+      history = trimmed;
+    }
+    // 文件头重新写一份，其余未知行丢弃。
+  }
+  final buffer = StringBuffer()..writeln(headerLine);
+  for (final row in messages) {
+    buffer.writeln(row);
+  }
+  if (history != null) buffer.writeln(history);
+  return buffer.toString();
+}
+
+/// 在独立 isolate 里拼好重写文本。
+String _compactInIsolate(String path, String headerLine) =>
+    _compactPayloadSync(File(path).readAsStringSync(), headerLine);
 
 /// 把 `{"t":"hs","v":[...]}` 解析成历史列表。
 ///

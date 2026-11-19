@@ -626,6 +626,15 @@ class VibeAgentFacade extends AgentFacade {
   String? get activity => _controller.activity;
 
   @override
+  ValueListenable<String>? liveTextOf(String messageId) {
+    for (final entry in _idByIndex.entries) {
+      if (entry.value != messageId) continue;
+      return _controller.liveText(entry.key);
+    }
+    return null;
+  }
+
+  @override
   bool get hasEarlier => _hasEarlier;
 
   @override
@@ -971,9 +980,14 @@ class VibeAgentFacade extends AgentFacade {
       next.add(
         AgentMessageView(
           id: id,
-          role: tool != null ? 'tool' : (message.isUser ? 'user' : 'assistant'),
+          role: message.kind == VibeMessageKind.reasoning
+              ? 'reasoning'
+              : tool != null
+              ? 'tool'
+              : (message.isUser ? 'user' : 'assistant'),
           text: tool != null ? (tool.result ?? '') : message.text,
           toolName: tool?.toolName,
+          durationMs: message.durationMs,
           isError:
               tool != null &&
               (tool.status == VibeToolStatus.error ||

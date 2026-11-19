@@ -13,6 +13,7 @@ import '../services/api_client.dart';
 /// 一次模型请求的调度器。
 ///
 /// 用法：`run(sessionId, () => api.aiChat(...))`。名额在请求结束后归还，
+/// 流式回合要等流消费完才归还。
 /// 429 按 [retryDelays] 退避重试，最多重试 [retryDelays].length 次。
 class AgentRequestScheduler {
   AgentRequestScheduler({
@@ -51,11 +52,15 @@ class AgentRequestScheduler {
 
   /// 取名额执行一次模型请求；429 自动退避重试。
   ///
+  /// 名额覆盖整次请求：流式回合要等流消费完才归还。
   /// [isCancelled] 返回真时不再重试，直接把最后一次异常抛给调用方。
+  /// [canRetry] 返回假时也不再重试：已经发出增量的回合重试会在界面上
+  /// 重复一段内容。
   Future<T> run<T>(
     String sessionKey,
     Future<T> Function() request, {
     bool Function()? isCancelled,
+    bool Function()? canRetry,
   }) async {
     final acquired = await _acquire(sessionKey);
     if (!acquired) {
@@ -71,9 +76,11 @@ class AgentRequestScheduler {
           final retryable = error.statusCode == 429;
           if (!retryable || attempt >= retryDelays.length) rethrow;
           if (isCancelled?.call() == true) rethrow;
+          if (canRetry?.call() == false) rethrow;
           await _sleep(retryDelays[attempt]);
           attempt++;
           if (isCancelled?.call() == true) rethrow;
+          if (canRetry?.call() == false) rethrow;
         }
       }
     } finally {
