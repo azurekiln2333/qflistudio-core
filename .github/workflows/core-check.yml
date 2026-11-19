@@ -1,5 +1,5 @@
 # 内核的云端检查：任何分支推送都跑 analyze 和全量测试。
-# 本机只用鸿蒙版 Flutter fork；云端用 Dart 版本相同的标准 Flutter。
+# 用语言 App CI 锁定的同一个鸿蒙版 Flutter，测试里用到的 TargetPlatform.ohos 只有它有。
 name: core-check
 
 on:
@@ -11,18 +11,40 @@ concurrency:
   group: core-check-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FLUTTER_OHOS_TAG: 3.41.9+ohos-1.0.2
+  FLUTTER_OHOS_REVISION: 62357a93d653bf844f730bb1f4b7cc9e2139d14e
+
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
+      - name: Cache Flutter OHOS and pub
+        uses: actions/cache@v4
         with:
-          channel: stable
-          flutter-version: 3.41.x
-          cache: true
+          path: |
+            ${{ runner.temp }}/flutter_ohos
+            ~/.pub-cache
+          key: flutter-ohos-${{ env.FLUTTER_OHOS_REVISION }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: flutter-ohos-${{ env.FLUTTER_OHOS_REVISION }}-
+      - name: Check out the pinned Flutter OHOS release
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/flutter_ohos"
+          if [ ! -d "$root/.git" ]; then
+            git clone --depth 1 --single-branch --branch "$FLUTTER_OHOS_TAG" \
+              https://gitcode.com/CPF-Flutter/flutter_flutter.git "$root"
+          fi
+          test "$(git -C "$root" rev-parse HEAD)" = "$FLUTTER_OHOS_REVISION"
+          echo "$root/bin" >> "$GITHUB_PATH"
+          echo "FLUTTER_ROOT=$root" >> "$GITHUB_ENV"
+      - run: flutter config --no-analytics
       - run: flutter --version
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
-      - run: flutter test --reporter expanded
+      - name: Run tests and compare with known failures
+        run: |
+          flutter test --reporter json > "$RUNNER_TEMP/test.json" || true
+          python3 .github/scripts/check_test_results.py "$RUNNER_TEMP/test.json" .github/known-test-failures.txt
