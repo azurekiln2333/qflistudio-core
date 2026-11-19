@@ -1,0 +1,36 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_fixture","model":"fixture-reasoner","status":"in_progress","output":[]}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_fixture","output_index":0,"summary_index":0,"delta":"先确认用户"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_fixture","output_index":0,"summary_index":0,"delta":"要查什么。"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture","output_index":1,"content_index":0,"delta":"我先查一下"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_fixture","output_index":1,"content_index":0,"delta":"示例资料。"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_fixture_1","call_id":"call_fixture_1","name":"web_search","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_fixture_1","output_index":2,"delta":"{\"query\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_fixture_1","output_index":2,"delta":" \"示例 查询\"}"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","id":"fc_fixture_2","call_id":"call_fixture_2","name":"web_fetch","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_fixture_2","output_index":3,"delta":"{\"url\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_fixture_2","output_index":3,"delta":" \"https://example.com\"}"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_fixture","model":"fixture-reasoner","status":"completed","output":[{"type":"reasoning","id":"rs_fixture","summary":[{"type":"summary_text","text":"先确认用户要查什么。"}]},{"type":"message","id":"msg_fixture","content":[{"type":"output_text","text":"我先查一下示例资料。"}]},{"type":"function_call","id":"fc_fixture_1","call_id":"call_fixture_1","name":"web_search","arguments":"{\"query\": \"示例 查询\"}"},{"type":"function_call","id":"fc_fixture_2","call_id":"call_fixture_2","name":"web_fetch","arguments":"{\"url\": \"https://example.com\"}"}],"usage":{"input_tokens":21,"output_tokens":48,"total_tokens":69}}}
+

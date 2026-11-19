@@ -173,6 +173,7 @@ class AiPanel extends StatefulWidget {
       apiKey: settings.aiApiKey,
       model: model,
       protocol: settings.aiProtocol,
+      thinking: settings.aiThinking,
     );
   }
 

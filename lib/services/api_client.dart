@@ -27,13 +27,15 @@ class AiEndpoint {
     : route = AiRoute.relay,
       baseUrl = '',
       apiKey = '',
-      model = '';
+      model = '',
+      thinking = false;
 
   const AiEndpoint.direct({
     required this.baseUrl,
     required this.apiKey,
     required this.model,
     this.protocol = AiProtocol.chat,
+    this.thinking = false,
   }) : route = AiRoute.direct;
 
   final AiRoute route;
@@ -41,6 +43,9 @@ class AiEndpoint {
   final String apiKey;
   final String model;
   final AiProtocol protocol;
+
+  /// 直连时是否请求思考过程。只影响 Responses 与 Messages 的请求字段。
+  final bool thinking;
 
   /// 是否具备直连所需的必要参数；中转链路恒为 true。
   bool get isUsable => switch (route) {
@@ -66,6 +71,34 @@ class AiChatResult {
     this.aiGenerated = true,
     this.reasoning = '',
   });
+
+  /// 用一条内部助手消息构造结果，替三个协议解码器与流式组装共用。
+  ///
+  /// 形状不合法时抛 [ApiException]，与中转响应的失败文案一致。
+  factory AiChatResult.fromMessage({
+    required String model,
+    required Map<String, dynamic> message,
+    Map<String, dynamic>? usage,
+    bool aiGenerated = true,
+  }) {
+    final content = message['content'];
+    final calls = message['tool_calls'];
+    if (message['role'] != 'assistant' ||
+        (content != null && content is! String) ||
+        (calls != null && calls is! List) ||
+        (content == null && (calls == null || (calls as List).isEmpty))) {
+      throw ApiException('AI 响应格式无效');
+    }
+    final reasoning = message['reasoning_content'];
+    return AiChatResult(
+      model: model,
+      content: content is String ? content : '',
+      rawMessage: Map<String, dynamic>.from(message),
+      usage: usage,
+      aiGenerated: aiGenerated,
+      reasoning: reasoning is String ? reasoning : '',
+    );
+  }
 
   final String model;
 
@@ -213,12 +246,24 @@ class TerminalEvent {
 
 /// azurekiln-qfli-server 的 HTTP 客户端。
 class ApiClient {
-  ApiClient({http.Client? transport, ConnectionProbe? probe})
-    : _transport = transport,
-      _probe = probe ?? const SocketConnectionProbe();
+  ApiClient({
+    http.Client? transport,
+    ConnectionProbe? probe,
+    Duration? aiFirstByteTimeout,
+    Duration? aiIdleTimeout,
+  }) : _transport = transport,
+       _probe = probe ?? const SocketConnectionProbe(),
+       _aiFirstByteTimeout = aiFirstByteTimeout ?? _aiTimeout,
+       _aiIdleTimeout = aiIdleTimeout ?? _aiTimeout;
 
   final http.Client? _transport;
   final ConnectionProbe _probe;
+
+  /// 流式回合的首字节超时。测试注入短值，不真等 90 秒。
+  final Duration _aiFirstByteTimeout;
+
+  /// 流式回合两段数据之间的空闲超时。
+  final Duration _aiIdleTimeout;
   // 延迟创建并复用连接，不在应用首帧初始化网络。
   late final http.Client _http = _transport ?? http.Client();
 
@@ -278,9 +323,7 @@ class ApiClient {
         data = text;
       }
       if (response.statusCode >= 300) {
-        final payload = data is Map
-            ? Map<String, dynamic>.from(data)
-            : null;
+        final payload = data is Map ? Map<String, dynamic>.from(data) : null;
         final serverError = payload?['error'] is String
             ? _clip(payload!['error'] as String, 200)
             : '';
@@ -518,9 +561,7 @@ class ApiClient {
   Future<String> probeConnection() async {
     final uri = Uri.parse(ApiConfig.baseUrl);
     final host = uri.host;
-    final port = uri.hasPort
-        ? uri.port
-        : (uri.scheme == 'https' ? 443 : 80);
+    final port = uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80);
     final lines = <String>['服务器：$host'];
 
     final dns = await _probeStep(() => _probe.lookup(host));
@@ -550,9 +591,7 @@ class ApiClient {
       if (!tls.ok) {
         lines.add('③ TLS 握手：失败，${tls.describe()}');
         if (_isCertificateTimeProblem(tls.osMessage)) {
-          lines.add(
-            '结论：服务器证书已过期或尚未生效。检查设备时间，或稍后重试。',
-          );
+          lines.add('结论：服务器证书已过期或尚未生效。检查设备时间，或稍后重试。');
         } else {
           lines.add(
             '结论：能连到服务器的 IP，但 TLS 握手被断开。'
@@ -569,17 +608,11 @@ class ApiClient {
     return lines.join('\n');
   }
 
-  Future<_ProbeStep> _probeStep(
-    Future<List<String>> Function() step,
-  ) async {
+  Future<_ProbeStep> _probeStep(Future<List<String>> Function() step) async {
     final clock = Stopwatch()..start();
     try {
       final addresses = await step().timeout(probeStepTimeout);
-      return _ProbeStep(
-        ok: true,
-        elapsed: clock.elapsed,
-        addresses: addresses,
-      );
+      return _ProbeStep(ok: true, elapsed: clock.elapsed, addresses: addresses);
     } on TimeoutException {
       return _ProbeStep(
         ok: false,
@@ -1645,8 +1678,9 @@ class ApiClient {
 
   /// 一次模型回合的事件流。参数与 [aiChat] 相同。
   ///
-  /// 契约阶段的回退实现：整轮请求后只发一个 [AiTurnCompleted]。
-  /// 真正的增量解析见任务 11-19-agent-thinking-stream design §3、§4。
+  /// 中转走 `/api/ai/chat/stream` 的 NDJSON，直连按协议解析上游 SSE。
+  /// 两条链路产出同一种事件流，Agent 循环不按协议分支。
+  /// 取消时中断在途请求并结束流，不抛未处理的异常。
   Stream<AiTurnEvent> aiChatStream({
     required String token,
     required List<Map<String, dynamic>> messages,
@@ -1655,17 +1689,27 @@ class ApiClient {
     AiEndpoint? endpoint,
     String? model,
     String? reasoningEffort,
-  }) async* {
-    yield AiTurnCompleted(
-      await aiChat(
-        token: token,
+  }) {
+    final target = endpoint ?? const AiEndpoint.relay();
+    final requested = model?.trim() ?? '';
+    final effort = reasoningEffort?.trim() ?? '';
+    if (target.route == AiRoute.direct) {
+      return _aiChatStreamDirect(
+        target,
         messages: messages,
         tools: tools,
         abortTrigger: abortTrigger,
-        endpoint: endpoint,
-        model: model,
-        reasoningEffort: reasoningEffort,
-      ),
+        model: requested.isEmpty ? null : requested,
+        reasoningEffort: effort.isEmpty ? null : effort,
+      );
+    }
+    return _aiChatStreamRelay(
+      token,
+      messages: messages,
+      tools: tools,
+      abortTrigger: abortTrigger,
+      model: requested.isEmpty ? null : requested,
+      reasoningEffort: effort.isEmpty ? null : effort,
     );
   }
 
@@ -1738,6 +1782,7 @@ class ApiClient {
       messages: messages,
       tools: tools,
       reasoningEffort: reasoningEffort,
+      thinking: endpoint.thinking,
     );
     final request =
         (abortTrigger == null
@@ -1860,6 +1905,455 @@ class ApiClient {
     }
   }
 
+  // ---- AI 事件流：中转与直连 ----
+
+  /// 中转：POST `/api/ai/chat/stream`，按行读 NDJSON 事件。
+  ///
+  /// 旧服务端没有这个路由（404 或 405）时回退到整轮的 `/api/ai/chat`，
+  /// 只发一个 [AiTurnCompleted]，因此服务端与客户端谁先上线都可以。
+  Stream<AiTurnEvent> _aiChatStreamRelay(
+    String token, {
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    Future<void>? abortTrigger,
+    String? model,
+    String? reasoningEffort,
+  }) async* {
+    _requireOnline();
+    final isAborted = _abortFlag(abortTrigger);
+    final uri = ApiConfig.endpoint('/api/ai/chat/stream');
+    final clock = Stopwatch()..start();
+    try {
+      final request =
+          (abortTrigger == null
+                ? http.Request('POST', uri)
+                : http.AbortableRequest(
+                    'POST',
+                    uri,
+                    abortTrigger: abortTrigger,
+                  ))
+            ..followRedirects = false
+            ..headers.addAll(_headers(token: token))
+            ..headers['accept'] = 'application/x-ndjson'
+            ..body = jsonEncode({
+              'messages': messages,
+              'tools': ?tools,
+              'model': ?model,
+              'reasoning_effort': ?reasoningEffort,
+            });
+      final response = await _http.send(request).timeout(_aiFirstByteTimeout);
+      if (response.statusCode == 404 || response.statusCode == 405) {
+        await _drain(response.stream);
+        try {
+          yield AiTurnCompleted(
+            await aiChat(
+              token: token,
+              messages: messages,
+              tools: tools,
+              abortTrigger: abortTrigger,
+              model: model,
+              reasoningEffort: reasoningEffort,
+            ),
+          );
+        } on ApiException {
+          if (isAborted()) return;
+          rethrow;
+        }
+        return;
+      }
+      if (response.statusCode != 200) {
+        final text = await _idleBound(
+          _cutAt(response.stream, abortTrigger),
+        ).transform(utf8.decoder).join();
+        throw ApiException(
+          _aiErrorMessage(response.statusCode, text),
+          statusCode: response.statusCode,
+          details: _failureDetails(
+            phase: 'http',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+            statusCode: response.statusCode,
+            serverError: text,
+            requestId: response.headers['x-request-id'],
+          ),
+        );
+      }
+      final lines = _idleBound(
+        _cutAt(response.stream, abortTrigger),
+      ).transform(utf8.decoder).transform(const LineSplitter());
+      await for (final line in lines) {
+        final text = line.trim();
+        if (text.isEmpty) continue;
+        Object? decoded;
+        try {
+          decoded = jsonDecode(text);
+        } on FormatException {
+          throw ApiException('AI 流式响应格式无效');
+        }
+        if (decoded is! Map<String, dynamic>) {
+          throw ApiException('AI 流式响应格式无效');
+        }
+        switch (decoded['type']) {
+          case 'reasoning':
+            final piece = decoded['text'];
+            if (piece is String && piece.isNotEmpty) {
+              yield AiReasoningDelta(piece);
+            }
+          case 'content':
+            final piece = decoded['text'];
+            if (piece is String && piece.isNotEmpty) {
+              yield AiContentDelta(piece);
+            }
+          case 'tool_call':
+            final index = decoded['index'];
+            final name = decoded['name'];
+            if (index is int && name is String && name.isNotEmpty) {
+              yield AiToolCallStarted(index: index, name: name);
+            }
+          case 'result':
+            yield AiTurnCompleted(_decodeAiResult(decoded));
+            return;
+          case 'error':
+            throw _aiStreamError(decoded);
+          default:
+            // `start` 和以后新增的事件只承载元信息，这里忽略。
+            break;
+        }
+      }
+      if (isAborted()) return;
+      throw ApiException(
+        'AI 流式响应提前结束',
+        details: _failureDetails(
+          phase: 'response',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+        ),
+      );
+    } on http.RequestAbortedException {
+      return;
+    } on ApiException {
+      rethrow;
+    } on TimeoutException catch (error) {
+      if (isAborted()) return;
+      throw ApiException(
+        _failureMessage('timeout', uri.host, osMessage: _osMessageOf(error)),
+        details: _failureDetails(
+          phase: 'timeout',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
+    } on SocketException catch (error) {
+      final phase = _phaseOfSocket(error);
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage(phase, uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: phase,
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on HandshakeException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('tls', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'tls',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (error) {
+      if (isAborted()) return;
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('connect', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'connect',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    }
+  }
+
+  /// 直连：按协议编码请求。响应是 SSE 就按协议解析，否则整体解码。
+  Stream<AiTurnEvent> _aiChatStreamDirect(
+    AiEndpoint endpoint, {
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    Future<void>? abortTrigger,
+    String? model,
+    String? reasoningEffort,
+  }) async* {
+    _requireOnline();
+    if (!endpoint.isUsable) {
+      throw ApiException(
+        '请先在 AI 接口设置中填写地址与模型',
+        details: const {'code': 'AI_NOT_CONFIGURED'},
+      );
+    }
+    final isAborted = _abortFlag(abortTrigger);
+    final selectedModel = model ?? endpoint.model.trim();
+    final uri = Uri.parse(
+      AiService.endpoint(endpoint.baseUrl, endpoint.protocol),
+    );
+    if (!uri.hasAuthority || (uri.scheme != 'https' && uri.scheme != 'http')) {
+      throw ApiException('AI 接口地址无效，需要 http 或 https');
+    }
+    final body = AiService.encodeRequest(
+      protocol: endpoint.protocol,
+      model: selectedModel,
+      messages: messages,
+      tools: tools,
+      reasoningEffort: reasoningEffort,
+      stream: true,
+      thinking: endpoint.thinking,
+    );
+    final clock = Stopwatch()..start();
+    try {
+      final request =
+          (abortTrigger == null
+                ? http.Request('POST', uri)
+                : http.AbortableRequest(
+                    'POST',
+                    uri,
+                    abortTrigger: abortTrigger,
+                  ))
+            ..followRedirects = false
+            ..headers.addAll(
+              AiService.headers(endpoint.protocol, apiKey: endpoint.apiKey),
+            )
+            ..headers['x-client-platform'] = ClientPlatform.header
+            ..headers['accept'] = 'text/event-stream'
+            ..body = jsonEncode(body);
+      final response = await _http.send(request).timeout(_aiFirstByteTimeout);
+      if (response.statusCode >= 300) {
+        final text = await _idleBound(
+          _cutAt(response.stream, abortTrigger),
+        ).transform(utf8.decoder).join();
+        throw ApiException(
+          _aiErrorMessage(response.statusCode, text),
+          statusCode: response.statusCode,
+          details: _failureDetails(
+            phase: 'http',
+            method: 'POST',
+            uri: uri,
+            elapsed: clock.elapsed,
+            exception: 'HttpStatus',
+            statusCode: response.statusCode,
+            serverError: text,
+            requestId: response.headers['x-request-id'],
+          ),
+        );
+      }
+      if (!AiService.isEventStream(response.headers['content-type'])) {
+        // 上游不支持流式：整体解码，只发一个完成事件。
+        final text = await _idleBound(
+          _cutAt(response.stream, abortTrigger),
+        ).transform(utf8.decoder).join();
+        final decoded = text.isEmpty ? null : jsonDecode(text);
+        if (decoded is! Map<String, dynamic>) {
+          throw ApiException(
+            'AI 接口返回了无法解析的内容',
+            details: _failureDetails(
+              phase: 'response',
+              method: 'POST',
+              uri: uri,
+              elapsed: clock.elapsed,
+            ),
+          );
+        }
+        yield AiTurnCompleted(
+          _decodeAiResult({
+            'model': selectedModel,
+            'message': AiService.decodeReply(endpoint.protocol, decoded),
+          }),
+        );
+        return;
+      }
+      await for (final event in AiService.decodeEventStream(
+        endpoint.protocol,
+        _idleBound(_cutAt(response.stream, abortTrigger)),
+        model: selectedModel,
+      )) {
+        // 取消后不再收尾，已显示的增量由调用方保留。
+        if (isAborted()) return;
+        yield event;
+      }
+    } on http.RequestAbortedException {
+      return;
+    } on ApiException {
+      rethrow;
+    } on TimeoutException catch (error) {
+      if (isAborted()) return;
+      throw ApiException(
+        _failureMessage('timeout', uri.host, osMessage: _osMessageOf(error)),
+        details: _failureDetails(
+          phase: 'timeout',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: _osMessageOf(error),
+        ),
+      );
+    } on SocketException catch (error) {
+      final phase = _phaseOfSocket(error);
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage(phase, uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: phase,
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on HandshakeException catch (error) {
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('tls', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'tls',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on http.ClientException catch (error) {
+      if (isAborted()) return;
+      final osMessage = _osMessageOf(error);
+      throw ApiException(
+        _failureMessage('connect', uri.host, osMessage: osMessage),
+        details: _failureDetails(
+          phase: 'connect',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: error.runtimeType.toString(),
+          osMessage: osMessage,
+        ),
+      );
+    } on FormatException {
+      throw ApiException(
+        'AI 接口返回了无法解析的内容',
+        details: _failureDetails(
+          phase: 'response',
+          method: 'POST',
+          uri: uri,
+          elapsed: clock.elapsed,
+          exception: 'FormatException',
+        ),
+      );
+    } on AiException catch (error) {
+      throw ApiException(error.message);
+    }
+  }
+
+  /// 监听取消。取消后流直接结束，不再收尾。
+  static bool Function() _abortFlag(Future<void>? abortTrigger) {
+    final state = <bool>[false];
+    unawaited(
+      abortTrigger?.then<void>(
+        (_) => state[0] = true,
+        onError: (Object _) => state[0] = true,
+      ),
+    );
+    return () => state[0];
+  }
+
+  /// 在 [abortTrigger] 完成时结束 [source]。
+  ///
+  /// 假客户端与真实的 `AbortableRequest` 都不保证立刻关流，这里统一收尾，
+  /// 取消后不留悬挂订阅。
+  static Stream<T> _cutAt<T>(Stream<T> source, Future<void>? abortTrigger) {
+    if (abortTrigger == null) return source;
+    final controller = StreamController<T>();
+    late final StreamSubscription<T> subscription;
+    var closed = false;
+    void finish() {
+      if (closed) return;
+      closed = true;
+      unawaited(subscription.cancel());
+      unawaited(controller.close());
+    }
+
+    subscription = source.listen(
+      (value) {
+        if (!closed) controller.add(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        if (closed) return;
+        closed = true;
+        controller
+          ..addError(error, stack)
+          ..close();
+        unawaited(subscription.cancel());
+      },
+      onDone: finish,
+    );
+    unawaited(
+      abortTrigger.then<void>((_) => finish(), onError: (Object _) => finish()),
+    );
+    controller.onCancel = () {
+      if (closed) return;
+      closed = true;
+      unawaited(subscription.cancel());
+    };
+    return controller.stream;
+  }
+
+  /// 任意两段数据之间超过空闲超时就失败结束。
+  Stream<List<int>> _idleBound(Stream<List<int>> bytes) => bytes.timeout(
+    _aiIdleTimeout,
+    onTimeout: (sink) => sink.addError(
+      ApiException('AI 接口响应超时', details: const {'phase': 'timeout'}),
+    ),
+  );
+
+  /// 丢掉响应体并释放连接。回退路径不需要它。
+  static Future<void> _drain(Stream<List<int>> stream) async {
+    try {
+      await stream.drain<void>();
+    } catch (_) {
+      // 回退路径读失败不影响结果。
+    }
+  }
+
+  /// 流内 error 事件：状态码与文案按 [_aiErrorMessage] 的规则。
+  static ApiException _aiStreamError(Map<String, dynamic> event) {
+    final raw = event['status'];
+    final status = raw is int && raw >= 100 && raw <= 599 ? raw : 502;
+    final error = event['error'];
+    final detail = error is String ? error.trim() : '';
+    return ApiException(
+      detail.isEmpty
+          ? _aiErrorMessage(status, '')
+          : _aiErrorMessage(status, jsonEncode({'error': detail})),
+      statusCode: status,
+    );
+  }
+
   /// 上游错误体 → 用户可读文案。不回显响应头，也不回显请求中的密钥。
   static String _aiErrorMessage(int status, String text) {
     var message = 'AI 接口错误（$status）';
@@ -1920,24 +2414,12 @@ class ApiClient {
     if (model is! String || model.isEmpty || message is! Map) {
       throw ApiException('AI 响应格式无效');
     }
-    final raw = Map<String, dynamic>.from(message);
-    final content = raw['content'];
-    final calls = raw['tool_calls'];
-    if (raw['role'] != 'assistant' ||
-        (content != null && content is! String) ||
-        (calls != null && calls is! List) ||
-        (content == null && (calls == null || (calls as List).isEmpty))) {
-      throw ApiException('AI 响应格式无效');
-    }
     final usage = data['usage'];
-    final reasoning = raw['reasoning_content'];
-    return AiChatResult(
+    return AiChatResult.fromMessage(
       model: model,
-      content: content is String ? content : '',
-      rawMessage: raw,
+      message: Map<String, dynamic>.from(message),
       usage: usage is Map ? Map<String, dynamic>.from(usage) : null,
       aiGenerated: data['aiGenerated'] != false,
-      reasoning: reasoning is String ? reasoning : '',
     );
   }
 }
