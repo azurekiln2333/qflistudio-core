@@ -1836,11 +1836,11 @@ class VibeCodingController extends ChangeNotifier {
       bytes -= _entryBytes(_history[start]);
       start++;
     }
-    // 裁剪起点不能是 tool 条目，否则上游拒绝。
-    while (start < _history.length && _history[start]['role'] == 'tool') {
+    // 只从完整轮次（user 条目）开始，起点一定不是 tool 条目。
+    while (start < _history.length && _history[start]['role'] != 'user') {
       start++;
     }
-    if (start <= 1) return;
+    if (start <= 1 || start >= _history.length) return;
     _rewriteHistory(start);
   }
 
