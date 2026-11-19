@@ -569,8 +569,14 @@ class FileAgentSessionStore extends AgentSessionStore {
     if (length <= _isolateThreshold) {
       return _scanRowsSync(await file.readAsString());
     }
-    return Isolate.run(() => _scanRowsInIsolate(file.path));
+    return _scanOffIsolate(file.path);
   }
+
+  /// 在独立 isolate 里扫文件。
+  ///
+  /// 与 [_compactOffIsolate] 同理：闭包必须在同步帧里建，才能不捕住 Future。
+  static Future<(int, int, int)> _scanOffIsolate(String path) =>
+      Isolate.run(() => _scanRowsInIsolate(path));
 
   /// 把会话正文编码成完整的 jsonl 文本（建文件用）。
   String _payloadOf(AgentSessionMeta meta, AgentTranscript transcript) {
