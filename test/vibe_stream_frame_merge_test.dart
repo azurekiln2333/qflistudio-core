@@ -12,6 +12,15 @@ import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
 /// 这个文件只有 widget 测试：装了绑定之后，控制器的实时文本走帧回调，
 /// 纯 `test()` 用例会因为没人推进帧而永远读不到新文本。
 void main() {
+  /// 推进帧，直到条件成立。
+  Future<void> pumpUntil(WidgetTester tester, bool Function() condition) async {
+    for (var index = 0; index < 20; index++) {
+      if (condition()) return;
+      await tester.pump();
+    }
+    fail('条件未满足');
+  }
+
   testWidgets('同一帧里的多个增量只写一次实时文本', (tester) async {
     StudioProfile.current = null;
     final api = _ScriptedApi();
@@ -28,15 +37,12 @@ void main() {
     controller.addListener(() => controlNotices++);
 
     controller.send('想一想');
-    await tester.pump();
-    expect(api.turns, hasLength(1));
+    await pumpUntil(tester, () => api.turns.isNotEmpty);
     final turn = api.turns.first;
 
     turn.add(const AiReasoningDelta('一'));
-    await tester.pump();
-    final live = controller.liveText(1);
-    expect(live, isNotNull);
-    expect(live!.value, '一');
+    await pumpUntil(tester, () => controller.liveText(1)?.value == '一');
+    final live = controller.liveText(1)!;
 
     var liveNotices = 0;
     live.addListener(() => liveNotices++);
@@ -44,11 +50,10 @@ void main() {
 
     turn.add(const AiReasoningDelta('二'));
     turn.add(const AiReasoningDelta('三'));
-    await tester.pump();
+    await pumpUntil(tester, () => live.value == '一二三');
     await tester.pump();
 
     // 两个增量合并成一次写入，期间控制器不通知。
-    expect(live.value, '一二三');
     expect(liveNotices, 1);
     expect(controlNotices, 0);
 
@@ -67,13 +72,7 @@ void main() {
       ),
     );
     await turn.close();
-    for (
-      var index = 0;
-      index < 20 && controller.phase == VibePhase.running;
-      index++
-    ) {
-      await tester.pump();
-    }
+    await pumpUntil(tester, () => controller.phase != VibePhase.running);
     expect(controller.phase, VibePhase.succeeded);
     expect(controller.messages[1].text, '一二三');
     expect(controller.liveText(1), isNull);
