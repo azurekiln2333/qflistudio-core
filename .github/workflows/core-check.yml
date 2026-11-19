@@ -1,0 +1,28 @@
+# 内核的云端检查：任何分支推送都跑 analyze 和全量测试。
+# 本机只用鸿蒙版 Flutter fork；云端用 Dart 版本相同的标准 Flutter。
+name: core-check
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: core-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.x
+          cache: true
+      - run: flutter --version
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test --reporter expanded

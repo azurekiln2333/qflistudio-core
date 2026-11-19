@@ -79,6 +79,9 @@ class VibeToolCall {
   );
 }
 
+/// 消息条目的种类。
+enum VibeMessageKind { text, reasoning }
+
 class VibeMessage {
   const VibeMessage({
     required this.isUser,
@@ -86,7 +89,15 @@ class VibeMessage {
     this.tool,
     this.pending = false,
     this.aiGenerated = false,
+    this.kind = VibeMessageKind.text,
+    this.durationMs,
   });
+
+  /// [VibeMessageKind.reasoning] 表示模型的思考内容。
+  final VibeMessageKind kind;
+
+  /// 思考用时；仍在思考或被取消时为 null。
+  final int? durationMs;
 
   final bool isUser;
   final String text;
@@ -108,12 +119,15 @@ class VibeMessage {
     VibeToolCall? tool,
     bool? pending,
     bool? aiGenerated,
+    int? durationMs,
   }) => VibeMessage(
     isUser: isUser,
     text: text ?? this.text,
     tool: tool ?? this.tool,
     pending: pending ?? this.pending,
     aiGenerated: aiGenerated ?? this.aiGenerated,
+    kind: kind,
+    durationMs: durationMs ?? this.durationMs,
   );
 }
 
