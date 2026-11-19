@@ -657,6 +657,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
             onEdit: (message, id) => _editUserMessage(message, menuSession),
             busy: _working || _resendingId != null,
             sessionKey: _sessionId,
+            // 气泡用它只重绘增长的那一条消息（thinking-stream design §6.1）。
+            liveTextOf: facade?.liveTextOf,
             emptyTitle: '开始一个新的会话',
             emptyHint: '在下面的输入卡片里说一句要改什么，发送后就在这里跑。',
           ),
