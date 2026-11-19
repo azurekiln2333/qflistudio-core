@@ -122,6 +122,12 @@ class SettingsStore extends ChangeNotifier {
   /// 与引入本字段前的行为一致，无需破坏性迁移。
   AiProtocol aiProtocol = AiProtocol.chat;
 
+  /// 直连时是否请求思考过程。只影响 Responses 与 Messages 协议的请求字段。
+  ///
+  /// 默认关闭：不支持思考的模型收到思考参数会返回 400。
+  /// 旧设置文件没有这个字段，按 false 读取。
+  bool aiThinking = false;
+
   bool get loaded => _loaded;
 
   Future<void> load() async {
@@ -191,6 +197,7 @@ class SettingsStore extends ChangeNotifier {
           aiApiKey = data['aiApiKey'] as String? ?? aiApiKey;
           aiModel = data['aiModel'] as String? ?? aiModel;
           aiProtocol = AiProtocol.parse(data['aiProtocol'] as String?);
+          aiThinking = data['aiThinking'] == true;
           customFileExts = [
             for (final e in (data['customFileExts'] as List? ?? []))
               e as String,
@@ -250,6 +257,7 @@ class SettingsStore extends ChangeNotifier {
       'aiApiKey': aiApiKey,
       'aiModel': aiModel,
       'aiProtocol': aiProtocol.id,
+      'aiThinking': aiThinking,
       'customFileExts': customFileExts,
       'backupEnabled': backupEnabled,
       'symbolBars': symbolBars,
@@ -393,6 +401,13 @@ class SettingsStore extends ChangeNotifier {
     aiApiKey = apiKey;
     aiModel = model;
     aiProtocol = protocol ?? aiProtocol;
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> setAiThinking(bool value) async {
+    if (aiThinking == value) return;
+    aiThinking = value;
     await _persist();
     notifyListeners();
   }
