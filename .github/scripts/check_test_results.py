@@ -4,6 +4,7 @@
 方便以后从清单里删掉。没有跑任何测试也算失败。
 """
 import json
+import os
 import sys
 
 results_path, known_path = sys.argv[1], sys.argv[2]
@@ -24,7 +25,9 @@ for raw in open(results_path, encoding="utf-8", errors="replace"):
     elif kind == "testStart":
         test = event["test"]
         path = suites.get(test.get("suiteID"), "").split("qflistudio-core/")[-1]
-        tests[test["id"]] = f"{path}: {test['name']}"
+        # 加载失败的测试名里带绝对路径，去掉工作区前缀才能和清单对上。
+        workspace = os.environ.get("GITHUB_WORKSPACE", "") + "/"
+        tests[test["id"]] = f"{path}: {test['name']}".replace(workspace, "")
     elif kind == "testDone" and not event.get("hidden") and not event.get("skipped"):
         name = tests.get(event["testID"], str(event["testID"]))
         if event.get("result") == "success":
