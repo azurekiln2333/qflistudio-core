@@ -342,6 +342,18 @@ class _SettingsPageState extends State<SettingsPage> {
                         trailing: const Icon(Icons.chevron_right),
                         onTap: () => editAiSettings(context, settings),
                       ),
+                      // 只影响直连的 Responses 与 Messages 请求字段
+                      // （design §4.4：默认关闭，不支持思考的模型会返回 400）。
+                      SwitchListTile(
+                        key: const ValueKey('settings-ai-thinking'),
+                        secondary: const Icon(Icons.psychology_outlined),
+                        title: const Text('请求思考过程'),
+                        subtitle: const Text(
+                          '只对 Responses 与 Messages 协议生效。模型不支持思考时请关闭。',
+                        ),
+                        value: settings.aiThinking,
+                        onChanged: settings.setAiThinking,
+                      ),
                     ],
                   ),
                 if (_showsAccountSection) _accountSection(context),
