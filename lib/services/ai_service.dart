@@ -1191,9 +1191,19 @@ class _StreamState {
         return [AiContentDelta(initial)];
       case 'tool_use':
         final tool = _tool('block:$index');
+        final input = block['input'];
+        final stored = <String, dynamic>{
+          'type': 'tool_use',
+          'id': block['id'] is String ? block['id'] : '',
+          'name': block['name'] is String ? block['name'] : '',
+          'input': input is Map
+              ? Map<String, dynamic>.from(input)
+              : const <String, dynamic>{},
+        };
+        _blocksByIndex[index] = stored;
+        _blocks.add(stored);
         final id = block['id'];
         if (id is String && id.isNotEmpty) tool.id = id;
-        final input = block['input'];
         if (input is Map && input.isNotEmpty) {
           tool.arguments.write(jsonEncode(input));
         }
@@ -1253,7 +1263,8 @@ class _StreamState {
     if (index is! int) return;
     final partial = _partialJson.remove(index);
     final block = _blocksByIndex[index];
-    if (partial == null || block == null || block['type'] != 'tool_use') return;
+    if (block == null || block['type'] != 'tool_use') return;
+    if (partial == null) return;
     block['input'] = _decodeToolInput(partial.toString());
   }
 
