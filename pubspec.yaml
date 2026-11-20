@@ -25,10 +25,15 @@ dependencies:
   xml: ^6.6.1
   crypto: ^3.0.6
   web_socket_channel: ^3.0.3
+  # 远程电脑的终端渲染器（CloudTerminal 打过补丁的 xterm 分支）。
+  xterm: ^4.0.0
 
 dependency_overrides:
   re_editor:
     path: vendor/re_editor
+  # 指向本包内的 vendored 副本，App 构建不依赖 cloudterminal 源码仓库。
+  xterm:
+    path: vendor/xterm
 
 dev_dependencies:
   flutter_test:
