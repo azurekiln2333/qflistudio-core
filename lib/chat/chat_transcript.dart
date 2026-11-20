@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../vibe_coding/vibe_agent_facade.dart';
 import '../vibe_coding/vibe_coding_widgets.dart';
+import 'thinking_bubble.dart';
 import 'write_approval_card.dart';
 
 /// 对话流：一个会话的消息列表。
@@ -35,6 +36,7 @@ class ChatTranscript extends StatefulWidget {
     this.emptyTitle = '开始一个新的会话',
     this.emptyHint = '描述你想改什么。Agent 会读写项目文件，并在在线终端里运行命令。',
     this.emptyAction,
+    this.liveTextOf,
     this.padding = const EdgeInsets.all(12),
   });
 
@@ -101,6 +103,12 @@ class ChatTranscript extends StatefulWidget {
   /// 避免把上一个会话的条目和滚动位置带过来。
   final Object? sessionKey;
 
+  /// 取一条消息的实时文本。消息不在流式中时返回 null。
+  ///
+  /// 气泡用它只重绘增长的那一条，不重建整个列表
+  /// （任务 11-19-agent-thinking-stream design §6.1）。
+  final ValueListenable<String>? Function(String id)? liveTextOf;
+
   final String emptyTitle;
   final String emptyHint;
   final Widget? emptyAction;
@@ -130,6 +138,10 @@ class _ChatTranscriptState extends State<ChatTranscript> {
 
   /// 每个缓存条目建出来时的动作指纹。
   final Map<String, String> _actionStamps = <String, String>{};
+
+  /// 用户手动展开或收起的思考气泡，按消息 id 记。不落盘
+  /// （design §6：用户操作过的气泡不再自动展开或收起）。
+  final Map<String, bool> _thinkingExpanded = <String, bool>{};
 
   /// 整个列表最近一次的动作指纹。
   String _lastActionStamp = '';
@@ -238,6 +250,26 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       _tiles.clear();
       _rendered.clear();
     }
+    final tile = _buildTile(message);
+    _tiles[message.id] = tile;
+    _rendered[message.id] = message;
+    _actionStamps[message.id] = _actionStamp();
+    return tile;
+  }
+
+  /// 造一条消息的条目。思考消息走思考气泡，其余走通用消息条目。
+  Widget _buildTile(AgentMessageView message) {
+    final key = ValueKey('chat-message-${message.id}');
+    final liveText = widget.liveTextOf?.call(message.id);
+    if (message.role == 'reasoning') {
+      return ThinkingBubble(
+        key: key,
+        message: message,
+        liveText: liveText,
+        expanded: _thinkingExpanded[message.id],
+        onToggle: (value) => _onThinkingToggle(message.id, value),
+      );
+    }
     // 只有用户的提问能编辑或重发；助手与工具条目不是提示词。
     // 回声消息（这一条还在发送中）也还不是可编辑的历史。
     final isUser = message.role == 'user';
@@ -247,11 +279,12 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     final canEdit = offerEdit && !widget.busy;
     final canResend = offerResend && !widget.busy;
     final sessionKey = widget.sessionKey;
-    final tile = ChatMessageTile(
-      key: ValueKey('chat-message-${message.id}'),
+    return ChatMessageTile(
+      key: key,
       message: message,
       onOpenFile: widget.onOpenFile,
       fileExists: widget.fileExists,
+      liveText: liveText,
       actions: ChatMessageActions(
         canEdit: canEdit,
         canResend: canResend,
@@ -271,10 +304,18 @@ class _ChatTranscriptState extends State<ChatTranscript> {
             : null,
       ),
     );
-    _tiles[message.id] = tile;
-    _rendered[message.id] = message;
-    _actionStamps[message.id] = _actionStamp();
-    return tile;
+  }
+
+  /// 记住用户对思考气泡的选择，丢掉这一条缓存让气泡按新状态重建。
+  ///
+  /// 选择只活在这个 State 里，换会话或重开应用后回到自动规则（prd R10）。
+  void _onThinkingToggle(String id, bool expanded) {
+    setState(() {
+      _thinkingExpanded[id] = expanded;
+      _tiles.remove(id);
+      _rendered.remove(id);
+      _actionStamps.remove(id);
+    });
   }
 
   /// 动作可用性是否变了的指纹。
@@ -317,6 +358,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
       a.toolName == b.toolName &&
       a.isError == b.isError &&
       a.pending == b.pending &&
+      a.durationMs == b.durationMs &&
       a.sourceText == b.sourceText &&
       a.aiGenerated == b.aiGenerated &&
       listEquals(a.changedPaths, b.changedPaths) &&
@@ -327,6 +369,7 @@ class _ChatTranscriptState extends State<ChatTranscript> {
     _tiles.clear();
     _rendered.clear();
     _actionStamps.clear();
+    _thinkingExpanded.clear();
     _earlierCount = 0;
     _lastPixels = 0;
     _lastIds = [for (final message in widget.messages) message.id];
@@ -861,6 +904,7 @@ class ChatMessageTile extends StatelessWidget {
     this.actions,
     this.onOpenFile,
     this.fileExists,
+    this.liveText,
   });
 
   final AgentMessageView message;
@@ -873,6 +917,8 @@ class ChatMessageTile extends StatelessWidget {
 
   /// 文件现在是否还在磁盘上；为空时按存在处理。
   final bool Function(String path)? fileExists;
+  /// 流式中的实时文本。为空时用 [message] 自己的文本。
+  final ValueListenable<String>? liveText;
 
   /// 测试用：累计 build 次数，用来证明流式更新只重建末尾条目。
   static int debugBuildCount = 0;
@@ -937,15 +983,8 @@ class ChatMessageTile extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (message.text.trim().isNotEmpty)
-              SelectableText(
-                message.text,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: message.isError ? scheme.error : null,
-                ),
-              ),
-            if (message.aiGenerated && message.text.trim().isNotEmpty)
-              const AiGeneratedBadge(),
+            if (_bodyVisible) _buildAssistantBody(theme, scheme),
+            if (message.aiGenerated && _bodyVisible) const AiGeneratedBadge(),
             if (message.pending)
               Padding(
                 padding: const EdgeInsets.only(top: 6),
@@ -974,6 +1013,36 @@ class ChatMessageTile extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  /// 正文现在是否有内容可显示。流式中以实时文本为准。
+  bool get _bodyVisible =>
+      message.text.trim().isNotEmpty || (liveText != null && message.pending);
+
+  /// 助手正文。流式中只重绘这一条，并用分块渲染避开长文本的整体重排。
+  ///
+  /// 流式用普通 `Text`，结束后换成可选中的 `SelectableText`（design §6.1）。
+  Widget _buildAssistantBody(ThemeData theme, ColorScheme scheme) {
+    final style = theme.textTheme.bodyMedium?.copyWith(
+      color: message.isError ? scheme.error : null,
+    );
+    final live = liveText;
+    if (live == null || !message.pending) {
+      return SelectableText(message.text, style: style);
+    }
+    return ValueListenableBuilder<String>(
+      valueListenable: live,
+      builder: (context, value, _) {
+        final text = value.isEmpty ? message.text : value;
+        if (text.trim().isEmpty) return const SizedBox.shrink();
+        return ChunkedText(
+          key: ValueKey('assistant-live-${message.id}'),
+          text: text,
+          style: style,
+          keyPrefix: 'assistant-${message.id}',
+        );
+      },
     );
   }
 
