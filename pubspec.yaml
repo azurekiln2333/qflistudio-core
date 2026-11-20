@@ -23,10 +23,15 @@ dependencies:
   intl: ^0.20.2
   fast_gbk: ^1.0.0
   xml: ^6.6.1
+  # 远程电脑的终端渲染器（CloudTerminal 打过补丁的 xterm 分支）。
+  xterm: ^4.0.0
 
 dependency_overrides:
   re_editor:
     path: vendor/re_editor
+  # 指向本包内的 vendored 副本，App 构建不依赖 cloudterminal 源码仓库。
+  xterm:
+    path: vendor/xterm
 
 dev_dependencies:
   flutter_test:
