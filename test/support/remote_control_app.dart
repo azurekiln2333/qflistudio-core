@@ -43,6 +43,8 @@ Future<void> pumpRemoteUntil(
 }
 
 /// Preserve real route transitions without waiting for unrelated busy spinners.
+/// [page] must select an ordinary page, card or text element, not an inherited
+/// scope: route lookup registers that element as a dependent of the scope.
 Future<void> pumpRemoteRoute(
   WidgetTester tester,
   Finder page, {
@@ -50,14 +52,20 @@ Future<void> pumpRemoteRoute(
 }) => pumpRemoteUntil(tester, () {
   final elements = page.evaluate().toList();
   if (elements.length != 1) return false;
+  expect(elements.single, isNot(isA<InheritedElement>()));
   final route = ModalRoute.of(elements.single);
   if (route == null) return false;
   final routes = <ModalRoute<dynamic>>{route};
   // The dashboard has an inner Navigator. Its first route can be ready while
   // the host is still animating the module into view.
   elements.single.visitAncestorElements((element) {
-    final ancestor = ModalRoute.of(element);
-    if (ancestor != null) routes.add(ancestor);
+    // Only a Navigator's ordinary StatefulElement needs the enclosing route.
+    // Querying every ancestor can call ModalRoute.of on the inherited route
+    // scope itself, registering an illegal self-dependency in that scope.
+    if (element is StatefulElement && element.widget is Navigator) {
+      final ancestor = ModalRoute.of(element);
+      if (ancestor != null) routes.add(ancestor);
+    }
     return true;
   });
   return routes.every(
