@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../git/git_branch_label.dart';
 import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
@@ -19,11 +20,13 @@ class ProjectCard extends StatefulWidget {
     required this.onRemove,
     this.onToggleFavorite,
     this.onExport,
+    this.gitRefreshRevision = 0,
   });
 
   final Project project;
   final VoidCallback onOpen;
   final VoidCallback onRemove;
+  final int gitRefreshRevision;
 
   /// 本地项目压缩导出；仅在项目目录存在时显示。
   final VoidCallback? onExport;
@@ -35,25 +38,65 @@ class ProjectCard extends StatefulWidget {
   State<ProjectCard> createState() => _ProjectCardState();
 }
 
-class _ProjectCardState extends State<ProjectCard> {
+class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
   bool _hovering = false;
   bool _canExport = false;
+  String? _gitBranch;
+  String? _gitProjectPath;
+  bool? _gitWasCloud;
+  int _gitRequest = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_refreshExportAvailability());
+    unawaited(_refreshGitBranch());
   }
 
   @override
   void didUpdateWidget(covariant ProjectCard oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final gitTargetChanged =
+        _gitProjectPath != widget.project.path ||
+        _gitWasCloud != widget.project.isCloud;
+    if (gitTargetChanged ||
+        oldWidget.gitRefreshRevision != widget.gitRefreshRevision) {
+      if (gitTargetChanged) _gitBranch = null;
+      unawaited(_refreshGitBranch());
+    }
     if (oldWidget.project.path != widget.project.path ||
         oldWidget.project.isCloud != widget.project.isCloud ||
         (oldWidget.onExport == null) != (widget.onExport == null)) {
       _canExport = false;
       unawaited(_refreshExportAvailability());
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshGitBranch());
+    }
+  }
+
+  Future<void> _refreshGitBranch() async {
+    final request = ++_gitRequest;
+    final project = widget.project;
+    _gitProjectPath = project.path;
+    _gitWasCloud = project.isCloud;
+    final branch = project.isCloud
+        ? null
+        : await readProjectGitBranch(project.path);
+    if (!mounted || request != _gitRequest) return;
+    if (_gitBranch != branch) setState(() => _gitBranch = branch);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _gitRequest++;
+    super.dispose();
   }
 
   Future<void> _refreshExportAvailability() async {
@@ -198,7 +241,41 @@ class _ProjectCardState extends State<ProjectCard> {
                                   ),
                                 ),
                               ),
-                              if (showOpenedAt) ...[
+                              if (_gitBranch != null) ...[
+                                const SizedBox(width: 8),
+                                ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxWidth: constraints.maxWidth * 0.5,
+                                  ),
+                                  child: Tooltip(
+                                    message: _gitBranch!,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.call_split_outlined,
+                                          size: 12,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Flexible(
+                                          child: Text(
+                                            _gitBranch!,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: textTheme.bodySmall
+                                                ?.copyWith(
+                                                  color:
+                                                      scheme.onSurfaceVariant,
+                                                  fontSize: 11,
+                                                ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ] else if (showOpenedAt) ...[
                                 const SizedBox(width: 8),
                                 ConstrainedBox(
                                   constraints: const BoxConstraints(

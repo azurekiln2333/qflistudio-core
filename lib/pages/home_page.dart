@@ -308,6 +308,7 @@ class _HomeTabState extends State<HomeTab>
   bool _searchOpen = false;
   String _query = '';
   String _languageFilter = '';
+  int _gitRefreshRevision = 0;
   String? _archiveBusyLabel;
   String? _cloneBusyLabel;
   GitCloneCancellation? _cloneCancellation;
@@ -927,6 +928,7 @@ class _HomeTabState extends State<HomeTab>
   Future<void> _reloadProjects(ProjectScope scope) async {
     try {
       await widget.store.refresh();
+      if (mounted) setState(() => _gitRefreshRevision++);
       if (StudioProfile.current?.offlineOnly == true) return;
       final token = widget.auth.token;
       if (token == null ||
@@ -1046,6 +1048,7 @@ class _HomeTabState extends State<HomeTab>
   Widget _buildCard(BuildContext context, Project project) {
     return ProjectCard(
       project: project,
+      gitRefreshRevision: _gitRefreshRevision,
       onOpen: () => _openProject(context, project),
       onRemove: () => _deleteProject(context, project),
       onToggleFavorite: (value) => widget.store.setFavorite(project, value),
@@ -1307,6 +1310,7 @@ class _HomeTabState extends State<HomeTab>
       settings: widget.settings,
       initialOpenPath: initialOpenFile,
     );
+    if (mounted) setState(() => _gitRefreshRevision++);
     OpenPerformance.endOpen();
   }
 
