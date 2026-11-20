@@ -95,13 +95,19 @@ class AgentMessageView {
     this.aiGenerated = false,
     this.sourceText,
     this.attachedPaths = const [],
+    this.durationMs,
   });
 
   /// 会话内稳定标识，用于列表 key。
   final String id;
 
-  /// `user` | `assistant` | `tool`。
+  /// `user` | `assistant` | `tool` | `reasoning`。
+  ///
+  /// `reasoning` 是模型的思考内容，界面渲染成可折叠的思考气泡。
   final String role;
+
+  /// 思考用时（毫秒）。只有 `reasoning` 条目可能有值；被取消时为 null。
+  final int? durationMs;
 
   final String text;
 
@@ -141,6 +147,7 @@ class AgentMessageView {
     'aiGenerated': aiGenerated,
     if (sourceText != null) 'sourceText': sourceText,
     if (attachedPaths.isNotEmpty) 'attachedPaths': attachedPaths,
+    if (durationMs != null) 'durationMs': durationMs,
   };
 
   static AgentMessageView? fromJson(Object? value) {
@@ -153,7 +160,9 @@ class AgentMessageView {
     final paths = value['changedPaths'];
     final attached = value['attachedPaths'];
     final source = value['sourceText'];
+    final duration = value['durationMs'];
     return AgentMessageView(
+      durationMs: duration is int && duration >= 0 ? duration : null,
       id: id,
       role: role,
       text: text is String ? text : '',
@@ -271,6 +280,12 @@ abstract class AgentFacade extends ChangeNotifier {
   /// 一句话说明正在做什么，例如「正在读取 lib/main.dart」。空闲时为 null。
   /// 由 pi-B 在返工阶段实现。
   String? get activity => null;
+
+  /// 流式中的消息的实时文本。消息不在流式中时返回 null。
+  ///
+  /// 界面用它只重绘这一条消息，不重建整个对话列表
+  /// （任务 11-19-agent-thinking-stream design §6.1）。
+  ValueListenable<String>? liveTextOf(String messageId) => null;
 
   /// 是否还有更早的消息没有载入。由 pi-B 在返工阶段实现。
   bool get hasEarlier => false;

@@ -9,6 +9,9 @@ import '../community/models.dart';
 import '../config/api_config.dart';
 import '../config/client_platform.dart';
 import 'ai_service.dart';
+import 'ai_turn_event.dart';
+
+export 'ai_turn_event.dart';
 import 'connection_probe.dart';
 import 'studio_profile.dart';
 
@@ -61,9 +64,16 @@ class AiChatResult {
     required this.rawMessage,
     this.usage,
     this.aiGenerated = true,
+    this.reasoning = '',
   });
 
   final String model;
+
+  /// 本轮完整的思考内容；模型没有思考时为空串。
+  ///
+  /// 回传给上游用的原始字段留在 [rawMessage]：Chat 与中转是
+  /// `reasoning_content`，直连 Messages 是 `reasoning_blocks`。
+  final String reasoning;
 
   /// 助手文本；只有工具调用时可能为空。
   final String content;
@@ -1633,6 +1643,32 @@ class ApiClient {
     return _decodeAiResult(data);
   }
 
+  /// 一次模型回合的事件流。参数与 [aiChat] 相同。
+  ///
+  /// 契约阶段的回退实现：整轮请求后只发一个 [AiTurnCompleted]。
+  /// 真正的增量解析见任务 11-19-agent-thinking-stream design §3、§4。
+  Stream<AiTurnEvent> aiChatStream({
+    required String token,
+    required List<Map<String, dynamic>> messages,
+    List<Map<String, dynamic>>? tools,
+    Future<void>? abortTrigger,
+    AiEndpoint? endpoint,
+    String? model,
+    String? reasoningEffort,
+  }) async* {
+    yield AiTurnCompleted(
+      await aiChat(
+        token: token,
+        messages: messages,
+        tools: tools,
+        abortTrigger: abortTrigger,
+        endpoint: endpoint,
+        model: model,
+        reasoningEffort: reasoningEffort,
+      ),
+    );
+  }
+
   /// 可用模型列表；[endpoint] 为直连时返回空列表。
   ///
   /// 直连模式下游地址与模型由用户自己填，没有统一的目录接口，
@@ -1894,12 +1930,14 @@ class ApiClient {
       throw ApiException('AI 响应格式无效');
     }
     final usage = data['usage'];
+    final reasoning = raw['reasoning_content'];
     return AiChatResult(
       model: model,
       content: content is String ? content : '',
       rawMessage: raw,
       usage: usage is Map ? Map<String, dynamic>.from(usage) : null,
       aiGenerated: data['aiGenerated'] != false,
+      reasoning: reasoning is String ? reasoning : '',
     );
   }
 }
