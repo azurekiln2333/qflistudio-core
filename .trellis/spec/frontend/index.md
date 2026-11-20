@@ -14,6 +14,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 
 | Guide | Description | Status |
 |-------|-------------|--------|
+| [Remote Control](./remote-control.md) | Route ownership, replay subscriptions, Herdr leases and host exit | Cloud verification pending |
 | [Project Transfer](./project-transfer.md) | Shared .qsz ZIP transfer, native document providers, Home search and main-page headers | Implemented |
 | [Offline Editor Analysis](./offline-editor-analysis.md) | Unsaved provider contract, bounded scheduling, diagnostic rendering and navigation | Implemented |
 | [Offline Content](./offline-content.md) | Subject filters, saved metadata, bundled restoration, fixture import and shared tools sliver | Implemented |

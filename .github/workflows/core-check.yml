@@ -15,7 +15,7 @@ concurrency:
 env:
   FLUTTER_OHOS_TAG: 3.41.10-ohos-1.0.1
   FLUTTER_OHOS_REVISION: adaf911c35c9136a7d18fc424d714c9ec7724e60
-  APP_REF: d56f44fc3c8f0053cd62bdd9de379b0847be56fd
+  APP_REF: 06b55336ff25f07b61c11485f3c90668117617ae
   JAVA_REF: 18b8c661c3681756a85bce8666fbcc280d033117
 
 defaults:
@@ -59,6 +59,7 @@ jobs:
         id: packages
         run: |
           flutter config --no-analytics
+          flutter config --no-enable-ohos
           flutter pub get
       - name: Analyze
         run: flutter analyze --no-pub --no-fatal-infos 2>&1 | tee "$RUNNER_TEMP/core-analyze.log"
