@@ -68,7 +68,7 @@ void main() {
   });
 
   tearDown(() async {
-    await workspaceStore.settle();
+    await workspaceStore.settle().timeout(const Duration(seconds: 5));
     try {
       root.deleteSync(recursive: true);
     } on FileSystemException {
@@ -134,7 +134,16 @@ void main() {
     addTearDown(() async {
       FocusManager.instance.primaryFocus?.unfocus();
       await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pump();
+      // dispose() queues a workspace save in fake time. Keep pumping its
+      // continuations while real file I/O runs before leaving the widget test.
+      var writesSettled = false;
+      final writes = workspaceStore.settle().then((_) => writesSettled = true);
+      await waitFor(
+        tester,
+        () => writesSettled,
+        'workspace writes after unmount',
+      );
+      await writes;
     });
     final saved = (await tester.runAsync(
       () => workspaceStore.save(
@@ -223,10 +232,15 @@ void main() {
     final page = await openGitPage(tester);
     final guard = page.beforeWorktreeChange!;
     var allowed = true;
+    var guardCompleted = false;
     // Drive the real editor hook against the dirty owner root.
-    final pending = guard(
-      GitWorktreeChangeRequest(root: secondary.path, operation: '切换到 dev'),
-    ).then((value) => allowed = value);
+    final pending =
+        guard(
+          GitWorktreeChangeRequest(root: secondary.path, operation: '切换到 dev'),
+        ).then((value) {
+          allowed = value;
+          guardCompleted = true;
+        });
     await waitFor(
       tester,
       () => find
@@ -243,7 +257,12 @@ void main() {
           .evaluate()
           .isEmpty;
     }, 'the dirty-buffer dialog closes');
-    await tester.runAsync(() => pending);
+    await waitFor(
+      tester,
+      () => guardCompleted,
+      'the dirty-buffer guard returns',
+    );
+    await pending;
 
     expect(allowed, isFalse, reason: 'a refused guard cancels the operation');
     expect(backend.checkoutCalls, 0);
