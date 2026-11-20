@@ -67,8 +67,9 @@ void main() {
     backend = _FakeBackend(root: secondary.path);
   });
 
-  tearDown(() async {
-    await workspaceStore.settle().timeout(const Duration(seconds: 5));
+  tearDown(() {
+    // pumpEditor's teardown drains writes before binding.postTest destroys
+    // fake time. Awaiting that queue again here cannot pump its continuations.
     try {
       root.deleteSync(recursive: true);
     } on FileSystemException {
