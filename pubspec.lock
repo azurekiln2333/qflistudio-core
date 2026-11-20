@@ -381,6 +381,15 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.2.2"
+  qfli_git:
+    dependency: "direct main"
+    description:
+      path: "."
+      ref: "03e351dc83f3289322089d2c1dcd471604df4021"
+      resolved-ref: "03e351dc83f3289322089d2c1dcd471604df4021"
+      url: "https://github.com/azurekiln2333/qflistudio-git.git"
+    source: git
+    version: "0.1.0"
   re_editor:
     dependency: "direct main"
     description:

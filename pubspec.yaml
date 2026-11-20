@@ -25,6 +25,10 @@ dependencies:
   xml: ^6.6.1
   crypto: ^3.0.6
   web_socket_channel: ^3.0.3
+  qfli_git:
+    git:
+      url: https://github.com/azurekiln2333/qflistudio-git.git
+      ref: 03e351dc83f3289322089d2c1dcd471604df4021
   # 远程电脑的终端渲染器（CloudTerminal 打过补丁的 xterm 分支）。
   xterm: ^4.0.0
 

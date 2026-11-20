@@ -12,7 +12,9 @@ import '../models/project.dart';
 import '../services/app_paths.dart';
 import '../services/api_client.dart';
 import '../services/cloud_sync_service.dart';
+import '../git/git_backend.dart';
 import '../services/example_code_store.dart';
+import '../services/git_clone_service.dart';
 import '../services/project_templates.dart';
 import '../services/picker_service.dart';
 import '../services/project_zip_service.dart';
@@ -22,6 +24,7 @@ import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import '../widgets/collapsed_search_field.dart';
+import 'git/git_clone_dialog.dart';
 import 'home_project_tabs.dart';
 import 'local_content_pages.dart';
 import 'quick_tools_page.dart';
@@ -306,6 +309,8 @@ class _HomeTabState extends State<HomeTab>
   String _query = '';
   String _languageFilter = '';
   String? _archiveBusyLabel;
+  String? _cloneBusyLabel;
+  GitCloneCancellation? _cloneCancellation;
   late bool _loggedIn;
   Future<void>? _refreshRequest;
   late final HomeTabOrderStore _tabOrderStore =
@@ -367,7 +372,6 @@ class _HomeTabState extends State<HomeTab>
     _applyTabOrder(saved);
   }
 
-
   /// Re-derives the rendered order from [saved] and the scopes the product
   /// offers right now. Keeps the selected scope selected when it still exists.
   void _applyTabOrder(List<ProjectScope> saved) {
@@ -377,7 +381,10 @@ class _HomeTabState extends State<HomeTab>
     );
     final selected = _orderedScopes.isEmpty
         ? ProjectScope.all
-        : _orderedScopes[_projectTabs.index.clamp(0, _orderedScopes.length - 1)];
+        : _orderedScopes[_projectTabs.index.clamp(
+            0,
+            _orderedScopes.length - 1,
+          )];
     final nextIndex = ordered.indexOf(selected);
     if (listEquals(ordered, _orderedScopes)) return;
     setState(() => _orderedScopes = ordered);
@@ -408,6 +415,7 @@ class _HomeTabState extends State<HomeTab>
 
   @override
   void dispose() {
+    _cloneCancellation?.cancel();
     widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _projectTabs.dispose();
@@ -475,12 +483,15 @@ class _HomeTabState extends State<HomeTab>
                         _removeMissingProjects(context);
                       case 'import_project':
                         unawaited(_importProjectArchive());
+                      case 'clone_repository':
+                        unawaited(_cloneRepository());
                     }
                   },
                   itemBuilder: (context) => [
                     PopupMenuItem(
                       value: 'import_project',
-                      enabled: _archiveBusyLabel == null,
+                      enabled:
+                          _archiveBusyLabel == null && _cloneBusyLabel == null,
                       child: const Row(
                         children: [
                           Icon(Icons.unarchive_outlined, size: 20),
@@ -489,6 +500,20 @@ class _HomeTabState extends State<HomeTab>
                         ],
                       ),
                     ),
+                    if (StudioProfile.current?.offlineOnly != true)
+                      PopupMenuItem(
+                        value: 'clone_repository',
+                        enabled:
+                            _cloneBusyLabel == null &&
+                            _archiveBusyLabel == null,
+                        child: const Row(
+                          children: [
+                            Icon(Icons.cloud_download_outlined, size: 20),
+                            SizedBox(width: 12),
+                            Flexible(child: Text('克隆 Git 仓库')),
+                          ],
+                        ),
+                      ),
                     if (AppPaths.isDesktop)
                       PopupMenuItem(
                         value: 'add_existing',
@@ -542,6 +567,31 @@ class _HomeTabState extends State<HomeTab>
                       key: const ValueKey('project-archive-progress'),
                     ),
                   ),
+                ],
+              ),
+            ),
+          if (_cloneBusyLabel != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _cloneBusyLabel!,
+                      key: const ValueKey('project-clone-progress'),
+                    ),
+                  ),
+                  if (_cloneCancellation != null)
+                    TextButton(
+                      key: const ValueKey('project-clone-cancel'),
+                      onPressed: _cancelClone,
+                      child: const Text('取消'),
+                    ),
                 ],
               ),
             ),
@@ -1085,6 +1135,64 @@ class _HomeTabState extends State<HomeTab>
       _showArchiveMessage('导入失败：$error');
     } finally {
       if (mounted) setState(() => _archiveBusyLabel = null);
+    }
+  }
+
+  Future<void> _cloneRepository() async {
+    if (_cloneBusyLabel != null || _archiveBusyLabel != null) return;
+    final request = await showGitCloneDialog(
+      context,
+      desktop: AppPaths.isDesktop,
+    );
+    if (request == null || !mounted) return;
+    final cancellation = GitCloneCancellation();
+    setState(() {
+      _cloneBusyLabel = '正在克隆仓库…';
+      _cloneCancellation = cancellation;
+    });
+    final service = GitCloneService(store: widget.store);
+    try {
+      final outcome = await service.clone(request, cancellation: cancellation);
+      if (!mounted) return;
+      if (outcome.cancelled) {
+        _showArchiveMessage('已取消克隆');
+        return;
+      }
+      final project = outcome.project;
+      if (outcome.error != null || project == null) {
+        final preserved = outcome.preservedPath;
+        _showArchiveMessage(
+          preserved == null
+              ? '克隆失败：${outcome.error ?? '未知错误'}'
+              : '克隆已下载，但注册失败：${outcome.error}。文件保留在 $preserved',
+        );
+        return;
+      }
+      setState(() {
+        _languageFilter = '';
+        _query = '';
+        _searchController.clear();
+        _searchOpen = false;
+      });
+      _projectTabs.animateTo(_orderedScopes.indexOf(ProjectScope.all));
+      _showArchiveMessage('已克隆项目「${project.name}」');
+    } on Object catch (error) {
+      if (mounted) _showArchiveMessage('克隆失败：$error');
+    } finally {
+      cancellation.dispose();
+      if (mounted) {
+        setState(() {
+          _cloneBusyLabel = null;
+          _cloneCancellation = null;
+        });
+      }
+    }
+  }
+
+  void _cancelClone() {
+    _cloneCancellation?.cancel();
+    if (mounted) {
+      setState(() => _cloneBusyLabel = '正在取消克隆…');
     }
   }
 

@@ -10,7 +10,9 @@ import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 
 import '../config/ohos_platform.dart';
+import '../git/git_backend.dart';
 import '../models/project.dart';
+import '../pages/git/git_worktree_guard.dart';
 import '../pages/git_page.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
@@ -171,6 +173,7 @@ class EditorPage extends StatefulWidget {
     this.agentRuntime,
     this.composerDefaults,
     this.agentEnabled = false,
+    this.gitBackendFactory,
   });
 
   final Project project;
@@ -226,6 +229,13 @@ class EditorPage extends StatefulWidget {
   /// 打开旧面板，没有 agent 入口、分段和右栏）。宿主 `retained_editor_host`
   /// 负责按产品策略打开，见 design.md §11.2。
   final bool agentEnabled;
+
+  /// Test seam for the local Git route.
+  ///
+  /// Production leaves this null: GitPage asks [GitBackendFactory] for the
+  /// platform adapter. Widget tests inject a deterministic backend so the
+  /// navigation and dirty-buffer contracts do not run real Git processes.
+  final GitBackend Function(Project project)? gitBackendFactory;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -1117,12 +1127,139 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
   }
 
+  /// Opens Git for the project that owns the active file.
+  ///
+  /// The owner is captured before any dialog or await so a tab switch cannot
+  /// retarget the operation. Without an open file the primary project is used.
+  /// An orphaned owner is refused instead of silently falling back.
   void _openGit() {
+    final active = _editor.current;
+    if (active != null && _isOrphaned(active)) {
+      _showSnack('项目已从工作区移除，无法打开 Git');
+      return;
+    }
+    final owner = active == null ? widget.project : _gitOwnerOf(active);
+    if (owner == null) {
+      _showSnack('找不到文件所属项目，无法打开 Git');
+      return;
+    }
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => GitPage(project: widget.project, auth: widget.auth),
+        builder: (_) => GitPage(
+          project: owner,
+          auth: widget.auth,
+          backend: widget.gitBackendFactory?.call(owner),
+          beforeWorktreeChange: _guardGitWorktreeChange,
+          onWorktreeChanged: _afterGitWorktreeChanged,
+        ),
       ),
     );
+  }
+
+  /// Resolves the registered project for an open document without assuming the
+  /// primary root. Order: primary match, live workspace member, registry.
+  Project? _gitOwnerOf(OpenFile open) {
+    final rootKey = workspacePathKey(open.projectRootPath);
+    if (workspacePathKey(widget.project.path) == rootKey) {
+      return widget.project;
+    }
+    for (final member in _workspaceMembers) {
+      if (workspacePathKey(member.path) == rootKey) return member;
+    }
+    for (final project in widget.store.projects) {
+      if (workspacePathKey(project.path) == rootKey) return project;
+    }
+    return null;
+  }
+
+  /// Refuses checkout/merge/pull while affected buffers hold unsaved text.
+  ///
+  /// Saving is offered explicitly; cancellation leaves the worktree untouched.
+  Future<bool> _guardGitWorktreeChange(GitWorktreeChangeRequest request) async {
+    if (!mounted) return false;
+    final rootKey = workspacePathKey(request.root);
+    bool affected(OpenFile open) {
+      if (open.readOnly || !open.dirty) return false;
+      if (workspacePathKey(open.projectRootPath) != rootKey) return false;
+      if (_isOrphaned(open)) return false;
+      if (request.touchesWholeRoot) return true;
+      return request.paths.any((relative) {
+        final target = p.normalize(p.join(open.projectRootPath, relative));
+        return p.equals(target, p.normalize(open.path));
+      });
+    }
+
+    final dirty = _editor.files.where(affected).toList();
+    if (dirty.isEmpty) return true;
+    final names = dirty
+        .take(6)
+        .map((open) => '· ${open.tabLabel(open.ownerProjectName)}')
+        .join('\n');
+    final more = dirty.length > 6 ? '\n…共 ${dirty.length} 个文件' : '';
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        key: const ValueKey('editor-git-dirty-guard'),
+        scrollable: true,
+        title: Text('${request.operation}前先保存'),
+        content: Text('以下文件有未保存的修改。\n$names$more\n\n操作可能覆盖磁盘内容。'),
+        actions: [
+          TextButton(
+            key: const ValueKey('editor-git-dirty-cancel'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('editor-git-dirty-save'),
+            onPressed: () => Navigator.of(dialogContext).pop('save'),
+            child: const Text('保存并继续'),
+          ),
+        ],
+      ),
+    );
+    if (action != 'save' || !mounted) return false;
+    for (final open in dirty) {
+      if (!mounted || !_editor.files.contains(open)) return false;
+      final error = await _editor.saveFile(
+        open,
+        shouldSave: () =>
+            mounted && _editor.files.contains(open) && !_isOrphaned(open),
+      );
+      if (!mounted) return false;
+      if (error != null) {
+        _showSnack('保存失败：$error');
+        return false;
+      }
+    }
+    return !dirty.any((open) => _editor.files.contains(open) && open.dirty);
+  }
+
+  /// Refreshes the tree and reloads only clean buffers after Git rewrote files.
+  ///
+  /// A failed checkout/merge/pull can still have started rewriting the worktree
+  /// before it stopped, so [diskMayHaveChanged] keeps the same reload for that
+  /// case; dirty buffers are skipped either way.
+  Future<void> _afterGitWorktreeChanged(
+    String root, {
+    bool diskMayHaveChanged = false,
+  }) async {
+    if (!mounted) return;
+    _treeRefresh.value++;
+    final rootKey = workspacePathKey(root);
+    for (final open in [..._editor.files]) {
+      if (!mounted || !_editor.files.contains(open)) return;
+      if (open.readOnly) continue;
+      if (workspacePathKey(open.projectRootPath) != rootKey) continue;
+      if (open.dirty) continue;
+      final file = File(open.path);
+      if (!await file.exists()) {
+        if (!mounted) return;
+        _closeTabsRemovedOnDisk(open.path);
+        continue;
+      }
+      await _editor.reloadFromDisk(open);
+    }
   }
 
   /// 顶栏副标题：当前打开文件的路径（过长时省略中段）。
@@ -1379,9 +1516,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       return;
     }
     unawaited(
-      _recheckOpenTabsFromDisk(
-        onlyPaths: {p.normalize(change.absolutePath)},
-      ),
+      _recheckOpenTabsFromDisk(onlyPaths: {p.normalize(change.absolutePath)}),
     );
   }
 
