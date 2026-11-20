@@ -178,7 +178,7 @@ void main() {
       const valid = GitIdentity(name: 'Ada', email: 'ada@example.com');
 
       await expectLater(
-        backend.commit('   ', valid),
+        () => backend.commit('   ', valid),
         throwsA(
           isA<GitOperationException>().having(
             (error) => error.kind,
@@ -188,7 +188,7 @@ void main() {
         ),
       );
       await expectLater(
-        backend.commit(
+        () => backend.commit(
           'message',
           const GitIdentity(name: 'Ada', email: 'not-an-email'),
         ),
@@ -261,7 +261,7 @@ void main() {
       final backend = NativeGitBackend(directory.path, api: api);
 
       await expectLater(
-        backend.setRemote(
+        () => backend.setRemote(
           'origin',
           'https://user:token@example.com/team/repo.git',
         ),
@@ -394,7 +394,7 @@ void main() {
       );
 
       await expectLater(
-        backend.fetch(),
+        () => backend.fetch(),
         throwsA(
           isA<GitOperationException>().having(
             (error) => error.kind,
@@ -430,6 +430,8 @@ void main() {
   group('NativeGitBackend clone', () {
     test('bridges cancellation to the native token and releases it', () async {
       final api = _FakeApi(_FakeRepository());
+      final cloneGate = Completer<void>();
+      api.cloneGate = cloneGate;
       final cancellation = GitCloneCancellation();
       final future = NativeGitBackend.cloneRepository(
         url: 'https://example.com/team/repo.git',
@@ -437,6 +439,10 @@ void main() {
         cancellation: cancellation,
         api: api,
       );
+      addTearDown(cancellation.dispose);
+      addTearDown(() {
+        if (!cloneGate.isCompleted) cloneGate.complete();
+      });
       final expectation = expectLater(
         future,
         throwsA(
@@ -453,15 +459,13 @@ void main() {
       cancellation.cancel();
       expect(cancel.cancelCalls, 1);
 
-      api.cloneGate!.complete();
+      cloneGate.complete();
       await expectation;
       expect(cancel.disposed, isTrue);
-
       cancellation.cancel();
       expect(cancel.cancelCalls, 1);
       cancellation.dispose();
     });
-
     test('offline policy blocks clone before plugin initialization', () async {
       final api = _FakeApi(_FakeRepository());
       await expectLater(
@@ -601,7 +605,8 @@ void main() {
 
     test('serializes mutations across instances of the same root', () async {
       final directory = _repositoryDirectory();
-      final repository = _FakeRepository()..commitGate = Completer<void>();
+      final gate = Completer<void>();
+      final repository = _FakeRepository()..commitGate = gate;
       final first = NativeGitBackend(directory.path, api: _FakeApi(repository));
       final second = NativeGitBackend(
         directory.path,
@@ -611,11 +616,14 @@ void main() {
 
       final a = first.commit('one', identity);
       final b = second.commit('two', identity);
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+
       await repository.commitStarted.future;
-      await Future<void>.delayed(Duration.zero);
       expect(repository.commitOrder, <String>['one']);
 
-      repository.commitGate!.complete();
+      gate.complete();
       await Future.wait(<Future<String>>[a, b]);
       expect(repository.commitOrder, <String>['one', 'two']);
     });
@@ -694,8 +702,8 @@ void main() {
       () async {
         final directory = _repositoryDirectory();
         final repository = _FakeRepository();
-        final blockerRepository = _FakeRepository()
-          ..commitGate = Completer<void>();
+        final gate = Completer<void>();
+        final blockerRepository = _FakeRepository()..commitGate = gate;
         const identity = GitIdentity(name: 'Ada', email: 'ada@example.com');
 
         final blocker = NativeGitBackend(
@@ -711,7 +719,7 @@ void main() {
         );
         final fetch = gated.fetch();
         offline = true;
-        blockerRepository.commitGate!.complete();
+        gate.complete();
         await Future.wait(<Future<Object?>>[
           held,
           fetch.catchError((Object error) => error),
@@ -734,8 +742,8 @@ void main() {
     test('a cancelled request does not cancel the next one', () async {
       final directory = _repositoryDirectory();
       final repository = _FakeRepository();
-      final blockerRepository = _FakeRepository()
-        ..commitGate = Completer<void>();
+      final gate = Completer<void>();
+      final blockerRepository = _FakeRepository()..commitGate = gate;
       const identity = GitIdentity(name: 'Ada', email: 'ada@example.com');
 
       final first = NativeGitBackend(directory.path, api: _FakeApi(repository));
@@ -754,11 +762,11 @@ void main() {
         directory.path,
         api: _FakeApi(repository),
       );
-      final gate = blocker.commit('block', identity);
-      final pending = second.fetch();
-      blockerRepository.commitGate!.complete();
-      await gate;
+      final pending = blocker.commit('block', identity);
+      final next = second.fetch();
+      gate.complete();
       await pending;
+      await next;
 
       expect(repository.lastFetchCancel?.cancelCalls, 0);
     });

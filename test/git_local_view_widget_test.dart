@@ -157,11 +157,15 @@ void main() {
     );
     await pumpView(tester, backend: backend);
 
+    // Both the header chip and the card name the state, so the assertion is
+    // scoped to the card's own title text.
     expect(
-      find.byKey(const ValueKey('git-interrupted-operation')),
+      find.descendant(
+        of: find.byKey(const ValueKey('git-interrupted-operation')),
+        matching: find.text('变基进行中'),
+      ),
       findsOneWidget,
     );
-    expect(find.text('变基进行中'), findsOneWidget);
     expect(find.text('合并进行中'), findsNothing);
     expect(find.byKey(const ValueKey('git-complete-merge')), findsNothing);
   });
