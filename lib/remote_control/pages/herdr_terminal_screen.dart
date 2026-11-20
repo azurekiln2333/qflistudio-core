@@ -16,10 +16,11 @@ import '../widgets/herdr_terminal_rows.dart';
 /// to reach a pane would spawn a process nobody asked for. Nothing here touches
 /// `RemoteController.createTerminal` or a `SessionView`.
 ///
-/// The screen owns the subscription lifecycle: it selects [paneId] as the user's
-/// choice on open (so a later visit and the session screen's rows agree), keeps the
-/// watchdog running so the tab/pane rows stay current while it is shown, and stops
-/// streaming on close while keeping that choice.
+/// The screen owns the subscription lifecycle: it claims a pane lease on mount,
+/// selects [paneId] as the user's choice (so a later visit and the session
+/// screen's rows agree), keeps the watchdog running so the tab/pane rows stay
+/// current while it is shown, and releases its lease on close — which stops
+/// streaming for this screen only, never for a route that replaced it.
 class HerdrTerminalScreen extends StatefulWidget {
   const HerdrTerminalScreen({
     super.key,
@@ -44,9 +45,21 @@ class HerdrTerminalScreen extends StatefulWidget {
 }
 
 class _HerdrTerminalScreenState extends State<HerdrTerminalScreen> {
+  /// This route's ownership of the live pane watch.
+  ///
+  /// Claimed synchronously in [initState], before the deferred first watch, so a
+  /// route that is popped during its own first frame already owns the
+  /// subscription and releases it — instead of inheriting, and later clearing,
+  /// whatever the route underneath had.
+  HerdrPaneLease? _lease;
+
   @override
   void initState() {
     super.initState();
+    // Claim before anything is deferred; a `late final` initialiser would only run
+    // on first read, which is the post-frame callback — too late for a route that
+    // leaves during its first frame.
+    final lease = _lease = widget.herdr.claimPaneWatching();
     // The tab/pane rows are drawn here, so desktop-side structure changes have to
     // reach them: the push stream supplies the edges and this tick is the
     // correctness fallback. Reference-counted, so it dies with the last screen.
@@ -68,8 +81,10 @@ class _HerdrTerminalScreenState extends State<HerdrTerminalScreen> {
     // `canControl` on (input is gated on it), so skipping it would leave the pane
     // silently untypable when the screen is opened before the first probe.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      widget.herdr.watchPane(widget.paneId, explicit: true);
+      // Ownership as well as mount state: a newer route may already hold the watch
+      // when this callback finally runs.
+      if (!mounted || !lease.isActive) return;
+      widget.herdr.watchPane(lease, widget.paneId, explicit: true);
       unawaited(widget.herdr.refresh());
       // The app bar names the pane and the rows list its tabs, which needs the
       // owning workspace's listing.
@@ -84,8 +99,10 @@ class _HerdrTerminalScreenState extends State<HerdrTerminalScreen> {
   void dispose() {
     widget.herdr.unwatch();
     // Stop reading the pane for a screen nobody is on, but remember the choice so
-    // reopening lands here again.
-    widget.herdr.suspendWatching();
+    // reopening lands here again. A superseded lease is ignored, so this cannot
+    // cancel the watch a newer route just started.
+    final lease = _lease;
+    if (lease != null) widget.herdr.releasePaneWatching(lease);
     super.dispose();
   }
 
@@ -131,7 +148,7 @@ class _HerdrTerminalScreenState extends State<HerdrTerminalScreen> {
               // a conditional child would shift the terminal's index and rebuild it
               // from scratch, dropping the soft keyboard whenever a pane closed or a
               // notice appeared.
-              HerdrTerminalRows(herdr: widget.herdr),
+              HerdrTerminalRows(herdr: widget.herdr, lease: _lease),
               gone
                   ? const _NoticeStrip(text: '这个面板已不在电脑上，输入已停止，请返回工作区列表重新选择')
                   : const SizedBox.shrink(),

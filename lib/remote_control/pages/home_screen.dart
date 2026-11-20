@@ -8,6 +8,7 @@ import '../state/herdr_controller.dart';
 import '../state/remote_controller.dart';
 import '../theme/remote_theme.dart';
 import '../widgets/history_sheet.dart';
+import '../widgets/module_exit.dart';
 import '../widgets/new_session_sheet.dart';
 import '../widgets/session_card.dart';
 import '../widgets/workspace_sidebar.dart';
@@ -17,9 +18,17 @@ import 'session_screen.dart';
 
 /// Connection status plus the list of sessions on the paired PC.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.controller});
+  const HomeScreen({super.key, required this.controller, this.onExit});
 
   final RemoteController controller;
+
+  /// Leaves the module for the host app.
+  ///
+  /// Supplied by `RemoteComputerPage` from *outside* this screen's inner
+  /// `Navigator`, so it always pops the host route instead of an inner page.
+  /// Null keeps the module usable in a host that provides its own exit, and in
+  /// tests that mount the screen directly.
+  final VoidCallback? onExit;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -86,6 +95,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
+  void _exit() {
+    // Remove the drawer's LocalHistoryEntry before popping the host route.
+    _scaffold.currentState?.closeDrawer();
+    widget.onExit?.call();
+  }
+
   /// Herdr is a sibling destination that keeps the existing session/Codex flow
   /// untouched; returning from it restores the previous home view.
   ///
@@ -135,7 +150,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 : SessionScreen(
                     controller: widget.controller,
                     view: widget.controller.view(session!),
-                    herdr: _herdr,
+                    // Herdr is a terminal destination. A Claude structured
+                    // session must not receive the controller at all: no pane
+                    // rows, no follow listener and, above all, no composer path
+                    // that could type Claude text into a desktop shell.
+                    herdr: session.isTerminal ? _herdr : null,
                     navigationButton: _navigationButton(context),
                   ),
           ),
@@ -171,6 +190,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       onThread: (thread) => _open(thread: thread),
       onSession: (session) => _open(session: session),
       onCloseDrawer: () => _scaffold.currentState?.closeDrawer(),
+      onExit: widget.onExit == null ? null : _exit,
       showClose: !wide,
       selectedThreadId: _selectedThread,
       selectedSessionId: _selectedSession,
@@ -195,6 +215,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     navigationButton: _navigationButton(context),
                     onOpen: (session) => _open(session: session),
                     onHerdr: _openHerdr,
+                    onExit: widget.onExit,
                   ),
                 ),
               ),
@@ -213,6 +234,7 @@ class _ManagedHomeScreen extends StatelessWidget {
     required this.onHerdr,
     this.herdr,
     this.navigationButton,
+    this.onExit,
   });
 
   final RemoteController controller;
@@ -224,6 +246,12 @@ class _ManagedHomeScreen extends StatelessWidget {
   final VoidCallback onHerdr;
   final HerdrController? herdr;
   final Widget? navigationButton;
+
+  /// Leaves the module for Studio. Rendered as an explicit app-bar action: the
+  /// narrow layout's leading slot is the drawer, so the automatic back control
+  /// shown by a pushed route never appears here, and the desktop layout has no
+  /// system back gesture at all.
+  final VoidCallback? onExit;
 
   void _open(BuildContext context, SessionInfo session) {
     onOpen(session);
@@ -367,6 +395,7 @@ class _ManagedHomeScreen extends StatelessWidget {
                   ),
                 ],
               ),
+              if (onExit != null) ModuleExitButton(onExit: onExit!),
             ],
           ),
           floatingActionButton: FloatingActionButton.extended(

@@ -143,7 +143,7 @@ void main() {
         await settle();
 
         final view = controller.view(controller.session('s1')!);
-        await controller.subscribe('s1');
+        await controller.subscribe('s1', owner: controller);
         expect(view.events.single, isA<UserEvent>());
         final socket = sockets.single;
 
@@ -244,7 +244,7 @@ void main() {
       controller = build()..connect();
       await settle();
       controller.view(controller.session('s1')!);
-      await controller.subscribe('s1');
+      await controller.subscribe('s1', owner: controller);
 
       first.drop();
       await settle();
@@ -273,8 +273,8 @@ void main() {
         await settle();
         final oldView = controller.view(controller.session('old')!);
         controller.view(controller.session('keep')!);
-        await controller.subscribe('old');
-        await controller.subscribe('keep');
+        await controller.subscribe('old', owner: controller);
+        await controller.subscribe('keep', owner: controller);
 
         first.drop();
         await settle();

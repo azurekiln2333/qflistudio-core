@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/pairing_uri.dart';
 import '../state/remote_controller.dart';
 import '../theme/remote_theme.dart';
+import '../widgets/module_exit.dart';
 import '../widgets/section_label.dart';
 
 /// First-run screen: connect this phone to the agent running on a PC.
@@ -13,10 +14,20 @@ import '../widgets/section_label.dart';
 /// 2. 输入短码 ([_PairMethod.code])
 /// 3. 手工填写服务器地址与设备密钥 ([_PairMethod.manual])
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key, required this.controller, this.initialRelay});
+  const PairScreen({
+    super.key,
+    required this.controller,
+    this.initialRelay,
+    this.onExit,
+  });
 
   final RemoteController controller;
   final String? initialRelay;
+
+  /// Leaves the module for the host app, rendered as a visible control above the
+  /// form. The unpaired state has no app bar and no inner route to pop, so
+  /// without this the only way out of the module was the platform back gesture.
+  final VoidCallback? onExit;
 
   @override
   State<PairScreen> createState() => _PairScreenState();
@@ -213,6 +224,11 @@ class _PairScreenState extends State<PairScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
+                  if (widget.onExit != null)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: ModuleExitTextButton(onExit: widget.onExit!),
+                    ),
                   Center(
                     child: Container(
                       width: 56,

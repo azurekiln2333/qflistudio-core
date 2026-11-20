@@ -16,6 +16,21 @@ import 'remote_controller.dart';
 /// first open, reconnect and mutations; a lightweight watchdog is the fallback
 /// when the desktop event connection is unavailable. Actions are guarded by
 /// [_inFlight] so a double tap cannot send the same mutating command twice.
+///
+/// ## Live pane ownership
+///
+/// The live pane stream is owned by exactly one mounted route at a time and the
+/// ownership is expressed by a [HerdrPaneLease]. A route claims a lease
+/// synchronously in its `initState`, before its deferred first watch. Every
+/// guarded operation ([watchPane], [resumeWatching], [suspendWatching],
+/// [releasePaneWatching]) takes that token and does nothing for a stale token,
+/// so the route being replaced can neither clear nor re-assert the watch that
+/// the replacing route just established. The token is intentionally not a pane
+/// id: two routes can show the same pane, and A→B→A reuses the id with different
+/// ownership.
+/// Pane-capable destinations in HomeScreen replace each other. An embedder that
+/// stacks such destinations must claim a fresh lease when revealing an older
+/// destination; a superseded lease never reactivates implicitly.
 class HerdrController extends ChangeNotifier implements HerdrPushSink {
   HerdrController(this._remote, {this.watchdogInterval = _defaultWatchdog}) {
     _wasOnline = _remote.isOnline;
@@ -93,6 +108,20 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
   /// to restore. One of the two states must own the choice; here it is this field.
   String? _preferredPaneId;
 
+  /// The one route currently allowed to drive [_watchedPaneId].
+  ///
+  /// Kept apart from both the subscription and the remembered choice: disposing
+  /// the owner clears the subscription but not the memory, and a route that lost
+  /// ownership must never be able to mutate either.
+  HerdrPaneLease? _paneLease;
+
+  /// The route currently allowed to drive the live pane subscription, if any.
+  ///
+  /// Exposed so a test or an embedder can perform an explicitly current-owner
+  /// action (for example the pane-row chips, which are rendered inside the owning
+  /// route) without inventing a second ownership registry.
+  HerdrPaneLease? get activePaneLease => _paneLease;
+
   String? get watchedPaneId => _watchedPaneId;
 
   /// The workspace that owns [paneId], derived from the id itself.
@@ -127,13 +156,42 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
   HerdrPaneSnapshot paneSnapshot(String paneId) =>
       HerdrPaneSnapshot.fromText(paneText(paneId), format: paneFormat(paneId));
 
+  /// Claims the live pane subscription for one mounted pane-capable route.
+  ///
+  /// Call synchronously from the route's `initState`, before scheduling the
+  /// route's first watch. Claiming alone does **not** notify listeners and does
+  /// not start, move or stop a subscription — the new owner's first [watchPane]
+  /// or [resumeWatching] decides what is streamed. Any previous owner becomes
+  /// stale immediately, so its listeners, deferred callbacks and disposal can no
+  /// longer touch the watch.
+  HerdrPaneLease claimPaneWatching() {
+    final previous = _paneLease;
+    if (previous != null) previous._active = false;
+    final lease = HerdrPaneLease._();
+    _paneLease = lease;
+    return lease;
+  }
+
+  bool _ownsPaneLease(HerdrPaneLease? lease) =>
+      lease != null && identical(_paneLease, lease) && lease._active;
+
   /// Asks the agent to stream [paneId], or to stop when null.
   ///
   /// Called by the terminal screen when the selected pane changes. Fire and
   /// forget: the agent replies with an ack, and the content arrives as pushes.
   /// [explicit] marks the choice as the user's own, which both remembers it for a
   /// future screen and stops the desktop's focus from overriding it.
-  void watchPane(String? paneId, {bool explicit = false}) {
+  ///
+  /// Only the route holding [lease] may change the selection. A stale lease
+  /// returns false and leaves both the subscription and the remembered pane
+  /// untouched: an old screen's listener must not re-point the watch that a newer
+  /// screen already owns.
+  bool watchPane(
+    HerdrPaneLease lease,
+    String? paneId, {
+    bool explicit = false,
+  }) {
+    if (!_ownsPaneLease(lease)) return false;
     final previousPane = _watchedPaneId;
     final previousPreference = _preferredPaneId;
     if (explicit) _preferredPaneId = paneId;
@@ -145,6 +203,7 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
         previousPreference != _preferredPaneId) {
       _notify();
     }
+    return true;
   }
 
   /// Restores the remembered pane when a screen (re)opens, and returns it.
@@ -152,8 +211,10 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
   /// The screen calls this instead of guessing: after leaving the page the
   /// subscription is gone but the choice is not, so this re-issues exactly one
   /// watch and gives the screen the id to render. Returns null when the user has
-  /// not chosen a pane, leaving the screen free to follow the desktop.
-  String? resumeWatching() {
+  /// not chosen a pane — or when [lease] is no longer the owner, which tells the
+  /// caller to schedule nothing.
+  String? resumeWatching(HerdrPaneLease lease) {
+    if (!_ownsPaneLease(lease)) return null;
     final paneId = _preferredPaneId;
     if (paneId == null) return null;
     _setSubscription(paneId);
@@ -162,10 +223,38 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
 
   /// Stops streaming without forgetting the user's choice.
   ///
-  /// Used when leaving the screen: the desktop must not keep reading a pane for a
-  /// page nobody is on, but the choice has to survive so reopening restores it.
-  void suspendWatching() {
+  /// Used when a screen leaves while its lease stays valid (for example a test or
+  /// a future embedded view); disposal uses [releasePaneWatching] instead. A
+  /// stale lease is ignored.
+  void suspendWatching(HerdrPaneLease lease) {
+    if (!_ownsPaneLease(lease)) return;
     _setSubscription(null);
+  }
+
+  /// Releases [lease] and, while it is still current, stops the live stream.
+  ///
+  /// Only the current owner may unsubscribe: a superseded route is disposed after
+  /// the replacing route already watched its pane, and its release must not send
+  /// `herdr_watch(null)` or wipe the cached screens. The remembered pane survives
+  /// so the next visit resumes it.
+  void releasePaneWatching(HerdrPaneLease lease) {
+    final current = _ownsPaneLease(lease);
+    lease._active = false;
+    if (!current) return;
+    _paneLease = null;
+    _setSubscription(null);
+  }
+
+  /// Records [paneId] as the user's choice without opening a live stream.
+  ///
+  /// Used by the workspace list just before it pushes the pane route: the list
+  /// renders no pane output, so it must not take ownership of the watch for a
+  /// screen it is about to cover. The pane route claims its lease on mount and
+  /// selects the pane explicitly.
+  void rememberPane(String? paneId) {
+    if (_preferredPaneId == paneId) return;
+    _preferredPaneId = paneId;
+    _notify();
   }
 
   /// The actual subscribe/unsubscribe, with no effect on the remembered choice.
@@ -196,7 +285,10 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
   /// so leaving a screen cannot trigger a background subscription on reconnect.
   void _resubscribeIfActive() {
     final paneId = _watchedPaneId;
-    if (paneId == null) return;
+    // Only an actively owned subscription is restored. `_watchedPaneId` alone is
+    // not enough: a route that was superseded during a transition must not have
+    // its pane resurrected by a reconnect.
+    if (paneId == null || !_ownsPaneLease(_paneLease)) return;
     _setSubscription(paneId, force: true);
   }
 
@@ -876,6 +968,8 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
   @override
   void dispose() {
     _disposed = true;
+    _paneLease?._active = false;
+    _paneLease = null;
     unwatchAll();
     _remote.setHerdrSink(null);
     _paneTexts.clear();
@@ -883,4 +977,24 @@ class HerdrController extends ChangeNotifier implements HerdrPushSink {
     _remote.removeListener(_onRemote);
     super.dispose();
   }
+}
+
+/// Ownership of the live Herdr pane stream, held by one mounted route.
+///
+/// Opaque on purpose. Routes must not derive ownership from a pane id: two routes
+/// can display the same pane and an A→B→A visit reuses that id while the owner is
+/// a different route instance. A lease becomes inactive when a newer route claims
+/// ownership or when its own route releases it, and every guarded
+/// [HerdrController] operation rejects an inactive lease.
+class HerdrPaneLease {
+  HerdrPaneLease._();
+
+  bool _active = true;
+
+  /// Whether this lease still owns the live pane watch.
+  ///
+  /// Deferred callbacks and listeners read this before touching the controller,
+  /// so a route that lost ownership during a navigation transition performs no
+  /// late work at all.
+  bool get isActive => _active;
 }

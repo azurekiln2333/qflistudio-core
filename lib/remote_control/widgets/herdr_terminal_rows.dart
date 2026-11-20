@@ -15,9 +15,17 @@ import 'herdr_status.dart';
 /// Renders nothing at all when there is no workspace to describe, so a plain
 /// terminal keeps its full height.
 class HerdrTerminalRows extends StatefulWidget {
-  const HerdrTerminalRows({super.key, required this.herdr});
+  const HerdrTerminalRows({super.key, required this.herdr, this.lease});
 
   final HerdrController herdr;
+
+  /// The owning route's pane lease.
+  ///
+  /// The chips are the user's local pane/tab selection, so they must act through
+  /// the lease of the route that renders them: a chip in a route that no longer
+  /// owns the watch must not re-point the stream. Null (the Herdr workspace list,
+  /// or a plain embedder) leaves the rows browsable but their selection inert.
+  final HerdrPaneLease? lease;
 
   @override
   State<HerdrTerminalRows> createState() => _HerdrTerminalRowsState();
@@ -59,9 +67,19 @@ class _HerdrTerminalRowsState extends State<HerdrTerminalRows> {
               onDismiss: () => setState(() => _dismissed = error),
             ),
           if (tabs.isNotEmpty)
-            _TabRow(herdr: herdr, tabs: tabs, compact: compact),
+            _TabRow(
+              herdr: herdr,
+              lease: widget.lease,
+              tabs: tabs,
+              compact: compact,
+            ),
           if (panes.isNotEmpty)
-            _PaneRow(herdr: herdr, panes: panes, compact: compact),
+            _PaneRow(
+              herdr: herdr,
+              lease: widget.lease,
+              panes: panes,
+              compact: compact,
+            ),
         ],
       ),
     );
@@ -74,11 +92,13 @@ class _TabRow extends StatelessWidget {
     required this.herdr,
     required this.tabs,
     required this.compact,
+    this.lease,
   });
 
   final HerdrController herdr;
   final List<HerdrTab> tabs;
   final bool compact;
+  final HerdrPaneLease? lease;
 
   @override
   Widget build(BuildContext context) {
@@ -93,8 +113,8 @@ class _TabRow extends StatelessWidget {
             status: tab.agentStatus,
             compact: compact,
             busy: herdr.isBusy('tab:${tab.tabId}'),
-            enabled: herdr.canControl,
-            onTap: () => _select(herdr, tab),
+            enabled: herdr.canControl && (lease?.isActive ?? false),
+            onTap: () => _select(herdr, tab, lease),
           ),
       ],
     );
@@ -106,7 +126,12 @@ class _TabRow extends StatelessWidget {
   /// Without the second half the rows contradicted the screen: the pane row
   /// listed the new tab's panes while the terminal below still showed the pane
   /// of the previous tab, so a tab switch looked like it did nothing.
-  static Future<void> _select(HerdrController herdr, HerdrTab tab) async {
+  static Future<void> _select(
+    HerdrController herdr,
+    HerdrTab tab,
+    HerdrPaneLease? lease,
+  ) async {
+    if (lease == null || !lease.isActive) return;
     try {
       await herdr.focusTab(tab.tabId);
     } on RemoteException {
@@ -114,6 +139,7 @@ class _TabRow extends StatelessWidget {
       // strip above renders; the selection stays where it was.
       return;
     }
+    if (!lease.isActive) return;
     final candidates = herdr
         .panes(tab.workspaceId)
         .where((pane) => pane.tabId == tab.tabId)
@@ -123,7 +149,7 @@ class _TabRow extends StatelessWidget {
       (pane) => pane.focused,
       orElse: () => candidates.first,
     );
-    herdr.watchPane(target.paneId, explicit: true);
+    herdr.watchPane(lease, target.paneId, explicit: true);
   }
 }
 
@@ -164,11 +190,13 @@ class _PaneRow extends StatelessWidget {
     required this.herdr,
     required this.panes,
     required this.compact,
+    this.lease,
   });
 
   final HerdrController herdr;
   final List<HerdrPane> panes;
   final bool compact;
+  final HerdrPaneLease? lease;
 
   @override
   Widget build(BuildContext context) {
@@ -182,8 +210,8 @@ class _PaneRow extends StatelessWidget {
             status: pane.agentStatus,
             compact: compact,
             busy: herdr.isBusy('pane:${pane.paneId}'),
-            enabled: herdr.canControl,
-            onTap: () => _select(herdr, pane),
+            enabled: herdr.canControl && (lease?.isActive ?? false),
+            onTap: () => _select(herdr, pane, lease),
           ),
       ],
     );
@@ -195,8 +223,20 @@ class _PaneRow extends StatelessWidget {
   /// the desktop focus action fails or is slow, so the stream follows the local
   /// choice rather than the desktop's reply. Marking the choice as explicit stops
   /// the screen from re-following the desktop's focus afterwards.
-  static void _select(HerdrController herdr, HerdrPane pane) {
-    herdr.watchPane(pane.paneId, explicit: true);
+  static void _select(
+    HerdrController herdr,
+    HerdrPane pane,
+    HerdrPaneLease? lease,
+  ) {
+    // The local switch happens first: the phone must show the tapped pane even if
+    // the desktop focus action fails or is slow, so the stream follows the local
+    // choice rather than the desktop's reply. Marking the choice as explicit stops
+    // the screen from re-following the desktop's focus afterwards. A route that
+    // does not own the watch cannot select: the chip does nothing instead of
+    // hijacking the newer route's stream.
+    if (lease == null || !herdr.watchPane(lease, pane.paneId, explicit: true)) {
+      return;
+    }
     // The local switch already happened; a failed desktop focus is published by
     // `run` through `herdr.error` and must not become an unhandled async error.
     unawaited(

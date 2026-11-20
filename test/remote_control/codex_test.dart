@@ -145,14 +145,17 @@ void main() {
           secret: 'fixture',
         ),
       );
+      // Retained and owned by the test: the migrated page does not dispose an
+      // injected controller (the host may keep it), so an inline controller here
+      // would leak its socket, frame subscription and backoff timers.
+      final controller = RemoteController(
+        store: store,
+        connector: (_) async => fixture.socket,
+      );
+      final owner = TestControllerOwner(controller);
+      addTearDown(owner.dispose);
       await tester.pumpWidget(
-        TestRemoteApp(
-          store: store,
-          controller: RemoteController(
-            store: store,
-            connector: (_) async => fixture.socket,
-          ),
-        ),
+        TestRemoteApp(store: store, controller: controller),
       );
       await tester.pumpAndSettle();
       expect(find.byType(NavigationDrawer), findsNothing);
@@ -175,7 +178,23 @@ void main() {
         fixture.socket.lastRequest('codex_read'),
         containsPair('cursor', 'earlier-turns'),
       );
+      // Closing the module leaves the host-owned controller alive...
       await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      expect(
+        fixture.socket.closed,
+        isFalse,
+        reason: 'the caller still owns the controller after the module closes',
+      );
+      // ...until the test releases it. That closes the local view only: no
+      // desktop session is ended by disposing a client.
+      owner.dispose();
+      expect(fixture.socket.closed, isTrue);
+      expect(
+        fixture.socket.requests.where((r) => r['type'] == 'close_session'),
+        isEmpty,
+        reason: 'disposing the client must not close a desktop session',
+      );
     },
   );
 
@@ -195,14 +214,14 @@ void main() {
           secret: 'fixture',
         ),
       );
+      final controller = RemoteController(
+        store: store,
+        connector: (_) async => fixture.socket,
+      );
+      final owner = TestControllerOwner(controller);
+      addTearDown(owner.dispose);
       await tester.pumpWidget(
-        TestRemoteApp(
-          store: store,
-          controller: RemoteController(
-            store: store,
-            connector: (_) async => fixture.socket,
-          ),
-        ),
+        TestRemoteApp(store: store, controller: controller),
       );
       await tester.pumpAndSettle();
       expect(find.byType(NavigationDrawer), findsOneWidget);
@@ -222,6 +241,19 @@ void main() {
       expect(find.text('新建会话'), findsOneWidget);
       expect(fixture.socket.lastRequest('codex_send'), isNull);
       await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      expect(
+        fixture.socket.closed,
+        isFalse,
+        reason: 'the caller still owns the controller after the module closes',
+      );
+      owner.dispose();
+      expect(fixture.socket.closed, isTrue);
+      expect(
+        fixture.socket.requests.where((r) => r['type'] == 'close_session'),
+        isEmpty,
+        reason: 'disposing the client must not close a desktop session',
+      );
     },
   );
 

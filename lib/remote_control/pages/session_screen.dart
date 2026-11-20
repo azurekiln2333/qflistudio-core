@@ -17,6 +17,18 @@ import '../widgets/permission_card.dart';
 import '../widgets/session_card.dart';
 
 /// Live transcript of one session with permission dock and composer.
+///
+/// A session is one of two kinds and Herdr touches only one of them:
+///
+/// * a **terminal** session may display and drive a live Herdr pane, so it claims
+///   a pane-watching lease for its lifetime;
+/// * a **Claude** structured session is not a terminal. It must never follow the
+///   desktop's focus, subscribe to a pane, or route text into one — the composer
+///   always submits to its own session through [RemoteController.send].
+///
+/// That separation is enforced here rather than only at the caller, because
+/// [widget.herdr] is a constructor argument a host (or a test) can pass for any
+/// session kind.
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
@@ -29,9 +41,13 @@ class SessionScreen extends StatefulWidget {
   final RemoteController controller;
   final SessionView view;
 
-  /// Optional: when present, a terminal session also shows the Herdr tab/pane
-  /// rows. Null keeps the plain-terminal layout, which is also what tests and
-  /// non-Herdr screens get.
+  /// Optional: when present **and the session is a terminal**, a terminal
+  /// session also shows the Herdr tab/pane rows. Null keeps the plain-terminal
+  /// layout, which is also what tests and non-Herdr screens get.
+  ///
+  /// Passed for terminal sessions only by [HomeScreen]; this screen additionally
+  /// ignores it for a Claude session, so constructing it directly cannot leak
+  /// text into a Herdr pane.
   final HerdrController? herdr;
   final Widget? navigationButton;
 
@@ -45,9 +61,22 @@ class _SessionScreenState extends State<SessionScreen> {
   bool _sending = false;
   bool _showJump = false;
   String? _subscribeError;
+  final Object _subscriptionOwner = Object();
 
   RemoteController get _c => widget.controller;
   SessionView get _v => widget.view;
+
+  /// Herdr is a terminal concern only.
+  ///
+  /// Every Herdr use in this screen goes through this getter instead of
+  /// [SessionScreen.herdr], so an injected controller is inert for a Claude
+  /// session: no follow listener, no subscription, no pane composer action, and
+  /// no path that would send Claude text as `herdr_send_text`.
+  HerdrController? get _herdr => _v.info.isTerminal ? widget.herdr : null;
+
+  /// The route's ownership of the live pane watch, non-null exactly while this
+  /// (terminal) screen is mounted with a Herdr controller.
+  HerdrPaneLease? _lease;
 
   @override
   void initState() {
@@ -65,8 +94,13 @@ class _SessionScreenState extends State<SessionScreen> {
     //
     // Deferred to after the frame because the first notify is synchronous and
     // this screen is mid-mount; notifying a building ancestor throws.
-    final herdr = widget.herdr;
+    final herdr = _herdr;
     if (herdr != null) {
+      // Claim the live pane watch synchronously, before anything is deferred: a
+      // route that is popped during its own first frame must already own (and
+      // then release) the subscription rather than inherit whatever the previous
+      // screen left behind.
+      final lease = _lease = herdr.claimPaneWatching();
       // Keep the tab/pane rows following the desktop: reads are
       // request/response, so a tab created on the PC is only noticed by asking.
       herdr.watch();
@@ -82,10 +116,12 @@ class _SessionScreenState extends State<SessionScreen> {
       // `resumeWatching()` only mutates internal state and stays synchronous; it
       // is `watchPane` (and `refresh`) that notify, and notifying an ancestor that
       // is mid-build throws.
-      final resumed = herdr.resumeWatching();
+      final resumed = herdr.resumeWatching(lease);
       _followPending = resumed == null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
+        // Ownership, not just mount state: a newer route may have taken the watch
+        // during the transition that is still animating this one away.
+        if (!mounted || !lease.isActive) return;
         // Cleared first: the notification this may trigger must not see a
         // half-applied follow, and after it `watchedPaneId` is authoritative.
         _followPending = false;
@@ -106,7 +142,7 @@ class _SessionScreenState extends State<SessionScreen> {
 
   /// The pane the pending follow will select, or null when there is none.
   String? get _pendingFollowPane {
-    final herdr = widget.herdr;
+    final herdr = _herdr;
     if (!_followPending || herdr == null || herdr.preferredPaneId != null) {
       return null;
     }
@@ -115,17 +151,21 @@ class _SessionScreenState extends State<SessionScreen> {
 
   /// Points the pane stream at the desktop's focused pane.
   ///
-  /// Only runs while the user has not chosen a pane by hand.
+  /// Only runs while the user has not chosen a pane by hand **and** this route
+  /// still owns the watch: this is also a listener, so it can fire during the
+  /// transition that replaces this screen with another one.
   void _followFocusedPane() {
-    final herdr = widget.herdr;
-    if (herdr == null || !mounted || herdr.preferredPaneId != null) return;
+    final herdr = _herdr;
+    final lease = _lease;
+    if (herdr == null || lease == null || !lease.isActive) return;
+    if (!mounted || herdr.preferredPaneId != null) return;
     final paneId = herdr.focusedPaneId;
-    if (paneId != null) herdr.watchPane(paneId);
+    if (paneId != null) herdr.watchPane(lease, paneId);
   }
 
   Future<void> _subscribe() async {
     try {
-      await _c.subscribe(_v.id);
+      await _c.subscribe(_v.id, owner: _subscriptionOwner);
       if (mounted && _subscribeError != null) {
         setState(() => _subscribeError = null);
       }
@@ -137,22 +177,30 @@ class _SessionScreenState extends State<SessionScreen> {
 
   /// Stops streaming on leave while **keeping** the user's chosen pane.
   ///
-  /// `suspendWatching()` clears the subscription but not the choice, which is what
-  /// lets [resumeWatching] restore it on the next visit. Calling
-  /// `watchPane(null)` here was the bug: it dropped the selection too, so the
-  /// screen came back with nothing to watch and silently fell through to the PTY.
+  /// `releasePaneWatching()` clears the subscription but not the choice, which is
+  /// what lets [HerdrController.resumeWatching] restore it on the next visit, and
+  /// does nothing when a newer route already claimed the watch. Calling
+  /// `watchPane(null)` here was the original bug: it dropped the selection too, so
+  /// the screen came back with nothing to watch and silently fell through to the
+  /// PTY. Suspending unconditionally was the second bug: a route disposed at the
+  /// end of a transition cancelled the watch its replacement had just started.
   void _stopWatching() {
-    widget.herdr?.suspendWatching();
+    final herdr = _herdr;
+    final lease = _lease;
+    if (herdr == null || lease == null) return;
+    herdr.releasePaneWatching(lease);
   }
 
   @override
   void dispose() {
-    widget.herdr?.removeListener(_followFocusedPane);
+    final herdr = _herdr;
+    herdr?.removeListener(_followFocusedPane);
     // Stop the stream: the desktop should not keep reading a pane for a screen
-    // nobody is looking at.
+    // nobody is looking at. A superseded route's lease is already inactive, so
+    // this cannot clear a newer route's subscription.
     _stopWatching();
-    widget.herdr?.unwatch();
-    _c.unsubscribe(_v.id);
+    herdr?.unwatch();
+    _c.unsubscribe(_v.id, owner: _subscriptionOwner);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -176,7 +224,10 @@ class _SessionScreenState extends State<SessionScreen> {
   ///   turned into `herdr_prompt`: that is a different operation (submit a task to
   ///   a hosted agent), and using it for ordinary keystrokes would break a shell
   ///   pane and every TUI that expects raw input.
-  /// * The **local PTY session** keeps the original `send` call.
+  /// * Any other session, including every **Claude** session, keeps the original
+  ///   `send` call to its own session id. `_herdr` is null for a non-terminal
+  ///   session even when a controller was injected, so Claude text can never be
+  ///   typed into a desktop shell.
   ///
   /// The target is resolved at submit time from the current selection, so a pane
   /// switch never leaks input to the previous pane or to the PTY.
@@ -184,12 +235,13 @@ class _SessionScreenState extends State<SessionScreen> {
     final raw = _input.text;
     // Emptiness is the only thing trim is allowed to decide here.
     if (raw.trim().isEmpty || _sending) return;
-    final paneId = widget.herdr?.watchedPaneId;
+    final herdr = _herdr;
+    final paneId = herdr?.watchedPaneId;
     setState(() => _sending = true);
     try {
-      if (paneId != null) {
-        await widget.herdr!.sendText(paneId, raw);
-        await widget.herdr!.sendKeys(paneId, const <String>['enter']);
+      if (herdr != null && paneId != null) {
+        await herdr.sendText(paneId, raw);
+        await herdr.sendKeys(paneId, const <String>['enter']);
       } else {
         await _c.send(_v.id, raw);
       }
@@ -213,14 +265,15 @@ class _SessionScreenState extends State<SessionScreen> {
   /// This is the *explicit* `herdr_prompt` path, offered as its own action so it
   /// is never confused with ordinary terminal input.
   Future<void> _prompt() async {
-    final paneId = widget.herdr?.watchedPaneId;
+    final herdr = _herdr;
+    final paneId = herdr?.watchedPaneId;
     // An agent task is prose, not a shell line: surrounding whitespace carries no
     // meaning here, so it is trimmed before submission.
     final text = _input.text.trim();
-    if (paneId == null || text.isEmpty || _sending) return;
+    if (herdr == null || paneId == null || text.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
-      final report = await widget.herdr!.prompt(paneId, text);
+      final report = await herdr.prompt(paneId, text);
       _input.clear();
       _toast(report.summary);
     } on RemoteException catch (e) {
@@ -301,12 +354,12 @@ class _SessionScreenState extends State<SessionScreen> {
       view: _v,
       subscribeError: _subscribeError,
     );
-    final herdr = widget.herdr;
+    final herdr = _herdr;
     if (herdr == null) return pane;
     final watched = herdr.watchedPaneId ?? _pendingFollowPane;
     return Column(
       children: <Widget>[
-        HerdrTerminalRows(herdr: herdr),
+        HerdrTerminalRows(herdr: herdr, lease: _lease),
         Expanded(
           child: watched == null
               ? pane
@@ -318,7 +371,7 @@ class _SessionScreenState extends State<SessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final herdr = widget.herdr;
+    final herdr = _herdr;
     return ListenableBuilder(
       listenable: Listenable.merge(<Listenable?>[_v, _c, herdr]),
       builder: (context, _) {
@@ -484,10 +537,8 @@ class _SessionScreenState extends State<SessionScreen> {
                         onStop: _interrupt,
                         // Sending a task is only meaningful to a hosted agent,
                         // so the affordance appears exactly when a pane is shown.
-                        onPrompt: widget.herdr?.watchedPaneId == null
-                            ? null
-                            : _prompt,
-                        hint: widget.herdr?.watchedPaneId != null
+                        onPrompt: herdr?.watchedPaneId == null ? null : _prompt,
+                        hint: herdr?.watchedPaneId != null
                             ? '输入到面板，回车提交'
                             : pending.isNotEmpty
                             ? '也可以直接回复 Claude…'

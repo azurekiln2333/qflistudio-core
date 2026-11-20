@@ -215,6 +215,26 @@ class _Harness {
   final HerdrController herdr;
   final String paneId;
 
+  /// The pane-watch lease these actions run through.
+  ///
+  /// A mounted pane screen claims its own lease; when one owns the watch the
+  /// harness acts through it, exactly as the screen's chips do. With no screen
+  /// (a bare [HerdrTerminal] or a pre-pump setup) the harness claims one itself,
+  /// which is what a route does in `initState`.
+  HerdrPaneLease get lease {
+    final owner = herdr.activePaneLease;
+    if (owner != null) return owner;
+    final own = _lease;
+    if (own != null && own.isActive) return own;
+    return _lease = herdr.claimPaneWatching();
+  }
+
+  HerdrPaneLease? _lease;
+
+  /// Points the watch at [paneId] the way a pane chip does.
+  void watch(String paneId, {bool explicit = true}) =>
+      herdr.watchPane(lease, paneId, explicit: explicit);
+
   bool _disposed = false;
 
   /// Every `herdr_send_text` the app put on the wire, in order.
@@ -336,8 +356,9 @@ Future<_Harness> _pumpTerminal(
     );
   } else {
     // No HerdrTerminalScreen: the widget is mounted directly so a pane switch can
-    // be a rebuild rather than a navigation.
-    herdr.watchPane(paneId, explicit: true);
+    // be a rebuild rather than a navigation. Nothing claims a lease here, so the
+    // harness claims one as the route stand-in.
+    herdr.watchPane(herdr.claimPaneWatching(), paneId, explicit: true);
     await tester.pumpWidget(
       MaterialApp(
         theme: remoteTestTheme(),
@@ -840,7 +861,7 @@ void main() {
       await tester.pump();
 
       // Switch panes while the first keystroke is still in flight.
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       await tester.pumpWidget(
         MaterialApp(
           theme: remoteTestTheme(),
@@ -1175,7 +1196,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 10));
 
       // Switch panes while the clipboard read is still outstanding.
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       await tester.pumpWidget(
         MaterialApp(
           theme: remoteTestTheme(),
@@ -1319,7 +1340,7 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pump(const Duration(milliseconds: 10));
 
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       await tester.pumpWidget(
         MaterialApp(
           theme: remoteTestTheme(),
@@ -1560,7 +1581,8 @@ void main() {
       final socket = _scriptSocket(outputText: 'pane screen');
       final remote = await controllerFor(socket);
       await tester.pump();
-      final herdr = HerdrController(remote)..watchPane('wJ:p2', explicit: true);
+      final herdr = HerdrController(remote);
+      herdr.watchPane(herdr.claimPaneWatching(), 'wJ:p2', explicit: true);
       final harness = _Harness(socket, remote, herdr, 'wJ:p2');
       addTearDown(harness.dispose);
       await tester.pumpWidget(
@@ -1591,7 +1613,7 @@ void main() {
       final h = await pumpOwned(tester);
       await _tapTerminal(tester);
 
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       _ime(tester, 'leak');
       await tester.pumpAndSettle();
 
@@ -1610,7 +1632,7 @@ void main() {
       final h = await pumpOwned(tester);
       await _tapTerminal(tester);
 
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       _ime(tester, 'leak');
       await tester.pumpAndSettle();
 
@@ -1634,7 +1656,7 @@ void main() {
       final h = await pumpOwned(tester);
       await _tapTerminal(tester);
 
-      h.herdr.watchPane('wJ:p3', explicit: true);
+      h.watch('wJ:p3');
       await tester.tap(find.widgetWithText(TextButton, '粘贴'));
       await tester.pumpAndSettle();
 

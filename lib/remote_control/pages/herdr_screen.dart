@@ -236,10 +236,16 @@ class _HerdrScreenState extends State<HerdrScreen> {
   /// focus is requested second, so a slow or failed focus cannot stop the user
   /// from reaching the terminal they tapped. A failed focus is reported and the
   /// screen still opens — the pane output is a read.
+  ///
+  /// The local half is [HerdrController.rememberPane], not `watchPane` (which now
+  /// requires the owning route's lease): this list renders no pane output, so it
+  /// must not take ownership of the live watch for a screen it is about to cover.
+  /// The pushed [HerdrTerminalScreen] claims its own lease on mount and selects the
+  /// pane explicitly, which is also what re-issues the watch.
   Future<void> _openPane(HerdrWorkspace workspace, HerdrPane pane) async {
     final herdr = widget.herdr;
     herdr.selectWorkspace(workspace.workspaceId);
-    herdr.watchPane(pane.paneId, explicit: true);
+    herdr.rememberPane(pane.paneId);
     try {
       await herdr.focusPane(pane.paneId);
     } on RemoteException catch (e) {

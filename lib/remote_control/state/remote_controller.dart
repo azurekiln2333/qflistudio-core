@@ -130,7 +130,11 @@ class RemoteController extends ChangeNotifier {
   bool _herdrPasteReady = false;
   final Map<String, SessionInfo> _sessions = <String, SessionInfo>{};
   final Map<String, SessionView> _views = <String, SessionView>{};
-  final Set<String> _subscribed = <String>{};
+  // Multiple routes may overlap while displaying the same desktop session.
+  // Identity tokens keep an outgoing route from releasing its replacement.
+  final Map<String, Set<Object>> _subscriptionOwners = <String, Set<Object>>{};
+  final Map<String, Future<void>> _subscriptionRequests =
+      <String, Future<void>>{};
   final Map<String, Completer<Json>> _pending = <String, Completer<Json>>{};
   final Map<String, Timer> _timeouts = <String, Timer>{};
   final StreamController<CodexNotice> _codexNotices =
@@ -291,7 +295,7 @@ class RemoteController extends ChangeNotifier {
     _agent = null;
     _sessions.clear();
     _views.clear();
-    _subscribed.clear();
+    _subscriptionOwners.clear();
     _phase = ConnectionPhase.unpaired;
     _lastError = null;
     await _store.setPairing(null);
@@ -304,7 +308,7 @@ class RemoteController extends ChangeNotifier {
     _pairing = pairing;
     _sessions.clear();
     _views.clear();
-    _subscribed.clear();
+    _subscriptionOwners.clear();
     _lastError = null;
     connect();
   }
@@ -462,6 +466,7 @@ class RemoteController extends ChangeNotifier {
 
   void _onAgentOnline() {
     final infoEpoch = ++_infoEpoch;
+    _subscriptionRequests.clear();
     _herdrPasteReady = false;
     _setPhase(ConnectionPhase.online);
     unawaited(_refreshAfterConnect(infoEpoch));
@@ -474,10 +479,14 @@ class RemoteController extends ChangeNotifier {
       _agent = AgentInfo.fromJson(info);
       _herdrPasteReady = _agent!.capabilities.contains('herdr_paste');
       await refreshSessions();
-      for (final id in _subscribed.toList()) {
+      for (final id in _subscriptionOwners.keys.toList()) {
+        if (_disposed || !isOnline || infoEpoch != _infoEpoch) return;
         // Sessions that vanished (agent restarted) were marked gone by the
         // list refresh; one of them failing must not block the others.
-        if (!_sessions.containsKey(id)) continue;
+        if (!_sessions.containsKey(id) ||
+            !_subscriptionOwners.containsKey(id)) {
+          continue;
+        }
         try {
           await _subscribe(id);
         } on RemoteException {
@@ -758,14 +767,42 @@ class RemoteController extends ChangeNotifier {
         'rows': rows,
       });
 
-  /// Start streaming [id] into its view (backlog first, then live events).
-  Future<void> subscribe(String id) async {
-    _subscribed.add(id);
+  /// Acquires streaming for [owner] before awaiting the desktop reply.
+  ///
+  /// Each route retains its own identity token. Repeated acquisition by that
+  /// owner is harmless, and overlapping routes share one wire subscription.
+  Future<void> subscribe(String id, {required Object owner}) async {
+    if (_disposed) return;
+    final owners = _subscriptionOwners.putIfAbsent(id, Set<Object>.identity);
+    owners.add(owner);
     await _subscribe(id);
   }
 
-  Future<void> _subscribe(String id) async {
+  Future<void> _subscribe(String id) {
+    final current = _subscriptionRequests[id];
+    if (current != null) return current;
+    // Every overlapping route observes the same success or failure. Retain a
+    // successful request until disconnect/final release, and allow retry after
+    // failure without dropping route ownership.
+    late final Future<void> pending;
+    pending = _requestSubscription(id).catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      if (identical(_subscriptionRequests[id], pending)) {
+        _subscriptionRequests.remove(id);
+      }
+      Error.throwWithStackTrace(error, stack);
+    });
+    _subscriptionRequests[id] = pending;
+    return pending;
+  }
+
+  Future<void> _requestSubscription(String id) async {
     final view = _views[id];
+    final generation = _generation;
+    final infoEpoch = _infoEpoch;
+    final owners = _subscriptionOwners[id];
     try {
       await _request(<String, dynamic>{
         'type': 'subscribe',
@@ -773,13 +810,23 @@ class RemoteController extends ChangeNotifier {
         'afterSeq': view?.lastSeq ?? 0,
       });
     } on RemoteException {
-      if (!_sessions.containsKey(id)) view?.markGone();
+      if (!_disposed &&
+          generation == _generation &&
+          infoEpoch == _infoEpoch &&
+          identical(_subscriptionOwners[id], owners) &&
+          !_sessions.containsKey(id)) {
+        view?.markGone();
+      }
       rethrow;
     }
   }
 
-  void unsubscribe(String id) {
-    _subscribed.remove(id);
+  /// Releases one route. Only the final owner stops desktop streaming.
+  void unsubscribe(String id, {required Object owner}) {
+    final owners = _subscriptionOwners[id];
+    if (owners == null || !owners.remove(owner) || owners.isNotEmpty) return;
+    _subscriptionOwners.remove(id);
+    _subscriptionRequests.remove(id);
     if (isOnline) {
       unawaited(
         _request(<String, dynamic>{
@@ -973,7 +1020,8 @@ class RemoteController extends ChangeNotifier {
       'sessionId': sessionId,
     });
     _sessions.remove(sessionId);
-    _subscribed.remove(sessionId);
+    _subscriptionOwners.remove(sessionId);
+    _subscriptionRequests.remove(sessionId);
     _views.remove(sessionId)?.markGone();
     _notify();
   }
@@ -984,6 +1032,7 @@ class RemoteController extends ChangeNotifier {
     if (_phase == phase) return;
     if (phase != ConnectionPhase.online) {
       _infoEpoch += 1;
+      _subscriptionRequests.clear();
       _herdrPasteReady = false;
     }
     _phase = phase;
@@ -992,6 +1041,7 @@ class RemoteController extends ChangeNotifier {
 
   void _teardownSocket() {
     _infoEpoch += 1;
+    _subscriptionRequests.clear();
     _herdrPasteReady = false;
     unawaited(_frameSub?.cancel());
     _frameSub = null;
@@ -1014,6 +1064,7 @@ class RemoteController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _generation++;
+    _subscriptionOwners.clear();
     _teardownSocket();
     unawaited(_codexNotices.close());
     super.dispose();
