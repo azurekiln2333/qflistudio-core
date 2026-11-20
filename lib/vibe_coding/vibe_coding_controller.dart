@@ -9,6 +9,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../interop/interop_runner.dart';
 import '../services/ai_file_header.dart';
@@ -220,6 +221,23 @@ class VibeCodingController extends ChangeNotifier {
   /// 最近一次模型请求的原始异常；会话层据此分类错误文案。
   ApiException? _lastApiError;
 
+  /// 正在流式输出的消息：下标 → 实时文本。
+  ///
+  /// 界面只监听这一个 notifier，对话列表不重建（design §6.1）。
+  final Map<int, ValueNotifier<String>> _liveText = {};
+
+  /// 增量先写这里，下一帧合并进 notifier。
+  final Map<int, String> _liveBuffer = {};
+
+  /// 已经结束的流式消息，等控制器销毁时统一释放。
+  final List<ValueNotifier<String>> _retiredLive = [];
+
+  bool _liveFlushScheduled = false;
+
+  /// 正在流式输出的消息的实时文本。
+  /// 不在流式中时返回 null。
+  ValueListenable<String>? liveText(int index) => _liveText[index];
+
   /// 模型请求的并发门闸；为 null 时不限并发（现有行为）。
   AgentRequestScheduler? requestScheduler;
 
@@ -385,7 +403,22 @@ class VibeCodingController extends ChangeNotifier {
     if (completion != null && !completion.isCompleted) {
       completion.complete(_cancelledOutcome());
     }
+    _dropLiveNotifiers();
     super.dispose();
+  }
+
+  /// 释放流式消息的实时文本 notifier。
+  ///
+  /// 还挂着监听器的交给 GC：界面还没来得及摘监听器时，释放会报错。
+  void _dropLiveNotifiers() {
+    _liveBuffer.clear();
+    _liveFlushScheduled = false;
+    final notifiers = [..._liveText.values, ..._retiredLive];
+    _liveText.clear();
+    _retiredLive.clear();
+    for (final notifier in notifiers) {
+      if (!notifier.hasListeners) notifier.dispose();
+    }
   }
 
   // ---- 循环 ----
@@ -413,17 +446,14 @@ class VibeCodingController extends ChangeNotifier {
           _fail('登录已过期，请重新登录');
           return;
         }
+        final turn = _StreamTurn();
         final AiChatResult reply;
         try {
-          Future<AiChatResult> request() => _api.aiChat(
-            token: activeToken,
-            messages: List.unmodifiable(_history),
-            tools: _toolSpecs(),
-            abortTrigger: _abort?.future,
-            endpoint: _endpointProvider?.call(),
-            model: _modelId,
-            reasoningEffort: _reasoningEffort,
-          );
+          Future<AiChatResult> request() {
+            turn.reset();
+            return _consumeTurn(turn, token: activeToken);
+          }
+
           final scheduler = requestScheduler;
           reply = scheduler == null
               ? await request()
@@ -431,6 +461,8 @@ class VibeCodingController extends ChangeNotifier {
                   schedulerKey ?? 'session',
                   request,
                   isCancelled: () => _cancelRequested || _disposed,
+                  // 已经发出增量的回合不重试：否则界面会重复一段。
+                  canRetry: () => !turn.emitted,
                 );
         } on ApiException catch (error) {
           if (_cancelRequested || _disposed) {
@@ -444,6 +476,7 @@ class VibeCodingController extends ChangeNotifier {
           return;
         }
 
+        _calibrateReasoning(turn, reply);
         final calls = reply.toolCalls;
         final parsed = <_ParsedCall>[];
         for (final call in calls) {
@@ -476,16 +509,9 @@ class VibeCodingController extends ChangeNotifier {
         if (calls.isNotEmpty) {
           assistant['tool_calls'] = calls;
         }
+        _carryReasoning(assistant, reply);
         _history.add(assistant);
-        if (reply.content.trim().isNotEmpty) {
-          _appendMessage(
-            VibeMessage(
-              isUser: false,
-              text: reply.content.trim(),
-              aiGenerated: reply.aiGenerated,
-            ),
-          );
-        }
+        _calibrateContent(turn, reply);
         if (parsed.isEmpty) {
           _trimHistory();
           _finish(VibePhase.succeeded);
@@ -583,6 +609,7 @@ class VibeCodingController extends ChangeNotifier {
         _fail('任务执行失败：$error');
       }
     } finally {
+      _closeLiveMessages();
       _abort = null;
       _terminalSubscription = null;
       _commandCompletion = null;
@@ -1476,6 +1503,252 @@ class VibeCodingController extends ChangeNotifier {
     联网搜索工具已下线，不要声称自己搜过网。
 回答用中文，简洁说明改动内容和真实验证结果。''';
 
+  // ---- 流式回合 ----
+
+  /// 消费一次模型的回合事件流，返回权威结果。
+  ///
+  /// 增量只用于显示。写历史、执行工具只认 `AiTurnCompleted.result`
+  /// （design §5.1）。
+  Future<AiChatResult> _consumeTurn(
+    _StreamTurn turn, {
+    required String token,
+  }) async {
+    AiChatResult? completed;
+    try {
+      final events = _api.aiChatStream(
+        token: token,
+        messages: List.unmodifiable(_history),
+        tools: _toolSpecs(),
+        abortTrigger: _abort?.future,
+        endpoint: _endpointProvider?.call(),
+        model: _modelId,
+        reasoningEffort: _reasoningEffort,
+      );
+      await for (final event in events) {
+        switch (event) {
+          case AiReasoningDelta(:final text):
+            turn.emitted = true;
+            _pushReasoning(turn, text);
+          case AiContentDelta(:final text):
+            turn.emitted = true;
+            _pushContent(turn, text);
+          case AiToolCallStarted():
+            turn.emitted = true;
+            _closeReasoning(turn);
+          case AiTurnCompleted(:final result):
+            completed = result;
+        }
+      }
+    } finally {
+      if (completed == null) _interruptStreaming(turn);
+    }
+    final result = completed;
+    if (result == null) {
+      // 取消或被中断。交给调用方按现有规则收尾。
+      throw ApiException(
+        'AI 回合没有返回结果',
+        details: const {'code': 'AI_STREAM_INCOMPLETE'},
+      );
+    }
+    return result;
+  }
+
+  /// 思考增量：第一条新建思考消息并开始计时。
+  void _pushReasoning(_StreamTurn turn, String text) {
+    final index = turn.reasoningIndex ??= _openReasoningMessage(turn);
+    turn.reasoningText += text;
+    _pushLive(index, turn.reasoningText);
+  }
+
+  /// 新建思考消息，并开始计时。
+  int _openReasoningMessage(_StreamTurn turn) {
+    turn.clock = Stopwatch()..start();
+    return _openLiveMessage(
+      const VibeMessage(
+        isUser: false,
+        text: '',
+        pending: true,
+        aiGenerated: true,
+        kind: VibeMessageKind.reasoning,
+      ),
+    );
+  }
+
+  /// 正文增量：第一条新建助手文本消息并保持 pending。
+  void _pushContent(_StreamTurn turn, String text) {
+    _closeReasoning(turn);
+    final index = turn.contentIndex ??= _openLiveMessage(
+      const VibeMessage(
+        isUser: false,
+        text: '',
+        pending: true,
+        aiGenerated: true,
+      ),
+    );
+    turn.contentText += text;
+    _pushLive(index, turn.contentText);
+  }
+
+  /// 思考收尾：气泡不再 pending，写入用时。正文或工具开始时调用。
+  void _closeReasoning(_StreamTurn turn) {
+    final index = turn.reasoningIndex;
+    if (index == null || turn.reasoningClosed) return;
+    turn.reasoningClosed = true;
+    turn.clock?.stop();
+    _settleMessage(
+      index,
+      text: turn.reasoningText,
+      durationMs: turn.clock?.elapsedMilliseconds ?? 0,
+    );
+    _retireLive(index);
+  }
+
+  /// 回合结束后用权威结果校准思考文本。
+  ///
+  /// 没有增量时（旧中转、上游返回 JSON）也补一条气泡，否则思考内容白丢。
+  void _calibrateReasoning(_StreamTurn turn, AiChatResult result) {
+    final index = turn.reasoningIndex;
+    if (index == null) {
+      if (result.reasoning.isEmpty) return;
+      _appendMessage(
+        VibeMessage(
+          isUser: false,
+          text: result.reasoning,
+          aiGenerated: true,
+          kind: VibeMessageKind.reasoning,
+        ),
+      );
+      return;
+    }
+    turn.reasoningClosed = true;
+    turn.clock?.stop();
+    _settleMessage(
+      index,
+      text: result.reasoning.isNotEmpty ? result.reasoning : turn.reasoningText,
+      durationMs: turn.clock?.elapsedMilliseconds ?? 0,
+    );
+    _retireLive(index);
+  }
+
+  /// 回合结束后用权威结果校准正文。
+  /// 没有增量时补一条消息。
+  void _calibrateContent(_StreamTurn turn, AiChatResult result) {
+    final text = result.content.trim().isNotEmpty
+        ? result.content.trim()
+        : turn.contentText.trim();
+    final index = turn.contentIndex;
+    if (index == null) {
+      if (text.isEmpty) return;
+      _appendMessage(
+        VibeMessage(isUser: false, text: text, aiGenerated: result.aiGenerated),
+      );
+      return;
+    }
+    _settleMessage(index, text: text);
+    _retireLive(index);
+  }
+
+  /// 回合意外结束时，把还在流式中的消息收尾。
+  ///
+  /// 取消可能落在“结果已到、还没校准”的窗口里，这时不能留下一个转圈的气泡。
+  void _closeLiveMessages() {
+    if (_liveText.isEmpty) return;
+    for (final index in List<int>.of(_liveText.keys)) {
+      final text = _liveBuffer.remove(index);
+      _settleMessage(index, text: text ?? _messages[index].text);
+      _retireLive(index);
+    }
+  }
+
+  /// 取消或中断：保留已经显示的内容，消息改为不 pending。
+  void _interruptStreaming(_StreamTurn turn) {
+    final reasoning = turn.reasoningIndex;
+    if (reasoning != null) {
+      turn.clock?.stop();
+      _settleMessage(reasoning, text: turn.reasoningText);
+      _retireLive(reasoning);
+    }
+    final content = turn.contentIndex;
+    if (content != null) {
+      _settleMessage(content, text: turn.contentText);
+      _retireLive(content);
+    }
+  }
+
+  /// 新增一条流式消息，并给它一个实时文本 notifier。
+  int _openLiveMessage(VibeMessage message) {
+    final index = _appendMessage(message);
+    _liveText[index] = ValueNotifier<String>('');
+    return index;
+  }
+
+  /// 把一条流式消息写成最终内容。
+  void _settleMessage(int index, {required String text, int? durationMs}) {
+    if (index < 0 || index >= _messages.length) return;
+    final current = _messages[index];
+    if (current.text == text &&
+        !current.pending &&
+        current.durationMs == durationMs) {
+      return;
+    }
+    _messages[index] = current.copyWith(
+      text: text,
+      pending: false,
+      durationMs: durationMs,
+    );
+    _notify();
+  }
+
+  /// 记下新的实时文本。下一帧合并写入，每帧最多一次。
+  void _pushLive(int index, String text) {
+    if (!_liveText.containsKey(index)) return;
+    _liveBuffer[index] = text;
+    _scheduleLiveFlush();
+  }
+
+  void _scheduleLiveFlush() {
+    if (_liveFlushScheduled) return;
+    final frames = _frames;
+    if (frames == null) {
+      _flushLive();
+      return;
+    }
+    _liveFlushScheduled = true;
+    frames.scheduleFrameCallback((_) {
+      _liveFlushScheduled = false;
+      _flushLive();
+    });
+    frames.ensureVisualUpdate();
+  }
+
+  void _flushLive() {
+    if (_liveBuffer.isEmpty) return;
+    final pending = Map<int, String>.of(_liveBuffer);
+    _liveBuffer.clear();
+    for (final entry in pending.entries) {
+      final notifier = _liveText[entry.key];
+      if (notifier != null) notifier.value = entry.value;
+    }
+  }
+
+  /// 流式结束：补上最后一段文本，之后不再实时更新。
+  void _retireLive(int index) {
+    final text = _liveBuffer.remove(index);
+    final notifier = _liveText.remove(index);
+    if (notifier == null) return;
+    if (text != null && notifier.value != text) notifier.value = text;
+    _retiredLive.add(notifier);
+  }
+
+  /// 帧调度器。没有绑定（纯单元测试）时返回 null，直接写入。
+  static SchedulerBinding? get _frames {
+    try {
+      return SchedulerBinding.instance;
+    } on Object {
+      return null;
+    }
+  }
+
   int _appendMessage(VibeMessage message) {
     _messages.add(message);
     _notify();
@@ -1538,17 +1811,91 @@ class VibeCodingController extends ChangeNotifier {
   void _trimHistory() {
     const keep = 80;
     final extras = _history.length - 1;
-    if (extras <= keep) return;
-    var start = _history.length - keep;
-    // 片段不能以 tool 结果开头，否则上游拒绝。
-    while (start < _history.length && _history[start]['role'] == 'tool') {
+    if (extras > keep) {
+      var start = _history.length - keep;
+      // 片段不能以 tool 结果开头，否则上游拒绝。
+      while (start < _history.length && _history[start]['role'] == 'tool') {
+        start++;
+      }
+      _rewriteHistory(start);
+    }
+    _trimHistoryBytes();
+  }
+
+  /// 序列化后超过 [_maxHistoryBytes] 时，从最旧的完整轮次开始丢。
+  ///
+  /// 思考内容会明显撑大历史，而中转的请求体上限是 512 KiB，
+  /// 这里给中转留出余量（design §5.3）。
+  void _trimHistoryBytes() {
+    if (_history.length <= 1) return;
+    var bytes = 0;
+    for (final entry in _history) {
+      bytes += _entryBytes(entry);
+    }
+    if (bytes <= _maxHistoryBytes) return;
+    var start = 1;
+    while (start < _history.length && bytes > _maxHistoryBytes) {
+      bytes -= _entryBytes(_history[start]);
       start++;
     }
+    // 只从完整轮次（user 条目）开始，起点一定不是 tool 条目。
+    while (start < _history.length && _history[start]['role'] != 'user') {
+      start++;
+    }
+    if (start <= 1 || start >= _history.length) return;
+    _rewriteHistory(start);
+  }
+
+  /// 一条历史条目序列化后的字节数，含结尾换行。
+  static int _entryBytes(Map<String, dynamic> entry) =>
+      utf8.encode(jsonEncode(entry)).length + 1;
+
+  /// 丢掉 [start] 之前的条目，系统提示永远保留。
+  void _rewriteHistory(int start) {
+    if (start <= 1 || start >= _history.length) return;
     final kept = _history.sublist(start);
     _history
       ..clear()
       ..add({'role': 'system', 'content': _systemPrompt()})
       ..addAll(kept);
+  }
+
+  /// 历史的字节预算。给中转的 512 KiB 请求体留出余量。
+  static const int _maxHistoryBytes = 448 * 1024;
+
+  /// 把思考内容写进助手历史条目，下一轮原样回传。
+  static void _carryReasoning(
+    Map<String, dynamic> assistant,
+    AiChatResult result,
+  ) {
+    final content = result.rawMessage['reasoning_content'];
+    if (content is String && content.isNotEmpty) {
+      assistant['reasoning_content'] = content;
+    }
+    final blocks = _cleanReasoningBlocks(result.rawMessage['reasoning_blocks']);
+    if (blocks.isNotEmpty) {
+      assistant['reasoning_blocks'] = blocks;
+    }
+  }
+
+  /// 只保留已知键的思考块。
+  ///
+  /// 直连 Messages 协议要求原样回传这些块，所以签名和 `data` 不能丢。
+  static List<Map<String, dynamic>> _cleanReasoningBlocks(Object? value) {
+    if (value is! List) return const [];
+    final blocks = <Map<String, dynamic>>[];
+    for (final entry in value) {
+      if (entry is! Map) continue;
+      final type = entry['type'];
+      if (type is! String || type.isEmpty) continue;
+      final block = <String, dynamic>{'type': type};
+      for (final key in const ['thinking', 'signature', 'data']) {
+        final field = entry[key];
+        if (field is String && field.isNotEmpty) block[key] = field;
+      }
+      blocks.add(block);
+    }
+    return blocks;
   }
 
   /// 恢复历史时只保留协议合法的完整轮次。
@@ -1588,6 +1935,14 @@ class VibeCodingController extends ChangeNotifier {
         };
         if (ids.isNotEmpty && calls is List) {
           sanitized['tool_calls'] = calls;
+        }
+        final reasoning = entry['reasoning_content'];
+        if (reasoning is String && reasoning.isNotEmpty) {
+          sanitized['reasoning_content'] = reasoning;
+        }
+        final blocks = _cleanReasoningBlocks(entry['reasoning_blocks']);
+        if (blocks.isNotEmpty) {
+          sanitized['reasoning_blocks'] = blocks;
         }
         kept.add(sanitized);
         pending.addAll(ids);
@@ -1733,6 +2088,32 @@ class VibeCodingController extends ChangeNotifier {
 
 class _WriteCancelled {
   const _WriteCancelled();
+}
+
+/// 一轮流式回合的临时状态。
+///
+/// 每次请求前调用 [reset]，重试时不会把上一轮的下标串进来。
+class _StreamTurn {
+  int? reasoningIndex;
+  int? contentIndex;
+  Stopwatch? clock;
+  String reasoningText = '';
+  String contentText = '';
+  bool reasoningClosed = false;
+
+  /// 本轮是否已经发出过增量。
+  /// 已发出增量的回合不重试。
+  bool emitted = false;
+
+  void reset() {
+    reasoningIndex = null;
+    contentIndex = null;
+    clock = null;
+    reasoningText = '';
+    contentText = '';
+    reasoningClosed = false;
+    emitted = false;
+  }
 }
 
 class _ParsedCall {
