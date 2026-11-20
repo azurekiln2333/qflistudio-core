@@ -115,7 +115,6 @@ class SymbolsBar extends StatelessWidget {
   }
 
   void _hideKeyboard() {
-    FocusManager.instance.primaryFocus?.unfocus();
     unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
   }
 
@@ -136,7 +135,7 @@ class SymbolsBar extends StatelessWidget {
       color: scheme.surfaceContainerLow,
       child: Container(
         height: 44,
-        decoration: BoxDecoration(
+        foregroundDecoration: BoxDecoration(
           border: Border(top: BorderSide(color: scheme.outlineVariant)),
         ),
         child: Row(
@@ -194,17 +193,25 @@ class SymbolsBar extends StatelessWidget {
               onPressed: () => _editSymbols(context),
               icon: Icon(Icons.tune, size: 18, color: scheme.onSurfaceVariant),
             ),
-            IconButton(
-              key: const ValueKey('symbols-hide-keyboard'),
-              tooltip: '收起键盘',
-              visualDensity: VisualDensity.compact,
-              constraints: const BoxConstraints.tightFor(width: 44, height: 44),
-              padding: EdgeInsets.zero,
-              onPressed: _hideKeyboard,
-              icon: Icon(
-                Icons.keyboard_hide_outlined,
-                size: 20,
-                color: scheme.onSurfaceVariant,
+            CodeEditorTapRegion(
+              child: IconButton(
+                key: const ValueKey('symbols-hide-keyboard'),
+                tooltip: '收起键盘',
+                visualDensity: VisualDensity.standard,
+                style: const ButtonStyle(
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                constraints: const BoxConstraints.tightFor(
+                  width: 44,
+                  height: 44,
+                ),
+                padding: EdgeInsets.zero,
+                onPressed: _hideKeyboard,
+                icon: Icon(
+                  Icons.keyboard_hide_outlined,
+                  size: 20,
+                  color: scheme.onSurfaceVariant,
+                ),
               ),
             ),
           ],

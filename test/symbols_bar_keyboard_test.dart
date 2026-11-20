@@ -4,59 +4,72 @@ import 'package:qfli_studio_core/editor/symbols_bar.dart';
 import 'package:re_editor/re_editor.dart';
 
 void main() {
-  testWidgets('keyboard button hides the input method without editing code', (
-    tester,
-  ) async {
-    final controller = CodeLineEditingController.fromText('hello world');
-    final focus = FocusNode();
-    addTearDown(controller.dispose);
-    addTearDown(focus.dispose);
-    addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
+  testWidgets(
+    'keyboard button hides the input method without editing code',
+    (tester) async {
+      final controller = CodeLineEditingController.fromText('hello world');
+      final focus = FocusNode();
+      addTearDown(controller.dispose);
+      addTearDown(focus.dispose);
+      addTearDown(() => tester.pumpWidget(const SizedBox.shrink()));
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Column(
-            children: [
-              Expanded(
-                child: CodeEditor(controller: controller, focusNode: focus),
-              ),
-              SymbolsBar(
-                language: 'Dart',
-                controller: controller,
-                symbols: const [';', '{}'],
-                onSymbolsEdited: (_) {},
-              ),
-            ],
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                Expanded(
+                  child: CodeEditor(controller: controller, focusNode: focus),
+                ),
+                SymbolsBar(
+                  language: 'Dart',
+                  controller: controller,
+                  symbols: const [';', '{}'],
+                  onSymbolsEdited: (_) {},
+                ),
+              ],
+            ),
           ),
         ),
-      ),
-    );
-    focus.requestFocus();
-    await tester.pump();
-    const selection = CodeLineSelection(
-      baseIndex: 0,
-      baseOffset: 1,
-      extentIndex: 0,
-      extentOffset: 5,
-    );
-    controller.selection = selection;
-    await tester.pump();
-    tester.testTextInput.log.clear();
+      );
+      focus.requestFocus();
+      await tester.pump();
+      const selection = CodeLineSelection(
+        baseIndex: 0,
+        baseOffset: 1,
+        extentIndex: 0,
+        extentOffset: 5,
+      );
+      controller.selection = selection;
+      await tester.pump();
+      expect(focus.hasFocus, isTrue);
+      expect(controller.selection, selection);
+      expect(tester.testTextInput.isVisible, isTrue);
+      tester.testTextInput.log.clear();
 
-    await tester.tap(find.byTooltip('收起键盘'));
-    await tester.pump();
+      await tester.tap(find.byTooltip('收起键盘'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
 
-    expect(
-      tester.testTextInput.log.any((call) => call.method == 'TextInput.hide'),
-      isTrue,
-    );
-    expect(tester.testTextInput.isVisible, isFalse);
-    expect(focus.hasFocus, isFalse);
-    expect(controller.text, 'hello world');
-    expect(controller.selection, selection);
-    expect(tester.takeException(), isNull);
-  });
+      expect(
+        tester.testTextInput.log.any((call) => call.method == 'TextInput.hide'),
+        isTrue,
+      );
+      expect(
+        tester.testTextInput.log.any((call) => call.method == 'TextInput.show'),
+        isFalse,
+      );
+      expect(tester.testTextInput.isVisible, isFalse);
+      expect(focus.hasFocus, isTrue);
+      expect(controller.text, 'hello world');
+      expect(controller.selection, selection);
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.iOS,
+    }),
+  );
 
   testWidgets('keyboard button stays at the right while symbols scroll', (
     tester,
