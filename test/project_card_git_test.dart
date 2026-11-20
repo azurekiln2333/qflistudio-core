@@ -1,9 +1,19 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:qfli_studio_core/editor/retained_editor_host.dart';
+import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/models/project.dart';
+import 'package:qfli_studio_core/pages/home_page.dart';
+import 'package:qfli_studio_core/pages/home_project_tabs.dart';
+import 'package:qfli_studio_core/services/local_store_backend.dart';
+import 'package:qfli_studio_core/services/studio_profile.dart';
+import 'package:qfli_studio_core/store/auth_store.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
+import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/widgets/project_card.dart';
 
 void main() {
@@ -66,6 +76,78 @@ void main() {
     await _waitForBranch(tester, 'feature/external-checkout');
 
     expect(find.text('main'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await _unmount(tester);
+  });
+
+  testWidgets('minimizing the retained editor refreshes Home branch cards', (
+    tester,
+  ) async {
+    final previousProfile = StudioProfile.current;
+    StudioProfile.current = const StudioProfile(
+      id: 'card-git-return-test',
+      appTitle: 'Studio',
+      templates: [],
+      isOffline: true,
+      supportsSavedWorkspaces: false,
+    );
+    addTearDown(() => StudioProfile.current = previousProfile);
+    final project = await _project(tester, root, branch: 'main');
+    final store = ProjectStore(
+      storageFile: File(p.join(project.path, 'registry.json')),
+    );
+    final auth = AuthStore();
+    final settings = SettingsStore();
+    final retainedEditor = RetainedEditorController();
+    addTearDown(store.dispose);
+    addTearDown(auth.dispose);
+    addTearDown(settings.dispose);
+    addTearDown(retainedEditor.dispose);
+    await tester.runAsync(() async {
+      await store.load();
+      final result = await store.addExisting(project.path);
+      expect(result.error, isNull);
+    });
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: const [
+          StudioLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        home: RetainedEditorScope(
+          controller: retainedEditor,
+          child: HomeTab(
+            store: store,
+            auth: auth,
+            settings: settings,
+            tabOrderStore: HomeTabOrderStore(backend: LocalMemoryBackend()),
+          ),
+        ),
+      ),
+    );
+    await _waitForBranch(tester, 'main', visibleOnly: true);
+
+    // No retained host is mounted: this exercises the real visibility owner
+    // without starting EditorPage or any editor-side service.
+    retainedEditor.open(
+      project: project,
+      auth: auth,
+      store: store,
+      settings: settings,
+    );
+    await tester.pump();
+    await _writeBranch(tester, project, 'feature/retained-checkout');
+    retainedEditor.minimize();
+    await tester.pump();
+    await _waitForBranch(
+      tester,
+      'feature/retained-checkout',
+      visibleOnly: true,
+    );
+
+    expect(find.text('main').hitTestable(), findsNothing);
     expect(tester.takeException(), isNull);
     await _unmount(tester);
   });
@@ -202,18 +284,21 @@ Future<void> _mount(
   );
 }
 
-Future<void> _waitForBranch(WidgetTester tester, String branch) async {
-  for (
-    var attempt = 0;
-    attempt < 100 && find.text(branch).evaluate().isEmpty;
-    attempt++
-  ) {
+Future<void> _waitForBranch(
+  WidgetTester tester,
+  String branch, {
+  bool visibleOnly = false,
+}) async {
+  final finder = visibleOnly
+      ? find.text(branch).hitTestable()
+      : find.text(branch);
+  for (var attempt = 0; attempt < 100 && finder.evaluate().isEmpty; attempt++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
     await tester.pump();
   }
-  expect(find.text(branch), findsOneWidget);
+  expect(finder, findsOneWidget);
 }
 
 Future<void> _drainMetadata(WidgetTester tester) async {

@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:re_editor/re_editor.dart';
 
 import 'editor_fonts.dart';
@@ -111,6 +114,11 @@ class SymbolsBar extends StatelessWidget {
     controller.replaceSelection(symbol);
   }
 
+  void _hideKeyboard() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
+  }
+
   Future<void> _editSymbols(BuildContext context) async {
     final result = await showDialog<List<String>>(
       context: context,
@@ -185,6 +193,19 @@ class SymbolsBar extends StatelessWidget {
               padding: EdgeInsets.zero,
               onPressed: () => _editSymbols(context),
               icon: Icon(Icons.tune, size: 18, color: scheme.onSurfaceVariant),
+            ),
+            IconButton(
+              key: const ValueKey('symbols-hide-keyboard'),
+              tooltip: '收起键盘',
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints.tightFor(width: 44, height: 44),
+              padding: EdgeInsets.zero,
+              onPressed: _hideKeyboard,
+              icon: Icon(
+                Icons.keyboard_hide_outlined,
+                size: 20,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
           ],
         ),

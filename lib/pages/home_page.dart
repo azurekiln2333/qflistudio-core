@@ -309,6 +309,8 @@ class _HomeTabState extends State<HomeTab>
   String _query = '';
   String _languageFilter = '';
   int _gitRefreshRevision = 0;
+  RetainedEditorController? _retainedEditor;
+  bool _retainedEditorVisible = false;
   String? _archiveBusyLabel;
   String? _cloneBusyLabel;
   GitCloneCancellation? _cloneCancellation;
@@ -342,7 +344,23 @@ class _HomeTabState extends State<HomeTab>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final retainedEditor = RetainedEditorScope.maybeOf(context);
+    if (!identical(_retainedEditor, retainedEditor)) {
+      _retainedEditor?.removeListener(_onRetainedEditorChanged);
+      final wasVisible = _retainedEditorVisible;
+      _retainedEditor = retainedEditor;
+      _retainedEditorVisible = retainedEditor?.isVisible ?? false;
+      retainedEditor?.addListener(_onRetainedEditorChanged);
+      if (wasVisible && !_retainedEditorVisible) _gitRefreshRevision++;
+    }
     _applySavedTabOrderIfReady();
+  }
+
+  void _onRetainedEditorChanged() {
+    final visible = _retainedEditor?.isVisible ?? false;
+    final returnedHome = _retainedEditorVisible && !visible;
+    _retainedEditorVisible = visible;
+    if (mounted && returnedHome) setState(() => _gitRefreshRevision++);
   }
 
   /// Reads the saved tab order once, as soon as the store can read without a
@@ -417,6 +435,7 @@ class _HomeTabState extends State<HomeTab>
   @override
   void dispose() {
     _cloneCancellation?.cancel();
+    _retainedEditor?.removeListener(_onRetainedEditorChanged);
     widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _projectTabs.dispose();

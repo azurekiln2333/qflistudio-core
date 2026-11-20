@@ -92,7 +92,7 @@ class _GitCloneDialogState extends State<_GitCloneDialog> {
           TextField(
             key: const ValueKey('git-clone-url'),
             controller: _url,
-            autofocus: true,
+            autofocus: widget.desktop,
             keyboardType: TextInputType.url,
             textInputAction: TextInputAction.next,
             decoration: const InputDecoration(

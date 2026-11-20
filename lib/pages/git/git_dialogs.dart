@@ -6,9 +6,8 @@ import '../../services/git_clone_service.dart';
 
 /// Opens a Git dialog that stays usable when the keyboard shrinks the surface.
 ///
-/// [AlertDialog] with `scrollable: true` owns the content scroll; this wrapper
-/// lifts the dialog above the keyboard inset and animates the change so a field
-/// under the cursor remains reachable on narrow devices.
+/// [AlertDialog] owns both keyboard inset animation and scrollable content.
+/// Applying the view inset here as well would subtract the keyboard twice.
 Future<T?> showGitDialog<T>({
   required BuildContext context,
   required WidgetBuilder builder,
@@ -17,15 +16,7 @@ Future<T?> showGitDialog<T>({
   return showDialog<T>(
     context: context,
     barrierDismissible: barrierDismissible,
-    builder: (dialogContext) {
-      final insets = MediaQuery.viewInsetsOf(dialogContext);
-      return AnimatedPadding(
-        duration: const Duration(milliseconds: 120),
-        curve: Curves.easeOut,
-        padding: EdgeInsets.only(bottom: insets.bottom),
-        child: builder(dialogContext),
-      );
-    },
+    builder: builder,
   );
 }
 
