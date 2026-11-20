@@ -300,6 +300,31 @@ void main() {
     expect(find.byTooltip('D:/work/other/src/Util.java'), findsOneWidget);
   });
 
+  for (final path in [
+    r'C:\work\src\Util.java',
+    r'\\server\share\src\Util.java',
+    '/work/other/src/Util.java',
+  ]) {
+    testWidgets('restored absolute attachment keeps its tail: $path', (
+      tester,
+    ) async {
+      state.attachAll([path]);
+      await tester.pumpWidget(
+        host(ComposerCard(state: state, onSend: (text, list) async => true)),
+      );
+      expect(find.text('src/Util.java'), findsOneWidget);
+      expect(find.byTooltip(path), findsOneWidget);
+    });
+  }
+
+  testWidgets('relative attachment keeps every path segment', (tester) async {
+    state.attachAll(['module/src/Util.java']);
+    await tester.pumpWidget(
+      host(ComposerCard(state: state, onSend: (text, list) async => true)),
+    );
+    expect(find.text('module/src/Util.java'), findsOneWidget);
+  });
+
   testWidgets('typing a slash lists skills and inserts the chosen one', (
     tester,
   ) async {

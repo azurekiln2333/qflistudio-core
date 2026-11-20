@@ -175,6 +175,102 @@ void main() {
     });
   }
 
+  for (final status in [200, 404, 405]) {
+    test(
+      'reasoning history respects relay capabilities for HTTP $status',
+      () async {
+        final history = <Map<String, dynamic>>[
+          {
+            'role': 'assistant',
+            'content': 'Previous answer',
+            'reasoning_content': 'Previous reasoning',
+            'reasoning_blocks': [
+              {
+                'type': 'thinking',
+                'thinking': 'Private protocol block',
+                'signature': 'fixture',
+              },
+            ],
+            'tool_calls': <dynamic>[],
+          },
+          {'role': 'user', 'content': 'Continue'},
+        ];
+        final original = jsonEncode(history);
+        final requests = <String>[];
+        final api = ApiClient(
+          transport: MockClient.streaming((request, bodyStream) async {
+            requests.add(request.url.path);
+            final body =
+                jsonDecode(await utf8.decoder.bind(bodyStream).join()) as Map;
+            final sent = (body['messages'] as List).first as Map;
+            expect(sent.containsKey('reasoning_blocks'), isFalse);
+            if (request.url.path.endsWith('/stream')) {
+              expect(sent['reasoning_content'], 'Previous reasoning');
+              if (status == 200) return _ndjson(200, [_relayResult]);
+              return http.StreamedResponse(
+                const Stream<List<int>>.empty(),
+                status,
+              );
+            }
+            expect(sent.keys.toSet(), {'role', 'content', 'tool_calls'});
+            return http.StreamedResponse(
+              Stream.value(utf8.encode(jsonEncode(_relayResult))),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }),
+        );
+        final result = await api
+            .aiChatStream(token: 'fixture', messages: history)
+            .toList();
+        expect(result.whereType<AiTurnCompleted>(), hasLength(1));
+        expect(requests.length, status == 200 ? 1 : 2);
+        expect(jsonEncode(history), original);
+      },
+    );
+  }
+
+  test('whole-turn relay projects history without mutating it', () async {
+    final history = <Map<String, dynamic>>[
+      {
+        'role': 'assistant',
+        'content': 'answer',
+        'reasoning_content': 'thinking',
+        'reasoning_blocks': <dynamic>[],
+      },
+    ];
+    final original = jsonEncode(history);
+    final api = ApiClient(
+      transport: MockClient((request) async {
+        final body = jsonDecode(request.body) as Map;
+        expect(body['messages'], [
+          {'role': 'assistant', 'content': 'answer'},
+        ]);
+        return http.Response(jsonEncode(_relayResult), 200);
+      }),
+    );
+    await api.aiChat(token: 'fixture', messages: history);
+    expect(jsonEncode(history), original);
+  });
+
+  test('HTTP 400 does not retry the conversation', () async {
+    var count = 0;
+    final api = ApiClient(
+      transport: MockClient.streaming((request, body) async {
+        count++;
+        return http.StreamedResponse(
+          Stream.value(utf8.encode('{"error":"invalid history"}')),
+          400,
+        );
+      }),
+    );
+    await expectLater(
+      api.aiChatStream(token: 'fixture', messages: _history).toList(),
+      throwsA(isA<ApiException>().having((e) => e.statusCode, 'status', 400)),
+    );
+    expect(count, 1);
+  });
+
   test('a non-200 stream response is reported before any event', () async {
     final api = ApiClient(
       transport: MockClient.streaming(

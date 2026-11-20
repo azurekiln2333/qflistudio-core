@@ -308,7 +308,9 @@ class _ComposerCardState extends State<ComposerCard> {
   /// 反而看不见文件名。完整路径放进 tooltip。
   static String _attachmentLabel(String path) {
     final slashed = path.replaceAll('\\', '/');
-    if (!p.isAbsolute(path)) return slashed;
+    // Restored sessions may contain paths created on another platform.
+    if (!p.posix.isAbsolute(path) && !p.windows.isAbsolute(path))
+      return slashed;
     final parts = slashed.split('/').where((part) => part.isNotEmpty).toList();
     if (parts.length <= 2) return slashed;
     return parts.sublist(parts.length - 2).join('/');

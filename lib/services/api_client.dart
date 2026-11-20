@@ -1666,7 +1666,8 @@ class ApiClient {
               timeout: _aiTimeout,
               abortTrigger: abortTrigger,
               body: {
-                'messages': messages,
+                // 旧服务端只认四个字段。404/405 回退也走这里。
+                'messages': _relayMessages(messages),
                 'tools': ?tools,
                 'model': ?(requested.isEmpty ? null : requested),
                 'reasoning_effort': ?(effort.isEmpty ? null : effort),
@@ -1750,6 +1751,44 @@ class ApiClient {
       models.add(AiModelInfo(id: id.trim(), reasoningEfforts: efforts));
     }
     return models;
+  }
+
+  /// 中转请求接受的消息字段。旧路由只要这四个。
+  static const _relayMessageFields = [
+    'role',
+    'content',
+    'tool_calls',
+    'tool_call_id',
+  ];
+
+  /// 中转消息投影：每条都新建 Map，不改调用方的历史。
+  ///
+  /// 普通中转只留旧路由认的四个字段。流式中转额外带上助手的
+  /// `reasoning_content`，因为流式路由的校验接受它。
+  /// `reasoning_blocks` 和其他元数据一律不发。
+  static List<Map<String, dynamic>> _relayMessages(
+    List<Map<String, dynamic>> messages, {
+    bool reasoning = false,
+  }) => [
+    for (final message in messages)
+      _relayMessage(message, reasoning: reasoning),
+  ];
+
+  static Map<String, dynamic> _relayMessage(
+    Map<String, dynamic> message, {
+    required bool reasoning,
+  }) {
+    final out = <String, dynamic>{};
+    for (final field in _relayMessageFields) {
+      if (message.containsKey(field)) out[field] = message[field];
+    }
+    if (reasoning && out['role'] == 'assistant') {
+      final thinking = message['reasoning_content'];
+      if (thinking is String && thinking.isNotEmpty) {
+        out['reasoning_content'] = thinking;
+      }
+    }
+    return out;
   }
 
   /// 直连上游：编码、发送、解码均由 [AiService] 完成。
@@ -1936,7 +1975,8 @@ class ApiClient {
             ..headers.addAll(_headers(token: token))
             ..headers['accept'] = 'application/x-ndjson'
             ..body = jsonEncode({
-              'messages': messages,
+              // 流式路由额外接受助手的 reasoning_content。
+              'messages': _relayMessages(messages, reasoning: true),
               'tools': ?tools,
               'model': ?model,
               'reasoning_effort': ?reasoningEffort,

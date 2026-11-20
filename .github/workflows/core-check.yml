@@ -1,5 +1,3 @@
-# 内核的云端检查：任何分支推送都跑 analyze 和全量测试。
-# 用语言 App CI 锁定的同一个鸿蒙版 Flutter，测试里用到的 TargetPlatform.ohos 只有它有。
 name: core-check
 
 on:
@@ -7,44 +5,72 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: core-check-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  FLUTTER_OHOS_TAG: 3.41.9+ohos-1.0.2
-  FLUTTER_OHOS_REVISION: 62357a93d653bf844f730bb1f4b7cc9e2139d14e
+  FLUTTER_OHOS_TAG: 3.41.10-ohos-1.0.1
+  FLUTTER_OHOS_REVISION: adaf911c35c9136a7d18fc424d714c9ec7724e60
+  APP_REF: d56f44fc3c8f0053cd62bdd9de379b0847be56fd
+  JAVA_REF: 18b8c661c3681756a85bce8666fbcc280d033117
+
+defaults:
+  run:
+    shell: bash
+    working-directory: qfli_studio_core
 
 jobs:
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      - name: Cache Flutter OHOS and pub
-        uses: actions/cache@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: qfli_studio_core
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-next
+          ref: ${{ env.APP_REF }}
+          path: qflistudio
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-java
+          ref: ${{ env.JAVA_REF }}
+          path: qfli_java
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ${{ runner.temp }}/flutter_ohos
             ~/.pub-cache
-          key: flutter-ohos-${{ env.FLUTTER_OHOS_REVISION }}-${{ hashFiles('pubspec.lock') }}
-          restore-keys: flutter-ohos-${{ env.FLUTTER_OHOS_REVISION }}-
-      - name: Check out the pinned Flutter OHOS release
+          key: core-ohos-${{ env.FLUTTER_OHOS_REVISION }}-${{ hashFiles('qfli_studio_core/pubspec.lock') }}
+          restore-keys: core-ohos-${{ env.FLUTTER_OHOS_REVISION }}-
+      - name: Install the pinned OHOS Flutter SDK
         run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/flutter_ohos"
-          if [ ! -d "$root/.git" ]; then
-            git clone --depth 1 --single-branch --branch "$FLUTTER_OHOS_TAG" \
-              https://gitcode.com/CPF-Flutter/flutter_flutter.git "$root"
-          fi
-          test "$(git -C "$root" rev-parse HEAD)" = "$FLUTTER_OHOS_REVISION"
-          echo "$root/bin" >> "$GITHUB_PATH"
-          echo "FLUTTER_ROOT=$root" >> "$GITHUB_ENV"
-      - run: flutter config --no-analytics
-      - run: flutter --version
-      - run: flutter pub get
-      - run: flutter analyze --no-fatal-infos
-      - name: Run tests and compare with known failures
+          bash ../qflistudio/tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter_ohos" "$FLUTTER_OHOS_TAG" "$FLUTTER_OHOS_REVISION" --ohos
+          echo "$RUNNER_TEMP/flutter_ohos/bin" >> "$GITHUB_PATH"
+      - name: Resolve packages
+        id: packages
         run: |
-          flutter test --reporter json > "$RUNNER_TEMP/test.json" || true
-          python3 .github/scripts/check_test_results.py "$RUNNER_TEMP/test.json" .github/known-test-failures.txt
+          flutter config --no-analytics
+          flutter pub get
+      - name: Analyze
+        run: flutter analyze --no-pub --no-fatal-infos 2>&1 | tee "$RUNNER_TEMP/core-analyze.log"
+      - name: Run the complete test suite
+        if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
+        run: flutter test --no-pub --reporter json 2>&1 | tee "$RUNNER_TEMP/core-test.json"
+      - name: Upload verification logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: core-verification-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/core-analyze.log
+            ${{ runner.temp }}/core-test.json
+          if-no-files-found: ignore
