@@ -12,6 +12,8 @@ import 'package:qfli_studio_core/session/agent_session.dart';
 import 'package:qfli_studio_core/vibe_coding/agent_request_scheduler.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
+import 'support/ai_relay_fixture.dart';
+
 void main() {
   late Directory root;
   late Directory project;
@@ -735,6 +737,7 @@ class _FakeRelay {
           headers: {'content-type': 'application/json'},
         );
       }
+      expect(request.url.path, '/api/ai/chat/stream');
       chatBodies.add(
         body.isEmpty ? {} : jsonDecode(body) as Map<String, dynamic>,
       );
@@ -748,11 +751,7 @@ class _FakeRelay {
       final reply = chatReplies.removeAt(0);
       final gate = chatGate;
       if (gate != null) await gate.future;
-      return http.StreamedResponse(
-        Stream.value(utf8.encode(jsonEncode(reply))),
-        200,
-        headers: {'content-type': 'application/json'},
-      );
+      return relayTurnResponse(reply);
     });
   }
 
@@ -766,7 +765,7 @@ class _FakeRelay {
   /// 任何请求都直接失败，用来证明某条路径不碰网络。
   bool failOnRequest = false;
 
-  /// 非空时 `/api/ai/chat` 直接返回这个状态码。
+  /// 非空时，聊天请求返回此状态码。
   int? chatStatus;
   String? chatError;
 

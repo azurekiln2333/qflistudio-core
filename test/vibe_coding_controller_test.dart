@@ -10,6 +10,8 @@ import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
 
+import 'support/ai_relay_fixture.dart';
+
 void main() {
   late Directory root;
   late StudioProfile? previousProfile;
@@ -1273,17 +1275,13 @@ class _FakeRelay {
           headers: {'content-type': 'application/json'},
         );
       }
-      if (request.url.path == '/api/ai/chat') {
+      if (request.url.path == '/api/ai/chat/stream') {
         final decoded = jsonDecode(body) as Map<String, dynamic>;
         final index = chatBodies.length;
         chatBodies.add(decoded);
         await onChat?.call(index, decoded);
         final reply = chatReplies.removeAt(0);
-        return http.StreamedResponse(
-          Stream.value(utf8.encode(jsonEncode(reply))),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
+        return relayTurnResponse(reply);
       }
       if (request.method == 'DELETE') {
         deleteCalls++;

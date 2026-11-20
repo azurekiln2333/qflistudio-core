@@ -12,6 +12,8 @@ import 'package:qfli_studio_core/session/agent_session.dart';
 import 'package:qfli_studio_core/vibe_coding/agent_request_scheduler.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 
+import 'support/ai_relay_fixture.dart';
+
 /// Agent 的覆盖写入必须和用户手动保存走同一条备份路径，
 /// 这样「文件历史」里能看到 agent 覆盖前的版本，也能回滚。
 void main() {
@@ -156,14 +158,10 @@ class _FakeRelay {
   _FakeRelay() {
     client = MockClient.streaming((request, bodyStream) async {
       final body = await utf8.decoder.bind(bodyStream).join();
-      if (request.url.path == '/api/ai/chat') {
+      if (request.url.path == '/api/ai/chat/stream') {
         chatBodies.add(jsonDecode(body) as Map<String, dynamic>);
         final reply = chatReplies.removeAt(0);
-        return http.StreamedResponse(
-          Stream.value(utf8.encode(jsonEncode(reply))),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
+        return relayTurnResponse(reply);
       }
       return http.StreamedResponse(
         Stream.value(utf8.encode('{}')),

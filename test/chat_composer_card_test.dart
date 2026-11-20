@@ -313,7 +313,7 @@ void main() {
         host(ComposerCard(state: state, onSend: (text, list) async => true)),
       );
       expect(find.text('src/Util.java'), findsOneWidget);
-      expect(find.byTooltip(path), findsOneWidget);
+      expect(find.byTooltip(path.replaceAll('\\', '/')), findsOneWidget);
     });
   }
 

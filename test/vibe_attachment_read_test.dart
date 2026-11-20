@@ -11,6 +11,8 @@ import 'package:qfli_studio_core/session/agent_session.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
 
+import 'support/ai_relay_fixture.dart';
+
 void main() {
   late Directory root;
   late Directory project;
@@ -359,15 +361,12 @@ class _FakeRelay {
   _FakeRelay() {
     client = MockClient.streaming((request, bodyStream) async {
       final body = await utf8.decoder.bind(bodyStream).join();
+      expect(request.url.path, '/api/ai/chat/stream');
       chatBodies.add(
         body.isEmpty ? {} : jsonDecode(body) as Map<String, dynamic>,
       );
       final reply = chatReplies.removeAt(0);
-      return http.StreamedResponse(
-        Stream.value(utf8.encode(jsonEncode(reply))),
-        200,
-        headers: {'content-type': 'application/json'},
-      );
+      return relayTurnResponse(reply);
     });
   }
 
