@@ -38,6 +38,7 @@ class _RemoteTerminalPaneState extends State<RemoteTerminalPane> {
   String? _error;
 
   bool get _enabled =>
+      widget.view.onTerminalInput == _input &&
       widget.controller.isOnline &&
       widget.view.loaded &&
       !widget.view.gone &&
@@ -68,7 +69,7 @@ class _RemoteTerminalPaneState extends State<RemoteTerminalPane> {
   void _resize(int cols, int rows, int pixelWidth, int pixelHeight) {
     _resizeTimer?.cancel();
     _resizeTimer = Timer(const Duration(milliseconds: 150), () {
-      if (!_enabled) return;
+      if (!_enabled || _bound?.onResize != _resize) return;
       unawaited(
         _request(
           () => widget.controller.terminalResize(
@@ -83,8 +84,12 @@ class _RemoteTerminalPaneState extends State<RemoteTerminalPane> {
 
   @override
   void dispose() {
-    widget.view.onTerminalInput = null;
-    _bound?.onResize = null;
+    // A replacement route binds the same shared emulator before this route's
+    // exit animation ends. Clear only callbacks still owned by this widget.
+    if (widget.view.onTerminalInput == _input) {
+      widget.view.onTerminalInput = null;
+    }
+    if (_bound?.onResize == _resize) _bound?.onResize = null;
     _resizeTimer?.cancel();
     super.dispose();
   }
@@ -94,7 +99,7 @@ class _RemoteTerminalPaneState extends State<RemoteTerminalPane> {
     final terminal = widget.view.terminal;
     final enabled = _enabled;
     if (!identical(terminal, _bound)) {
-      _bound?.onResize = null;
+      if (_bound?.onResize == _resize) _bound?.onResize = null;
       _bound = terminal;
       terminal.onResize = _resize;
       _resize(terminal.viewWidth, terminal.viewHeight, 0, 0);

@@ -14,6 +14,17 @@
 // Closing this page never closes desktop sessions. `RemoteController.dispose()`
 // only cancels the frame subscription and closes the client socket; it sends no
 // `session_close`, so agents keep running on the PC and reappear on reconnect.
+//
+// ## Ownership
+//
+// * No injected controller: this page opens the store, builds the controller and
+//   disposes it when the route goes away.
+// * `store`/`controller` injected: the **caller** owns them. The page never
+//   disposes them, and the caller keeps whatever it wants across module visits.
+//
+// Returning to Studio uses the host route that mounted this page, captured
+// outside the module's own inner `Navigator` (see [RemoteComputerPage.onExit]),
+// so a nested remote page never swallows the exit.
 
 import 'dart:async';
 
@@ -24,6 +35,7 @@ import 'pages/home_screen.dart';
 import 'pages/pair_screen.dart';
 import 'state/remote_controller.dart';
 import 'state/remote_store.dart';
+import 'widgets/module_exit.dart';
 
 /// Single entry point for the remote-computer module.
 ///
@@ -40,15 +52,32 @@ import 'state/remote_store.dart';
 /// second `MaterialApp`: that would silently drop the host's navigator and
 /// snackbars.
 class RemoteComputerPage extends StatefulWidget {
-  const RemoteComputerPage({super.key, this.store, this.controller});
+  const RemoteComputerPage({
+    super.key,
+    this.store,
+    this.controller,
+    this.onExit,
+  });
 
   /// Pre-opened store. Tests pass one to avoid the private directory; the app
   /// leaves it null and the page opens it once.
   final RemoteStore? store;
 
   /// Pre-built controller. When given, this page does **not** dispose it — the
-  /// caller owns its lifetime.
+  /// caller owns its lifetime, and that stays true after the module is closed.
   final RemoteController? controller;
+
+  /// Leaves the module from the visible "返回 Studio" control.
+  ///
+  /// Defaults to popping the route that mounted this page. Inject it when the
+  /// host embeds the module somewhere a `pop` is not the right exit (a tab, a
+  /// dialog, a desktop shell).
+  ///
+  /// The callback is captured at the page level, deliberately *outside* the
+  /// dashboard's inner `Navigator`: the control therefore returns to the host
+  /// even while a nested remote page (a pane, a Codex thread) is on top of the
+  /// inner stack, and internal back navigation keeps working for those pages.
+  final VoidCallback? onExit;
 
   /// Whether this build can drive a paired computer at all.
   ///
@@ -169,12 +198,34 @@ class _RemoteComputerPageState extends State<RemoteComputerPage>
 
   @override
   Widget build(BuildContext context) {
-    if (_unsupported) return const _UnsupportedPlatform();
+    if (_unsupported) return _UnsupportedPlatform(onExit: _exit);
     final error = _bootError;
-    if (error != null) return _BootFailure(error: error);
+    if (error != null) return _BootFailure(error: error, onExit: _exit);
     final boot = _boot;
     if (boot == null) return const _Booting();
-    return _RemoteRoot(controller: boot.controller, store: boot.store);
+    return _RemoteRoot(
+      controller: boot.controller,
+      store: boot.store,
+      onExit: _exit,
+    );
+  }
+
+  /// Leaves the module, releasing whatever this page owns.
+  ///
+  /// Ownership is decided by [RemoteController.dispose] alone: an owned
+  /// controller is disposed by `dispose()` when the route is removed, an injected
+  /// one is left to its caller. Either way no `session_close` is sent, so desktop
+  /// sessions keep running.
+  void _exit() {
+    final injected = widget.onExit;
+    if (injected != null) {
+      injected();
+      return;
+    }
+    // Resolved from this page's own context, which sits above the dashboard's
+    // inner Navigator, so this pops the host route rather than an inner page.
+    final navigator = Navigator.maybeOf(context);
+    if (navigator != null && navigator.canPop()) navigator.pop();
   }
 }
 
@@ -183,10 +234,11 @@ class _RemoteComputerPageState extends State<RemoteComputerPage>
 /// Split out so the transition rebuilds only on controller notifications and
 /// never re-runs the page's boot or lifecycle logic.
 class _RemoteRoot extends StatelessWidget {
-  const _RemoteRoot({required this.controller, this.store});
+  const _RemoteRoot({required this.controller, this.store, this.onExit});
 
   final RemoteController controller;
   final RemoteStore? store;
+  final VoidCallback? onExit;
 
   @override
   Widget build(BuildContext context) {
@@ -200,6 +252,7 @@ class _RemoteRoot extends StatelessWidget {
               ? PairScreen(
                   key: const ValueKey<String>('remote-pair'),
                   controller: controller,
+                  onExit: onExit,
                   // Remembering the last relay saves retyping the address after
                   // an unpair; the secret is gone with the pairing.
                   initialRelay: store?.lastRelayUrl,
@@ -207,6 +260,7 @@ class _RemoteRoot extends StatelessWidget {
               : HomeScreen(
                   key: ValueKey<String>('remote-home-${pairing.agentId}'),
                   controller: controller,
+                  onExit: onExit,
                 ),
         );
       },
@@ -239,15 +293,21 @@ class _Booting extends StatelessWidget {
 /// The only realistic causes are a broken storage plugin or a filesystem
 /// permission problem, so the text says that instead of "something went wrong".
 class _BootFailure extends StatelessWidget {
-  const _BootFailure({required this.error});
+  const _BootFailure({required this.error, this.onExit});
 
   final Object error;
+  final VoidCallback? onExit;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('远程电脑')),
+      appBar: AppBar(
+        title: const Text('远程电脑'),
+        actions: <Widget>[
+          if (onExit != null) ModuleExitButton(onExit: onExit!),
+        ],
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -292,13 +352,20 @@ class _BootFailure extends StatelessWidget {
 /// and resolve to stubs without `dart:io`. Saying so avoids the "连接失败" loop a
 /// user would otherwise see from repeated socket attempts.
 class _UnsupportedPlatform extends StatelessWidget {
-  const _UnsupportedPlatform();
+  const _UnsupportedPlatform({this.onExit});
+
+  final VoidCallback? onExit;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('远程电脑')),
+      appBar: AppBar(
+        title: const Text('远程电脑'),
+        actions: <Widget>[
+          if (onExit != null) ModuleExitButton(onExit: onExit!),
+        ],
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24),

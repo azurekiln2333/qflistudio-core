@@ -22,6 +22,7 @@ class WorkspaceSidebar extends StatelessWidget {
     required this.onThread,
     required this.onSession,
     required this.onCloseDrawer,
+    this.onExit,
     this.showClose = false,
     this.selectedThreadId,
     this.selectedSessionId,
@@ -47,6 +48,13 @@ class WorkspaceSidebar extends StatelessWidget {
   /// Closes the surrounding drawer after an in-drawer action, so a tap does not
   /// leave the list covering the terminal it just switched.
   final VoidCallback onCloseDrawer;
+
+  /// Leaves the module for the host app ("返回 Studio").
+  ///
+  /// The dashboard's app bar carries the same action, but the drawer is the only
+  /// visible chrome in the narrow layout once it is open — and before this entry
+  /// existed that drawer offered no way back to Studio at all.
+  final VoidCallback? onExit;
 
   /// Shows an explicit close control in the header; true only when this instance
   /// is the modal drawer (a persistent wide sidebar must not offer it).
@@ -93,6 +101,16 @@ class WorkspaceSidebar extends StatelessWidget {
               ],
             ),
           ),
+          if (onExit != null) ...<Widget>[
+            ListTile(
+              leading: const Icon(Icons.exit_to_app_rounded),
+              title: const Text('返回 Studio'),
+              // The owner closes the drawer's local history before leaving the
+              // host route, so one tap exits the module.
+              onTap: onExit,
+            ),
+            const Divider(indent: 16, endIndent: 16),
+          ],
           const NavigationDrawerDestination(
             icon: Icon(Icons.terminal_rounded),
             label: Text('终端'),

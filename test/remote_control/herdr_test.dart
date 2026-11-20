@@ -1,8 +1,8 @@
 // Provenance: ported from CloudTerminal `test/herdr_test.dart` (source HEAD
 // 49b2aac781858929a19307faeb808b83f8154410). Test bodies and assertions are
-// unchanged. Adaptations: module import paths,
-// `AppStore` -> `RemoteStore`, `AppTheme.light` -> `remoteTestTheme()`, and the
-// support helper paths.
+// retain the source behavior contracts. Adaptations: module import paths,
+// `AppStore` -> `RemoteStore`, `AppTheme.light` -> `remoteTestTheme()`, lease
+// ownership, support helper paths, and the padded-capture expectation below.
 
 // Herdr models, controller and UI tests.
 //
@@ -1048,10 +1048,13 @@ void main() {
       await setUpConnected();
       scriptHerdr();
       await herdr!.refresh();
-      herdr!.watchPane('wJ:p2');
+      // Standalone selection: no route owns the watch in this test, so it claims
+      // one, exactly as a mounted pane screen would.
+      final lease = herdr!.claimPaneWatching();
+      herdr!.watchPane(lease, 'wJ:p2');
       await Future<void>.delayed(Duration.zero);
       expect(socket.lastRequest('herdr_watch')?['paneId'], 'wJ:p2');
-      herdr!.watchPane(null);
+      herdr!.watchPane(lease, null);
       await Future<void>.delayed(Duration.zero);
       expect(socket.lastRequest('herdr_watch')?['paneId'], isNull);
     });
@@ -1078,7 +1081,8 @@ void main() {
           previous?.call(s, frame);
         };
 
-        herdr!.watchPane('wJ:p2', explicit: true);
+        final lease = herdr!.claimPaneWatching();
+        herdr!.watchPane(lease, 'wJ:p2', explicit: true);
         for (var i = 0; i < 4; i += 1) {
           await Future<void>.delayed(Duration.zero);
         }
@@ -1090,7 +1094,7 @@ void main() {
               'a failed watch must settle without an unhandled error or retry',
         );
 
-        herdr!.suspendWatching();
+        herdr!.suspendWatching(lease);
         for (var i = 0; i < 4; i += 1) {
           await Future<void>.delayed(Duration.zero);
         }
@@ -1141,7 +1145,7 @@ void main() {
       }
       expect(sockets, hasLength(1));
 
-      watched.watchPane('wJ:p2');
+      watched.watchPane(watched.claimPaneWatching(), 'wJ:p2');
       for (var i = 0; i < 4; i += 1) {
         await Future<void>.delayed(Duration.zero);
       }
@@ -1208,9 +1212,10 @@ void main() {
         await Future<void>.delayed(Duration.zero);
       }
 
-      watched.watchPane('wJ:pX', explicit: true);
+      final lease = watched.claimPaneWatching();
+      watched.watchPane(lease, 'wJ:pX', explicit: true);
       await Future<void>.delayed(Duration.zero);
-      watched.suspendWatching();
+      watched.suspendWatching(lease);
       await Future<void>.delayed(Duration.zero);
       expect(watched.watchedPaneId, isNull);
 
@@ -2353,7 +2358,11 @@ Future<(FakeSocket, HerdrController)> _pumpWatchingPane(
         ],
   );
   final herdr = tester.widget<SessionScreen>(find.byType(SessionScreen)).herdr!;
-  herdr.watchPane(paneId, explicit: true);
+  // Act through the mounted screen's lease: the pane chips it renders are the
+  // local selection, and only the owning route may move the watch.
+  final lease = herdr.activePaneLease;
+  expect(lease, isNotNull, reason: 'a mounted pane screen owns the watch');
+  herdr.watchPane(lease!, paneId, explicit: true);
   await tester.pumpAndSettle();
   return (socket, herdr);
 }
@@ -2994,7 +3003,7 @@ void _paneViewModelTests() {
         paneJson(paneId: 'wJ:p3', name: 'other'),
       ],
     );
-    herdr.watchPane('wJ:p3', explicit: true);
+    herdr.watchPane(herdr.activePaneLease!, 'wJ:p3', explicit: true);
     await tester.pumpAndSettle();
 
     await _focusPaneTerminal(tester);
@@ -3151,7 +3160,7 @@ void _paneViewModelTests() {
     // --- first visit: open, then choose a pane by tapping its chip ---
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    herdr.watchPane('wJ:pX', explicit: true);
+    herdr.watchPane(herdr.activePaneLease!, 'wJ:pX', explicit: true);
     await tester.pumpAndSettle();
     expect(herdr.watchedPaneId, 'wJ:pX');
     expect(
@@ -3248,7 +3257,7 @@ void _paneViewModelTests() {
 
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
-    herdr.watchPane('wJ:pX', explicit: true);
+    herdr.watchPane(herdr.activePaneLease!, 'wJ:pX', explicit: true);
     await tester.pumpAndSettle();
     expect(herdr.preferredPaneId, 'wJ:pX');
 
@@ -3327,7 +3336,7 @@ void _paneViewModelTests() {
       remote.dispose();
     });
 
-    herdr.watchPane('wJ:pX', explicit: true);
+    herdr.watchPane(herdr.claimPaneWatching(), 'wJ:pX', explicit: true);
     // A structure push for a *different* workspace must not clear it.
     herdr.applyStructure(<String, dynamic>{
       'kind': 'herdr_structure',
@@ -3678,10 +3687,19 @@ void _gridPaddingTests() {
     expect(after[5], 'trailing');
   });
 
-  test('the captured pane with no fill is unchanged', () {
-    // Captured prose that happens to reach 75 cells has no fill to remove.
-    final raw = _fixture('herdr_pS_visible_ansi.txt');
-    expect(stripGridPadding(raw), raw);
+  test('the captured pane loses only its plain grid fill', () {
+    // This fixture has a 75-cell grid, including two completely padded rows.
+    // The source assertion called it unpadded, contradicting the captured bytes.
+    // Enumerate its expected rows independently of the grid-width inference.
+    final raw = _fixture('herdr_pS_visible_ansi.txt').replaceAll('\r', '');
+    final expected = raw.split('\n');
+    for (final row in <int>[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]) {
+      expected[row] = expected[row].replaceFirst(RegExp(r' +$'), '');
+    }
+    expected[10] = expected[10].replaceFirst('pane   \x1b[0m', 'pane\x1b[0m');
+    // Preserve the reverse-video cursor cell, then remove the 74 plain cells.
+    expected[17] = '\x1b[0m\x1b[7m \x1b[0m';
+    expect(stripGridPadding(raw), expected.join('\n'));
   });
 }
 
