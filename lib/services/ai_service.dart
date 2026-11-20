@@ -43,7 +43,7 @@ enum AiProtocol {
   /// 持久化标识，写入 settings.json 后不再变更。
   final String id;
 
-  /// 设置界面展示的协议名与端点。
+  /// 设置界面显示的协议名与端点。
   String get label => switch (this) {
     AiProtocol.chat => 'OpenAI Chat (/chat/completions)',
     AiProtocol.responses => 'OpenAI Responses (/responses)',
@@ -73,6 +73,12 @@ abstract final class AiService {
 
   /// Anthropic Messages 必须带 max_tokens；未指定时用这个值。
   static const int defaultMaxTokens = 4096;
+
+  /// 开启思考时 Anthropic 要求的 thinking 预算。
+  static const int thinkingBudgetTokens = 8192;
+
+  /// 开启思考时 Anthropic 的 max_tokens 下限。预算必须小于它。
+  static const int thinkingMaxTokens = 16384;
 
   /// 由用户填写的接口地址推导端点。
   ///
@@ -121,6 +127,10 @@ abstract final class AiService {
   ///
   /// [reasoningEffort] 只在 Chat 与 Responses 协议下发 `reasoning_effort`。
   /// Anthropic Messages 没有等价字段，传了也不写，避免猜一个不存在的参数。
+  ///
+  /// [stream] 为真时各协议下发 `stream: true`。
+  /// [thinking] 为真时 Responses 加 `reasoning.summary`，Messages 加
+  /// `thinking` 并抬高 `max_tokens`。Chat 由模型自己决定是否思考，不加参数。
   static Map<String, dynamic> encodeRequest({
     required AiProtocol protocol,
     required String model,
@@ -128,6 +138,8 @@ abstract final class AiService {
     List<Map<String, dynamic>>? tools,
     int? maxTokens,
     String? reasoningEffort,
+    bool stream = false,
+    bool thinking = false,
   }) => switch (protocol) {
     AiProtocol.chat => _encodeChat(
       model,
@@ -135,14 +147,24 @@ abstract final class AiService {
       tools,
       maxTokens,
       reasoningEffort,
+      stream,
     ),
     AiProtocol.responses => _encodeResponses(
       model,
       messages,
       tools,
       reasoningEffort,
+      stream,
+      thinking,
     ),
-    AiProtocol.messages => _encodeMessages(model, messages, tools, maxTokens),
+    AiProtocol.messages => _encodeMessages(
+      model,
+      messages,
+      tools,
+      maxTokens,
+      stream,
+      thinking,
+    ),
   };
 
   /// 把本协议的回复解码成内部助手消息。
@@ -162,6 +184,29 @@ abstract final class AiService {
   static bool isEventStream(String? contentType) =>
       contentType != null && contentType.contains('text/event-stream');
 
+  /// 把协议原生的 SSE 字节流转成统一回合事件。
+  ///
+  /// [model] 是请求里用的模型名。上游在流里给了模型名时以流里的为准。
+  /// 单行 JSON 在主 isolate 解码，服务端已限制单行长度。
+  /// `[DONE]`、`message_stop`、`response.completed` 或字节流完结都会收尾，
+  /// 每轮只产出一个 [AiTurnCompleted]。
+  static Stream<AiTurnEvent> decodeEventStream(
+    AiProtocol protocol,
+    Stream<List<int>> bytes, {
+    required String model,
+  }) async* {
+    final state = _StreamState(protocol, model);
+    await for (final line
+        in bytes.transform(utf8.decoder).transform(const LineSplitter())) {
+      for (final event in state.feed(line)) {
+        yield event;
+      }
+    }
+    for (final event in state.finish()) {
+      yield event;
+    }
+  }
+
   /// 推理强度的统一清洗：只接受短参数值，其余当未设置。
   static String? _effort(String? value) {
     final effort = value?.trim().toLowerCase() ?? '';
@@ -178,6 +223,7 @@ abstract final class AiService {
     List<Map<String, dynamic>>? tools,
     int? maxTokens,
     String? reasoningEffort,
+    bool stream,
   ) => <String, dynamic>{
     'model': model,
     'messages': [
@@ -187,6 +233,7 @@ abstract final class AiService {
     if (tools != null && tools.isNotEmpty) 'tools': tools,
     'max_tokens': ?maxTokens,
     'reasoning_effort': ?_effort(reasoningEffort),
+    if (stream) 'stream': true,
   };
 
   static Map<String, dynamic> _chatMessage(
@@ -208,6 +255,12 @@ abstract final class AiService {
     final calls = message['tool_calls'];
     if (allowToolCalls && calls is List && calls.isNotEmpty) {
       out['tool_calls'] = [for (final call in calls) _openAiCall(call)];
+    }
+    // 思考模式下带 tools 时，此前的助手消息必须原样回传 reasoning_content。
+    // 只有上游返回过思考内容才会有这个字段，因此不会发给不认识它的上游。
+    final reasoning = message['reasoning_content'];
+    if (role == 'assistant' && reasoning is String && reasoning.isNotEmpty) {
+      out['reasoning_content'] = reasoning;
     }
     return out;
   }
@@ -265,9 +318,11 @@ abstract final class AiService {
         });
       }
     }
+    final reasoning = message['reasoning_content'];
     return _assistant(
       content is String ? content : '',
       calls.isEmpty ? null : calls,
+      reasoning: reasoning is String ? reasoning : '',
     );
   }
 
@@ -278,6 +333,8 @@ abstract final class AiService {
     List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     String? reasoningEffort,
+    bool stream,
+    bool thinking,
   ) {
     final system = <String>[];
     final input = <Map<String, dynamic>>[];
@@ -328,6 +385,8 @@ abstract final class AiService {
       if (system.isNotEmpty) 'instructions': system.join('\n\n'),
       'store': false,
       'reasoning_effort': ?_effort(reasoningEffort),
+      if (stream) 'stream': true,
+      if (thinking) 'reasoning': const {'summary': 'auto'},
       if (tools != null && tools.isNotEmpty)
         'tools': [for (final tool in tools) _responsesTool(tool)],
     };
@@ -352,8 +411,13 @@ abstract final class AiService {
     if (output is! List) throw const AiException('AI 接口返回了无法解析的内容');
     final texts = <String>[];
     final calls = <Map<String, dynamic>>[];
+    final reasoning = StringBuffer();
     for (final item in output) {
       if (item is! Map) continue;
+      if (item['type'] == 'reasoning') {
+        reasoning.write(_reasoningText(item));
+        continue;
+      }
       if (item['type'] == 'function_call') {
         final name = item['name'];
         if (name is! String || name.isEmpty) continue;
@@ -381,7 +445,27 @@ abstract final class AiService {
         if (text is String && text.isNotEmpty) texts.add(text);
       }
     }
-    return _assistant(texts.join('\n'), calls.isEmpty ? null : calls);
+    return _assistant(
+      texts.join('\n'),
+      calls.isEmpty ? null : calls,
+      reasoning: reasoning.toString(),
+    );
+  }
+
+  /// Responses 的 reasoning 项：优先取 summary 文本，其次取 content 文本。
+  static String _reasoningText(Map item) {
+    for (final key in const ['summary', 'content']) {
+      final parts = item[key];
+      if (parts is! List) continue;
+      final buffer = StringBuffer();
+      for (final part in parts) {
+        if (part is! Map) continue;
+        final text = part['text'];
+        if (text is String && text.isNotEmpty) buffer.write(text);
+      }
+      if (buffer.isNotEmpty) return buffer.toString();
+    }
+    return '';
   }
 
   // ---- Anthropic Messages ----
@@ -391,6 +475,8 @@ abstract final class AiService {
     List<Map<String, dynamic>> messages,
     List<Map<String, dynamic>>? tools,
     int? maxTokens,
+    bool stream,
+    bool thinking,
   ) {
     final system = <String>[];
     // Anthropic 要求 user/assistant 交替，相邻同角色消息必须合并。
@@ -419,6 +505,14 @@ abstract final class AiService {
           ]);
         case 'assistant':
           final blocks = <Map<String, dynamic>>[];
+          // 开启思考的工具循环要求把 thinking 块放回该消息最前面，签名一起带上。
+          final recorded = message['reasoning_blocks'];
+          if (recorded is List) {
+            for (final block in recorded) {
+              final encoded = _reasoningBlock(block);
+              if (encoded != null) blocks.add(encoded);
+            }
+          }
           if (text.isNotEmpty) blocks.add({'type': 'text', 'text': text});
           final calls = message['tool_calls'];
           if (calls is List) {
@@ -455,14 +549,44 @@ abstract final class AiService {
         ],
       });
     }
+    final budget = maxTokens ?? defaultMaxTokens;
     return {
       'model': model,
-      'max_tokens': maxTokens ?? defaultMaxTokens,
+      'max_tokens': thinking && budget < thinkingMaxTokens
+          ? thinkingMaxTokens
+          : budget,
       if (system.isNotEmpty) 'system': system.join('\n\n'),
       'messages': merged,
+      if (stream) 'stream': true,
+      if (thinking)
+        'thinking': const {
+          'type': 'enabled',
+          'budget_tokens': thinkingBudgetTokens,
+        },
       if (tools != null && tools.isNotEmpty)
         'tools': [for (final tool in tools) _messagesTool(tool)],
     };
+  }
+
+  /// 历史里的思考块 → Anthropic content 块。只认两种类型，其余丢弃。
+  static Map<String, dynamic>? _reasoningBlock(Object? block) {
+    if (block is! Map) return null;
+    if (block['type'] == 'thinking') {
+      final thinking = block['thinking'];
+      if (thinking is! String || thinking.isEmpty) return null;
+      final signature = block['signature'];
+      return {
+        'type': 'thinking',
+        'thinking': thinking,
+        if (signature is String && signature.isNotEmpty) 'signature': signature,
+      };
+    }
+    if (block['type'] == 'redacted_thinking') {
+      final data = block['data'];
+      if (data is! String || data.isEmpty) return null;
+      return {'type': 'redacted_thinking', 'data': data};
+    }
+    return null;
   }
 
   /// Chat 工具定义 → Anthropic `input_schema` 定义。
@@ -485,8 +609,18 @@ abstract final class AiService {
     if (content is! List) throw const AiException('AI 接口返回了无法解析的内容');
     final texts = <String>[];
     final calls = <Map<String, dynamic>>[];
+    final reasoning = StringBuffer();
+    final reasoningBlocks = <Map<String, dynamic>>[];
     for (final block in content) {
       if (block is! Map) continue;
+      if (block['type'] == 'thinking' || block['type'] == 'redacted_thinking') {
+        final recorded = _reasoningBlock(block);
+        if (recorded == null) continue;
+        reasoningBlocks.add(recorded);
+        final thinking = recorded['thinking'];
+        if (thinking is String) reasoning.write(thinking);
+        continue;
+      }
       if (block['type'] == 'text') {
         final text = block['text'];
         if (text is String && text.isNotEmpty) texts.add(text);
@@ -506,15 +640,22 @@ abstract final class AiService {
         },
       });
     }
-    return _assistant(texts.join('\n'), calls.isEmpty ? null : calls);
+    return _assistant(
+      texts.join('\n'),
+      calls.isEmpty ? null : calls,
+      reasoning: reasoning.toString(),
+      reasoningBlocks: reasoningBlocks.isEmpty ? null : reasoningBlocks,
+    );
   }
 
   // ---- 共用 ----
 
   static Map<String, dynamic> _assistant(
     String content,
-    List<Map<String, dynamic>>? calls,
-  ) {
+    List<Map<String, dynamic>>? calls, {
+    String reasoning = '',
+    List<Map<String, dynamic>>? reasoningBlocks,
+  }) {
     if (content.isEmpty && (calls == null || calls.isEmpty)) {
       throw const AiException('AI 接口返回了无法解析的内容');
     }
@@ -522,6 +663,8 @@ abstract final class AiService {
       'role': 'assistant',
       'content': content.isEmpty ? null : content,
       'tool_calls': ?calls,
+      if (reasoning.isNotEmpty) 'reasoning_content': reasoning,
+      'reasoning_blocks': ?reasoningBlocks,
     };
   }
 
@@ -609,7 +752,7 @@ abstract final class AiService {
   }) async* {
     final endpoint = endpointFor(baseUrl, protocol);
     if (endpoint.isEmpty) {
-      throw const AiException('请先在设置中配置 AI 接口地址');
+      throw const AiException('请先在设置中填写 AI 接口地址');
     }
     final uri = Uri.parse(endpoint);
     final history = <Map<String, dynamic>>[
@@ -749,6 +892,471 @@ class AiException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// 一轮 SSE 的增量累积器：只做解码，不做 IO。
+///
+/// 增量事件只用于显示，完成事件里的结果才是这一轮的权威值。
+class _StreamState {
+  _StreamState(this.protocol, String model) : _model = model;
+
+  final AiProtocol protocol;
+  String _model;
+
+  final StringBuffer _text = StringBuffer();
+  final StringBuffer _reasoning = StringBuffer();
+  final List<_ToolCall> _tools = [];
+  Map<String, dynamic> _usage = const {};
+  Map<String, dynamic>? _finalResponse;
+  bool _completed = false;
+
+  /// Messages 的内容块按出现顺序保存，收尾时整块交给 `_decodeMessages`。
+  final List<Map<String, dynamic>> _blocks = [];
+  final Map<int, Map<String, dynamic>> _blocksByIndex = {};
+  final Map<int, StringBuffer> _partialJson = {};
+
+  List<AiTurnEvent> feed(String raw) {
+    if (_completed) return const [];
+    final line = raw.trim();
+    if (line.isEmpty || line.startsWith(':') || line.startsWith('event:')) {
+      return const [];
+    }
+    if (!line.startsWith('data:')) return const [];
+    final payload = line.substring(5).trim();
+    if (payload.isEmpty) return const [];
+    if (payload == '[DONE]') return finish();
+    Object? decoded;
+    try {
+      decoded = jsonDecode(payload);
+    } on FormatException {
+      return const [];
+    }
+    if (decoded is! Map<String, dynamic>) return const [];
+    return switch (protocol) {
+      AiProtocol.chat => _feedChat(decoded),
+      AiProtocol.responses => _feedResponses(decoded),
+      AiProtocol.messages => _feedMessages(decoded),
+    };
+  }
+
+  List<AiTurnEvent> finish() {
+    if (_completed) return const [];
+    _completed = true;
+    return switch (protocol) {
+      AiProtocol.chat => [AiTurnCompleted(_chatResult())],
+      AiProtocol.responses => [AiTurnCompleted(_responsesResult())],
+      AiProtocol.messages => [AiTurnCompleted(_messagesResult())],
+    };
+  }
+
+  // ---- Chat ----
+
+  List<AiTurnEvent> _feedChat(Map<String, dynamic> data) {
+    final events = <AiTurnEvent>[];
+    _captureModel(data['model']);
+    _mergeUsage(data['usage']);
+    final choices = data['choices'];
+    if (choices is! List || choices.isEmpty) return events;
+    final first = choices.first;
+    if (first is! Map) return events;
+    final delta = first['delta'];
+    if (delta is! Map) return events;
+    final reasoning = _firstText([
+      delta['reasoning_content'],
+      delta['reasoning'],
+    ]);
+    if (reasoning.isNotEmpty) {
+      _reasoning.write(reasoning);
+      events.add(AiReasoningDelta(reasoning));
+    }
+    final content = delta['content'];
+    if (content is String && content.isNotEmpty) {
+      _text.write(content);
+      events.add(AiContentDelta(content));
+    }
+    final calls = delta['tool_calls'];
+    if (calls is! List) return events;
+    for (final entry in calls) {
+      if (entry is! Map) continue;
+      final index = entry['index'];
+      final tool = _tool('chat:${index is int ? index : _tools.length}');
+      final id = entry['id'];
+      if (id is String && id.isNotEmpty) tool.id = id;
+      final function = entry['function'];
+      if (function is! Map) continue;
+      final name = function['name'];
+      if (name is String && name.isNotEmpty && tool.name.isEmpty) {
+        tool.name = name;
+        events.add(AiToolCallStarted(index: tool.position, name: name));
+      }
+      final arguments = function['arguments'];
+      if (arguments is String) tool.arguments.write(arguments);
+    }
+    return events;
+  }
+
+  AiChatResult _chatResult() {
+    final calls = <Map<String, dynamic>>[
+      for (final tool in _tools)
+        if (tool.name.isNotEmpty) tool.toChatCall(),
+    ];
+    return AiChatResult.fromMessage(
+      model: _model,
+      message: AiService._assistant(
+        _text.toString(),
+        calls.isEmpty ? null : calls,
+        reasoning: _reasoning.toString(),
+      ),
+      usage: _usageOrNull,
+    );
+  }
+
+  // ---- Responses ----
+
+  List<AiTurnEvent> _feedResponses(Map<String, dynamic> data) {
+    final events = <AiTurnEvent>[];
+    switch (data['type']) {
+      case 'response.created':
+        final response = data['response'];
+        if (response is Map) _captureModel(response['model']);
+      case 'response.reasoning_summary_text.delta':
+      case 'response.reasoning_text.delta':
+        final delta = data['delta'];
+        if (delta is String && delta.isNotEmpty) {
+          _reasoning.write(delta);
+          events.add(AiReasoningDelta(delta));
+        }
+      case 'response.output_text.delta':
+        final delta = data['delta'];
+        if (delta is String && delta.isNotEmpty) {
+          _text.write(delta);
+          events.add(AiContentDelta(delta));
+        }
+      case 'response.output_item.added':
+        events.addAll(_outputItemAdded(data));
+      case 'response.function_call_arguments.delta':
+        final delta = data['delta'];
+        if (delta is String && delta.isNotEmpty) {
+          _tool(_responseSlot(null, data)).arguments.write(delta);
+        }
+      case 'response.completed':
+        final response = data['response'];
+        if (response is Map) {
+          _captureModel(response['model']);
+          _mergeUsage(response['usage']);
+          _finalResponse = Map<String, dynamic>.from(response);
+        }
+        return events..addAll(finish());
+      case 'response.failed':
+      case 'error':
+        throw AiException(_streamError(data));
+      default:
+        break;
+    }
+    return events;
+  }
+
+  List<AiTurnEvent> _outputItemAdded(Map<String, dynamic> data) {
+    final item = data['item'];
+    if (item is! Map || item['type'] != 'function_call') return const [];
+    final tool = _tool(_responseSlot(item, data));
+    final id = _firstText([item['call_id'], item['id']]);
+    if (id.isNotEmpty) tool.id = id;
+    final arguments = item['arguments'];
+    if (arguments is String) tool.arguments.write(arguments);
+    final name = item['name'];
+    if (name is! String || name.isEmpty || tool.name.isNotEmpty) {
+      return const [];
+    }
+    tool.name = name;
+    return [AiToolCallStarted(index: tool.position, name: name)];
+  }
+
+  /// 工具调用的稳定键：优先 item id，其次 output_index。
+  String _responseSlot(Map? item, Map<String, dynamic> data) {
+    final id = _firstText([if (item != null) item['id'], data['item_id']]);
+    if (id.isNotEmpty) return 'item:$id';
+    final index = data['output_index'];
+    return 'output:${index is int ? index : _tools.length}';
+  }
+
+  AiChatResult _responsesResult() {
+    final finalResponse = _finalResponse;
+    final reply = finalResponse != null
+        ? AiService._decodeResponses(finalResponse)
+        : AiService._decodeResponses({'output': _assembledOutput()});
+    // 上游可能不返回 reasoning 项：用已经收到的摘要补齐本轮思考文本。
+    if ((reply['reasoning_content'] as String?)?.isNotEmpty != true &&
+        _reasoning.isNotEmpty) {
+      reply['reasoning_content'] = _reasoning.toString();
+    }
+    return AiChatResult.fromMessage(
+      model: _model,
+      message: reply,
+      usage: _usageOrNull,
+    );
+  }
+
+  List<Map<String, dynamic>> _assembledOutput() => [
+    if (_reasoning.isNotEmpty)
+      {
+        'type': 'reasoning',
+        'summary': [
+          {'type': 'summary_text', 'text': _reasoning.toString()},
+        ],
+      },
+    if (_text.isNotEmpty)
+      {
+        'type': 'message',
+        'content': [
+          {'type': 'output_text', 'text': _text.toString()},
+        ],
+      },
+    for (final tool in _tools)
+      if (tool.name.isNotEmpty)
+        {
+          'type': 'function_call',
+          'call_id': tool.id,
+          'name': tool.name,
+          'arguments': tool.argumentsText,
+        },
+  ];
+
+  // ---- Messages ----
+
+  List<AiTurnEvent> _feedMessages(Map<String, dynamic> data) {
+    final events = <AiTurnEvent>[];
+    switch (data['type']) {
+      case 'message_start':
+        _messageStart(data);
+      case 'content_block_start':
+        events.addAll(_contentBlockStart(data));
+      case 'content_block_delta':
+        events.addAll(_contentBlockDelta(data));
+      case 'content_block_stop':
+        _contentBlockStop(data);
+      case 'message_delta':
+        _mergeUsage(data['usage']);
+      case 'message_stop':
+        return events..addAll(finish());
+      case 'error':
+        throw AiException(_streamError(data));
+      default:
+        break;
+    }
+    return events;
+  }
+
+  void _messageStart(Map<String, dynamic> data) {
+    final message = data['message'];
+    if (message is! Map) return;
+    _captureModel(message['model']);
+    _mergeUsage(message['usage']);
+  }
+
+  List<AiTurnEvent> _contentBlockStart(Map<String, dynamic> data) {
+    final index = data['index'];
+    final block = data['content_block'];
+    if (index is! int || block is! Map) return const [];
+    switch (block['type']) {
+      case 'thinking':
+        final initial = block['thinking'];
+        final stored = <String, dynamic>{
+          'type': 'thinking',
+          'thinking': initial is String ? initial : '',
+        };
+        _blocksByIndex[index] = stored;
+        _blocks.add(stored);
+        if (initial is! String || initial.isEmpty) return const [];
+        _reasoning.write(initial);
+        return [AiReasoningDelta(initial)];
+      case 'redacted_thinking':
+        final redacted = block['data'];
+        final stored = <String, dynamic>{
+          'type': 'redacted_thinking',
+          'data': redacted is String ? redacted : '',
+        };
+        _blocksByIndex[index] = stored;
+        _blocks.add(stored);
+      case 'text':
+        final initial = block['text'];
+        final stored = <String, dynamic>{
+          'type': 'text',
+          'text': initial is String ? initial : '',
+        };
+        _blocksByIndex[index] = stored;
+        _blocks.add(stored);
+        if (initial is! String || initial.isEmpty) return const [];
+        _text.write(initial);
+        return [AiContentDelta(initial)];
+      case 'tool_use':
+        final tool = _tool('block:$index');
+        final input = block['input'];
+        final stored = <String, dynamic>{
+          'type': 'tool_use',
+          'id': block['id'] is String ? block['id'] : '',
+          'name': block['name'] is String ? block['name'] : '',
+          'input': input is Map
+              ? Map<String, dynamic>.from(input)
+              : const <String, dynamic>{},
+        };
+        _blocksByIndex[index] = stored;
+        _blocks.add(stored);
+        final id = block['id'];
+        if (id is String && id.isNotEmpty) tool.id = id;
+        if (input is Map && input.isNotEmpty) {
+          tool.arguments.write(jsonEncode(input));
+        }
+        final name = block['name'];
+        if (name is! String || name.isEmpty) return const [];
+        tool.name = name;
+        return [AiToolCallStarted(index: tool.position, name: name)];
+      default:
+        break;
+    }
+    return const [];
+  }
+
+  List<AiTurnEvent> _contentBlockDelta(Map<String, dynamic> data) {
+    final index = data['index'];
+    final delta = data['delta'];
+    if (index is! int || delta is! Map) return const [];
+    final target = _blocksByIndex[index];
+    switch (delta['type']) {
+      case 'thinking_delta':
+        final thinking = delta['thinking'];
+        if (thinking is! String || thinking.isEmpty) return const [];
+        _reasoning.write(thinking);
+        if (target != null && target['type'] == 'thinking') {
+          target['thinking'] = '${target['thinking']}$thinking';
+        }
+        return [AiReasoningDelta(thinking)];
+      case 'signature_delta':
+        final signature = delta['signature'];
+        if (signature is String &&
+            signature.isNotEmpty &&
+            target != null &&
+            target['type'] == 'thinking') {
+          target['signature'] = signature;
+        }
+      case 'text_delta':
+        final text = delta['text'];
+        if (text is! String || text.isEmpty) return const [];
+        _text.write(text);
+        if (target != null && target['type'] == 'text') {
+          target['text'] = '${target['text']}$text';
+        }
+        return [AiContentDelta(text)];
+      case 'input_json_delta':
+        final partial = delta['partial_json'];
+        if (partial is String && partial.isNotEmpty) {
+          (_partialJson[index] ??= StringBuffer()).write(partial);
+        }
+      default:
+        break;
+    }
+    return const [];
+  }
+
+  void _contentBlockStop(Map<String, dynamic> data) {
+    final index = data['index'];
+    if (index is! int) return;
+    final partial = _partialJson.remove(index);
+    final block = _blocksByIndex[index];
+    if (block == null || block['type'] != 'tool_use') return;
+    if (partial == null) return;
+    block['input'] = _decodeToolInput(partial.toString());
+  }
+
+  AiChatResult _messagesResult() {
+    final content = _blocks.isNotEmpty
+        ? _blocks
+        : <Map<String, dynamic>>[
+            if (_text.isNotEmpty) {'type': 'text', 'text': _text.toString()},
+            for (final tool in _tools)
+              if (tool.name.isNotEmpty)
+                {
+                  'type': 'tool_use',
+                  'id': tool.id,
+                  'name': tool.name,
+                  'input': _decodeToolInput(tool.argumentsText),
+                },
+          ];
+    return AiChatResult.fromMessage(
+      model: _model,
+      message: AiService._decodeMessages({'content': content}),
+      usage: _usageOrNull,
+    );
+  }
+
+  static Map<String, dynamic> _decodeToolInput(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } on FormatException {
+      // 参数不是完整 JSON 时按空对象，交给上游报校验错误。
+    }
+    return const {};
+  }
+
+  // ---- 共用 ----
+
+  Map<String, dynamic>? get _usageOrNull => _usage.isEmpty ? null : _usage;
+
+  void _captureModel(Object? value) {
+    if (value is String && value.isNotEmpty) _model = value;
+  }
+
+  void _mergeUsage(Object? usage) {
+    if (usage is! Map) return;
+    _usage = {..._usage, ...Map<String, dynamic>.from(usage)};
+  }
+
+  _ToolCall _tool(String slot) {
+    for (final tool in _tools) {
+      if (tool.slot == slot) return tool;
+    }
+    final tool = _ToolCall(slot, _tools.length);
+    _tools.add(tool);
+    return tool;
+  }
+
+  static String _firstText(List<Object?> values) {
+    for (final value in values) {
+      if (value is String && value.isNotEmpty) return value;
+    }
+    return '';
+  }
+
+  static String _streamError(Map<String, dynamic> data) {
+    final error = data['error'];
+    if (error is Map && error['message'] is String) {
+      return error['message'] as String;
+    }
+    if (data['message'] is String) return data['message'] as String;
+    return 'AI 接口返回了无法解析的内容';
+  }
+}
+
+/// 一个正在累积的工具调用。[position] 是本轮内的出现顺序。
+class _ToolCall {
+  _ToolCall(this.slot, this.position);
+
+  final String slot;
+  final int position;
+  String id = '';
+  String name = '';
+  final StringBuffer arguments = StringBuffer();
+
+  String get argumentsText => arguments.isEmpty ? '{}' : arguments.toString();
+
+  Map<String, dynamic> toChatCall() => {
+    'id': id.isEmpty ? AiService._synthesizeId(name) : id,
+    'type': 'function',
+    'function': {'name': name, 'arguments': argumentsText},
+  };
 }
 
 /// 栅栏信息行 ```lang:path → 语言部分。
