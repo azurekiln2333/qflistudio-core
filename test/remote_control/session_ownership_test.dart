@@ -105,6 +105,20 @@ void _expectOutput(SessionView view, String kind, String text) {
   }
 }
 
+Future<void> _pumpSession(WidgetTester tester) => pumpRemoteRoute(
+  tester,
+  find.byType(SessionScreen, skipOffstage: false),
+  ready: () =>
+      tester.widget<SessionScreen>(find.byType(SessionScreen)).view.loaded,
+);
+
+Future<void> _pumpHost(WidgetTester tester) => pumpRemoteRoute(
+  tester,
+  find.text('host'),
+  ready: () =>
+      find.byType(SessionScreen, skipOffstage: false).evaluate().isEmpty,
+);
+
 void main() {
   for (final kind in <String>['terminal', 'claude']) {
     testWidgets('$kind replacement retains streaming and replay ownership', (
@@ -127,7 +141,7 @@ void main() {
         builder: (_) => SessionScreen(controller: controller, view: view),
       );
       unawaited(navigator.currentState!.push(route()));
-      await tester.pumpAndSettle();
+      await _pumpSession(tester);
       first.output('a', kind, 1, 'first');
       await tester.pump();
       expect(view.lastSeq, 1);
@@ -145,12 +159,12 @@ void main() {
       await tester.pump();
       expect(second.requests('subscribe'), hasLength(1));
       expect(second.requests('subscribe').single['afterSeq'], 1);
-      await tester.pumpAndSettle();
+      await _pumpSession(tester);
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(second.requests('unsubscribe'), isEmpty);
       second.output('a', kind, 1, 'duplicate');
       second.output('a', kind, 2, 'survived');
-      await tester.pumpAndSettle();
+      await _pumpSession(tester);
       expect(view.lastSeq, 2);
       _expectOutput(view, kind, 'survived');
       if (kind == 'terminal') {
@@ -167,7 +181,7 @@ void main() {
       }
 
       navigator.currentState!.pop();
-      await tester.pumpAndSettle();
+      await _pumpHost(tester);
       expect(second.requests('unsubscribe'), hasLength(1));
       controller.connect();
       await tester.pump();
@@ -207,7 +221,7 @@ void main() {
       ),
     );
     push('a');
-    await tester.pumpAndSettle();
+    await _pumpSession(tester);
     navigator.currentState!.pop();
     push('b');
     await tester.pump();
@@ -215,16 +229,16 @@ void main() {
     navigator.currentState!.pop();
     push('a');
     await tester.pump();
-    await tester.pumpAndSettle();
+    await _pumpSession(tester);
     expect(agent.subscribed, <String>{'a'});
     expect(agent.requests('unsubscribe').map((r) => r['sessionId']), <String>[
       'b',
     ]);
     agent.output('a', 'claude', 1, 'returned');
-    await tester.pumpAndSettle();
+    await _pumpSession(tester);
     expect(find.text('returned'), findsOneWidget);
     navigator.currentState!.pop();
-    await tester.pumpAndSettle();
+    await _pumpHost(tester);
     expect(agent.requests('unsubscribe').map((r) => r['sessionId']), <String>[
       'b',
       'a',

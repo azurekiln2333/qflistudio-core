@@ -231,6 +231,31 @@ Future<_Harness> _connect(
 /// widgets; the card is only painted by the dashboard itself.
 Finder _sessionCard(String title) => find.widgetWithText(SessionCard, title);
 
+Future<void> _pumpDashboard(WidgetTester tester, RemoteController controller) =>
+    pumpRemoteRoute(
+      tester,
+      _sessionCard('桌面终端'),
+      ready: () =>
+          controller.isOnline &&
+          controller.session(_terminalSessionId) != null &&
+          controller.session(_claudeSessionId) != null &&
+          find.byType(SessionScreen, skipOffstage: false).evaluate().isEmpty,
+    );
+
+Future<void> _pumpSession(WidgetTester tester) => pumpRemoteRoute(
+  tester,
+  find.byType(SessionScreen, skipOffstage: false),
+  ready: () =>
+      tester.widget<SessionScreen>(find.byType(SessionScreen)).view.loaded,
+);
+
+Future<void> _pumpHost(WidgetTester tester) => pumpRemoteRoute(
+  tester,
+  find.text('Studio 主页'),
+  ready: () =>
+      find.byType(RemoteComputerPage, skipOffstage: false).evaluate().isEmpty,
+);
+
 void main() {
   // ---------------------------------------------------------------------------
   // R1: Claude structured sessions are never terminals
@@ -251,12 +276,12 @@ void main() {
         await tester.pumpWidget(
           TestRemoteApp(store: h.store, controller: h.remote),
         );
-        await tester.pumpAndSettle();
+        await _pumpDashboard(tester, h.remote);
 
         // --- the user watches a Herdr pane in the terminal session first, which
         // gives the module both an active focused pane and a remembered pane.
         await tester.tap(_sessionCard('桌面终端'));
-        await tester.pumpAndSettle();
+        await _pumpSession(tester);
         expect(find.byType(SessionScreen), findsOneWidget);
         expect(find.byType(HerdrTerminalRows), findsOneWidget);
         expect(
@@ -267,7 +292,11 @@ void main() {
 
         // The user taps the other pane, as a chip tap does.
         await tester.tap(find.text('scratch'));
-        await tester.pumpAndSettle();
+        await pumpRemoteUntil(
+          tester,
+          () => h.watchFrames.last == _paneB,
+          reason: 'the selected pane receives the watch',
+        );
         expect(
           h.watchFrames.last,
           _paneB,
@@ -276,7 +305,7 @@ void main() {
 
         // Leaving the session stops its stream but keeps the choice.
         await tester.pageBack();
-        await tester.pumpAndSettle();
+        await _pumpDashboard(tester, h.remote);
         expect(_sessionCard('Claude 会话'), findsOneWidget);
         expect(
           h.watchFrames.last,
@@ -288,7 +317,7 @@ void main() {
 
         // --- now open the Claude session. It must receive no Herdr controller.
         await tester.tap(_sessionCard('Claude 会话'));
-        await tester.pumpAndSettle();
+        await _pumpSession(tester);
         expect(find.byType(SessionScreen), findsOneWidget);
         expect(
           find.byType(HerdrTerminalRows),
@@ -311,7 +340,11 @@ void main() {
         await tester.enterText(find.byType(TextField), '只发给 Claude 的消息');
         await tester.pump();
         await tester.tap(find.byTooltip('发送'));
-        await tester.pumpAndSettle();
+        await pumpRemoteUntil(
+          tester,
+          () => h.sends.length == 1,
+          reason: 'the Claude send reaches the agent',
+        );
 
         expect(h.sends, hasLength(1), reason: 'exactly one Claude send');
         expect(h.sends.single['sessionId'], _claudeSessionId);
@@ -781,7 +814,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Studio 主页'), findsOneWidget);
       await tester.tap(find.text('远程电脑'));
-      await tester.pumpAndSettle();
+      if (controller != null && controller.pairing != null) {
+        await _pumpDashboard(tester, controller);
+      } else {
+        await pumpRemoteRoute(tester, find.byType(PairScreen));
+      }
       expect(find.byType(RemoteComputerPage), findsOneWidget);
     }
 
@@ -808,7 +845,7 @@ void main() {
           );
 
           await tester.tap(find.byTooltip(moduleExitLabel));
-          await tester.pumpAndSettle();
+          await _pumpHost(tester);
 
           expect(find.text('Studio 主页'), findsOneWidget);
           expect(find.byType(RemoteComputerPage), findsNothing);
@@ -862,7 +899,7 @@ void main() {
           addTearDown(notices.cancel);
 
           await tester.tap(find.byTooltip(moduleExitLabel));
-          await tester.pumpAndSettle();
+          await _pumpHost(tester);
 
           expect(find.text('Studio 主页'), findsOneWidget);
           expect(find.byType(RemoteComputerPage), findsNothing);
@@ -884,7 +921,13 @@ void main() {
       await open(tester, store: h.store, controller: h.remote);
 
       await tester.tap(find.byTooltip('工作空间'));
-      await tester.pumpAndSettle();
+      await pumpRemoteUntil(
+        tester,
+        () =>
+            find.byType(NavigationDrawer).evaluate().length == 1 &&
+            tester.getTopLeft(find.byType(NavigationDrawer)).dx.abs() < 0.5,
+        reason: 'the drawer has fully entered the viewport',
+      );
       expect(find.byType(NavigationDrawer), findsOneWidget);
       expect(
         find.text(moduleExitLabel),
@@ -893,7 +936,7 @@ void main() {
       );
 
       await tester.tap(find.text(moduleExitLabel));
-      await tester.pumpAndSettle();
+      await _pumpHost(tester);
       expect(find.text('Studio 主页'), findsOneWidget);
       expect(
         h.socket.requests.where((r) => r['type'] == 'close_session'),
@@ -915,7 +958,7 @@ void main() {
       );
 
       await tester.tap(find.byTooltip(moduleExitLabel));
-      await tester.pumpAndSettle();
+      await _pumpDashboard(tester, h.remote);
       expect(exited, 1, reason: 'the host callback is authoritative');
       expect(
         find.byType(RemoteComputerPage),
@@ -934,7 +977,7 @@ void main() {
       // The exit controls sit outside the inner navigator: a nested remote page
       // keeps its own back affordance, and leaving it lands on the dashboard.
       await tester.tap(_sessionCard('桌面终端'));
-      await tester.pumpAndSettle();
+      await _pumpSession(tester);
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(find.byType(HomeScreen), findsOneWidget);
       expect(
@@ -944,7 +987,7 @@ void main() {
       );
 
       await tester.pageBack();
-      await tester.pumpAndSettle();
+      await _pumpDashboard(tester, h.remote);
       expect(_sessionCard('桌面终端'), findsOneWidget);
       expect(find.byTooltip(moduleExitLabel), findsOneWidget);
       expect(

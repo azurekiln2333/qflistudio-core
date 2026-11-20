@@ -246,7 +246,11 @@ void main() {
         expect(body['messages'], [
           {'role': 'assistant', 'content': 'answer'},
         ]);
-        return http.Response(jsonEncode(_relayResult), 200, encoding: utf8);
+        return http.Response.bytes(
+          utf8.encode(jsonEncode(_relayResult)),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
       }),
     );
     await api.aiChat(token: 'fixture', messages: history);

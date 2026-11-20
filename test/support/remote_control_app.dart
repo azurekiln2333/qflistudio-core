@@ -17,6 +17,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/remote_control/remote_computer_page.dart';
 import 'package:qfli_studio_core/remote_control/state/remote_controller.dart';
 import 'package:qfli_studio_core/remote_control/state/remote_store.dart';
@@ -26,6 +27,48 @@ ThemeData remoteTestTheme() => ThemeData(
   colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFC15F3C)),
   useMaterial3: true,
 );
+
+/// Wait for a specific observable result while live sessions keep animating.
+/// `pumpAndSettle` cannot finish while a running-session spinner is mounted.
+Future<void> pumpRemoteUntil(
+  WidgetTester tester,
+  bool Function() ready, {
+  required String reason,
+}) async {
+  for (var frame = 0; frame < 100; frame += 1) {
+    await tester.pump(const Duration(milliseconds: 20));
+    if (ready()) return;
+  }
+  expect(ready(), isTrue, reason: reason);
+}
+
+/// Preserve real route transitions without waiting for unrelated busy spinners.
+Future<void> pumpRemoteRoute(
+  WidgetTester tester,
+  Finder page, {
+  bool Function()? ready,
+}) => pumpRemoteUntil(tester, () {
+  final elements = page.evaluate().toList();
+  if (elements.length != 1) return false;
+  final route = ModalRoute.of(elements.single);
+  if (route == null) return false;
+  final routes = <ModalRoute<dynamic>>{route};
+  // The dashboard has an inner Navigator. Its first route can be ready while
+  // the host is still animating the module into view.
+  elements.single.visitAncestorElements((element) {
+    final ancestor = ModalRoute.of(element);
+    if (ancestor != null) routes.add(ancestor);
+    return true;
+  });
+  return routes.every(
+        (route) =>
+            route.isCurrent &&
+            route.animation?.status == AnimationStatus.completed &&
+            (route.secondaryAnimation == null ||
+                route.secondaryAnimation!.status == AnimationStatus.dismissed),
+      ) &&
+      (ready?.call() ?? true);
+}, reason: 'Expected one ready, fully transitioned route for $page');
 
 /// One `MaterialApp` plus the module's page: the shell the host provides.
 ///
