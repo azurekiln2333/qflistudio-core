@@ -5,11 +5,12 @@ import 'package:flutter/material.dart';
 
 import '../git/git_branch_label.dart';
 import '../models/project.dart';
+import '../i18n/studio_localizations.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
 import 'language_badge.dart';
 
-enum ProjectCardAction { open, reveal, remove, favorite, export }
+enum ProjectCardAction { open, reveal, remove, favorite, export, share }
 
 /// 主页的项目卡片 — MD3 outlined 风格。
 class ProjectCard extends StatefulWidget {
@@ -20,6 +21,7 @@ class ProjectCard extends StatefulWidget {
     required this.onRemove,
     this.onToggleFavorite,
     this.onExport,
+    this.onShare,
     this.cloudBusy = false,
     this.gitRefreshRevision = 0,
   });
@@ -31,6 +33,9 @@ class ProjectCard extends StatefulWidget {
 
   /// 本地项目压缩导出；仅在项目目录存在时显示。
   final VoidCallback? onExport;
+
+  /// R5/R6: ZIP sharing is separate from import-compatible archive export.
+  final VoidCallback? onShare;
 
   final bool cloudBusy;
 
@@ -70,7 +75,8 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
     }
     if (oldWidget.project.path != widget.project.path ||
         oldWidget.project.isCloud != widget.project.isCloud ||
-        (oldWidget.onExport == null) != (widget.onExport == null)) {
+        (oldWidget.onExport == null) != (widget.onExport == null) ||
+        (oldWidget.onShare == null) != (widget.onShare == null)) {
       _canExport = false;
       unawaited(_refreshExportAvailability());
     }
@@ -103,7 +109,10 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshExportAvailability() async {
-    if (widget.onExport == null || widget.project.isCloud) return;
+    if ((widget.onExport == null && widget.onShare == null) ||
+        widget.project.isCloud) {
+      return;
+    }
     final path = widget.project.path;
     final exists = await Directory(path).exists();
     if (!mounted || widget.project.path != path) return;
@@ -126,6 +135,7 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final project = widget.project;
+    final l10n = StudioLocalizations.of(context);
 
     // 云端项目用 tertiary 色系区分。
     final iconBg = project.isCloud
@@ -329,6 +339,8 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                         widget.onToggleFavorite?.call(!project.favorite);
                       case ProjectCardAction.export:
                         widget.onExport?.call();
+                      case ProjectCardAction.share:
+                        widget.onShare?.call();
                     }
                   },
                   itemBuilder: (context) => [
@@ -378,6 +390,21 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                             Icon(Icons.archive_outlined, size: 20),
                             SizedBox(width: 12),
                             Text('压缩导出项目'),
+                          ],
+                        ),
+                      ),
+                    // R5/R6: cloud sharing downloads a complete snapshot first.
+                    if (widget.onShare != null &&
+                        !project.isCloud &&
+                        _canExport)
+                      PopupMenuItem(
+                        value: ProjectCardAction.share,
+                        enabled: !widget.cloudBusy,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.share_outlined, size: 20),
+                            const SizedBox(width: 12),
+                            Flexible(child: Text(l10n.shareProjectZip)),
                           ],
                         ),
                       ),

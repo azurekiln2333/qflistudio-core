@@ -11,6 +11,7 @@ import '../editor/retained_editor_host.dart';
 import '../models/project.dart';
 import '../config/api_config.dart';
 import '../services/cloud_project_actions.dart';
+import '../services/archive_share_service.dart';
 import '../services/app_paths.dart';
 import '../services/api_client.dart';
 import '../services/cloud_sync_service.dart';
@@ -1134,11 +1135,73 @@ class _HomeTabState extends State<HomeTab>
       onExport: project.isCloud
           ? null
           : () => unawaited(_exportProjectArchive(project)),
+      // R5/R6: sharing ZIP does not replace import-compatible .qsz export.
+      onShare: project.isCloud ? null : () => unawaited(_shareProject(project)),
       cloudBusy:
           project.isCloud &&
           (_cloudActions.isBusy(project) ||
               _deletingCloudProjects.contains(project.id)),
     );
+  }
+
+  // R5/R6: capture the account generation before download/ZIP/native handoff.
+  Future<void> _shareProject(Project project) async {
+    if (_archiveBusyLabel != null) return;
+    final l10n = StudioLocalizations.of(context);
+    if (project.isCloud) return;
+    bool current() => mounted;
+    setState(() => _archiveBusyLabel = l10n.preparingProjectShare);
+    try {
+      final result = await ArchiveShareService.shareProject(project);
+      if (!mounted || !current()) return;
+      if (result.status == ArchiveShareStatus.shared) {
+        _showArchiveMessage(l10n.projectShareHandedOff);
+        return;
+      }
+      // Unsupported is not success. Keep the finished ZIP and let the user save
+      // that exact archive instead of downloading/compressing a second time.
+      final save = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(l10n.shareUnsupportedTitle),
+          content: Text(l10n.shareUnsupportedMessage),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(l10n.saveZip),
+            ),
+          ],
+        ),
+      );
+      if (save != true || !current()) return;
+      final location = await PickerService.saveDocument(
+        suggestedName: p.basename(result.path),
+      );
+      if (location == null || !current()) return;
+      final path = location.path;
+      if (path != null && path.isNotEmpty) {
+        // Write exactly the path confirmed by the system picker. Do not append an
+        // extension and accidentally overwrite an unconfirmed sibling file.
+        if (!p.equals(p.absolute(path), p.absolute(result.path))) {
+          await File(result.path).copy(path);
+        }
+      } else if (location.uri case final uri? when uri.isNotEmpty) {
+        final bytes = await File(result.path).readAsBytes();
+        if (!current()) return;
+        await PickerService.writeUri(uri, bytes);
+      } else {
+        throw const FileSystemException('No writable destination');
+      }
+      if (current()) _showArchiveMessage(l10n.zipSaved);
+    } catch (_) {
+      if (current()) _showArchiveMessage(l10n.projectShareFailed);
+    } finally {
+      if (mounted) setState(() => _archiveBusyLabel = null);
+    }
   }
 
   // R3: do not promise local recycle-bin recovery for permanent remote deletion.

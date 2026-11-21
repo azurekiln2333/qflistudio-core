@@ -197,10 +197,7 @@ void main() {
         expect(find.text('Imported').hitTestable(), findsOneWidget);
         // The imported project is unstarred, so it can only be on screen if the
         // flow really switched to the all-projects scope.
-        expect(
-          tester.widget<TabBar>(find.byType(TabBar)).controller!.index,
-          2,
-        );
+        expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 2);
         expect(
           find.byKey(const ValueKey('home-scope-page-all')).hitTestable(),
           findsOneWidget,
@@ -218,6 +215,104 @@ void main() {
       },
     );
   }
+
+  testWidgets('R5 Home shares a retained ZIP without changing the project', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester, root);
+    String? shared;
+    String? mimeType;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'shareFile') {
+        final arguments = call.arguments as Map;
+        shared = arguments['path'] as String;
+        mimeType = arguments['mimeType'] as String;
+        return true;
+      }
+      return null;
+    });
+    await _share(tester);
+    await _waitFor(
+      tester,
+      () =>
+          shared != null &&
+          find
+              .byKey(const ValueKey('project-archive-progress'))
+              .evaluate()
+              .isEmpty,
+    );
+    expect(shared, endsWith('.zip'));
+    expect(mimeType, 'application/zip');
+    expect(File(shared!).existsSync(), isTrue);
+    expect(
+      File(p.join(fixture.project.path, 'Main.java')).existsSync(),
+      isTrue,
+    );
+    expect(fixture.projects.projects, hasLength(1));
+    final archive = ZipDecoder().decodeBytes(File(shared!).readAsBytesSync());
+    expect(
+      archive.files.any((entry) => entry.name.endsWith('Main.java')),
+      isTrue,
+    );
+    expect(find.textContaining('已交给系统分享'), findsOneWidget);
+  });
+
+  testWidgets('R5 unsupported sharing offers saving the exact retained ZIP', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester, root);
+    final destination = p.join(fixture.directory.path, 'saved.zip');
+    String? shared;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'shareFile') {
+        shared = (call.arguments as Map)['path'] as String;
+        return false;
+      }
+      if (call.method == 'saveDocument') return {'path': destination};
+      return null;
+    });
+    await _share(tester);
+    await _waitFor(tester, () => find.text('系统暂不支持文件分享').evaluate().isNotEmpty);
+    expect(find.textContaining('已交给系统分享'), findsNothing);
+    await tester.tap(find.text('保存 ZIP'));
+    await _waitFor(tester, () => File(destination).existsSync());
+    expect(
+      File(destination).readAsBytesSync(),
+      File(shared!).readAsBytesSync(),
+    );
+    expect(File(shared!).existsSync(), isTrue);
+    expect(
+      File(p.join(fixture.project.path, 'Main.java')).existsSync(),
+      isTrue,
+    );
+  });
+
+  testWidgets('R5 dismissing unsupported share keeps source and ZIP', (
+    tester,
+  ) async {
+    final fixture = await _mount(tester, root);
+    String? shared;
+    var saves = 0;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'shareFile') {
+        shared = (call.arguments as Map)['path'] as String;
+        return false;
+      }
+      if (call.method == 'saveDocument') saves++;
+      return null;
+    });
+    await _share(tester);
+    await _waitFor(tester, () => find.text('系统暂不支持文件分享').evaluate().isNotEmpty);
+    await tester.tap(find.text('取消'));
+    await _settle(tester);
+    expect(saves, 0);
+    expect(File(shared!).existsSync(), isTrue);
+    expect(
+      File(p.join(fixture.project.path, 'Main.java')).existsSync(),
+      isTrue,
+    );
+    expect(fixture.projects.projects, hasLength(1));
+  });
 
   testWidgets(
     'adding qsz suffix never overwrites an existing unconfirmed target',
@@ -385,6 +480,19 @@ void main() {
     }
     expect(tester.takeException(), isNull);
   });
+}
+
+Future<void> _share(WidgetTester tester) async {
+  await tester.runAsync(
+    () => Future<void>.delayed(const Duration(milliseconds: 20)),
+  );
+  await tester.pump();
+  await tester.tap(
+    find.byType(PopupMenuButton<ProjectCardAction>).hitTestable().first,
+  );
+  await _settle(tester);
+  await tester.tap(find.text('导出并分享 ZIP'));
+  await _settle(tester);
 }
 
 Future<_Fixture> _mount(

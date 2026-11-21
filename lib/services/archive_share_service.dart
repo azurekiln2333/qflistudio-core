@@ -22,6 +22,9 @@ class ArchiveShareResult {
 /// Selection/project ZIP preparation boundary for editor and Home.
 /// Cloud snapshots are C-owned and never mutate the editor working tree.
 abstract final class ArchiveShareService {
+  static Future<ArchiveShareResult> shareProject(Project project) =>
+      shareSelection(project, selectedPath: project.path);
+
   static Future<ArchiveShareResult> shareSelection(
     Project project, {
     required String selectedPath,

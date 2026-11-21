@@ -134,6 +134,15 @@ class StudioLocalizations {
   );
 
   // R5/R6: ZIP share is separate from the existing .qsz export.
+  String get shareProjectZip =>
+      _pick('导出并分享 ZIP', '匯出並分享 ZIP', 'Export and share ZIP');
+  String get preparingProjectShare =>
+      _pick('正在准备项目 ZIP…', '正在準備專案 ZIP…', 'Preparing project ZIP…');
+  String get projectShareHandedOff => _pick(
+    '已交给系统分享。是否发送由系统决定。',
+    '已交給系統分享。是否傳送由系統決定。',
+    'Handed off to system sharing. Sending is controlled by the system.',
+  );
   String get projectShareFailed =>
       _pick('无法导出或分享项目', '無法匯出或分享專案', 'Could not export or share the project');
   String get shareUnsupportedTitle =>
@@ -144,6 +153,8 @@ class StudioLocalizations {
     'The ZIP is ready. Save it to a file instead. The source project will not be deleted.',
   );
   String get saveZip => _pick('保存 ZIP', '儲存 ZIP', 'Save ZIP');
+  String get zipSaved => _pick('ZIP 已保存', 'ZIP 已儲存', 'ZIP saved');
+
   String _pick(String cn, String tw, String en) => isEnglish
       ? en
       : isTraditionalChinese

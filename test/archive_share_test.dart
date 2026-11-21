@@ -139,10 +139,7 @@ void main() {
         name: 'project',
         path: p.join(fixture.path, 'project'),
       );
-      final result = await ArchiveShareService.shareSelection(
-        project,
-        selectedPath: project.path,
-      );
+      final result = await ArchiveShareService.shareProject(project);
       expect(result.status, ArchiveShareStatus.shared);
       expect(request!.method, 'shareFile');
       expect((request!.arguments as Map)['mimeType'], 'application/zip');
@@ -169,15 +166,12 @@ void main() {
         name: 'project',
         path: p.join(fixture.path, 'project'),
       );
-      final result = await ArchiveShareService.shareSelection(
-        project,
-        selectedPath: project.path,
-      );
+      final result = await ArchiveShareService.shareProject(project);
       expect(result.status, ArchiveShareStatus.unsupported);
       expect(await File(result.path).exists(), isTrue);
       project.cloudId = 'proj_missing_snapshot';
       await expectLater(
-        ArchiveShareService.shareSelection(project, selectedPath: project.path),
+        ArchiveShareService.shareProject(project),
         throwsA(isA<ProjectZipException>()),
       );
       expect(
