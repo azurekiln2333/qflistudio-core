@@ -38,11 +38,12 @@ Future<({String name, String language, String type})> _prepareImportedProject(
   return (name: name, language: language, type: type);
 }
 
-({List<Project> projects, String? browsedId}) _readProjectRegistry(
-  ({String path, IosSandboxPaths? iosPaths}) input,
-) {
+({List<Project> projects, String? browsedId, Set<String> deletedCloud})
+_readProjectRegistry(({String path, IosSandboxPaths? iosPaths}) input) {
   final file = File(input.path);
-  if (!file.existsSync()) return (projects: <Project>[], browsedId: null);
+  if (!file.existsSync()) {
+    return (projects: <Project>[], browsedId: null, deletedCloud: <String>{});
+  }
   final data = jsonDecode(file.readAsStringSync());
   if (data is! Map || data['projects'] is! List) {
     throw const FormatException('项目列表格式不正确');
@@ -72,9 +73,22 @@ Future<({String name, String language, String type})> _prepareImportedProject(
       // 单条损坏不影响其他项目。
     }
   }
+  final deletedCloud = <String>{};
+  for (final value
+      in data['deletedCloud'] is List
+          ? data['deletedCloud'] as List
+          : const []) {
+    if (value is String &&
+        RegExp(
+          r'^[a-f0-9]{64}/[a-f0-9]{64}/[A-Za-z0-9][A-Za-z0-9_-]{0,127}$',
+        ).hasMatch(value)) {
+      deletedCloud.add(value);
+    }
+  }
   return (
     projects: projects,
     browsedId: data['lastBrowsedProjectId'] as String?,
+    deletedCloud: deletedCloud,
   );
 }
 
@@ -91,6 +105,7 @@ class ProjectStore extends ChangeNotifier {
   int _revision = 0;
   int _cloudGeneration = 0;
   CloudProjectScope? _cloudScope;
+  final Set<String> _deletedCloud = {};
 
   /// Called on login-generation change, refresh start, and before deletion.
   int invalidateCloudRefresh([CloudProjectScope? scope]) {
@@ -106,8 +121,30 @@ class ProjectStore extends ChangeNotifier {
   bool cloudRefreshIsCurrent(CloudProjectScope scope, int generation) =>
       _cloudScope == scope && _cloudGeneration == generation;
 
-  List<Project> cloudProjectsFor(CloudProjectScope scope) =>
-      projects.where((project) => project.belongsToCloudScope(scope)).toList();
+  List<Project> cloudProjectsFor(CloudProjectScope scope) => projects
+      .where(
+        (project) =>
+            project.belongsToCloudScope(scope) &&
+            !_deletedCloud.contains('${scope.key}/${project.cloudId}'),
+      )
+      .toList();
+
+  bool _isDeletedCloud(Project project) {
+    if (!project.isCloud ||
+        project.cloudOrigin == null ||
+        project.cloudAccountId == null) {
+      return false;
+    }
+    try {
+      final scope = CloudProjectScope(
+        origin: project.cloudOrigin!,
+        accountId: project.cloudAccountId!,
+      );
+      return _deletedCloud.contains('${scope.key}/${project.cloudId}');
+    } on CloudOperationException {
+      return false; // Preserve malformed legacy metadata without adopting it.
+    }
+  }
 
   /// 文件树上一次浏览的项目（跨编辑器会话记忆）。
   String? lastBrowsedProjectId;
@@ -154,9 +191,10 @@ class ProjectStore extends ChangeNotifier {
     ));
     // 读取期间发生了创建、收藏等操作时保留较新的内存状态。
     if (revision != _revision) return;
+    _deletedCloud.addAll(result.deletedCloud);
     _projects
       ..clear()
-      ..addAll(result.projects);
+      ..addAll(result.projects.where((project) => !_isDeletedCloud(project)));
     lastBrowsedProjectId = result.browsedId;
   }
 
@@ -201,10 +239,12 @@ class ProjectStore extends ChangeNotifier {
         ensureCurrent?.call();
         final data = {
           'version': 1,
+          'deletedCloud': _deletedCloud.toList()..sort(),
           'projects': [
             for (final project in _projects)
-              if (!_pendingLocalRegistrations.contains(project) ||
-                  identical(project, registering))
+              if (!_isDeletedCloud(project) &&
+                  (!_pendingLocalRegistrations.contains(project) ||
+                      identical(project, registering)))
                 _registryEntry(project, iosPaths),
           ],
           if (lastBrowsedProjectId != null)
@@ -558,6 +598,9 @@ class ProjectStore extends ChangeNotifier {
       return (error: '该云端项目已在列表中', project: null);
     }
     CloudProjectScope.validateCloudId(cloudId);
+    if (_deletedCloud.contains('${scope.key}/$cloudId')) {
+      return (error: '该云端项目已删除，请刷新列表', project: null);
+    }
     final project = Project.create(
       name: name,
       path: cachePath,
@@ -595,6 +638,7 @@ class ProjectStore extends ChangeNotifier {
     CloudProjectScope? scope,
     int? generation,
     CloudSession? session,
+    bool reconcile = false,
   }) async {
     session?.ensureCurrent();
     if (scope == null ||
@@ -602,17 +646,39 @@ class ProjectStore extends ChangeNotifier {
         !cloudRefreshIsCurrent(scope, generation)) {
       return;
     }
+    final rows = projects.toList();
+    final liveIds = rows
+        .where((p) => p.belongsToCloudScope(scope))
+        .map((p) => p.cloudId)
+        .toSet();
+    final removed = reconcile
+        ? _projects
+              .where(
+                (p) =>
+                    p.belongsToCloudScope(scope) &&
+                    !liveIds.contains(p.cloudId),
+              )
+              .toList()
+        : <Project>[];
+    _projects.removeWhere(removed.contains);
     final priorGeneration = _cloudGeneration;
-    for (final project in projects) {
-      if (!project.belongsToCloudScope(scope)) continue;
+    final added = <Project>[];
+    final renamed = <Project, String>{};
+    for (final project in rows) {
+      if (!project.belongsToCloudScope(scope) ||
+          _deletedCloud.contains('${scope.key}/${project.cloudId}')) {
+        continue;
+      }
       final existing = _projects.where(
         (item) =>
             item.cloudId == project.cloudId && item.belongsToCloudScope(scope),
       );
       if (existing.isEmpty) {
         _projects.add(project);
+        added.add(project);
       } else {
         // Do not move an old mirror: it may hold unsent editor changes.
+        renamed[existing.first] = existing.first.name;
         existing.first.name = project.name;
       }
     }
@@ -623,8 +689,62 @@ class ProjectStore extends ChangeNotifier {
       }
     }
 
-    await _persist(ensureCurrent: ensureCurrent);
+    try {
+      await _persist(ensureCurrent: ensureCurrent);
+    } catch (_) {
+      // Roll back only this merge's entries, never a newer refresh/delete.
+      if (_cloudGeneration == priorGeneration) {
+        _projects.removeWhere(added.contains);
+        _projects.addAll(removed.where((p) => !_isDeletedCloud(p)));
+        for (final entry in renamed.entries) {
+          entry.key.name = entry.value;
+        }
+      }
+      rethrow;
+    }
     notifyListeners();
+  }
+
+  /// Records a server-confirmed fact for exactly one origin/account/id.
+  /// removeDeletedCloudProject persists this set with the registry.
+  void recordCloudDeletion(Project project, CloudProjectScope scope) {
+    if (!project.belongsToCloudScope(scope)) {
+      throw const CloudOperationException('scope', '云端项目账号不匹配');
+    }
+    _deletedCloud.add('${scope.key}/${project.cloudId}');
+    ++_cloudGeneration;
+    ++_revision;
+  }
+
+  /// Remote deletion has already succeeded. Keep bytes, await durable registry
+  /// removal, and retain a tombstone even when disk persistence fails.
+  Future<void> removeDeletedCloudProject(
+    Project project,
+    CloudProjectScope scope,
+  ) async {
+    // A confirmed remote deletion is a durable fact, not a current-session
+    // request. Finish its exact scoped registry mutation even after logout.
+    if (!project.belongsToCloudScope(scope)) {
+      throw const CloudOperationException('scope', '云端项目账号不匹配');
+    }
+    recordCloudDeletion(project, scope);
+    _projects.removeWhere(
+      (item) =>
+          item.cloudId == project.cloudId && item.belongsToCloudScope(scope),
+    );
+    try {
+      if (!_loaded) await load();
+      // load may have observed a pre-delete registry. Apply only this exact
+      // scope again after it completes, preserving all other loaded rows.
+      _projects.removeWhere(
+        (item) =>
+            item.cloudId == project.cloudId && item.belongsToCloudScope(scope),
+      );
+      _storage ??= _storageOverride ?? await _resolveStorageFile();
+      await _persist();
+    } finally {
+      notifyListeners();
+    }
   }
 
   /// 仅从列表移除，不删除磁盘文件（适用于目录已失效的项目）。

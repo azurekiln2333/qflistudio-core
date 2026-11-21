@@ -80,6 +80,10 @@ class CloudProjectActions extends ChangeNotifier {
     return session;
   }
 
+  bool isBusy(Project project) =>
+      _scope != null &&
+      project.belongsToCloudScope(_scope!) &&
+      cache.isBusy(_scope!, project.cloudId!);
   Future<void> refresh() async {
     final session = _capture();
     final generation = store.invalidateCloudRefresh(session.scope);
@@ -113,9 +117,47 @@ class CloudProjectActions extends ChangeNotifier {
       scope: session.scope,
       generation: generation,
       session: session,
+      reconcile: true,
     );
     session.ensureCurrent();
     if (!_disposed) notifyListeners();
+  }
+
+  Future<CloudDeleteResult> deleteProject(Project project) async {
+    final session = _capture();
+    // Invalidate before network I/O, even when deletion later fails. A later
+    // explicit refresh may run, but its merge is invalidated again on success.
+    store.invalidateCloudRefresh(session.scope);
+    try {
+      return await cache.exclusive(project, session, () async {
+        // The DELETE can have committed before a login change was observed.
+        // Track its server result separately from local/account cleanup.
+        session.ensureCurrent();
+        if (session.scope.origin != ApiConfig.origin) {
+          throw const CloudOperationException('origin', '云端服务来源不匹配');
+        }
+        await api.cloudDeleteProject(session.token, project.cloudId!);
+        // Do not clear cache or workspace data on remote deletion. Users may
+        // still need a recovery copy of unsent edits. The server-confirmed fact
+        // must be persisted for this exact scope even after logout.
+        try {
+          await store.removeDeletedCloudProject(project, session.scope);
+        } catch (_) {
+          return const CloudDeleteResult(
+            remoteDeleted: true,
+            cleanupError: '云端项目已删除，本地列表保存失败',
+          );
+        }
+        return const CloudDeleteResult(remoteDeleted: true);
+      });
+    } catch (error) {
+      return CloudDeleteResult(
+        remoteDeleted: false,
+        error: error is CloudOperationException
+            ? error.message
+            : '删除云端项目失败，请重试',
+      );
+    }
   }
 
   @override

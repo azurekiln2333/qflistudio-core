@@ -20,6 +20,7 @@ class ProjectCard extends StatefulWidget {
     required this.onRemove,
     this.onToggleFavorite,
     this.onExport,
+    this.cloudBusy = false,
     this.gitRefreshRevision = 0,
   });
 
@@ -30,6 +31,8 @@ class ProjectCard extends StatefulWidget {
 
   /// 本地项目压缩导出；仅在项目目录存在时显示。
   final VoidCallback? onExport;
+
+  final bool cloudBusy;
 
   /// 收藏切换回调（null 时隐藏收藏菜单项）。
   final ValueChanged<bool>? onToggleFavorite;
@@ -378,8 +381,9 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                           ],
                         ),
                       ),
-                    const PopupMenuItem(
+                    PopupMenuItem(
                       value: ProjectCardAction.remove,
+                      enabled: !widget.cloudBusy,
                       child: Row(
                         children: [
                           Icon(Icons.delete_outline, size: 20),

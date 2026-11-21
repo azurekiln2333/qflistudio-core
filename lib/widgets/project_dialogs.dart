@@ -2,6 +2,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../i18n/studio_localizations.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
 import '../services/project_templates.dart';
@@ -63,6 +64,37 @@ Future<bool> showDeleteProjectConfirm(
     ),
   );
   return result ?? false;
+}
+
+/// R3: permanent server deletion is not a local recycle-bin operation.
+Future<bool> showDeleteCloudProjectConfirm(
+  BuildContext context,
+  Project project,
+) async {
+  final l10n = StudioLocalizations.of(context);
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: const ValueKey('cloud-project-delete-confirm'),
+          title: Text(l10n.cloudDeleteTitle(project.name)),
+          content: Text(l10n.cloudDeleteWarning),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(l10n.cancel),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(l10n.cloudDeleteAction),
+            ),
+          ],
+        ),
+      ) ??
+      false;
 }
 
 /// 新建文件/文件夹时输入名称。

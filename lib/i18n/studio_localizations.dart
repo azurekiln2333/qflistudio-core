@@ -103,6 +103,36 @@ class StudioLocalizations {
   );
   String get refresh => _pick('刷新', '重新整理', 'Refresh');
 
+  // R3: cloud deletion is permanent, unlike local recycle-bin deletion.
+  String get deletingCloudProject =>
+      _pick('正在删除云端项目…', '正在刪除雲端專案…', 'Deleting cloud project…');
+  String cloudDeleteTitle(String name) => _pick(
+    '永久删除云端项目「$name」？',
+    '永久刪除雲端專案「$name」？',
+    'Permanently delete cloud project “$name”?',
+  );
+  String get cloudDeleteWarning => _pick(
+    '此操作删除服务器上的项目，无法从本地回收站恢复。本机缓存另行管理。',
+    '此操作刪除伺服器上的專案，無法從本機資源回收筒復原。本機快取另行管理。',
+    'This permanently deletes the server project. The local recycle bin cannot restore it. Local cache is managed separately.',
+  );
+  String get cloudDeleteAction => _pick('永久删除', '永久刪除', 'Delete permanently');
+  String cloudDeleteSucceeded(String name) => _pick(
+    '已永久删除云端项目「$name」',
+    '已永久刪除雲端專案「$name」',
+    'Permanently deleted cloud project “$name”.',
+  );
+  String get cloudDeleteFailed => _pick(
+    '云端删除失败，项目和缓存已保留',
+    '雲端刪除失敗，專案和快取已保留',
+    'Cloud deletion failed. The project and cache were kept.',
+  );
+  String get cloudDeleteCleanupWarning => _pick(
+    '云端项目已删除，但本机记录清理失败。请刷新后重试清理。',
+    '雲端專案已刪除，但本機記錄清理失敗。請重新整理後重試清理。',
+    'The server project was deleted, but local cleanup failed. Refresh and retry cleanup.',
+  );
+
   String _pick(String cn, String tw, String en) => isEnglish
       ? en
       : isTraditionalChinese

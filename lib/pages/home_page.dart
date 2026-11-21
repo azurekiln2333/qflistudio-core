@@ -347,6 +347,7 @@ class _HomeTabState extends State<HomeTab>
   // The pair also invalidates work when this Home swaps its auth/store objects.
   ({int home, int session}) get _accountGeneration =>
       (home: _homeGeneration, session: widget.auth.sessionGeneration);
+  final Set<String> _deletingCloudProjects = {};
   late final HomeTabOrderStore _tabOrderStore =
       widget.tabOrderStore ?? HomeTabOrderStore();
 
@@ -460,6 +461,7 @@ class _HomeTabState extends State<HomeTab>
       _accountToken = widget.auth.token;
       _authSessionGeneration = widget.auth.sessionGeneration;
       _refreshRequest = null;
+      _deletingCloudProjects.clear();
       _cloudActions = CloudProjectActions(
         auth: widget.auth,
         store: widget.store,
@@ -487,6 +489,7 @@ class _HomeTabState extends State<HomeTab>
       _accountToken = token;
       _authSessionGeneration = sessionGeneration;
       _refreshRequest = null;
+      _deletingCloudProjects.clear();
     }
     if (!mounted) return;
     setState(() => _loggedIn = loggedIn);
@@ -1131,7 +1134,42 @@ class _HomeTabState extends State<HomeTab>
       onExport: project.isCloud
           ? null
           : () => unawaited(_exportProjectArchive(project)),
+      cloudBusy:
+          project.isCloud &&
+          (_cloudActions.isBusy(project) ||
+              _deletingCloudProjects.contains(project.id)),
     );
+  }
+
+  // R3: do not promise local recycle-bin recovery for permanent remote deletion.
+  Future<void> _deleteCloudProject(Project project) async {
+    if (_deletingCloudProjects.contains(project.id)) return;
+    final generation = _accountGeneration;
+    final actions = _cloudActions;
+    final l10n = StudioLocalizations.of(context);
+    // Reserve before the dialog so repeated taps cannot open duplicate deletes.
+    setState(() => _deletingCloudProjects.add(project.id));
+    try {
+      final confirmed = await showDeleteCloudProjectConfirm(context, project);
+      if (!confirmed || !mounted || generation != _accountGeneration) return;
+      final result = await actions.deleteProject(project);
+      if (!mounted || generation != _accountGeneration) return;
+      _showArchiveMessage(
+        !result.remoteDeleted
+            ? l10n.cloudDeleteFailed
+            : result.cleanupError != null
+            ? l10n.cloudDeleteCleanupWarning
+            : l10n.cloudDeleteSucceeded(project.name),
+      );
+    } catch (_) {
+      if (mounted && generation == _accountGeneration) {
+        _showArchiveMessage(l10n.cloudDeleteFailed);
+      }
+    } finally {
+      if (mounted && generation == _accountGeneration) {
+        setState(() => _deletingCloudProjects.remove(project.id));
+      }
+    }
   }
 
   Future<void> _exportProjectArchive(Project project) async {
@@ -1416,6 +1454,10 @@ class _HomeTabState extends State<HomeTab>
   }
 
   Future<void> _deleteProject(BuildContext context, Project project) async {
+    if (project.isCloud) {
+      await _deleteCloudProject(project);
+      return;
+    }
     final confirmed = await showDeleteProjectConfirm(context, project);
     if (!confirmed || !context.mounted) return;
     // 压缩备份可能耗时，显示进度提示。
