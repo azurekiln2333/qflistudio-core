@@ -466,6 +466,24 @@ void main() {
       expect(cancel.cancelCalls, 1);
       cancellation.dispose();
     });
+    test('maps native clone progress without exposing plugin types', () async {
+      final api = _FakeApi(_FakeRepository());
+      final events = <GitCloneProgress>[];
+
+      await NativeGitBackend.cloneRepository(
+        url: 'https://example.com/team/repo.git',
+        path: p.join(_plainDirectory().path, 'clone'),
+        api: api,
+        onProgress: events.add,
+      );
+
+      expect(events, hasLength(1));
+      expect(events.single.stage, GitCloneStage.receiving);
+      expect(events.single.completed, 2);
+      expect(events.single.total, 5);
+      expect(events.single.receivedBytes, 1024);
+    });
+
     test('offline policy blocks clone before plugin initialization', () async {
       final api = _FakeApi(_FakeRepository());
       await expectLater(
@@ -839,6 +857,7 @@ class _FakeApi implements NativeGitApi {
   Completer<void>? cloneGate;
   final Completer<void> cloneStarted = Completer<void>();
   _FakeCancel? cloneCancel;
+  GitCloneProgressCallback? cloneProgress;
   Object? cloneError;
 
   @override
@@ -865,9 +884,19 @@ class _FakeApi implements NativeGitApi {
     String? username,
     String? token,
     NativeCancelHandle? cancel,
+    GitCloneProgressCallback? onProgress,
   }) async {
     cloneCalls++;
     cloneCancel = cancel as _FakeCancel?;
+    cloneProgress = onProgress;
+    onProgress?.call(
+      const GitCloneProgress(
+        stage: GitCloneStage.receiving,
+        completed: 2,
+        total: 5,
+        receivedBytes: 1024,
+      ),
+    );
     if (!cloneStarted.isCompleted) cloneStarted.complete();
     final gate = cloneGate;
     if (gate != null) await gate.future;

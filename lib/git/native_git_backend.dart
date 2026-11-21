@@ -89,6 +89,7 @@ abstract interface class NativeGitApi {
     String? username,
     String? token,
     NativeCancelHandle? cancel,
+    GitCloneProgressCallback? onProgress,
   });
 }
 
@@ -486,6 +487,7 @@ class NativeGitBackend implements GitBackend {
     GitCloneCancellation? cancellation,
     NativeGitApi? api,
     bool Function()? isOffline,
+    GitCloneProgressCallback? onProgress,
   }) async {
     final checkedUrl = _remoteUrl(url);
     if ((isOffline ?? _defaultOffline)()) {
@@ -512,6 +514,7 @@ class NativeGitBackend implements GitBackend {
           username: secrets.username,
           token: secrets.token,
           cancel: cancel,
+          onProgress: onProgress,
         );
         if (cancellation?.isCancelled == true) {
           throw const GitOperationException('克隆已取消', kind: 'cancelled');
@@ -810,6 +813,7 @@ class _PluginGitApi implements NativeGitApi {
     String? username,
     String? token,
     NativeCancelHandle? cancel,
+    GitCloneProgressCallback? onProgress,
   }) async {
     await plugin.GitRepository.clone(
       url: url,
@@ -817,6 +821,21 @@ class _PluginGitApi implements NativeGitApi {
       username: username,
       token: token,
       cancel: _pluginCancel(cancel),
+      onProgress: onProgress == null
+          ? null
+          : (progress) => emitGitCloneProgress(
+              onProgress,
+              GitCloneProgress(
+                stage: switch (progress.stage) {
+                  plugin.GitCloneStage.receiving => GitCloneStage.receiving,
+                  plugin.GitCloneStage.resolving => GitCloneStage.resolving,
+                  plugin.GitCloneStage.checkout => GitCloneStage.checkout,
+                },
+                completed: progress.completed,
+                total: progress.total,
+                receivedBytes: progress.receivedBytes,
+              ),
+            ),
     );
   }
 }

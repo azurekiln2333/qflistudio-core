@@ -44,6 +44,7 @@ typedef GitCloneRunner =
       required String path,
       GitCredentials? credentials,
       GitCloneCancellation? cancellation,
+      GitCloneProgressCallback? onProgress,
     });
 
 /// Reserves a fresh, exclusively owned destination directory for a clone.
@@ -107,7 +108,15 @@ class GitCloneService {
   Future<GitCloneOutcome> clone(
     GitCloneRequest request, {
     GitCloneCancellation? cancellation,
+    GitCloneProgressCallback? onProgress,
   }) async {
+    void reportProgress(GitCloneProgress progress) =>
+        emitGitCloneProgress(onProgress, progress);
+
+    if (cancellation?.isCancelled == true) {
+      return const GitCloneOutcome(cancelled: true);
+    }
+    reportProgress(const GitCloneProgress(stage: GitCloneStage.preparing));
     if (cancellation?.isCancelled == true) {
       return const GitCloneOutcome(cancelled: true);
     }
@@ -138,12 +147,22 @@ class GitCloneService {
     }
 
     try {
+      reportProgress(const GitCloneProgress(stage: GitCloneStage.connecting));
+      if (cancellation?.isCancelled == true) {
+        await _removeOwnedPath(path);
+        return const GitCloneOutcome(cancelled: true);
+      }
       await _clone(
         url: url,
         path: path,
         credentials: request.credentials,
         cancellation: cancellation,
+        onProgress: onProgress == null ? null : reportProgress,
       );
+      if (cancellation?.isCancelled == true) {
+        await _removeOwnedPath(path);
+        return const GitCloneOutcome(cancelled: true);
+      }
     } on GitOperationException catch (error) {
       await _removeOwnedPath(path);
       if (error.kind == 'cancelled' || cancellation?.isCancelled == true) {
@@ -159,6 +178,11 @@ class GitCloneService {
     }
 
     try {
+      reportProgress(const GitCloneProgress(stage: GitCloneStage.registering));
+      if (cancellation?.isCancelled == true) {
+        await _removeOwnedPath(path);
+        return const GitCloneOutcome(cancelled: true);
+      }
       // The directory carries a random suffix, so record the wanted name in
       // project metadata first; registration reads it back from there. A
       // cloned repository may ship its own `.qfli/project.json`, so keep its
@@ -196,12 +220,14 @@ class GitCloneService {
     required String path,
     GitCredentials? credentials,
     GitCloneCancellation? cancellation,
+    GitCloneProgressCallback? onProgress,
   }) {
     return GitBackendFactory.clone(
       url: url,
       path: path,
       credentials: credentials,
       cancellation: cancellation,
+      onProgress: onProgress,
     );
   }
 

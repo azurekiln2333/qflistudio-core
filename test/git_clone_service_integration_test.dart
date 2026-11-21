@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -27,6 +28,112 @@ void main() {
     return GitCloneDestination(path: directory.path, displayName: name);
   }
 
+  test('reports lifecycle and backend progress without credentials', () async {
+    final progress = <GitCloneProgress>[];
+    final service = GitCloneService(
+      store: registry,
+      desktop: true,
+      allocateDestination: allocate,
+      cloneRunner:
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
+            onProgress?.call(
+              const GitCloneProgress(
+                stage: GitCloneStage.receiving,
+                completed: 3,
+                total: 4,
+                receivedBytes: 2048,
+              ),
+            );
+          },
+    );
+
+    final outcome = await service.clone(
+      const GitCloneRequest(
+        url: 'https://example.invalid/repo.git',
+        username: 'private-user',
+        token: 'private-token',
+      ),
+      onProgress: progress.add,
+    );
+
+    expect(outcome.ok, isTrue);
+    expect(progress.map((event) => event.stage), <GitCloneStage>[
+      GitCloneStage.preparing,
+      GitCloneStage.connecting,
+      GitCloneStage.receiving,
+      GitCloneStage.registering,
+    ]);
+    expect(progress.last.fraction, isNull);
+    expect(
+      progress.any((event) => event.toString().contains('private-token')),
+      isFalse,
+    );
+  });
+
+  test('cancellation at registration boundary prevents registration', () async {
+    final cancellation = GitCloneCancellation();
+    String? reserved;
+    final service = GitCloneService(
+      store: registry,
+      desktop: true,
+      allocateDestination: allocate,
+      cloneRunner:
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
+            reserved = path;
+            await File(p.join(path, 'source.txt')).writeAsString('complete');
+          },
+    );
+
+    final outcome = await service.clone(
+      const GitCloneRequest(url: 'https://example.invalid/repo.git'),
+      cancellation: cancellation,
+      onProgress: (event) {
+        if (event.stage == GitCloneStage.registering) cancellation.cancel();
+      },
+    );
+
+    expect(outcome.cancelled, isTrue);
+    expect(registry.calls, 0);
+    expect(await Directory(reserved!).exists(), isFalse);
+    cancellation.dispose();
+  });
+
+  test('a throwing progress listener cannot fail clone registration', () async {
+    final service = GitCloneService(
+      store: registry,
+      desktop: true,
+      allocateDestination: allocate,
+      cloneRunner:
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {},
+    );
+
+    final outcome = await service.clone(
+      const GitCloneRequest(url: 'https://example.invalid/repo.git'),
+      onProgress: (_) => throw StateError('listener disposed'),
+    );
+
+    expect(outcome.ok, isTrue);
+    expect(registry.calls, 1);
+  });
+
   test(
     'failure removes its reserved directory and preserves a sibling',
     () async {
@@ -38,7 +145,13 @@ void main() {
         desktop: true,
         allocateDestination: allocate,
         cloneRunner:
-            ({required url, required path, credentials, cancellation}) async {
+            ({
+              required url,
+              required path,
+              credentials,
+              cancellation,
+              onProgress,
+            }) async {
               reserved = path;
               await File(p.join(path, 'partial.txt')).writeAsString('partial');
               throw const GitOperationException('clone failed');
@@ -62,7 +175,13 @@ void main() {
       desktop: true,
       allocateDestination: allocate,
       cloneRunner:
-          ({required url, required path, credentials, cancellation}) async {
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
             await File(p.join(path, 'source.txt')).writeAsString('source');
           },
     );
@@ -84,7 +203,13 @@ void main() {
       desktop: true,
       allocateDestination: allocate,
       cloneRunner:
-          ({required url, required path, credentials, cancellation}) async {
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
             await ProjectConfig.write(
               projectRoot: path,
               name: 'Upstream',
@@ -118,7 +243,13 @@ void main() {
         return allocate(name: name);
       },
       cloneRunner:
-          ({required url, required path, credentials, cancellation}) async {
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
             clones++;
           },
     );
@@ -132,6 +263,116 @@ void main() {
     expect(allocations, 0);
     expect(clones, 0);
     expect(registry.calls, 0);
+  });
+
+  test('overlapping clones isolate cancellation, paths and progress', () async {
+    final cancelA = GitCloneCancellation();
+    final cancelB = GitCloneCancellation();
+    final enteredA = Completer<void>();
+    final enteredB = Completer<void>();
+    final releaseA = Completer<void>();
+    final releaseB = Completer<void>();
+    final progressA = <GitCloneProgress>[];
+    final progressB = <GitCloneProgress>[];
+    String? pathA;
+    String? pathB;
+
+    addTearDown(cancelA.dispose);
+    addTearDown(cancelB.dispose);
+    addTearDown(() {
+      if (!releaseA.isCompleted) releaseA.complete();
+      if (!releaseB.isCompleted) releaseB.complete();
+    });
+
+    final service = GitCloneService(
+      store: registry,
+      desktop: true,
+      allocateDestination: allocate,
+      cloneRunner:
+          ({
+            required url,
+            required path,
+            credentials,
+            cancellation,
+            onProgress,
+          }) async {
+            if (url.endsWith('/a.git')) {
+              pathA = path;
+              enteredA.complete();
+              onProgress?.call(
+                const GitCloneProgress(
+                  stage: GitCloneStage.receiving,
+                  completed: 1,
+                  total: 2,
+                ),
+              );
+              await releaseA.future;
+              await File(p.join(path, 'source.txt')).writeAsString('a');
+            } else {
+              pathB = path;
+              enteredB.complete();
+              onProgress?.call(
+                const GitCloneProgress(
+                  stage: GitCloneStage.receiving,
+                  completed: 2,
+                  total: 2,
+                ),
+              );
+              await releaseB.future;
+              await File(p.join(path, 'source.txt')).writeAsString('b');
+            }
+          },
+    );
+
+    final futureA = service.clone(
+      const GitCloneRequest(url: 'https://example.invalid/a.git'),
+      cancellation: cancelA,
+      onProgress: progressA.add,
+    );
+    final futureB = service.clone(
+      const GitCloneRequest(url: 'https://example.invalid/b.git'),
+      cancellation: cancelB,
+      onProgress: progressB.add,
+    );
+
+    var overlapObserved = false;
+    try {
+      await Future.wait(<Future<void>>[
+        enteredA.future,
+        enteredB.future,
+      ]).timeout(const Duration(seconds: 5));
+      overlapObserved = true;
+    } on TimeoutException {
+      // Release both runners below, then await both outcomes before failing.
+    } finally {
+      cancelA.cancel();
+      if (!releaseA.isCompleted) releaseA.complete();
+      if (!releaseB.isCompleted) releaseB.complete();
+    }
+
+    final outcomes = await Future.wait(<Future<GitCloneOutcome>>[
+      futureA,
+      futureB,
+    ]).timeout(const Duration(seconds: 5));
+
+    expect(overlapObserved, isTrue);
+
+    expect(outcomes.first.cancelled, isTrue);
+    expect(outcomes.first.project, isNull);
+    expect(outcomes.last.ok, isTrue);
+    expect(registry.calls, 1);
+    expect(pathA, isNot(pathB));
+    expect(await Directory(pathA!).exists(), isFalse);
+    expect(await File(p.join(pathB!, 'source.txt')).readAsString(), 'b');
+    expect(
+      progressA.map((event) => event.stage),
+      contains(GitCloneStage.receiving),
+    );
+    expect(
+      progressB.map((event) => event.stage),
+      contains(GitCloneStage.receiving),
+    );
+    expect(progressA, isNot(same(progressB)));
   });
 
   test(
@@ -150,7 +391,13 @@ void main() {
           return destination;
         },
         cloneRunner:
-            ({required url, required path, credentials, cancellation}) async {
+            ({
+              required url,
+              required path,
+              credentials,
+              cancellation,
+              onProgress,
+            }) async {
               clones++;
             },
       );

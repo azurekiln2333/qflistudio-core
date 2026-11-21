@@ -385,8 +385,8 @@ packages:
     dependency: "direct main"
     description:
       path: "."
-      ref: "53ad359159258706d4c242e70a2db0e1d075dabc"
-      resolved-ref: "53ad359159258706d4c242e70a2db0e1d075dabc"
+      ref: "e6d01736b9523baf31778f6b1983fa51dcac35e6"
+      resolved-ref: "e6d01736b9523baf31778f6b1983fa51dcac35e6"
       url: "https://github.com/azurekiln2333/qflistudio-git.git"
     source: git
     version: "0.1.0"

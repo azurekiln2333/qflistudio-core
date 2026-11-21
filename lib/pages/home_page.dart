@@ -31,6 +31,7 @@ import 'quick_tools_page.dart';
 import 'terminax_terminal_page.dart';
 import '../i18n/studio_localizations.dart';
 import 'community/post_list_page.dart';
+import '../widgets/home_git_clone_tasks.dart';
 import '../widgets/project_card.dart';
 import '../widgets/project_dialogs.dart';
 import '../widgets/retained_page.dart';
@@ -301,6 +302,22 @@ class HomeTab extends StatefulWidget {
   State<HomeTab> createState() => _HomeTabState();
 }
 
+class _HomeCloneTaskState {
+  _HomeCloneTaskState({
+    required this.id,
+    required this.name,
+    required this.cancellation,
+  });
+
+  final int id;
+  final String name;
+  final GitCloneCancellation cancellation;
+  GitCloneProgress progress = const GitCloneProgress(
+    stage: GitCloneStage.preparing,
+  );
+  bool cancelling = false;
+}
+
 /// 主页 Tab 的状态：项目列表 + 搜索 + 更多操作 + 可拖动的项目页签。
 class _HomeTabState extends State<HomeTab>
     with TickerProviderStateMixin, AutomaticKeepAliveClientMixin {
@@ -312,8 +329,8 @@ class _HomeTabState extends State<HomeTab>
   RetainedEditorController? _retainedEditor;
   bool _retainedEditorVisible = false;
   String? _archiveBusyLabel;
-  String? _cloneBusyLabel;
-  GitCloneCancellation? _cloneCancellation;
+  final Map<int, _HomeCloneTaskState> _cloneTasks = {};
+  int _nextCloneTaskId = 0;
   late bool _loggedIn;
   Future<void>? _refreshRequest;
   late final HomeTabOrderStore _tabOrderStore =
@@ -434,7 +451,9 @@ class _HomeTabState extends State<HomeTab>
 
   @override
   void dispose() {
-    _cloneCancellation?.cancel();
+    for (final task in _cloneTasks.values) {
+      task.cancellation.cancel();
+    }
     _retainedEditor?.removeListener(_onRetainedEditorChanged);
     widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
@@ -510,8 +529,7 @@ class _HomeTabState extends State<HomeTab>
                   itemBuilder: (context) => [
                     PopupMenuItem(
                       value: 'import_project',
-                      enabled:
-                          _archiveBusyLabel == null && _cloneBusyLabel == null,
+                      enabled: _archiveBusyLabel == null,
                       child: const Row(
                         children: [
                           Icon(Icons.unarchive_outlined, size: 20),
@@ -523,9 +541,7 @@ class _HomeTabState extends State<HomeTab>
                     if (StudioProfile.current?.offlineOnly != true)
                       PopupMenuItem(
                         value: 'clone_repository',
-                        enabled:
-                            _cloneBusyLabel == null &&
-                            _archiveBusyLabel == null,
+                        enabled: _archiveBusyLabel == null,
                         child: const Row(
                           children: [
                             Icon(Icons.cloud_download_outlined, size: 20),
@@ -569,98 +585,96 @@ class _HomeTabState extends State<HomeTab>
               icon: const Icon(Icons.create_new_folder_outlined),
               label: Text(l10n.createProject),
             ),
-      body: Column(
-        children: [
-          if (_archiveBusyLabel != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final taskPanelHeight = (constraints.maxHeight * 0.35)
+              .clamp(0.0, HomeGitCloneTasks.defaultMaxHeight)
+              .toDouble();
+          return Column(
+            children: [
+              if (_archiveBusyLabel != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      _archiveBusyLabel!,
-                      key: const ValueKey('project-archive-progress'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          if (_cloneBusyLabel != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      _cloneBusyLabel!,
-                      key: const ValueKey('project-clone-progress'),
-                    ),
-                  ),
-                  if (_cloneCancellation != null)
-                    TextButton(
-                      key: const ValueKey('project-clone-cancel'),
-                      onPressed: _cancelClone,
-                      child: const Text('取消'),
-                    ),
-                ],
-              ),
-            ),
-          Expanded(
-            child: ListenableBuilder(
-              listenable: widget.store,
-              builder: (context, _) {
-                if (_searchOpen) {
-                  return _buildProjectList(
-                    context,
-                    scope: ProjectScope.all,
-                    keyword: _query,
-                  );
-                }
-                return Column(
-                  children: [
-                    _buildScopeTabBar(context, l10n),
-                    Expanded(
-                      child: TabBarView(
-                        controller: _projectTabs,
-                        children: [
-                          for (final scope in _orderedScopes)
-                            scope == ProjectScope.workspace
-                                ? SavedWorkspacesTab(
-                                    key: const ValueKey(
-                                      'home-scope-page-workspace',
-                                    ),
-                                    store: widget.store,
-                                    auth: widget.auth,
-                                    settings: widget.settings,
-                                  )
-                                : KeyedSubtree(
-                                    key: ValueKey(
-                                      'home-scope-page-${scope.name}',
-                                    ),
-                                    child: _buildProjectList(
-                                      context,
-                                      scope: scope,
-                                    ),
-                                  ),
-                        ],
+                  child: Row(
+                    children: [
+                      const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
                       ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _archiveBusyLabel!,
+                          key: const ValueKey('project-archive-progress'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              HomeGitCloneTasks(
+                maxHeight: taskPanelHeight,
+                tasks: [
+                  for (final task in _cloneTasks.values)
+                    HomeGitCloneTask(
+                      id: task.id,
+                      name: task.name,
+                      progress: task.progress,
+                      cancelling: task.cancelling,
+                      onCancel: () => _cancelClone(task.id),
                     ),
-                  ],
-                );
-              },
-            ),
-          ),
-        ],
+                ],
+              ),
+              Expanded(
+                child: ListenableBuilder(
+                  listenable: widget.store,
+                  builder: (context, _) {
+                    if (_searchOpen) {
+                      return _buildProjectList(
+                        context,
+                        scope: ProjectScope.all,
+                        keyword: _query,
+                      );
+                    }
+                    return Column(
+                      children: [
+                        _buildScopeTabBar(context, l10n),
+                        Expanded(
+                          child: TabBarView(
+                            controller: _projectTabs,
+                            children: [
+                              for (final scope in _orderedScopes)
+                                scope == ProjectScope.workspace
+                                    ? SavedWorkspacesTab(
+                                        key: const ValueKey(
+                                          'home-scope-page-workspace',
+                                        ),
+                                        store: widget.store,
+                                        auth: widget.auth,
+                                        settings: widget.settings,
+                                      )
+                                    : KeyedSubtree(
+                                        key: ValueKey(
+                                          'home-scope-page-${scope.name}',
+                                        ),
+                                        child: _buildProjectList(
+                                          context,
+                                          scope: scope,
+                                        ),
+                                      ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1161,23 +1175,37 @@ class _HomeTabState extends State<HomeTab>
   }
 
   Future<void> _cloneRepository() async {
-    if (_cloneBusyLabel != null || _archiveBusyLabel != null) return;
+    if (_archiveBusyLabel != null) return;
     final request = await showGitCloneDialog(
       context,
       desktop: AppPaths.isDesktop,
     );
     if (request == null || !mounted) return;
+
+    final id = _nextCloneTaskId++;
     final cancellation = GitCloneCancellation();
-    setState(() {
-      _cloneBusyLabel = '正在克隆仓库…';
-      _cloneCancellation = cancellation;
-    });
+    final task = _HomeCloneTaskState(
+      id: id,
+      name: request.name.trim().isNotEmpty
+          ? request.name.trim()
+          : cloneProjectName(request.url, ''),
+      cancellation: cancellation,
+    );
+    setState(() => _cloneTasks[id] = task);
+
     final service = GitCloneService(store: widget.store);
     try {
-      final outcome = await service.clone(request, cancellation: cancellation);
+      final outcome = await service.clone(
+        request,
+        cancellation: cancellation,
+        onProgress: (progress) {
+          if (!mounted || !identical(_cloneTasks[id], task)) return;
+          setState(() => task.progress = progress);
+        },
+      );
       if (!mounted) return;
       if (outcome.cancelled) {
-        _showArchiveMessage('已取消克隆');
+        _showArchiveMessage('已取消克隆「${task.name}」');
         return;
       }
       final project = outcome.project;
@@ -1185,8 +1213,8 @@ class _HomeTabState extends State<HomeTab>
         final preserved = outcome.preservedPath;
         _showArchiveMessage(
           preserved == null
-              ? '克隆失败：${outcome.error ?? '未知错误'}'
-              : '克隆已下载，但注册失败：${outcome.error}。文件保留在 $preserved',
+              ? '「${task.name}」克隆失败：${outcome.error ?? '未知错误'}'
+              : '「${task.name}」克隆已下载，但注册失败：${outcome.error}。文件保留在 $preserved',
         );
         return;
       }
@@ -1199,23 +1227,20 @@ class _HomeTabState extends State<HomeTab>
       _projectTabs.animateTo(_orderedScopes.indexOf(ProjectScope.all));
       _showArchiveMessage('已克隆项目「${project.name}」');
     } on Object catch (error) {
-      if (mounted) _showArchiveMessage('克隆失败：$error');
+      if (mounted) _showArchiveMessage('「${task.name}」克隆失败：$error');
     } finally {
       cancellation.dispose();
       if (mounted) {
-        setState(() {
-          _cloneBusyLabel = null;
-          _cloneCancellation = null;
-        });
+        setState(() => _cloneTasks.remove(id));
       }
     }
   }
 
-  void _cancelClone() {
-    _cloneCancellation?.cancel();
-    if (mounted) {
-      setState(() => _cloneBusyLabel = '正在取消克隆…');
-    }
+  void _cancelClone(int id) {
+    final task = _cloneTasks[id];
+    if (task == null || task.cancelling) return;
+    task.cancellation.cancel();
+    if (mounted) setState(() => task.cancelling = true);
   }
 
   void _showArchiveMessage(String message) {

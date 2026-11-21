@@ -2,10 +2,12 @@ import 'dart:io';
 
 import 'cli_git_backend.dart';
 import 'git_cancellation.dart';
+import 'git_clone_progress.dart';
 import 'git_models.dart';
 import 'native_git_backend.dart';
 
 export 'git_cancellation.dart';
+export 'git_clone_progress.dart';
 export 'git_models.dart';
 
 abstract class GitBackend {
@@ -50,6 +52,7 @@ abstract final class GitBackendFactory {
     required String path,
     GitCredentials? credentials,
     GitCloneCancellation? cancellation,
+    GitCloneProgressCallback? onProgress,
   }) async {
     if (_desktop) {
       await CliGitBackend.cloneRepository(
@@ -57,6 +60,7 @@ abstract final class GitBackendFactory {
         path: path,
         credentials: credentials,
         cancellation: cancellation,
+        onProgress: onProgress,
       );
     } else if (Platform.isAndroid ||
         Platform.isIOS ||
@@ -66,6 +70,7 @@ abstract final class GitBackendFactory {
         path: path,
         credentials: credentials,
         cancellation: cancellation,
+        onProgress: onProgress,
       );
     } else {
       throw const GitOperationException('当前平台不支持本地 Git', kind: 'unsupported');

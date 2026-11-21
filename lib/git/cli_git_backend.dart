@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../services/process_supervisor.dart';
 import '../services/studio_profile.dart';
 import 'git_backend.dart';
+import 'git_clone_progress_parser.dart';
 import 'git_repository_queue.dart';
 
 typedef _Result = ({String out, String err, int code, bool truncated});
@@ -123,6 +124,7 @@ class CliGitBackend implements GitBackend {
     int maxBytes = 4 * 1024 * 1024,
     bool allowTruncation = false,
     Map<String, String>? environment,
+    GitCloneProgressParser? progressParser,
   }) async {
     if (_disposed) {
       throw const GitOperationException('Git 页面已关闭', kind: 'cancelled');
@@ -147,6 +149,7 @@ class CliGitBackend implements GitBackend {
     ManagedProcess? process;
     Future<void>? outDone;
     Future<void>? errDone;
+    var progressCompleted = false;
     try {
       process = await _supervisor.start(
         'git',
@@ -161,7 +164,10 @@ class CliGitBackend implements GitBackend {
       );
       if (network) _network = process;
       outDone = process.stdout.forEach((data) => collect(output, data));
-      errDone = process.stderr.forEach((data) => collect(errors, data));
+      errDone = process.stderr.forEach((data) {
+        collect(errors, data);
+        progressParser?.add(data);
+      });
       if (_disposed || (network && _cancelRequested)) await process.cancel();
       final code = await _waitForExit(
         process,
@@ -186,6 +192,7 @@ class CliGitBackend implements GitBackend {
       if (truncated && !allowTruncation) {
         throw const GitOperationException('Git 输出超过读取上限', kind: 'limit');
       }
+      progressCompleted = true;
       return result;
     } on ProcessException {
       throw const GitOperationException(
@@ -197,6 +204,7 @@ class CliGitBackend implements GitBackend {
     } on Object catch (error) {
       throw GitOperationException(_redact(error.toString()));
     } finally {
+      progressParser?.close(flush: progressCompleted);
       if (network && identical(_network, process)) _network = null;
     }
   }
@@ -224,7 +232,11 @@ class CliGitBackend implements GitBackend {
       await Future.wait([outDone, errDone]);
       return code;
     } on Object {
-      unawaited(process.cancel().catchError((Object _) {}));
+      await process.cancel();
+      await Future.wait<void>([
+        outDone.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+        errDone.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+      ]);
       rethrow;
     }
   }
@@ -710,6 +722,7 @@ class CliGitBackend implements GitBackend {
     required String path,
     GitCredentials? credentials,
     GitCloneCancellation? cancellation,
+    GitCloneProgressCallback? onProgress,
   }) async {
     _online();
     _url(url);
@@ -725,9 +738,11 @@ class CliGitBackend implements GitBackend {
           throw const GitOperationException('克隆已取消', kind: 'cancelled');
         }
         await backend._exec(
-          ['clone', '--', url, backend.root],
+          ['clone', '--progress', '--', url, backend.root],
           cwd: p.dirname(backend.root),
           network: true,
+          allowTruncation: true,
+          progressParser: GitCloneProgressParser(onProgress),
         );
         if (cancellation?.isCancelled == true) {
           throw const GitOperationException('克隆已取消', kind: 'cancelled');
