@@ -103,7 +103,7 @@ class ToolsBrowser extends StatefulWidget {
   /// 既有工具分组，标题和顺序由调用方给出。
   final List<ToolsBrowserSection> sections;
 
-  /// 显示密度、收藏和使用记录。
+  /// 显示密度、列数、收藏和使用记录。
   final ToolStateStore state;
 
   /// 可见范围覆盖，仅供测试；null 时按 `StudioProfile.current` 判定。
@@ -225,8 +225,10 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
               category: _category,
               categories: _categoryKeys(all),
               density: _state.density,
+              cardColumns: _state.cardColumns,
               onCategoryChanged: (value) => setState(() => _category = value),
               onDensityChanged: _state.setDensity,
+              onCardColumnsChanged: _state.setCardColumns,
               strings: strings,
             ),
           ),
@@ -306,7 +308,7 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
     );
   }
 
-  /// 宽松显示：卡片网格，几何与 netrix 的「全部工具」页相同。
+  /// 宽松显示：按用户选择固定为一列或两列。
   Widget _cardsSliver(List<ToolsBrowserEntry> entries) {
     final strings = NetrixLocalizations.of(context);
     final textTheme = Theme.of(context).textTheme;
@@ -325,13 +327,14 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
           onTap: () => _open(context, entry),
           isFavorite: isFavorite,
           onToggleFavorite: () => _state.toggleFavorite(entry.id),
-          favoriteTooltip:
-              isFavorite ? strings.removeFavorite : strings.addFavorite,
+          favoriteTooltip: isFavorite
+              ? strings.removeFavorite
+              : strings.addFavorite,
           openTooltip: strings.openTool,
         );
       }, childCount: entries.length),
-      gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: ToolsTheme.cardMaxWidth,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: _state.cardColumns,
         mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
         crossAxisSpacing: ToolsTheme.cardSpacing,
         mainAxisSpacing: ToolsTheme.cardSpacing,
@@ -401,8 +404,10 @@ class _ToolsBrowserHeader extends StatelessWidget {
     required this.category,
     required this.categories,
     required this.density,
+    required this.cardColumns,
     required this.onCategoryChanged,
     required this.onDensityChanged,
+    required this.onCardColumnsChanged,
     required this.strings,
   });
 
@@ -410,8 +415,10 @@ class _ToolsBrowserHeader extends StatelessWidget {
   final netrix.ToolCategory? category;
   final List<netrix.ToolCategory> categories;
   final ToolCardDensity density;
+  final int cardColumns;
   final ValueChanged<netrix.ToolCategory?> onCategoryChanged;
   final ValueChanged<ToolCardDensity> onDensityChanged;
+  final ValueChanged<int> onCardColumnsChanged;
   final NetrixLocalizations strings;
 
   @override
@@ -454,24 +461,57 @@ class _ToolsBrowserHeader extends StatelessWidget {
         const SizedBox(height: 12),
         Align(
           alignment: Alignment.centerRight,
-          child: SegmentedButton<ToolCardDensity>(
-            segments: <ButtonSegment<ToolCardDensity>>[
-              ButtonSegment<ToolCardDensity>(
-                value: ToolCardDensity.standard,
-                icon: const Icon(Icons.view_agenda_outlined),
-                label: Text(strings.standard),
+          child: Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SegmentedButton<ToolCardDensity>(
+                  segments: <ButtonSegment<ToolCardDensity>>[
+                    ButtonSegment<ToolCardDensity>(
+                      value: ToolCardDensity.standard,
+                      icon: const Icon(Icons.view_agenda_outlined),
+                      label: Text(strings.standard),
+                    ),
+                    ButtonSegment<ToolCardDensity>(
+                      value: ToolCardDensity.compact,
+                      icon: const Icon(Icons.view_compact_outlined),
+                      label: Text(strings.compact),
+                    ),
+                  ],
+                  selected: <ToolCardDensity>{density},
+                  showSelectedIcon: false,
+                  onSelectionChanged: (values) {
+                    if (values.isNotEmpty) onDensityChanged(values.first);
+                  },
+                ),
               ),
-              ButtonSegment<ToolCardDensity>(
-                value: ToolCardDensity.compact,
-                icon: const Icon(Icons.view_compact_outlined),
-                label: Text(strings.compact),
-              ),
+              if (density == ToolCardDensity.standard)
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SegmentedButton<int>(
+                    segments: <ButtonSegment<int>>[
+                      ButtonSegment<int>(
+                        value: 1,
+                        icon: const Icon(Icons.view_agenda_outlined),
+                        label: Text(strings.oneColumn),
+                      ),
+                      ButtonSegment<int>(
+                        value: 2,
+                        icon: const Icon(Icons.view_column_outlined),
+                        label: Text(strings.twoColumns),
+                      ),
+                    ],
+                    selected: <int>{cardColumns},
+                    showSelectedIcon: false,
+                    onSelectionChanged: (values) {
+                      if (values.isNotEmpty) onCardColumnsChanged(values.first);
+                    },
+                  ),
+                ),
             ],
-            selected: <ToolCardDensity>{density},
-            showSelectedIcon: false,
-            onSelectionChanged: (values) {
-              if (values.isNotEmpty) onDensityChanged(values.first);
-            },
           ),
         ),
       ],

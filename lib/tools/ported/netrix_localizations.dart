@@ -24,7 +24,9 @@ class NetrixLocalizations {
   /// 的目录另有 ja / ko；多出来的语言只在宿主将来扩展语言时才用到。
   static NetrixLocalizations of(BuildContext context) {
     return Localizations.of<NetrixLocalizations>(
-            context, NetrixLocalizations) ??
+          context,
+          NetrixLocalizations,
+        ) ??
         NetrixLocalizations(
           Localizations.maybeLocaleOf(context) ?? const Locale('zh', 'CN'),
         );
@@ -43,10 +45,8 @@ class NetrixLocalizations {
   String get homeSubtitle => _text('homeSubtitle');
   String get recentTools => _text('recentTools');
   String get recentToolsEmpty => _text('recentToolsEmpty');
-  String recentToolsCount(int count) => _text('recentToolsCount').replaceAll(
-        '{count}',
-        '$count',
-      );
+  String recentToolsCount(int count) =>
+      _text('recentToolsCount').replaceAll('{count}', '$count');
   String get browseAllTools => _text('browseAllTools');
   String get favoriteToolsEmpty => _text('favoriteToolsEmpty');
   String get favoriteListEmpty => _text('favoriteListEmpty');
@@ -68,6 +68,8 @@ class NetrixLocalizations {
       _text('requiredField').replaceAll('{label}', label);
   String get standard => _text('standard');
   String get compact => _text('compact');
+  String get oneColumn => _text('oneColumn');
+  String get twoColumns => _text('twoColumns');
   String get home => _text('home');
   String get all => _text('all');
   String get favorites => _text('favorites');
@@ -157,8 +159,8 @@ class NetrixLocalizations {
     return genericError;
   }
 
-  static const Map<String, Map<String, String>> _catalog =
-      <String, Map<String, String>>{
+  static const Map<String, Map<String, String>>
+  _catalog = <String, Map<String, String>>{
     'zh': <String, String>{
       'category_diagnostics': '诊断',
       'category_address': '地址与子网',
@@ -202,6 +204,8 @@ class NetrixLocalizations {
       'requiredField': '{label}不能为空',
       'standard': '标准',
       'compact': '紧凑',
+      'oneColumn': '一列',
+      'twoColumns': '两列',
       'home': '首页',
       'all': '全部',
       'favorites': '收藏',
@@ -303,6 +307,8 @@ class NetrixLocalizations {
       'requiredField': '{label} is required',
       'standard': 'Standard',
       'compact': 'Compact',
+      'oneColumn': '1 column',
+      'twoColumns': '2 columns',
       'home': 'Home',
       'all': 'All',
       'favorites': 'Favorites',
@@ -405,6 +411,8 @@ class NetrixLocalizations {
       'requiredField': '{label}は必須です',
       'standard': '標準',
       'compact': 'コンパクト',
+      'oneColumn': '1列',
+      'twoColumns': '2列',
       'home': 'ホーム',
       'all': 'すべて',
       'favorites': 'お気に入り',
@@ -503,6 +511,8 @@ class NetrixLocalizations {
       'requiredField': '{label}은(는) 필수입니다',
       'standard': '표준',
       'compact': '간결',
+      'oneColumn': '1열',
+      'twoColumns': '2열',
       'home': '홈',
       'all': '전체',
       'favorites': '즐겨찾기',
@@ -601,6 +611,8 @@ class NetrixLocalizations {
       'requiredField': '{label}不可為空',
       'standard': '標準',
       'compact': '精簡',
+      'oneColumn': '一欄',
+      'twoColumns': '兩欄',
       'home': '首頁',
       'all': '全部',
       'favorites': '收藏',
@@ -665,8 +677,8 @@ class _NetrixLocalizationsDelegate
 
   @override
   bool isSupported(Locale locale) => NetrixLocalizations.supportedLocales.any(
-        (Locale item) => item.languageCode == locale.languageCode,
-      );
+    (Locale item) => item.languageCode == locale.languageCode,
+  );
 
   @override
   Future<NetrixLocalizations> load(Locale locale) async {

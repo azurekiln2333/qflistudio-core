@@ -27,15 +27,11 @@ const String toolStateFileName = 'tools_state.json';
 /// 与 netrix 的 `standard` / `compact` 完全一致，重启和跨版本都能读回。
 enum ToolCardDensity { standard, compact }
 
-/// 工具页的本地状态：显示密度、收藏和使用记录。
+/// 工具页的本地状态：显示密度、列数、收藏和使用记录。
 ///
 /// 沿用内核已经有的本地存储约定（[LocalStoreBackend]），默认写
-/// `AppPaths.storageDirectory()/tool_state.json`。文件格式与 netrix 的
-/// `tool_state.json` 前三个字段同名同义，方便对照排查；另外只多出
-/// `version`。
-///
-/// 键名固定为 [densityKey]、[favoritesKey]、[recentKey]。[densityKey] 由 Pi C
-/// 定义，另外两个键的读写只发生在批次自己的代码里，三批之间不冲突。
+/// `AppPaths.storageDirectory()/tools_state.json`。
+/// 保留 netrix 的显示密度、收藏和使用记录字段。
 class ToolStateStore extends ChangeNotifier {
   ToolStateStore({
     LocalStoreBackend? backend,
@@ -47,10 +43,14 @@ class ToolStateStore extends ChangeNotifier {
   static final ToolStateStore instance = ToolStateStore();
 
   static const String defaultDensity = 'standard';
+  static const int defaultCardColumns = 1;
   static const int maxRecent = 12;
 
   /// 设置文件里的显示密度字段。
   static const String densityKey = 'cardDensity';
+
+  /// 宽松模式的列数字段，只接受 1 或 2。
+  static const String cardColumnsKey = 'cardColumns';
 
   /// 设置文件里的收藏字段，值为工具标识列表。
   static const String favoritesKey = 'favorites';
@@ -62,12 +62,15 @@ class ToolStateStore extends ChangeNotifier {
   final Duration _flushDelay;
 
   ToolCardDensity _density = ToolCardDensity.standard;
+  int _cardColumns = defaultCardColumns;
   Set<String> _favorites = const <String>{};
   List<String> _recent = const <String>[];
   bool _loaded = false;
   Future<void> _writes = Future<void>.value();
 
   ToolCardDensity get density => _density;
+
+  int get cardColumns => _cardColumns;
 
   Set<String> get favorites => Set<String>.unmodifiable(_favorites);
 
@@ -83,6 +86,7 @@ class ToolStateStore extends ChangeNotifier {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
           _density = _decodeDensity(decoded[densityKey]);
+          _cardColumns = _decodeCardColumns(decoded[cardColumnsKey]);
           _favorites = _decodeIds(decoded[favoritesKey]);
           _recent = _decodeRecent(decoded[recentKey]);
         }
@@ -98,6 +102,14 @@ class ToolStateStore extends ChangeNotifier {
   Future<void> setDensity(ToolCardDensity value) {
     if (_density == value) return _writes;
     _density = value;
+    notifyListeners();
+    return _persist();
+  }
+
+  /// 保存宽松模式的列数。
+  Future<void> setCardColumns(int value) {
+    if ((value != 1 && value != 2) || _cardColumns == value) return _writes;
+    _cardColumns = value;
     notifyListeners();
     return _persist();
   }
@@ -145,6 +157,7 @@ class ToolStateStore extends ChangeNotifier {
     final payload = jsonEncode(<String, Object>{
       'version': 1,
       densityKey: _density.name,
+      cardColumnsKey: _cardColumns,
       favoritesKey: _favorites.toList()..sort(),
       recentKey: _recent,
     });
@@ -170,6 +183,9 @@ class ToolStateStore extends ChangeNotifier {
         ? ToolCardDensity.values.firstWhere((v) => v.name == raw)
         : ToolCardDensity.standard;
   }
+
+  static int _decodeCardColumns(Object? raw) =>
+      raw is int && (raw == 1 || raw == 2) ? raw : defaultCardColumns;
 
   static Set<String> _decodeIds(Object? raw) {
     if (raw is! List) return const <String>{};

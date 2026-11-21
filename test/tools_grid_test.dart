@@ -254,13 +254,9 @@ void main() {
         expect(first.size, terminal.size);
         expect(second.size, terminal.size);
         expect(_card('字符/Unicode').hitTestable(), findsOneWidget);
-        if (size.width < 600) {
-          expect(second.left, closeTo(first.left, 0.5));
-          expect(second.top, greaterThan(first.top));
-        } else {
-          expect(second.top, closeTo(first.top, 0.5));
-          expect(second.left, greaterThan(first.left));
-        }
+        // The default remains one column at both viewport widths.
+        expect(second.left, closeTo(first.left, 0.5));
+        expect(second.top, greaterThan(first.top));
         await _revealCard(tester, 'Base64');
         expect(_card('Base64').hitTestable(), findsOneWidget);
         for (final (title, _) in _sharedPages.skip(2)) {
@@ -281,7 +277,7 @@ void main() {
     var customTaps = 0;
     await _mount(
       tester,
-      size: const Size(1100, 2400),
+      size: const Size(1100, 4000),
       home: Scaffold(
         body: ToolsGrid(
           onOpenTerminal: () {},
@@ -321,7 +317,7 @@ void main() {
     (tester) async {
       await _mount(
         tester,
-        size: const Size(1100, 2400),
+        size: const Size(1100, 4000),
         home: const Scaffold(body: ToolsGrid()),
       );
       expect(find.byType(ToolCard), findsNWidgets(9));

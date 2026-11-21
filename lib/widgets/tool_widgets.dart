@@ -15,13 +15,8 @@ abstract final class ToolsTheme {
   /// Widest the content column grows before it is centred on a large screen.
   static const double contentMaxWidth = 1000;
 
-  /// Card grid geometry. `maxCrossAxisExtent` lets Flutter pick the column
-  /// count, so the same code is a single column on a phone and three or four on
-  /// a tablet without a breakpoint table.
-  ///
-  /// The three values match netrix's “全部工具” page (`_standardSliver` in
-  /// `netrix/lib/ui/home_page.dart`): `maxCrossAxisExtent: 360`,
-  /// `mainAxisExtent: 176`, `crossAxisSpacing` / `mainAxisSpacing: 14`.
+  /// Maximum card width for standalone inline grids. The tools browser uses
+  /// the user's saved column count instead. Height and spacing match netrix.
   static const double cardMaxWidth = 360;
   static const double cardHeight = 176;
   static const double cardSpacing = 14;
@@ -135,24 +130,29 @@ class ToolCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Icon(icon, color: theme.colorScheme.primary),
-                    const Spacer(),
-                    if (isFavorite != null && onToggleFavorite != null)
-                      IconButton(
-                        tooltip: favoriteTooltip,
-                        onPressed: onToggleFavorite,
-                        icon: Icon(
-                          isFavorite! ? Icons.star : Icons.star_border,
+                LayoutBuilder(
+                  builder: (context, constraints) => Row(
+                    children: [
+                      Icon(icon, color: theme.colorScheme.primary),
+                      const Spacer(),
+                      if (isFavorite != null && onToggleFavorite != null)
+                        IconButton(
+                          tooltip: favoriteTooltip,
+                          onPressed: onToggleFavorite,
+                          icon: Icon(
+                            isFavorite! ? Icons.star : Icons.star_border,
+                          ),
                         ),
-                      ),
-                    IconButton(
-                      tooltip: openTooltip,
-                      onPressed: onTap,
-                      icon: const Icon(Icons.arrow_forward_outlined),
-                    ),
-                  ],
+                      // Narrow cards still open through the whole-card target.
+                      if (constraints.maxWidth >=
+                          24 + 2 * kMinInteractiveDimension)
+                        IconButton(
+                          tooltip: openTooltip,
+                          onPressed: onTap,
+                          icon: const Icon(Icons.arrow_forward_outlined),
+                        ),
+                    ],
+                  ),
                 ),
                 const Spacer(),
                 Text(
@@ -254,9 +254,7 @@ class ToolRow extends StatelessWidget {
                   IconButton(
                     tooltip: favoriteTooltip,
                     onPressed: onToggleFavorite,
-                    icon: Icon(
-                      isFavorite! ? Icons.star : Icons.star_border,
-                    ),
+                    icon: Icon(isFavorite! ? Icons.star : Icons.star_border),
                   ),
                 IconButton(
                   tooltip: openTooltip,
