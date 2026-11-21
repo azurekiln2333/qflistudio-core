@@ -25,6 +25,7 @@ import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import '../widgets/collapsed_search_field.dart';
 import 'git/git_clone_dialog.dart';
+import 'git/github_repository_picker.dart';
 import 'home_project_tabs.dart';
 import 'local_content_pages.dart';
 import 'quick_tools_page.dart';
@@ -524,6 +525,8 @@ class _HomeTabState extends State<HomeTab>
                         unawaited(_importProjectArchive());
                       case 'clone_repository':
                         unawaited(_cloneRepository());
+                      case 'github_repositories':
+                        unawaited(_cloneGitHubRepositories());
                     }
                   },
                   itemBuilder: (context) => [
@@ -547,6 +550,18 @@ class _HomeTabState extends State<HomeTab>
                             Icon(Icons.cloud_download_outlined, size: 20),
                             SizedBox(width: 12),
                             Flexible(child: Text('克隆 Git 仓库')),
+                          ],
+                        ),
+                      ),
+                    if (StudioProfile.current?.offlineOnly != true)
+                      PopupMenuItem(
+                        value: 'github_repositories',
+                        enabled: _archiveBusyLabel == null,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.source_outlined, size: 20),
+                            const SizedBox(width: 12),
+                            Flexible(child: Text(l10n.githubRepositories)),
                           ],
                         ),
                       ),
@@ -1181,7 +1196,21 @@ class _HomeTabState extends State<HomeTab>
       desktop: AppPaths.isDesktop,
     );
     if (request == null || !mounted) return;
+    await _runCloneRequest(request);
+  }
 
+  // R1: reuse the exact Home clone pipeline for every selected repository.
+  Future<void> _cloneGitHubRepositories() async {
+    if (_archiveBusyLabel != null) return;
+    final requests = await showGitHubRepositoryPicker(context);
+    if (!mounted || requests == null) return;
+    for (final request in requests) {
+      unawaited(_runCloneRequest(request));
+    }
+  }
+
+  Future<void> _runCloneRequest(GitCloneRequest request) async {
+    if (!mounted) return;
     final id = _nextCloneTaskId++;
     final cancellation = GitCloneCancellation();
     final task = _HomeCloneTaskState(

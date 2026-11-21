@@ -24,6 +24,7 @@ dependencies:
   fast_gbk: ^1.0.0
   xml: ^6.6.1
   crypto: ^3.0.6
+  flutter_secure_storage: ^11.2.0
   web_socket_channel: ^3.0.3
   qfli_git:
     git:

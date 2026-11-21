@@ -42,6 +42,73 @@ class StudioLocalizations {
     return values[key] ?? _zhCn[key] ?? key;
   }
 
+  // R1: GitHub authentication and repository selection.
+  String get githubRepositories =>
+      _pick('GitHub 仓库', 'GitHub 儲存庫', 'GitHub repositories');
+  String get githubCloneSelected =>
+      _pick('克隆所选仓库', '複製所選儲存庫', 'Clone selected repositories');
+  String githubSelectedCount(int count) => _pick(
+    '已选择 $count 个仓库',
+    '已選擇 $count 個儲存庫',
+    '$count repositories selected',
+  );
+  String githubLoadedCount(int count) =>
+      _pick('已加载 $count 个仓库', '已載入 $count 個儲存庫', '$count repositories loaded');
+  String get githubOAuth =>
+      _pick('OAuth 授权（默认）', 'OAuth 授權（預設）', 'OAuth (default)');
+  String get githubPat => _pick('个人访问令牌', '個人存取權杖', 'Personal access token');
+  String get githubConnect => _pick('连接 GitHub', '連接 GitHub', 'Connect GitHub');
+  String get githubDisconnect =>
+      _pick('断开 GitHub', '中斷 GitHub', 'Disconnect GitHub');
+  String get githubPatHint =>
+      _pick('粘贴 GitHub PAT', '貼上 GitHub PAT', 'Paste a GitHub PAT');
+  String get githubPatPrivacy => _pick(
+    '令牌仅用于 GitHub 和本次克隆。仅系统安全存储可保存令牌。',
+    '權杖僅用於 GitHub 和本次複製。僅系統安全儲存可保存權杖。',
+    'Used only for GitHub and cloning. Tokens are stored only in the system secure vault.',
+  );
+  String get githubOAuthHint => _pick(
+    '在浏览器完成 GitHub 授权，无需输入密码。',
+    '在瀏覽器完成 GitHub 授權，無需輸入密碼。',
+    'Authorize GitHub in your browser without entering a password here.',
+  );
+  String get githubAuthorizationCode =>
+      _pick('在 GitHub 输入此代码', '在 GitHub 輸入此代碼', 'Enter this code on GitHub');
+  String get githubOpenBrowser =>
+      _pick('打开授权页面', '開啟授權頁面', 'Open authorization page');
+  String get githubCopyCode =>
+      _pick('复制授权代码', '複製授權代碼', 'Copy authorization code');
+  String get githubWaiting =>
+      _pick('等待浏览器授权…', '等待瀏覽器授權…', 'Waiting for browser authorization…');
+  String get githubSearch =>
+      _pick('筛选已加载仓库', '篩選已載入儲存庫', 'Filter loaded repositories');
+  String get githubNoRepositories =>
+      _pick('没有可显示的仓库', '沒有可顯示的儲存庫', 'No repositories to display');
+  String get githubRepositoryScope => _pick(
+    '仅显示凭据获准访问的仓库，可继续加载下一页。',
+    '僅顯示憑據獲准存取的儲存庫，可繼續載入下一頁。',
+    'Shows repositories granted to these credentials. Load more to fetch the next page.',
+  );
+  String get githubLoadMore =>
+      _pick('加载更多仓库', '載入更多儲存庫', 'Load more repositories');
+  String get githubSelectLoaded =>
+      _pick('选择已加载仓库', '選擇已載入儲存庫', 'Select loaded repositories');
+  String get githubClearSelection => _pick('清除选择', '清除選取', 'Clear selection');
+  String get githubPrivate => _pick('私有', '私人', 'Private');
+  String get githubArchived => _pick('已归档', '已封存', 'Archived');
+  String get githubRequestFailed => _pick(
+    'GitHub 请求失败，请重试',
+    'GitHub 要求失敗，請重試',
+    'GitHub request failed. Try again.',
+  );
+  String get refresh => _pick('刷新', '重新整理', 'Refresh');
+
+  String _pick(String cn, String tw, String en) => isEnglish
+      ? en
+      : isTraditionalChinese
+      ? tw
+      : cn;
+
   String get home => _text('home');
   String get functions => _text('functions');
   String get tools => _text('tools');
@@ -105,8 +172,10 @@ class StudioLocalizations {
 
   /// Label of the collapsed search field on the tutorial page.
   String get searchContent => _text('searchContent');
+
   /// Cloud empty-state hint that points at the FAB instead of the old menu item.
   String get cloudProjectHintFab => _text('cloudProjectHintFab');
+
   /// Shown when the FAB is tapped on the cloud tab without a session.
   String get cloudSignInRequired => _text('cloudSignInRequired');
   String get allLanguages => _text('allLanguages');

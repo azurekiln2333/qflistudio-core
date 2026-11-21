@@ -1,6 +1,7 @@
 package com.azurekiln.qfli.core;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -112,6 +113,23 @@ public final class QfliPickerPlugin implements FlutterPlugin, ActivityAware,
     public void onMethodCall(MethodCall call, MethodChannel.Result result) {
         try {
             switch (call.method) {
+                case "openUrl": {
+                    String url = call.argument("url");
+                    Uri uri = url == null ? null : Uri.parse(url);
+                    if (uri == null || !("https".equals(uri.getScheme()) || "http".equals(uri.getScheme()))
+                            || uri.getHost() == null || uri.getUserInfo() != null) {
+                        throw new IllegalArgumentException("An HTTP(S) URL without credentials is required.");
+                    }
+                    try {
+                        Intent view = new Intent(Intent.ACTION_VIEW, uri);
+                        view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        applicationContext.startActivity(view);
+                        result.success(null);
+                    } catch (ActivityNotFoundException error) {
+                        result.error("UNSUPPORTED", "A system browser is unavailable.", null);
+                    }
+                    break;
+                }
                 case "pickDocument":
                     Intent pick = new Intent(Boolean.TRUE.equals(call.argument("folder"))
                             ? Intent.ACTION_OPEN_DOCUMENT_TREE : Intent.ACTION_OPEN_DOCUMENT);
