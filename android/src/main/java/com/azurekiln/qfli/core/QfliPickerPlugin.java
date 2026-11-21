@@ -2,6 +2,7 @@ package com.azurekiln.qfli.core;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -127,6 +128,37 @@ public final class QfliPickerPlugin implements FlutterPlugin, ActivityAware,
                         result.success(null);
                     } catch (ActivityNotFoundException error) {
                         result.error("UNSUPPORTED", "A system browser is unavailable.", null);
+                    }
+                    break;
+                }
+                case "shareFile": {
+                    String path = call.argument("path");
+                    String title = call.argument("title");
+                    String mime = call.argument("mimeType");
+                    if (path == null || !"application/zip".equals(mime)) {
+                        throw new IllegalArgumentException("A ZIP path and application/zip are required.");
+                    }
+                    if (activityBinding == null) {
+                        result.error("NO_ACTIVITY", "Sharing requires an attached Activity.", null);
+                        break;
+                    }
+                    try {
+                        Uri uri = QfliArchiveProvider.uriFor(applicationContext, path);
+                        Intent share = new Intent(Intent.ACTION_SEND)
+                                .setType("application/zip")
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .putExtra(Intent.EXTRA_TITLE, title)
+                                .setClipData(ClipData.newRawUri("ZIP archive", uri))
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        Intent chooser = Intent.createChooser(share, title)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        activityBinding.getActivity().startActivity(chooser);
+                        // Handoff only. The receiver may open the URI later.
+                        result.success(true);
+                    } catch (ActivityNotFoundException error) {
+                        result.success(false);
+                    } catch (IOException | SecurityException error) {
+                        result.error("SHARE_FAILED", "The ZIP could not be shared.", null);
                     }
                     break;
                 }

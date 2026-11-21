@@ -12,6 +12,7 @@ import 'package:re_editor/re_editor.dart';
 import '../config/ohos_platform.dart';
 import '../git/git_backend.dart';
 import '../models/project.dart';
+import '../i18n/studio_localizations.dart';
 import '../pages/git/git_worktree_guard.dart';
 import '../pages/git_page.dart';
 import '../store/auth_store.dart';
@@ -27,6 +28,7 @@ import '../services/local_web_server.dart';
 import '../services/runner_service.dart';
 import '../services/online_program.dart';
 import '../services/share_service.dart';
+import '../services/archive_share_service.dart';
 import '../services/studio_profile.dart';
 import '../services/web_preview_file.dart';
 import '../services/task_activity_service.dart';
@@ -4005,6 +4007,63 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     );
   }
 
+  bool _sharingArchive = false;
+
+  Future<void> _shareArchiveEntry(Project owner, String path) async {
+    if (_sharingArchive || owner.isCloud) return;
+    _sharingArchive = true;
+    final labels = StudioLocalizations.of(context);
+    bool current() => mounted;
+    try {
+      final result = await ArchiveShareService.shareSelection(
+        owner,
+        selectedPath: path,
+      );
+      if (!mounted || !current()) return;
+      if (result.status == ArchiveShareStatus.unsupported) {
+        final save = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(labels.shareUnsupportedTitle),
+            content: Text(labels.shareUnsupportedMessage),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(labels.cancel),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(labels.saveZip),
+              ),
+            ],
+          ),
+        );
+        if (save != true || !current()) return;
+        final target = await PickerService.saveDocument(
+          suggestedName: p.basename(result.path),
+        );
+        if (target == null || !current()) return;
+        if (target.isLocalFile) {
+          if (!p.equals(p.absolute(result.path), p.absolute(target.path!))) {
+            await File(result.path).copy(target.path!);
+          }
+        } else if (target.uri != null) {
+          final bytes = await File(result.path).readAsBytes();
+          if (!current()) return;
+          await PickerService.writeUri(target.uri!, bytes);
+        }
+      }
+    } catch (_) {
+      if (mounted && current()) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(labels.projectShareFailed)));
+      }
+    } finally {
+      _sharingArchive = false;
+    }
+  }
+
   /// 文件树卡片：外观（圆角 + 细描边、无阴影）由 [FileExplorer] 自绘。
   Widget _buildExplorerCard(
     BuildContext context, {
@@ -4021,6 +4080,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       store: widget.store,
       settings: widget.settings,
       onFileOpened: onFileOpened,
+      onShareEntry: _shareArchiveEntry,
       workspace: _workspace,
       workspaceMembers: _workspaceMembers,
       workspaceStore: widget.workspaceStore,

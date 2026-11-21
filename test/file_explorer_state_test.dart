@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/editor/editor_controller.dart';
@@ -384,6 +385,44 @@ void main() {
     },
   );
 
+  testWidgets('ZIP menu sends the selected workspace owner and path', (
+    tester,
+  ) async {
+    final shared = <({Project owner, String path})>[];
+    await fixture.mount(
+      tester,
+      onShareEntry: (owner, path) async =>
+          shared.add((owner: owner, path: path)),
+    );
+    await fixture.selectSecondRoot(tester);
+    await tester.longPress(fixture.entry(fixture.second, 'other'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ZIP 分享'));
+    await tester.pumpAndSettle();
+    expect(shared, hasLength(1));
+    expect(shared.single.owner, same(fixture.second));
+    expect(shared.single.path, p.join(fixture.second.path, 'other'));
+    await tester.tap(fixture.entry(fixture.second, 'other'));
+    await _waitForIo(
+      tester,
+      () => fixture.entry(fixture.second, 'second.json').evaluate().isNotEmpty,
+    );
+    await tester.tap(
+      fixture.entry(fixture.second, 'second.json'),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('ZIP 分享'));
+    await tester.pumpAndSettle();
+    expect(shared, hasLength(2));
+    expect(shared.last.owner, same(fixture.second));
+    expect(
+      shared.last.path,
+      p.join(fixture.second.path, 'other', 'second.json'),
+    );
+    await fixture.dispose(tester);
+  });
+
   for (final scale in [1.0, 2.0]) {
     testWidgets('workspace toolbar fits a 280px sidebar at text scale $scale', (
       tester,
@@ -484,6 +523,7 @@ class _ExplorerFixture {
     bool drawer = false,
     double? width,
     double scale = 1,
+    Future<void> Function(Project owner, String path)? onShareEntry,
   }) async {
     if (!_registeredTeardown) {
       _registeredTeardown = true;
@@ -497,6 +537,7 @@ class _ExplorerFixture {
       editor: editor,
       store: store,
       settings: settings,
+      onShareEntry: onShareEntry,
     );
     await tester.pumpWidget(
       MaterialApp(

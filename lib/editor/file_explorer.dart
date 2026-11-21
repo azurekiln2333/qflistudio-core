@@ -42,6 +42,7 @@ class FileExplorer extends StatefulWidget {
     required this.settings,
     this.onFileOpened,
     this.onEntryDeleted,
+    this.onShareEntry,
     this.outlined = true,
     this.workspace,
     this.workspaceMembers = const [],
@@ -87,6 +88,10 @@ class FileExplorer extends StatefulWidget {
 
   /// 文件/文件夹被删除后的回调（云端项目推送删除）。
   final ValueChanged<String>? onEntryDeleted;
+
+  /// The editor owns credentials and export lifecycle, not the tree. Ownership
+  /// is resolved from the selected node, including other workspace roots.
+  final Future<void> Function(Project owner, String path)? onShareEntry;
 
   /// 文件成功打开后的回调（抽屉模式下用于自动关闭抽屉）。
   final VoidCallback? onFileOpened;
@@ -1167,6 +1172,17 @@ class _FileExplorerState extends State<FileExplorer> {
             ],
           ),
         ),
+      if (widget.onShareEntry != null && !owner.isCloud)
+        const PopupMenuItem(
+          value: 'share_zip',
+          child: Row(
+            children: [
+              Icon(Icons.folder_zip_outlined, size: 18),
+              SizedBox(width: 10),
+              Text('ZIP 分享'),
+            ],
+          ),
+        ),
       if (!isRoot)
         const PopupMenuItem(
           value: 'delete',
@@ -1206,6 +1222,8 @@ class _FileExplorerState extends State<FileExplorer> {
           _loadChildren(node);
         case 'delete':
           _delete(node);
+        case 'share_zip':
+          unawaited(widget.onShareEntry!(owner, node.path));
         case 'history':
           Navigator.of(context).push(
             MaterialPageRoute(

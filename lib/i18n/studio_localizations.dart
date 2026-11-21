@@ -133,6 +133,17 @@ class StudioLocalizations {
     'The server project was deleted, but local cleanup failed. Refresh and retry cleanup.',
   );
 
+  // R5/R6: ZIP share is separate from the existing .qsz export.
+  String get projectShareFailed =>
+      _pick('无法导出或分享项目', '無法匯出或分享專案', 'Could not export or share the project');
+  String get shareUnsupportedTitle =>
+      _pick('系统暂不支持文件分享', '系統暫不支援檔案分享', 'File sharing is unavailable');
+  String get shareUnsupportedMessage => _pick(
+    'ZIP 已准备好。可以将其保存到文件，不会删除源项目。',
+    'ZIP 已準備好。可以將其儲存至檔案，不會刪除來源專案。',
+    'The ZIP is ready. Save it to a file instead. The source project will not be deleted.',
+  );
+  String get saveZip => _pick('保存 ZIP', '儲存 ZIP', 'Save ZIP');
   String _pick(String cn, String tw, String en) => isEnglish
       ? en
       : isTraditionalChinese

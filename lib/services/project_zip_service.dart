@@ -27,6 +27,134 @@ abstract final class ProjectZipService {
     return Isolate.run(() => _export(source, destination, metadata));
   }
 
+  /// Export exactly one selected file/folder, without project or parent extras.
+  /// This is intentionally separate from the import-compatible .qsz export.
+  static Future<void> exportSelectionToFile({
+    required String projectRoot,
+    required String selectedPath,
+    required String destination,
+  }) => Isolate.run(
+    () => _exportSelection(projectRoot, selectedPath, destination),
+  );
+
+  static Future<void> _exportSelection(
+    String projectRoot,
+    String selectedPath,
+    String destination,
+  ) async {
+    final root = p.normalize(p.absolute(projectRoot));
+    final selected = p.normalize(p.absolute(selectedPath));
+    if (!p.equals(root, selected) && !p.isWithin(root, selected)) {
+      throw const ProjectZipException('Selected entry is outside its project.');
+    }
+    final output = p.normalize(p.absolute(destination));
+    if (p.equals(root, output) || p.isWithin(root, output)) {
+      throw const ProjectZipException(
+        'Share output must be outside the project.',
+      );
+    }
+    if (await FileSystemEntity.type(root, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      throw const ProjectZipException(
+        'Project root is not a regular directory.',
+      );
+    }
+    final resolvedRoot = await Directory(root).resolveSymbolicLinks();
+    final entries = <({String path, String name, bool directory})>[];
+
+    Future<bool> validate(String path) async {
+      var current = root;
+      final relative = p.relative(path, from: root);
+      if (relative != '.') {
+        for (final part in p.split(relative)) {
+          current = p.join(current, part);
+          if (await FileSystemEntity.type(current, followLinks: false) ==
+              FileSystemEntityType.link) {
+            throw const ProjectZipException('Links cannot be shared as ZIP.');
+          }
+        }
+      }
+      final type = await FileSystemEntity.type(path, followLinks: false);
+      if (type != FileSystemEntityType.file &&
+          type != FileSystemEntityType.directory) {
+        throw const ProjectZipException(
+          'Selected entry is missing or unsupported.',
+        );
+      }
+      final actual = await (type == FileSystemEntityType.directory
+          ? Directory(path).resolveSymbolicLinks()
+          : File(path).resolveSymbolicLinks());
+      if (!p.equals(actual, resolvedRoot) &&
+          !p.isWithin(resolvedRoot, actual)) {
+        throw const ProjectZipException('Selected entry escapes its project.');
+      }
+      return type == FileSystemEntityType.directory;
+    }
+
+    Future<void> collect(String path, String name) async {
+      final directory = await validate(path);
+      entries.add((path: path, name: _relative(name), directory: directory));
+      if (directory) {
+        await for (final child in Directory(path).list(followLinks: false)) {
+          await collect(child.path, '$name/${p.basename(child.path)}');
+        }
+      }
+    }
+
+    final selectedIsRoot = p.equals(root, selected);
+    if (selectedIsRoot) {
+      await validate(root);
+      await for (final child in Directory(root).list(followLinks: false)) {
+        await collect(child.path, p.basename(child.path));
+      }
+    } else {
+      await collect(selected, p.basename(selected));
+    }
+    entries.sort((a, b) => a.name.compareTo(b.name));
+    final outputFile = File(output);
+    if (await FileSystemEntity.type(output, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw const ProjectZipException('Share destination already exists.');
+    }
+    await outputFile.parent.create(recursive: true);
+    final staging = await outputFile.parent.createTemp('.zip-staging-');
+    final staged = File(p.join(staging.path, 'archive.zip'));
+    final encoder = ZipFileEncoder();
+    var opened = false;
+    try {
+      encoder.create(staged.path, level: DeflateLevel.defaultCompression);
+      opened = true;
+      for (final entry in entries) {
+        // Recheck ancestors as well as the leaf immediately before reading.
+        if (await validate(entry.path) != entry.directory) {
+          throw const ProjectZipException('Entry changed while creating ZIP.');
+        }
+        if (entry.directory) {
+          final stat = await Directory(entry.path).stat();
+          encoder.addArchiveFile(
+            ArchiveFile.directory('${entry.name}/')
+              ..mode = stat.mode
+              ..lastModTime = stat.modified.millisecondsSinceEpoch ~/ 1000,
+          );
+        } else {
+          await encoder.addFile(File(entry.path), entry.name);
+        }
+      }
+      await encoder.close();
+      opened = false;
+      await staged.rename(output);
+    } finally {
+      if (opened) {
+        try {
+          await encoder.close();
+        } catch (_) {
+          // Preserve the source failure.
+        }
+      }
+      await staging.delete(recursive: true);
+    }
+  }
+
   /// Used by native document providers that accept bytes rather than a path.
   static Future<Uint8List> exportProject(Project project) {
     final source = project.path;
