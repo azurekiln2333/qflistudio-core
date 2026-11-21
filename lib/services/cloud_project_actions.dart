@@ -25,6 +25,7 @@ class CloudProjectActions extends ChangeNotifier {
   }) : api = api ?? ApiClient.instance,
        cache = cache ?? CloudCacheService.instance {
     auth.addListener(_authChanged);
+    this.cache.addListener(_cacheChanged);
     _authChanged();
   }
   final AuthStore auth;
@@ -68,6 +69,10 @@ class CloudProjectActions extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _cacheChanged() {
+    if (!_disposed) notifyListeners();
+  }
+
   CloudSession _capture() {
     // AuthStore mutates before awaiting persistence and notifying. Capture and
     // fences therefore check live getters, not only ChangeNotifier emissions.
@@ -84,6 +89,11 @@ class CloudProjectActions extends ChangeNotifier {
       _scope != null &&
       project.belongsToCloudScope(_scope!) &&
       cache.isBusy(_scope!, project.cloudId!);
+  CloudCacheStatus status(Project project) =>
+      _scope == null || !project.belongsToCloudScope(_scope!)
+      ? const CloudCacheStatus()
+      : cache.status(_scope!, project.cloudId!);
+
   Future<void> refresh() async {
     final session = _capture();
     final generation = store.invalidateCloudRefresh(session.scope);
@@ -120,6 +130,10 @@ class CloudProjectActions extends ChangeNotifier {
       reconcile: true,
     );
     session.ensureCurrent();
+    for (final project in projects) {
+      if (!store.cloudRefreshIsCurrent(session.scope, generation)) return;
+      await cache.inspect(project, session);
+    }
     if (!_disposed) notifyListeners();
   }
 
@@ -160,6 +174,12 @@ class CloudProjectActions extends ChangeNotifier {
     }
   }
 
+  Future<CloudCacheStatus> inspect(Project project) =>
+      cache.inspect(project, _capture());
+  Future<CloudCacheStatus> cacheProject(Project project) =>
+      cache.update(project, _capture());
+  Future<void> clearCache(Project project) => cache.clear(project, _capture());
+
   /// Workspace owners need not be present in the current Home list. Scope on
   /// the project is authoritative; membership in projects is not required.
   Future<CloudSnapshot> prepareSnapshot(Project project) =>
@@ -169,6 +189,7 @@ class CloudProjectActions extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     auth.removeListener(_authChanged);
+    cache.removeListener(_cacheChanged);
     super.dispose();
   }
 }

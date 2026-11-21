@@ -5,12 +5,22 @@ import 'package:flutter/material.dart';
 
 import '../git/git_branch_label.dart';
 import '../models/project.dart';
+import '../models/cloud_project.dart';
 import '../i18n/studio_localizations.dart';
 import '../services/app_paths.dart';
 import '../services/file_service.dart';
 import 'language_badge.dart';
 
-enum ProjectCardAction { open, reveal, remove, favorite, export, share }
+enum ProjectCardAction {
+  open,
+  reveal,
+  remove,
+  favorite,
+  export,
+  share,
+  cache,
+  clearCache,
+}
 
 /// 主页的项目卡片 — MD3 outlined 风格。
 class ProjectCard extends StatefulWidget {
@@ -22,7 +32,10 @@ class ProjectCard extends StatefulWidget {
     this.onToggleFavorite,
     this.onExport,
     this.onShare,
+    this.cacheStatus,
     this.cloudBusy = false,
+    this.onCache,
+    this.onClearCache,
     this.gitRefreshRevision = 0,
   });
 
@@ -37,7 +50,11 @@ class ProjectCard extends StatefulWidget {
   /// R5/R6: ZIP sharing is separate from import-compatible archive export.
   final VoidCallback? onShare;
 
+  /// R8: C's manifest-backed state, not an existence test on project.path.
+  final CloudCacheStatus? cacheStatus;
   final bool cloudBusy;
+  final VoidCallback? onCache;
+  final VoidCallback? onClearCache;
 
   /// 收藏切换回调（null 时隐藏收藏菜单项）。
   final ValueChanged<bool>? onToggleFavorite;
@@ -311,6 +328,10 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                           );
                         },
                       ),
+                      if (project.isCloud && widget.cacheStatus != null) ...[
+                        const SizedBox(height: 6),
+                        _CloudCacheSummary(status: widget.cacheStatus!),
+                      ],
                     ],
                   ),
                 ),
@@ -341,6 +362,10 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                         widget.onExport?.call();
                       case ProjectCardAction.share:
                         widget.onShare?.call();
+                      case ProjectCardAction.cache:
+                        widget.onCache?.call();
+                      case ProjectCardAction.clearCache:
+                        widget.onClearCache?.call();
                     }
                   },
                   itemBuilder: (context) => [
@@ -407,6 +432,40 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                           ],
                         ),
                       ),
+                    // R8: update/clear never alias the remote delete command.
+                    if (project.isCloud && widget.onCache != null)
+                      PopupMenuItem(
+                        value: ProjectCardAction.cache,
+                        enabled: !widget.cloudBusy,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.download_outlined, size: 20),
+                            const SizedBox(width: 12),
+                            Flexible(
+                              child: Text(
+                                widget.cacheStatus?.cachedAt == null
+                                    ? l10n.cacheProject
+                                    : l10n.updateProjectCache,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (project.isCloud && widget.onClearCache != null)
+                      PopupMenuItem(
+                        value: ProjectCardAction.clearCache,
+                        enabled: !widget.cloudBusy,
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.cleaning_services_outlined,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 12),
+                            Flexible(child: Text(l10n.clearProjectCache)),
+                          ],
+                        ),
+                      ),
                     PopupMenuItem(
                       value: ProjectCardAction.remove,
                       enabled: !widget.cloudBusy,
@@ -426,6 +485,89 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+}
+
+/// R8: show the last complete manifest separately from live download progress.
+class _CloudCacheSummary extends StatelessWidget {
+  const _CloudCacheSummary({required this.status});
+  final CloudCacheStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = StudioLocalizations.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final label = switch (status.phase) {
+      CloudCachePhase.notCached => l10n.cacheNotCached,
+      CloudCachePhase.caching => l10n.cacheCaching,
+      CloudCachePhase.cached => l10n.cacheCached,
+      CloudCachePhase.failed => l10n.cacheFailed,
+    };
+    final downloading = status.phase == CloudCachePhase.caching;
+    final counts = downloading
+        ? l10n.cacheFileProgress(status.completedFiles, status.totalFiles)
+        : l10n.cacheFileCount(status.fileCount);
+    final bytes = _bytes(downloading ? status.downloadedBytes : status.bytes);
+    final cachedAt = status.cachedAt?.toLocal();
+    final time = cachedAt == null
+        ? null
+        : l10n.cacheTime(
+            '${cachedAt.year}-${_two(cachedAt.month)}-${_two(cachedAt.day)} '
+            '${_two(cachedAt.hour)}:${_two(cachedAt.minute)}',
+          );
+    final details = [counts, bytes, ?time].join(' · ');
+    return Tooltip(
+      message: [
+        label,
+        details,
+        l10n.cacheSnapshotHint,
+        if (status.error != null) status.error!,
+      ].join('\n'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            '$label · $counts · $bytes',
+            key: const ValueKey('cloud-cache-status'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: status.phase == CloudCachePhase.failed
+                  ? scheme.error
+                  : scheme.onSurfaceVariant,
+            ),
+          ),
+          if (time != null)
+            Text(
+              time,
+              key: const ValueKey('cloud-cache-time'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          if (downloading) ...[
+            const SizedBox(height: 4),
+            LinearProgressIndicator(
+              value: status.totalFiles <= 0
+                  ? null
+                  : (status.completedFiles / status.totalFiles).clamp(0.0, 1.0),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _two(int value) => value.toString().padLeft(2, '0');
+  static String _bytes(int count) {
+    if (count < 1024) return '$count B';
+    if (count < 1024 * 1024) return '${(count / 1024).toStringAsFixed(1)} KiB';
+    if (count < 1024 * 1024 * 1024) {
+      return '${(count / (1024 * 1024)).toStringAsFixed(1)} MiB';
+    }
+    return '${(count / (1024 * 1024 * 1024)).toStringAsFixed(1)} GiB';
   }
 }
 

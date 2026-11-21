@@ -97,6 +97,33 @@ Future<bool> showDeleteCloudProjectConfirm(
       false;
 }
 
+/// R8: clearing this device's cache never deletes the server project.
+Future<bool> showClearCloudCacheConfirm(
+  BuildContext context,
+  Project project,
+) async {
+  final l10n = StudioLocalizations.of(context);
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: const ValueKey('cloud-project-cache-clear-confirm'),
+          title: Text(l10n.cacheClearTitle),
+          content: Text('${project.name}\n${l10n.cacheClearMessage}'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(l10n.clearProjectCache),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+}
+
 /// 新建文件/文件夹时输入名称。
 Future<String?> showNewNameDialog(
   BuildContext context, {

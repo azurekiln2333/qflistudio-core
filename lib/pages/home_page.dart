@@ -376,6 +376,23 @@ class _HomeTabState extends State<HomeTab>
     widget.auth.addListener(_onAuthChanged);
     if (_loggedIn && StudioProfile.current?.offlineOnly != true) {
       unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
+      unawaited(_inspectCloudCaches());
+    }
+  }
+
+  /// R8: restore manifest metadata for scoped registry rows on first display.
+  /// A folder's mere existence never marks a cache complete.
+  Future<void> _inspectCloudCaches() async {
+    final generation = _accountGeneration;
+    final actions = _cloudActions;
+    for (final project in actions.projects) {
+      if (!mounted || generation != _accountGeneration) return;
+      try {
+        await actions.inspect(project);
+      } catch (_) {
+        // C retains an observable failed/notCached status. One corrupt manifest
+        // must not prevent inspecting the remaining project cards.
+      }
     }
   }
 
@@ -491,6 +508,9 @@ class _HomeTabState extends State<HomeTab>
       _authSessionGeneration = sessionGeneration;
       _refreshRequest = null;
       _deletingCloudProjects.clear();
+      if (loggedIn && StudioProfile.current?.offlineOnly != true) {
+        unawaited(_inspectCloudCaches());
+      }
     }
     if (!mounted) return;
     setState(() => _loggedIn = loggedIn);
@@ -1093,7 +1113,12 @@ class _HomeTabState extends State<HomeTab>
         const padding = EdgeInsets.fromLTRB(12, 8, 12, 96);
         if (wide) {
           final scale = MediaQuery.textScalerOf(context).scale(1);
-          final itemExtent = (24 + 38 * scale).clamp(90.0, 180.0).toDouble();
+          // R8: make room for snapshot state/time/count/bytes on cloud cards.
+          final hasCloud = projects.any((project) => project.isCloud);
+          final itemExtent =
+              ((hasCloud ? 40 : 24) + (hasCloud ? 68 : 38) * scale)
+                  .clamp(hasCloud ? 132.0 : 90.0, hasCloud ? 260.0 : 180.0)
+                  .toDouble();
           return Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 1360),
@@ -1137,10 +1162,16 @@ class _HomeTabState extends State<HomeTab>
           : () => unawaited(_exportProjectArchive(project)),
       // R5/R6: sharing ZIP does not replace import-compatible .qsz export.
       onShare: () => unawaited(_shareProject(project)),
+      // R8: snapshot state is observable and independent of directory existence.
+      cacheStatus: project.isCloud ? _cloudActions.status(project) : null,
       cloudBusy:
           project.isCloud &&
           (_cloudActions.isBusy(project) ||
               _deletingCloudProjects.contains(project.id)),
+      onCache: project.isCloud ? () => unawaited(_cacheProject(project)) : null,
+      onClearCache: project.isCloud
+          ? () => unawaited(_clearProjectCache(project))
+          : null,
     );
   }
 
@@ -1219,6 +1250,36 @@ class _HomeTabState extends State<HomeTab>
       if (current()) _showArchiveMessage(l10n.projectShareFailed);
     } finally {
       if (mounted) setState(() => _archiveBusyLabel = null);
+    }
+  }
+
+  // R8: cache/clear are distinct operations, never remote delete aliases.
+  Future<void> _cacheProject(Project project) async {
+    final generation = _accountGeneration;
+    try {
+      await _cloudActions.cacheProject(project);
+    } catch (_) {
+      if (mounted && generation == _accountGeneration) {
+        _showArchiveMessage(StudioLocalizations.of(context).cacheActionFailed);
+      }
+    }
+  }
+
+  Future<void> _clearProjectCache(Project project) async {
+    final generation = _accountGeneration;
+    final actions = _cloudActions;
+    final l10n = StudioLocalizations.of(context);
+    final confirmed = await showClearCloudCacheConfirm(context, project);
+    if (!confirmed || !mounted || generation != _accountGeneration) return;
+    try {
+      await actions.clearCache(project);
+      if (mounted && generation == _accountGeneration) {
+        _showArchiveMessage(l10n.cacheCleared);
+      }
+    } catch (_) {
+      if (mounted && generation == _accountGeneration) {
+        _showArchiveMessage(l10n.cacheActionFailed);
+      }
     }
   }
 

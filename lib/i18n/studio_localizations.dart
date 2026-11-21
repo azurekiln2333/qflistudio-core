@@ -160,6 +160,43 @@ class StudioLocalizations {
   String get saveZip => _pick('保存 ZIP', '儲存 ZIP', 'Save ZIP');
   String get zipSaved => _pick('ZIP 已保存', 'ZIP 已儲存', 'ZIP saved');
 
+  // R8: cache metadata describes the last complete snapshot, not freshness.
+  String get cacheNotCached => _pick('未缓存', '尚未快取', 'Not cached');
+  String get cacheCaching => _pick('缓存中', '快取中', 'Caching');
+  String get cacheCached => _pick('已缓存', '已快取', 'Cached');
+  String get cacheFailed => _pick('同步失败', '同步失敗', 'Sync failed');
+  String get cacheProject => _pick('缓存项目', '快取專案', 'Cache project');
+  String get updateProjectCache => _pick('更新缓存', '更新快取', 'Update cache');
+  String get clearProjectCache => _pick('清理缓存', '清除快取', 'Clear cache');
+  String get cacheClearTitle =>
+      _pick('清理本机缓存？', '清除本機快取？', 'Clear local cache?');
+  String get cacheClearMessage => _pick(
+    '仅清理本机缓存，不删除云端项目。有未上传修改时不能清理。',
+    '僅清除本機快取，不刪除雲端專案。有未上傳修改時不能清除。',
+    'Removes only local cache, not the cloud project. Unuploaded changes prevent clearing.',
+  );
+  String get cacheActionFailed =>
+      _pick('缓存操作失败，请重试', '快取操作失敗，請重試', 'Cache operation failed. Try again.');
+  String get cacheCleared => _pick(
+    '本机缓存已清理，云端项目不变',
+    '本機快取已清除，雲端專案不變',
+    'Local cache cleared. The cloud project is unchanged.',
+  );
+  String cacheFileCount(int count) =>
+      _pick('$count 个文件', '$count 個檔案', '$count files');
+  String cacheFileProgress(int completed, int total) => _pick(
+    '$completed / $total 个文件',
+    '$completed / $total 個檔案',
+    '$completed / $total files',
+  );
+  String cacheTime(String time) =>
+      _pick('缓存时间 $time', '快取時間 $time', 'Cached $time');
+  String get cacheSnapshotHint => _pick(
+    '显示上次完整缓存，不代表云端最新状态',
+    '顯示上次完整快取，不代表雲端最新狀態',
+    'Last complete cache, not a guarantee of current remote contents',
+  );
+
   String _pick(String cn, String tw, String en) => isEnglish
       ? en
       : isTraditionalChinese
