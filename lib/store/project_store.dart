@@ -10,6 +10,7 @@ import '../models/tutorial.dart';
 import '../services/app_paths.dart';
 import '../services/code_import_service.dart';
 import '../services/file_service.dart';
+import '../services/ios_sandbox_paths.dart';
 import '../services/project_config.dart';
 import '../services/project_templates.dart';
 import '../services/project_zip_service.dart';
@@ -37,9 +38,9 @@ Future<({String name, String language, String type})> _prepareImportedProject(
 }
 
 ({List<Project> projects, String? browsedId}) _readProjectRegistry(
-  String path,
+  ({String path, IosSandboxPaths? iosPaths}) input,
 ) {
-  final file = File(path);
+  final file = File(input.path);
   if (!file.existsSync()) return (projects: <Project>[], browsedId: null);
   final data = jsonDecode(file.readAsStringSync());
   if (data is! Map || data['projects'] is! List) {
@@ -52,6 +53,13 @@ Future<({String name, String language, String type})> _prepareImportedProject(
     try {
       final project = Project.fromJson(Map<String, dynamic>.from(item));
       if (!ids.add(project.id)) continue;
+      final iosPaths = input.iosPaths;
+      if (iosPaths != null) {
+        project.path = iosPaths.resolve(
+          project.path,
+          relative: item[IosSandboxPaths.relativePathKey],
+        );
+      }
       if (!project.isCloud) {
         final metadata = ProjectConfig.readMetadata(project.path);
         project.name = metadata.name ?? project.name;
@@ -111,6 +119,7 @@ class ProjectStore extends ChangeNotifier {
 
   Future<void> _reload() async {
     _storage ??= _storageOverride ?? await _resolveStorageFile();
+    final iosPaths = AppPaths.isIos ? await AppPaths.iosSandboxPaths() : null;
     // New registrations can queue while refresh waits for an earlier write.
     while (true) {
       final pendingWrite = _writes;
@@ -119,13 +128,26 @@ class ProjectStore extends ChangeNotifier {
       if (identical(pendingWrite, _writes)) break;
     }
     final revision = _revision;
-    final result = await compute(_readProjectRegistry, _storage!.path);
+    final result = await compute(_readProjectRegistry, (
+      path: _storage!.path,
+      iosPaths: iosPaths,
+    ));
     // 读取期间发生了创建、收藏等操作时保留较新的内存状态。
     if (revision != _revision) return;
     _projects
       ..clear()
       ..addAll(result.projects);
     lastBrowsedProjectId = result.browsedId;
+  }
+
+  static Map<String, dynamic> _registryEntry(
+    Project project,
+    IosSandboxPaths? iosPaths,
+  ) {
+    final entry = project.toJson();
+    final relative = iosPaths?.relativePath(project.path);
+    if (relative != null) entry[IosSandboxPaths.relativePathKey] = relative;
+    return entry;
   }
 
   Future<File> _resolveStorageFile() async {
@@ -148,13 +170,16 @@ class ProjectStore extends ChangeNotifier {
       Directory? temporaryDirectory;
       File? temporaryFile;
       try {
+        final iosPaths = AppPaths.isIos
+            ? await AppPaths.iosSandboxPaths()
+            : null;
         final data = {
           'version': 1,
           'projects': [
             for (final project in _projects)
               if (!_pendingLocalRegistrations.contains(project) ||
                   identical(project, registering))
-                project.toJson(),
+                _registryEntry(project, iosPaths),
           ],
           if (lastBrowsedProjectId != null)
             'lastBrowsedProjectId': lastBrowsedProjectId,

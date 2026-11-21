@@ -3,6 +3,9 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../services/app_paths.dart';
+import '../services/ios_sandbox_paths.dart';
+
 /// 项目内会话记忆文件（`<项目>/history.json`）：
 /// - 每个文件的光标位置（打开文件时自动定位）
 /// - 上次打开的文件列表与激活标签（打开项目时恢复现场）
@@ -47,6 +50,18 @@ class ProjectDocumentSession {
   final String relativePath;
   final FileCursor cursor;
   final bool isActive;
+
+  ProjectDocumentSession resolveIosProjectPath(IosSandboxPaths paths) {
+    final resolved = paths.resolve(projectPath);
+    return resolved == projectPath
+        ? this
+        : ProjectDocumentSession(
+            projectPath: resolved,
+            relativePath: relativePath,
+            cursor: cursor,
+            isActive: isActive,
+          );
+  }
 
   Map<String, dynamic> toJson() => {
     'projectPath': projectPath,
@@ -135,10 +150,11 @@ abstract final class ProjectHistory {
       await pending;
       if (identical(pending, _writes[key])) break;
     }
-    return _read(projectPath);
+    final iosPaths = AppPaths.isIos ? await AppPaths.iosSandboxPaths() : null;
+    return _read(projectPath, iosPaths);
   }
 
-  static ProjectSession _read(String projectPath) {
+  static ProjectSession _read(String projectPath, [IosSandboxPaths? iosPaths]) {
     try {
       final file = historyFile(projectPath);
       if (!file.existsSync()) {
@@ -169,7 +185,7 @@ abstract final class ProjectHistory {
         treeRootExpanded: data['treeRootExpanded'] as bool? ?? true,
         workspaceRoots: [
           for (final path in (data['workspaceRoots'] as List? ?? []))
-            path as String,
+            iosPaths?.resolve(path as String) ?? path as String,
         ],
         documents: [
           for (final raw
@@ -177,7 +193,10 @@ abstract final class ProjectHistory {
                       ? data['documents'] as List
                       : const [])
                   .take(512))
-            ?ProjectDocumentSession.fromJson(raw),
+            if (ProjectDocumentSession.fromJson(raw) case final document?)
+              iosPaths == null
+                  ? document
+                  : document.resolveIosProjectPath(iosPaths),
         ],
       );
     } catch (_) {

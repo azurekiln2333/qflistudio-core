@@ -47,6 +47,7 @@ abstract final class RecoveryService {
           )
         : await FileBackup.directory();
     if (!await directory.exists()) return [];
+    final iosPaths = AppPaths.isIos ? await AppPaths.iosSandboxPaths() : null;
     final entries = <RecoveryEntry>[];
     await for (final entity in directory.list(
       recursive: !recycle,
@@ -65,6 +66,7 @@ abstract final class RecoveryService {
       }
       final stat = await entity.stat();
       final basename = p.basename(entity.path);
+      final originalPath = metadata['originalPath'] as String?;
       final inferredName = recycle
           ? basename.replaceFirst(RegExp(r'-\d{8}-\d{6}(?:-\d+)?\.zip$'), '')
           : basename.replaceFirst(
@@ -79,7 +81,9 @@ abstract final class RecoveryService {
               ? metadata['language'] as String
               : '',
           type: metadata['type'] is String ? metadata['type'] as String : '',
-          originalPath: metadata['originalPath'] as String?,
+          originalPath: originalPath == null
+              ? null
+              : iosPaths?.resolve(originalPath) ?? originalPath,
           projectName:
               metadata['projectName'] as String? ??
               (recycle ? null : p.basename(p.dirname(entity.path))),

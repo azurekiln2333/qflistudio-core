@@ -288,8 +288,15 @@ class TerminalPaneState extends State<TerminalPane> {
     super.initState();
     // Use the already-resolved app data directory when the app has one; the
     // project directory otherwise. No probe is started here.
+    final storage = AppPaths.storageDirectoryIfResolved;
+    final workingDirectory = widget.workingDirectory;
     _sandboxRoot =
-        AppPaths.storageDirectoryIfResolved ?? widget.workingDirectory;
+        storage == null ||
+            (AppPaths.isIos &&
+                !p.equals(storage, workingDirectory) &&
+                !p.isWithin(storage, workingDirectory))
+        ? workingDirectory
+        : storage;
     _sessions.add(_createSession(_nextSessionId++));
     if (widget.initialOnline) {
       WidgetsBinding.instance.addPostFrameCallback((_) {

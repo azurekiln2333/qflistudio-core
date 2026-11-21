@@ -134,7 +134,34 @@ class WorkspaceStore extends ChangeNotifier {
     );
     // A document may only update its own file, even if its local JSON is damaged.
     if (workspace == null || workspace.id != fileId) return null;
-    return _snapshotWorkspace(workspace);
+    final iosPaths = AppPaths.isIos ? await AppPaths.iosSandboxPaths() : null;
+    if (iosPaths == null) return _snapshotWorkspace(workspace);
+    final session = workspace.session;
+    return _snapshotWorkspace(
+      workspace.copyWith(
+        members: [
+          for (final member in workspace.members)
+            member.copyWith(path: iosPaths.resolve(member.path)),
+        ],
+        session: WorkspaceSessionSnapshot(
+          primaryPath: session.primaryPath == null
+              ? null
+              : iosPaths.resolve(session.primaryPath!),
+          documents: [
+            for (final document in session.documents)
+              document.resolveIosProjectPath(iosPaths),
+          ],
+          expandedDirs: {
+            for (final entry in session.expandedDirs.entries)
+              iosPaths.resolve(entry.key): entry.value,
+          },
+          rootExpanded: {
+            for (final entry in session.rootExpanded.entries)
+              iosPaths.resolve(entry.key): entry.value,
+          },
+        ),
+      ),
+    );
   }
 
   /// Creates or updates membership/name. Omitting [session] preserves the newest

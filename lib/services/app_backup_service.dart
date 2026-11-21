@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'app_backup_codec.dart';
 import 'app_paths.dart';
 import 'app_private_roots.dart';
+import 'ios_sandbox_paths.dart';
 import 'studio_profile.dart';
 
 /// 应用级全量私有数据备份。
@@ -1084,6 +1085,17 @@ abstract final class AppBackupService {
       if (info.recordedRootPath != null) storageRootKey: info.recordedRootPath!,
     };
     if (recorded.isEmpty) return;
+    final storage = recorded[storageRootKey];
+    final iosPaths = IosSandboxPaths(
+      documents:
+          recorded['documents'] ??
+          (storage?.endsWith('/Documents') == true ? storage : null),
+      support:
+          recorded['support'] ??
+          (storage?.endsWith('/Library/Application Support') == true
+              ? storage
+              : null),
+    );
     final registry = File(p.join(root.path, projectRegistryFileName));
     if (await registry.exists()) {
       Map<String, dynamic>? data;
@@ -1097,7 +1109,7 @@ abstract final class AppBackupService {
       }
       final projects = data?['projects'];
       if (projects is List &&
-          await _rebaseProjectPaths(projects, recorded, currentRoots)) {
+          _rebaseProjectPaths(projects, recorded, currentRoots, iosPaths)) {
         // Write failures must escape to the transaction rollback. Swallowing
         // a truncated write here would commit and delete the original copy.
         await registry.writeAsString(
@@ -1108,7 +1120,7 @@ abstract final class AppBackupService {
     }
     // FileBackup.listVersions 与回收站通过原路径过滤；不重定位这些元数据会让
     // 导入的历史版本/回收记录全部失效。即使 projects.json 缺失也要执行。
-    await _rebaseMetadataJson(root, recorded, currentRoots);
+    await _rebaseMetadataJson(root, recorded, currentRoots, iosPaths);
   }
 
   /// 重定位 `files_backup/**.metadata.json` 与 `recyclebin/**.metadata.json` 里的
@@ -1117,6 +1129,7 @@ abstract final class AppBackupService {
     Directory root,
     Map<String, String> recorded,
     Map<String, String> currentRoots,
+    IosSandboxPaths iosPaths,
   ) async {
     final subDirs = <String>[
       'files_backup',
@@ -1143,7 +1156,9 @@ abstract final class AppBackupService {
         }
         final original = data['originalPath'];
         if (original is! String || original.isEmpty) continue;
-        final rebased = _rebasePath(original, recorded, currentRoots);
+        final rebased =
+            _rebasePath(original, recorded, currentRoots) ??
+            _rebasePath(iosPaths.resolve(original), recorded, currentRoots);
         if (rebased == null) continue;
         data['originalPath'] = rebased;
         await entity.writeAsString(
@@ -1177,19 +1192,31 @@ abstract final class AppBackupService {
   }
 
   /// 把重启后仍在磁盘上的项目路径重定位到新私有根，返回是否发生修改。
-  static Future<bool> _rebaseProjectPaths(
+  static bool _rebaseProjectPaths(
     List<dynamic> projects,
     Map<String, String> recorded,
     Map<String, String> currentRoots,
-  ) async {
+    IosSandboxPaths iosPaths,
+  ) {
     var changed = false;
     for (final item in projects) {
       if (item is! Map) continue;
       final path = item['path'];
       if (path is! String || path.isEmpty) continue;
-      final rebased = _rebasePath(path, recorded, currentRoots);
+      final rebased =
+          _rebasePath(path, recorded, currentRoots) ??
+          _rebasePath(
+            iosPaths.resolve(
+              path,
+              relative: item[IosSandboxPaths.relativePathKey],
+            ),
+            recorded,
+            currentRoots,
+          );
       if (rebased == null) continue;
       item['path'] = rebased;
+      // The destination path can be under a different private root.
+      item.remove(IosSandboxPaths.relativePathKey);
       changed = true;
     }
     return changed;

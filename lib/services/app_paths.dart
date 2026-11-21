@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'file_service.dart';
+import 'ios_sandbox_paths.dart';
 import 'project_templates.dart';
 
 /// 应用可写目录与配置文件的路径解析。
@@ -16,8 +17,12 @@ abstract final class AppPaths {
   static const String _probeMarker = '.qfli_write_probe';
   static Future<String?>? _storageFuture;
   static Future<String?>? _writableFuture;
+  static Future<String?>? _iosDocumentsFuture;
+  static Future<IosSandboxPaths>? _iosSandboxPathsFuture;
   static int _probeId = 0;
   static String? _storagePathCache;
+
+  static bool get isIos => !kIsWeb && Platform.isIOS;
 
   /// Last resolved storage directory, or null when not resolved yet.
   ///
@@ -66,24 +71,55 @@ abstract final class AppPaths {
       _storageFuture ??= _findStorageDirectory();
 
   static Future<String?> _findStorageDirectory() async {
+    if (isIos) {
+      // Files exposes Documents. Keep the registry, settings and credentials
+      // in Application Support even when it cannot be reached.
+      return _storagePathCache = await _writableProviderPath(
+        getApplicationSupportDirectory,
+      );
+    }
     // 三个 Store 共享一次探测；第一个候选成功后立即返回。
     for (final getter in [
       getApplicationSupportDirectory,
       getApplicationDocumentsDirectory,
     ]) {
-      try {
-        final dir = await getter().timeout(const Duration(seconds: 2));
-        if (await _isWritable(dir.path)) return _storagePathCache = dir.path;
-      } catch (_) {}
+      final path = await _writableProviderPath(getter);
+      if (path != null) return _storagePathCache = path;
     }
     return _storagePathCache = await writableDirectory();
   }
 
-  /// 新建项目的默认根目录：`<应用数据>/projects`。
+  static Future<String?> _writableProviderPath(
+    Future<Directory> Function() getter,
+  ) async {
+    try {
+      final dir = await getter().timeout(const Duration(seconds: 2));
+      if (await _isWritable(dir.path)) return dir.path;
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<String?> _iosDocumentsDirectory() => _iosDocumentsFuture ??=
+      _writableProviderPath(getApplicationDocumentsDirectory);
+
+  static Future<IosSandboxPaths?> iosSandboxPaths() async {
+    if (!isIos) return null;
+    return _iosSandboxPathsFuture ??= _resolveIosSandboxPaths();
+  }
+
+  static Future<IosSandboxPaths> _resolveIosSandboxPaths() async =>
+      IosSandboxPaths(
+        documents: await _iosDocumentsDirectory(),
+        support: await storageDirectory(),
+      );
+
+  /// 新建项目的默认根目录。iOS 使用文档目录，其他平台使用应用数据目录。
   ///
   /// [create] 为 true 时确保目录存在（用于创建项目前）。
   static Future<String?> projectsRoot({bool create = false}) async {
-    final base = await storageDirectory();
+    final base = isIos
+        ? await _iosDocumentsDirectory()
+        : await storageDirectory();
     if (base == null) return null;
     final dir = Directory(p.join(base, 'projects'));
     if (create) {

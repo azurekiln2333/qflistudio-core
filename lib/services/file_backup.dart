@@ -95,6 +95,9 @@ abstract final class FileBackup {
         '^${RegExp.escape(name)}-(\\d{8}-\\d{6}-\\d{3})(?:-\\d+)?'
         '${RegExp.escape(ext)}\$',
       );
+      final iosPaths = AppPaths.isIos ? await AppPaths.iosSandboxPaths() : null;
+      final originalPath = p.normalize(original.absolute.path);
+      final resolvedOriginal = iosPaths?.resolve(originalPath) ?? originalPath;
       final versions = <BackupVersion>[];
       for (final entity in dir.listSync(followLinks: false)) {
         if (entity is! File) continue;
@@ -108,7 +111,10 @@ abstract final class FileBackup {
                     as Map<String, dynamic>;
             final source = data['originalPath'] as String?;
             if (source != null &&
-                !p.equals(source, p.normalize(original.absolute.path))) {
+                !p.equals(
+                  iosPaths?.resolve(source) ?? source,
+                  resolvedOriginal,
+                )) {
               continue;
             }
           } catch (_) {}

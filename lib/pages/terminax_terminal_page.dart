@@ -65,8 +65,8 @@ class _TerminaxTerminalPageState extends State<TerminaxTerminalPage> {
   }
 
   Future<String?> _resolveWorkingDirectory() async {
-    // App-level terminal: the sandbox root is the app private data directory,
-    // so every project directory inside it is reachable.
+    // On iOS, the default project root is in Documents.
+    if (AppPaths.isIos) return AppPaths.projectsRoot(create: true);
     final storage = await AppPaths.storageDirectory();
     if (storage != null && storage.isNotEmpty) return storage;
     return AppPaths.writableDirectory();
