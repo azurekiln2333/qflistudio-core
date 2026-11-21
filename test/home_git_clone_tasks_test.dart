@@ -27,33 +27,34 @@ void main() {
       ),
     );
 
+    expect(find.byKey(const ValueKey('home-git-clone-task-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('home-git-clone-task-1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('home-git-clone-task-2')), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-0')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-0')).hitTestable(),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-1')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-1')).hitTestable(),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-2')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-2')).hitTestable(),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-4')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-4')).hitTestable(),
       findsNothing,
     );
     expect(
       tester.getSize(find.byKey(const ValueKey('home-git-clone-tasks'))).height,
       lessThanOrEqualTo(HomeGitCloneTasks.defaultMaxHeight),
     );
-    await tester.drag(
-      find.byKey(const ValueKey('home-git-clone-tasks')),
-      const Offset(0, -180),
-    );
+    await tester.drag(find.byType(ListView), const Offset(0, -180));
     await tester.pump();
+    expect(find.byKey(const ValueKey('home-git-clone-task-4')), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-4')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-4')).hitTestable(),
       findsOneWidget,
     );
   });
@@ -86,12 +87,13 @@ void main() {
       tester.getSize(find.byKey(const ValueKey('home-git-clone-tasks'))).height,
       lessThanOrEqualTo(68),
     );
+    expect(find.byKey(const ValueKey('home-git-clone-task-0')), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-0')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-0')).hitTestable(),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('home-git-clone-task-1')).hitTestable(),
+      find.byKey(const ValueKey('home-git-clone-cancel-1')).hitTestable(),
       findsNothing,
     );
   });

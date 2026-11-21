@@ -373,6 +373,15 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "6.5.2"
+  qfli_git:
+    dependency: "direct main"
+    description:
+      path: "."
+      ref: "697291a27818612ae9dc53d83d4f99fa5887908e"
+      resolved-ref: "697291a27818612ae9dc53d83d4f99fa5887908e"
+      url: "https://github.com/azurekiln2333/qflistudio-git.git"
+    source: git
+    version: "0.1.0"
   quiver:
     dependency: transitive
     description:
@@ -381,15 +390,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.2.2"
-  qfli_git:
-    dependency: "direct main"
-    description:
-      path: "."
-      ref: "e6d01736b9523baf31778f6b1983fa51dcac35e6"
-      resolved-ref: "e6d01736b9523baf31778f6b1983fa51dcac35e6"
-      url: "https://github.com/azurekiln2333/qflistudio-git.git"
-    source: git
-    version: "0.1.0"
   re_editor:
     dependency: "direct main"
     description:

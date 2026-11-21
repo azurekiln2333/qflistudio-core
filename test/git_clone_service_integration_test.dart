@@ -62,6 +62,7 @@ void main() {
       onProgress: progress.add,
     );
 
+    expect(outcome.error, isNull, reason: 'clone outcome: ${outcome.error}');
     expect(outcome.ok, isTrue);
     expect(progress.map((event) => event.stage), <GitCloneStage>[
       GitCloneStage.preparing,
@@ -130,6 +131,7 @@ void main() {
       onProgress: (_) => throw StateError('listener disposed'),
     );
 
+    expect(outcome.error, isNull, reason: 'clone outcome: ${outcome.error}');
     expect(outcome.ok, isTrue);
     expect(registry.calls, 1);
   });
@@ -359,6 +361,11 @@ void main() {
 
     expect(outcomes.first.cancelled, isTrue);
     expect(outcomes.first.project, isNull);
+    expect(
+      outcomes.last.error,
+      isNull,
+      reason: 'clone B: ${outcomes.last.error}',
+    );
     expect(outcomes.last.ok, isTrue);
     expect(registry.calls, 1);
     expect(pathA, isNot(pathB));
@@ -423,13 +430,15 @@ class _Registry extends ProjectStore {
     calls++;
     if (reject) return (error: 'registry unavailable', project: null);
     final metadata = ProjectConfig.readMetadata(rawPath);
+    final language = metadata.language ?? ProjectStore.detectLanguage(rawPath);
+    final type = metadata.type ?? '';
     return (
       error: null,
       project: Project.create(
-        name: metadata.name!,
+        name: metadata.name ?? p.basename(rawPath),
         path: rawPath,
-        language: metadata.language!,
-        type: metadata.type!,
+        language: language,
+        type: type,
       ),
     );
   }

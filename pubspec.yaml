@@ -28,7 +28,7 @@ dependencies:
   qfli_git:
     git:
       url: https://github.com/azurekiln2333/qflistudio-git.git
-      ref: e6d01736b9523baf31778f6b1983fa51dcac35e6
+      ref: 697291a27818612ae9dc53d83d4f99fa5887908e
   # 远程电脑的终端渲染器（CloudTerminal 打过补丁的 xterm 分支）。
   xterm: ^4.0.0
 
