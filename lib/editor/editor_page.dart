@@ -174,6 +174,7 @@ class EditorPage extends StatefulWidget {
     this.composerDefaults,
     this.agentEnabled = false,
     this.gitBackendFactory,
+    this.cloudSyncOpener,
   });
 
   final Project project;
@@ -236,6 +237,10 @@ class EditorPage extends StatefulWidget {
   /// platform adapter. Widget tests inject a deterministic backend so the
   /// navigation and dirty-buffer contracts do not run real Git processes.
   final GitBackend Function(Project project)? gitBackendFactory;
+
+  /// Test seam for delayed/failing opens. The page owns every returned service,
+  /// including services that finish opening after the page has been disposed.
+  final Future<CloudSyncService> Function(Project project)? cloudSyncOpener;
 
   @override
   State<EditorPage> createState() => _EditorPageState();
@@ -432,18 +437,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _editor.addListener(_onEditorChanged);
     widget.settings.addListener(_onSettingsChanged);
     if (widget.project.isCloud && StudioProfile.current?.offlineOnly != true) {
-      CloudSyncService.open(
-        cloudId: widget.project.cloudId!,
-        cachePath: widget.project.path,
-        name: widget.project.name,
-      ).then((service) {
-        if (!mounted) return;
-        setState(() => _cloud = service);
-        _cloudSub = service.stateStream.listen((state) {
-          if (mounted) setState(() => _syncState = state);
-        });
-        _pullInitial();
-      });
+      unawaited(_openCloudSync());
     }
     // Restore existing tabs, then select an explicitly requested file.
     //
@@ -927,6 +921,51 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       }),
     );
     super.dispose();
+  }
+
+  Future<void> _openCloudSync() async {
+    CloudSyncService? opened;
+    try {
+      final project = widget.project;
+      opened =
+          await (widget.cloudSyncOpener?.call(project) ??
+              CloudSyncService.open(
+                cloudId: project.cloudId!,
+                cachePath: project.path,
+                name: project.name,
+              ));
+      if (!mounted) {
+        // Construction acquires CloudWorkspaceActivity. No page dispose can
+        // release this late service, because it was never assigned to _cloud.
+        opened.dispose();
+        return;
+      }
+      setState(() => _cloud = opened);
+      _cloudSub = opened.stateStream.listen((state) {
+        if (mounted) setState(() => _syncState = state);
+      });
+      await _pullInitial();
+    } catch (_) {
+      // Catch both failed opens and unexpected initial-pull failures. Never
+      // leave an owned service/activity lease behind, or leak a Future error.
+      final subscription = identical(_cloud, opened) ? _cloudSub : null;
+      if (identical(_cloud, opened)) {
+        _cloudSub = null;
+        _cloud = null;
+      }
+      opened?.dispose();
+      try {
+        await subscription?.cancel();
+      } catch (_) {
+        // Cleanup failure must not escape the detached initialization Future.
+      }
+      if (mounted) {
+        setState(() {
+          _syncState = SyncState.offline;
+          _syncError = '云端同步初始化失败，请重新打开项目';
+        });
+      }
+    }
   }
 
   Future<void> _pullInitial() async {

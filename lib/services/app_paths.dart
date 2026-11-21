@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../models/cloud_project.dart';
 import 'file_service.dart';
 import 'ios_sandbox_paths.dart';
 import 'project_templates.dart';
@@ -130,6 +131,23 @@ abstract final class AppPaths {
       }
     }
     return dir.path;
+  }
+
+  /// Canonical cloud ownership root. Does not adopt, move, or delete old mirrors.
+  static Future<String> cloudProjectRoot({
+    required CloudProjectScope scope,
+    required String cloudId,
+    String? projectsRootOverride,
+  }) async {
+    final root = projectsRootOverride ?? await projectsRoot(create: true);
+    if (root == null) throw const FileSystemException('未找到可写的项目目录');
+    return p.join(
+      root,
+      'cloudProjects',
+      scope.originKey,
+      scope.accountKey,
+      CloudProjectScope.validateCloudId(cloudId),
+    );
   }
 
   static String languageProjectsRoot(

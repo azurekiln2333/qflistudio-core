@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
+import '../models/cloud_project.dart';
 import '../models/tutorial.dart';
 import '../services/app_paths.dart';
 import '../services/code_import_service.dart';
@@ -88,6 +89,25 @@ class ProjectStore extends ChangeNotifier {
   bool _loaded = false;
   Future<void>? _writes;
   int _revision = 0;
+  int _cloudGeneration = 0;
+  CloudProjectScope? _cloudScope;
+
+  /// Called on login-generation change, refresh start, and before deletion.
+  int invalidateCloudRefresh([CloudProjectScope? scope]) {
+    _cloudScope = scope;
+    return ++_cloudGeneration;
+  }
+
+  /// Repeated facades in Home/editor share one store scope, not fresh tickets.
+  void bindCloudScope(CloudProjectScope? scope) {
+    if (_cloudScope != scope) invalidateCloudRefresh(scope);
+  }
+
+  bool cloudRefreshIsCurrent(CloudProjectScope scope, int generation) =>
+      _cloudScope == scope && _cloudGeneration == generation;
+
+  List<Project> cloudProjectsFor(CloudProjectScope scope) =>
+      projects.where((project) => project.belongsToCloudScope(scope)).toList();
 
   /// 文件树上一次浏览的项目（跨编辑器会话记忆）。
   String? lastBrowsedProjectId;
@@ -158,7 +178,11 @@ class ProjectStore extends ChangeNotifier {
     return File(p.join(base, 'projects.json'));
   }
 
-  Future<void> _persist({VoidCallback? onFailure, Project? registering}) {
+  Future<void> _persist({
+    VoidCallback? onFailure,
+    Project? registering,
+    VoidCallback? ensureCurrent,
+  }) {
     _revision++;
     final file = _storage;
     if (file == null) {
@@ -170,9 +194,11 @@ class ProjectStore extends ChangeNotifier {
       Directory? temporaryDirectory;
       File? temporaryFile;
       try {
+        ensureCurrent?.call();
         final iosPaths = AppPaths.isIos
             ? await AppPaths.iosSandboxPaths()
             : null;
+        ensureCurrent?.call();
         final data = {
           'version': 1,
           'projects': [
@@ -186,12 +212,16 @@ class ProjectStore extends ChangeNotifier {
         };
         final encoded = const JsonEncoder.withIndent('  ').convert(data);
         await file.parent.create(recursive: true);
+        ensureCurrent?.call();
         temporaryDirectory = await file.parent.createTemp(
           '.qfli-project-registry-',
         );
+        ensureCurrent?.call();
         temporaryFile = File(p.join(temporaryDirectory.path, 'registry.json'));
         await temporaryFile.writeAsString(encoded, flush: true);
-        await temporaryFile.rename(file.path);
+        ensureCurrent?.call();
+        // The final fence and atomic publication have no asynchronous gap.
+        temporaryFile.renameSync(file.path);
         _pendingLocalRegistrations.remove(registering);
       } catch (_) {
         onFailure?.call();
@@ -221,11 +251,19 @@ class ProjectStore extends ChangeNotifier {
     return pending;
   }
 
-  Future<ProjectResult> _registerLocalProject(Project project) async {
+  Future<ProjectResult> _registerLocalProject(
+    Project project, {
+    CloudSession? session,
+  }) async {
+    if (!_loaded) await load();
+    session?.ensureCurrent();
     _projects.add(project);
     _pendingLocalRegistrations.add(project);
     try {
+      _storage ??= _storageOverride ?? await _resolveStorageFile();
+      session?.ensureCurrent();
       await _persist(
+        ensureCurrent: session?.ensureCurrent,
         registering: project,
         onFailure: () {
           _pendingLocalRegistrations.remove(project);
@@ -234,6 +272,9 @@ class ProjectStore extends ChangeNotifier {
         },
       );
     } catch (error) {
+      _pendingLocalRegistrations.remove(project);
+      _projects.remove(project);
+      _revision++;
       notifyListeners();
       return (
         error: error is FileSystemException ? error.message : '$error',
@@ -502,44 +543,87 @@ class ProjectStore extends ChangeNotifier {
     required String cloudId,
     required String cachePath,
     String language = '',
+    CloudProjectScope? scope,
+    CloudSession? session,
   }) async {
-    if (_projects.any((e) => e.cloudId == cloudId)) {
+    scope ??= session?.scope;
+    session?.ensureCurrent();
+    if (session != null && session.scope != scope) {
+      return (error: '云端项目账号不匹配', project: null);
+    }
+    if (scope == null) return (error: '请先登录云端账号', project: null);
+    if (_projects.any(
+      (e) => e.cloudId == cloudId && e.belongsToCloudScope(scope!),
+    )) {
       return (error: '该云端项目已在列表中', project: null);
     }
+    CloudProjectScope.validateCloudId(cloudId);
     final project = Project.create(
       name: name,
       path: cachePath,
       cloudId: cloudId,
+      cloudOrigin: scope.origin,
+      cloudAccountId: scope.accountId,
       language: language,
     );
-    _projects.add(project);
-    await _persist();
-    notifyListeners();
-    return (error: null, project: project);
+    return _registerLocalProject(project, session: session);
   }
 
   /// 合并云端目录信息；保留本地收藏、最近打开时间和未同步文件。
-  Future<void> remapCloudId(String oldId, String newId) async {
+  Future<void> remapCloudId(
+    String oldId,
+    String newId, {
+    CloudProjectScope? scope,
+    int? generation,
+  }) async {
+    if (scope == null ||
+        generation == null ||
+        !cloudRefreshIsCurrent(scope, generation)) {
+      return;
+    }
     for (final project in _projects) {
-      if (project.cloudId == oldId) project.cloudId = newId;
+      if (project.cloudId == oldId && project.belongsToCloudScope(scope)) {
+        project.cloudId = newId;
+      }
     }
     await _persist();
     notifyListeners();
   }
 
-  Future<void> mergeCloudProjects(Iterable<Project> projects) async {
+  Future<void> mergeCloudProjects(
+    Iterable<Project> projects, {
+    CloudProjectScope? scope,
+    int? generation,
+    CloudSession? session,
+  }) async {
+    session?.ensureCurrent();
+    if (scope == null ||
+        generation == null ||
+        !cloudRefreshIsCurrent(scope, generation)) {
+      return;
+    }
+    final priorGeneration = _cloudGeneration;
     for (final project in projects) {
-      if (!project.isCloud) continue;
+      if (!project.belongsToCloudScope(scope)) continue;
       final existing = _projects.where(
-        (item) => item.cloudId == project.cloudId,
+        (item) =>
+            item.cloudId == project.cloudId && item.belongsToCloudScope(scope),
       );
       if (existing.isEmpty) {
         _projects.add(project);
       } else {
+        // Do not move an old mirror: it may hold unsent editor changes.
         existing.first.name = project.name;
       }
     }
-    await _persist();
+    void ensureCurrent() {
+      session?.ensureCurrent();
+      if (!cloudRefreshIsCurrent(scope, priorGeneration)) {
+        throw const CloudOperationException('staleRefresh', '云端列表已更新，请重试');
+      }
+    }
+
+    await _persist(ensureCurrent: ensureCurrent);
     notifyListeners();
   }
 

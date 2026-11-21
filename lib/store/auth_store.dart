@@ -12,7 +12,11 @@ import '../services/app_paths.dart';
 
 /// 登录状态与个人资料的持久化（auth.json）。
 class AuthStore extends ChangeNotifier {
-  AuthStore({File? storageFile}) : _storageOverride = storageFile;
+  AuthStore({File? storageFile, ApiClient? api})
+    : _storageOverride = storageFile,
+      _api = api ?? ApiClient.instance;
+
+  final ApiClient _api;
 
   final File? _storageOverride;
   File? _storage;
@@ -20,17 +24,28 @@ class AuthStore extends ChangeNotifier {
 
   String? _token;
   CommunityUser? _user;
+  int _sessionGeneration = 0;
+
+  /// Advances before any session-adoption or sign-out await. Profile and points
+  /// updates intentionally do not change this identity revision.
+  int get sessionGeneration => _sessionGeneration;
 
   bool get isLoggedIn => _token != null && _user != null;
   String? get token => _token;
   CommunityUser? get user => _user;
 
   Future<void> load() async {
+    final generation = ++_sessionGeneration;
     try {
-      _storage = _storageOverride ?? await _resolveStorage();
-      if (await _storage!.exists()) {
-        final data =
-            jsonDecode(await _storage!.readAsString()) as Map<String, dynamic>;
+      final storage = _storageOverride ?? await _resolveStorage();
+      if (_sessionGeneration != generation) return;
+      _storage = storage;
+      final exists = await storage.exists();
+      if (_sessionGeneration != generation) return;
+      if (exists) {
+        final text = await storage.readAsString();
+        if (_sessionGeneration != generation) return;
+        final data = jsonDecode(text) as Map<String, dynamic>;
         final source = data['serviceOrigin'] ?? data['serverUrl'];
         final trusted = source is String && ApiConfig.ownsSession(source);
         _token = trusted ? data['token'] as String? : null;
@@ -44,11 +59,12 @@ class AuthStore extends ChangeNotifier {
         if (data.containsKey('serverUrl') || !trusted) await _persist();
       }
     } catch (_) {
+      if (_sessionGeneration != generation) return;
       // 配置损坏时按未登录处理。
       _token = null;
       _user = null;
     }
-    notifyListeners();
+    if (_sessionGeneration == generation) notifyListeners();
   }
 
   Future<File> _resolveStorage() async {
@@ -60,6 +76,7 @@ class AuthStore extends ChangeNotifier {
   Future<void> _persist() {
     final file = _storage;
     if (file == null) return Future.value();
+    final generation = _sessionGeneration;
     final encoded = const JsonEncoder.withIndent('  ').convert({
       'serviceOrigin': ApiConfig.origin,
       if (_token != null) 'token': _token,
@@ -80,8 +97,11 @@ class AuthStore extends ChangeNotifier {
         },
     });
     Future<void> write() async {
+      if (_sessionGeneration != generation) return;
       await file.parent.create(recursive: true);
-      await file.writeAsString(encoded, flush: true);
+      if (_sessionGeneration != generation) return;
+      // No await between the final session fence and the credential write.
+      file.writeAsStringSync(encoded, flush: true);
     }
 
     final previous = _writes;
@@ -91,6 +111,7 @@ class AuthStore extends ChangeNotifier {
   }
 
   Future<void> signIn(String token, CommunityUser user) async {
+    ++_sessionGeneration;
     _token = token;
     _user = user;
     await _persist();
@@ -100,28 +121,34 @@ class AuthStore extends ChangeNotifier {
   /// 手动下拉刷新资料；头像由独立 URL 缓存管理。
   Future<void> refreshMe() async {
     final token = _token;
-    final client = ApiClient.instance;
+    final generation = _sessionGeneration;
+    final client = _api;
     if (token == null) return;
     try {
       final fresh = await client.me(token);
-      if (_token != token) return;
+      if (_token != token || _sessionGeneration != generation) return;
       _user = fresh;
       await _persist();
-      notifyListeners();
+      if (_sessionGeneration == generation) notifyListeners();
     } on ApiException catch (e) {
-      if (e.statusCode == 401 && _token == token) await signOut();
+      if (e.statusCode == 401 &&
+          _token == token &&
+          _sessionGeneration == generation) {
+        await signOut();
+      }
     }
   }
 
   Future<void> updateProfile({String? nickname, String? bio}) async {
     final token = _token;
-    final client = ApiClient.instance;
+    final generation = _sessionGeneration;
+    final client = _api;
     if (token == null) return;
     final fresh = await client.updateMe(token, nickname: nickname, bio: bio);
-    if (_token != token) return;
+    if (_token != token || _sessionGeneration != generation) return;
     _user = fresh;
     await _persist();
-    notifyListeners();
+    if (_sessionGeneration == generation) notifyListeners();
   }
 
   Future<void> updatePoints({
@@ -149,6 +176,7 @@ class AuthStore extends ChangeNotifier {
   }
 
   Future<void> signOut() async {
+    ++_sessionGeneration;
     final token = _token;
     _token = null;
     _user = null;
@@ -163,6 +191,7 @@ class AuthStore extends ChangeNotifier {
   /// 两条都不该再调 `/api/auth/logout`：前者令牌已失效，后者要在停止处理
   /// 个人信息的前提下结束登录。
   Future<void> clearLocalData() async {
+    ++_sessionGeneration;
     _token = null;
     _user = null;
     await _persist();
@@ -171,7 +200,7 @@ class AuthStore extends ChangeNotifier {
 
   Future<void> _revokeSession(String token) async {
     try {
-      await ApiClient.instance.logout(token);
+      await _api.logout(token);
     } on ApiException {
       // Local sign-out still completes when the server cannot be reached.
     }

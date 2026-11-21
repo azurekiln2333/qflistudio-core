@@ -9,6 +9,8 @@ import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
 import '../editor/retained_editor_host.dart';
 import '../models/project.dart';
+import '../config/api_config.dart';
+import '../services/cloud_project_actions.dart';
 import '../services/app_paths.dart';
 import '../services/api_client.dart';
 import '../services/cloud_sync_service.dart';
@@ -334,6 +336,17 @@ class _HomeTabState extends State<HomeTab>
   int _nextCloneTaskId = 0;
   late bool _loggedIn;
   Future<void>? _refreshRequest;
+  // R3/R8: one C-owned observable handles all account-scoped cloud mutations.
+  late CloudProjectActions _cloudActions;
+  String? _accountIdentity;
+  String? _accountToken;
+  int _authSessionGeneration = 0;
+  int _homeGeneration = 0;
+
+  // Capture the live AuthStore revision, not only its delayed notification.
+  // The pair also invalidates work when this Home swaps its auth/store objects.
+  ({int home, int session}) get _accountGeneration =>
+      (home: _homeGeneration, session: widget.auth.sessionGeneration);
   late final HomeTabOrderStore _tabOrderStore =
       widget.tabOrderStore ?? HomeTabOrderStore();
 
@@ -353,6 +366,11 @@ class _HomeTabState extends State<HomeTab>
   void initState() {
     super.initState();
     _loggedIn = widget.auth.isLoggedIn;
+    _accountIdentity = widget.auth.user?.id;
+    _accountToken = widget.auth.token;
+    _authSessionGeneration = widget.auth.sessionGeneration;
+    _cloudActions = CloudProjectActions(auth: widget.auth, store: widget.store)
+      ..addListener(_onCloudChanged);
     widget.auth.addListener(_onAuthChanged);
     if (_loggedIn && StudioProfile.current?.offlineOnly != true) {
       unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
@@ -433,20 +451,47 @@ class _HomeTabState extends State<HomeTab>
   @override
   void didUpdateWidget(covariant HomeTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.auth != widget.auth) {
+    if (oldWidget.auth != widget.auth || oldWidget.store != widget.store) {
       oldWidget.auth.removeListener(_onAuthChanged);
+      _cloudActions.removeListener(_onCloudChanged);
+      _cloudActions.dispose();
+      _homeGeneration++;
+      _accountIdentity = widget.auth.user?.id;
+      _accountToken = widget.auth.token;
+      _authSessionGeneration = widget.auth.sessionGeneration;
+      _refreshRequest = null;
+      _cloudActions = CloudProjectActions(
+        auth: widget.auth,
+        store: widget.store,
+      )..addListener(_onCloudChanged);
       widget.auth.addListener(_onAuthChanged);
       _loggedIn = widget.auth.isLoggedIn;
     }
   }
 
+  void _onCloudChanged() {
+    if (mounted) setState(() {});
+  }
+
   void _onAuthChanged() {
     final loggedIn = widget.auth.isLoggedIn;
-    if (mounted && loggedIn != _loggedIn) {
-      setState(() => _loggedIn = loggedIn);
-      if (loggedIn && StudioProfile.current?.offlineOnly != true) {
-        unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
-      }
+    final becameLoggedIn = loggedIn && !_loggedIn;
+    final identity = widget.auth.user?.id;
+    final token = widget.auth.token;
+    final sessionGeneration = widget.auth.sessionGeneration;
+    if (identity != _accountIdentity ||
+        token != _accountToken ||
+        sessionGeneration != _authSessionGeneration) {
+      _homeGeneration++;
+      _accountIdentity = identity;
+      _accountToken = token;
+      _authSessionGeneration = sessionGeneration;
+      _refreshRequest = null;
+    }
+    if (!mounted) return;
+    setState(() => _loggedIn = loggedIn);
+    if (becameLoggedIn && StudioProfile.current?.offlineOnly != true) {
+      unawaited(TaskActivityService.instance.refreshIfDue(widget.auth));
     }
   }
 
@@ -456,6 +501,9 @@ class _HomeTabState extends State<HomeTab>
       task.cancellation.cancel();
     }
     _retainedEditor?.removeListener(_onRetainedEditorChanged);
+    _homeGeneration++;
+    _cloudActions.removeListener(_onCloudChanged);
+    _cloudActions.dispose();
     widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _projectTabs.dispose();
@@ -821,12 +869,12 @@ class _HomeTabState extends State<HomeTab>
 
   /// 按页签取项目列表。
   List<Project> _projectsFor(ProjectScope scope) {
-    final all = widget.store.projects
-        .where(
-          (project) =>
-              StudioProfile.current?.offlineOnly != true || !project.isCloud,
-        )
-        .toList();
+    // R3/R8: the shared registry may retain other accounts and legacy mirrors.
+    // Only C's current-account projection is allowed to render cloud cards.
+    final all = <Project>[
+      ...widget.store.projects.where((project) => !project.isCloud),
+      if (StudioProfile.current?.offlineOnly != true) ..._cloudActions.projects,
+    ]..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
     switch (scope) {
       case ProjectScope.all:
         final list = [
@@ -974,41 +1022,21 @@ class _HomeTabState extends State<HomeTab>
   }
 
   Future<void> _reloadProjects(ProjectScope scope) async {
+    final generation = _accountGeneration;
+    final actions = _cloudActions;
     try {
       await widget.store.refresh();
-      if (mounted) setState(() => _gitRefreshRevision++);
-      if (StudioProfile.current?.offlineOnly == true) return;
-      final token = widget.auth.token;
-      if (token == null ||
-          (scope != ProjectScope.cloud && scope != ProjectScope.all)) {
+      if (!mounted || generation != _accountGeneration) return;
+      setState(() => _gitRefreshRevision++);
+      if (StudioProfile.current?.offlineOnly == true || !actions.available) {
         return;
       }
-      final remote = await ApiClient.instance.cloudProjects(token);
-      if (!mounted || widget.auth.token != token) return;
-      final projects = <Project>[];
-      for (final item in remote) {
-        final id = item['id'] as String?;
-        final name = item['name'] as String?;
-        if (id == null || id.isEmpty || name == null) continue;
-        final legacyId = item['legacyId'] as String?;
-        if (legacyId != null) await widget.store.remapCloudId(legacyId, id);
-        final existing = widget.store.projects.where(
-          (project) => project.cloudId == id,
-        );
-        final mirror = await CloudSyncService.open(
-          cloudId: id,
-          name: name,
-          cachePath: existing.isEmpty ? null : existing.first.path,
-        );
-        projects.add(
-          Project.create(name: name, path: mirror.localPath, cloudId: id),
-        );
-        mirror.dispose();
-      }
-      if (!mounted || widget.auth.token != token) return;
-      await widget.store.mergeCloudProjects(projects);
+      if (scope != ProjectScope.cloud && scope != ProjectScope.all) return;
+      // R3: C owns list generations, scoped merging and deletion tombstones.
+      // Never merge an independent cloud response here after a delete.
+      await actions.refresh();
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _accountGeneration) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -1554,12 +1582,37 @@ class _HomeTabState extends State<HomeTab>
         duration: Duration(seconds: 1),
       ),
     );
+    // R7/R8: new mirrors and registry rows use the same captured account scope.
+    final generation = _accountGeneration;
+    final token = widget.auth.token;
+    final accountId = widget.auth.user?.id;
+    if (token == null || accountId == null) return;
+    final scope = CloudProjectScope(
+      origin: ApiConfig.origin,
+      accountId: accountId,
+    );
+    final session = CloudSession(
+      scope: scope,
+      token: token,
+      isCurrent: () =>
+          mounted &&
+          generation == _accountGeneration &&
+          widget.auth.token == token &&
+          widget.auth.user?.id == accountId,
+    );
     final created = await CloudSyncService.createCloudProject(
-      token: widget.auth.token!,
+      token: token,
       name: name,
       template: template,
+      scope: scope,
+      session: session,
     );
-    if (!context.mounted) return;
+    if (!context.mounted ||
+        generation != _accountGeneration ||
+        widget.auth.token != token ||
+        widget.auth.user?.id != accountId) {
+      return;
+    }
     if (created.error != null) {
       ScaffoldMessenger.of(
         context,
@@ -1569,15 +1622,31 @@ class _HomeTabState extends State<HomeTab>
     final service = await CloudSyncService.open(
       cloudId: created.id!,
       name: name,
+      scope: scope,
+      session: session,
     );
+    if (!context.mounted ||
+        generation != _accountGeneration ||
+        widget.auth.token != token ||
+        widget.auth.user?.id != accountId) {
+      service.dispose();
+      return;
+    }
     final registered = await widget.store.addCloudProject(
       name: name,
       cloudId: '${created.id}',
       cachePath: service.localPath,
       language: template.language,
+      scope: scope,
+      session: session,
     );
     service.dispose();
-    if (!context.mounted) return;
+    if (!context.mounted ||
+        generation != _accountGeneration ||
+        widget.auth.token != token ||
+        widget.auth.user?.id != accountId) {
+      return;
+    }
     if (registered.error != null) {
       ScaffoldMessenger.of(
         context,

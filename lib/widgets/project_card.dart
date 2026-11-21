@@ -354,7 +354,7 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                         ],
                       ),
                     ),
-                    if (AppPaths.isDesktop)
+                    if (AppPaths.isDesktop && !project.isCloud)
                       const PopupMenuItem(
                         value: ProjectCardAction.reveal,
                         child: Row(

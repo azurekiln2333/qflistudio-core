@@ -98,20 +98,10 @@ void main() {
         );
         await _mount(tester, root);
 
-        _expectScopeLabels(tester, [
-          '历史项目',
-          '工作区',
-          '全部项目',
-          '收藏项目',
-          '云端项目',
-        ]);
-        // Launch opens history, newest first, cloud projects included.
-        expect(_visibleProjectNames(tester), [
-          'CloudOnly',
-          'Zulu',
-          'Middle',
-          'Alpha',
-        ]);
+        _expectScopeLabels(tester, ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+        // R3/R7: legacy unscoped cloud rows remain registered but are not
+        // attributed to a signed-out user or a different account.
+        expect(_visibleProjectNames(tester), ['Zulu', 'Middle', 'Alpha']);
         expect(find.byType(FilterChip), findsNothing);
 
         await _selectScope(tester, '全部项目');
@@ -119,15 +109,10 @@ void main() {
           find.byType(FilterChip),
           showHomeTabs ? findsWidgets : findsNothing,
         );
-        expect(_visibleProjectNames(tester), [
-          'Alpha',
-          'CloudOnly',
-          'Middle',
-          'Zulu',
-        ]);
+        expect(_visibleProjectNames(tester), ['Alpha', 'Middle', 'Zulu']);
 
         await _selectScope(tester, '云端项目');
-        expect(_visibleProjectNames(tester), ['CloudOnly']);
+        expect(_visibleProjectNames(tester), isEmpty);
       },
     );
   }
@@ -153,7 +138,7 @@ void main() {
         expect(find.byType(FilterChip), findsNothing);
         if (!offlineOnly) {
           await _selectScope(tester, '云端项目');
-          expect(_visibleProjectNames(tester), ['CloudOnly']);
+          expect(_visibleProjectNames(tester), isEmpty);
         }
       },
     );
@@ -226,9 +211,8 @@ List<String> _scopeLabels(WidgetTester tester) {
   final bar = find.byType(TabBar);
   expect(bar, findsOneWidget);
   final entries = [
-    for (final element in find
-        .descendant(of: bar, matching: find.byType(Text))
-        .evaluate())
+    for (final element
+        in find.descendant(of: bar, matching: find.byType(Text)).evaluate())
       (
         (element.renderObject! as RenderBox).localToGlobal(Offset.zero).dx,
         (element.widget as Text).data ?? '',

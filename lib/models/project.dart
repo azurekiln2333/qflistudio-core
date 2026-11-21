@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 
 import '../config/api_config.dart';
+import 'cloud_project.dart';
 
 /// 一个已注册到 QFLIStudioN 的项目。
 class Project {
@@ -13,6 +14,8 @@ class Project {
     required this.createdAt,
     required this.lastOpenedAt,
     this.cloudId,
+    this.cloudOrigin,
+    this.cloudAccountId,
     this.favorite = false,
     this.language = '',
     this.type = '',
@@ -26,6 +29,15 @@ class Project {
 
   /// 云端项目在服务器上的 proj_ ID；本地项目为 null。
   String? cloudId;
+
+  /// Explicit owner for scoped cloud data. Legacy rows without one stay intact.
+  String? cloudOrigin;
+  String? cloudAccountId;
+
+  bool belongsToCloudScope(CloudProjectScope scope) =>
+      isCloud &&
+      cloudOrigin == scope.origin &&
+      cloudAccountId == scope.accountId;
 
   /// 是否已收藏。
   bool favorite;
@@ -49,6 +61,8 @@ class Project {
     required String name,
     required String path,
     String? cloudId,
+    String? cloudOrigin,
+    String? cloudAccountId,
     bool favorite = false,
     String language = '',
     String type = '',
@@ -61,6 +75,8 @@ class Project {
       createdAt: now,
       lastOpenedAt: now,
       cloudId: cloudId,
+      cloudOrigin: cloudOrigin ?? (cloudId == null ? null : ApiConfig.origin),
+      cloudAccountId: cloudAccountId,
       favorite: favorite,
       language: language,
       type: type,
@@ -74,7 +90,8 @@ class Project {
     'createdAt': createdAt.toIso8601String(),
     'lastOpenedAt': lastOpenedAt.toIso8601String(),
     if (cloudId != null) 'cloudId': cloudId,
-    if (cloudId != null) 'cloudOrigin': ApiConfig.origin,
+    if (cloudId != null) 'cloudOrigin': cloudOrigin ?? ApiConfig.origin,
+    if (cloudAccountId != null) 'cloudAccountId': cloudAccountId,
     'favorite': favorite,
     'language': language,
     'type': type,
@@ -96,6 +113,8 @@ class Project {
       cloudId: ApiConfig.ownsSession(json['cloudOrigin'] as String?)
           ? json['cloudId'] as String?
           : null,
+      cloudOrigin: json['cloudOrigin'] as String?,
+      cloudAccountId: json['cloudAccountId'] as String?,
       favorite: json['favorite'] as bool? ?? false,
       language: json['language'] as String? ?? '',
       type: json['type'] as String? ?? '',

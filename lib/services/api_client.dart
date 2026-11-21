@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import '../community/models.dart';
 import '../config/api_config.dart';
 import '../config/client_platform.dart';
+import '../models/cloud_project.dart';
 import 'ai_service.dart';
 import 'ai_turn_event.dart';
 
@@ -1490,6 +1491,13 @@ class ApiClient {
 
   // ---- 云端项目（私有云盘）----
 
+  /// Captures origin + account + login generation at the cloud boundary.
+  ScopedCloudApi scopedCloud(CloudSession session) =>
+      ScopedCloudApi(this, session);
+
+  static String _cloudProjectPath(String id) =>
+      '/api/cloud/projects/${Uri.encodeComponent(CloudProjectScope.validateCloudId(id))}';
+
   Future<List<Map<String, dynamic>>> cloudProjects(String token) async {
     final data =
         await _send('GET', '/api/cloud/projects', token: token)
@@ -1514,11 +1522,11 @@ class ApiClient {
   }
 
   Future<void> cloudDeleteProject(String token, String id) async {
-    await _send('DELETE', '/api/cloud/projects/$id', token: token);
+    await _send('DELETE', _cloudProjectPath(id), token: token);
   }
 
   Future<Map<String, dynamic>> cloudFileTree(String token, String id) async {
-    return await _send('GET', '/api/cloud/projects/$id/files', token: token)
+    return await _send('GET', '${_cloudProjectPath(id)}/files', token: token)
         as Map<String, dynamic>;
   }
 
@@ -1529,7 +1537,7 @@ class ApiClient {
   ) async {
     return await _send(
           'GET',
-          '/api/cloud/projects/$id/file',
+          '${_cloudProjectPath(id)}/file',
           token: token,
           query: {'path': path},
         )
@@ -1544,7 +1552,7 @@ class ApiClient {
   ) async {
     await _send(
       'PUT',
-      '/api/cloud/projects/$id/file',
+      '${_cloudProjectPath(id)}/file',
       token: token,
       body: {'path': path, 'content': base64Content},
     );
@@ -1553,7 +1561,7 @@ class ApiClient {
   Future<void> cloudDeleteFile(String token, String id, String path) async {
     await _send(
       'DELETE',
-      '/api/cloud/projects/$id/file',
+      '${_cloudProjectPath(id)}/file',
       token: token,
       query: {'path': path},
     );
@@ -1569,7 +1577,7 @@ class ApiClient {
     final data =
         await _send(
               'POST',
-              '/api/cloud/projects/$id/git',
+              '${_cloudProjectPath(id)}/git',
               token: token,
               body: {'action': action, 'message': ?message, 'url': ?url},
             )
@@ -2462,6 +2470,37 @@ class ApiClient {
       aiGenerated: data['aiGenerated'] != false,
     );
   }
+}
+
+/// Scoped cloud operations never follow a later login into another account.
+class ScopedCloudApi {
+  ScopedCloudApi(this.client, this.session);
+  final ApiClient client;
+  final CloudSession session;
+
+  Future<T> _call<T>(Future<T> Function(String token) action) async {
+    session.ensureCurrent();
+    if (session.scope.origin != ApiConfig.origin) {
+      throw const CloudOperationException('origin', '云端服务来源不匹配');
+    }
+    final result = await action(session.token);
+    session.ensureCurrent();
+    return result;
+  }
+
+  Future<List<Map<String, dynamic>>> projects() => _call(client.cloudProjects);
+  Future<Map<String, dynamic>> createProject(String name) =>
+      _call((token) => client.cloudCreateProject(token, name));
+  Future<void> deleteProject(String id) =>
+      _call((token) => client.cloudDeleteProject(token, id));
+  Future<Map<String, dynamic>> fileTree(String id) =>
+      _call((token) => client.cloudFileTree(token, id));
+  Future<Map<String, dynamic>> readFile(String id, String path) =>
+      _call((token) => client.cloudReadFile(token, id, path));
+  Future<void> writeFile(String id, String path, String content) =>
+      _call((token) => client.cloudWriteFile(token, id, path, content));
+  Future<void> deleteFile(String id, String path) =>
+      _call((token) => client.cloudDeleteFile(token, id, path));
 }
 
 /// 诊断中某一步的结果。失败时写系统原文和异常类型名。
