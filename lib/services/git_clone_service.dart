@@ -241,8 +241,13 @@ class GitCloneService {
   }) async {
     final root = await AppPaths.projectsRoot(create: true);
     if (root == null) return null;
-    final parent = Directory(root);
-    final prefix = '${_sanitizeSegment(name).isEmpty ? 'clone' : name}_';
+    // R2: new clones have their own container. Existing registered paths stay
+    // untouched, and createTemp retains exclusive ownership for cancellation.
+    final parent = await Directory(
+      p.join(root, 'gitProjects'),
+    ).create(recursive: true);
+    final safeName = _sanitizeSegment(name);
+    final prefix = '${safeName.isEmpty ? 'clone' : safeName}_';
     final created = await parent.createTemp(prefix);
     return GitCloneDestination(path: created.path, displayName: name);
   }
