@@ -29,6 +29,7 @@ import '../services/runner_service.dart';
 import '../services/online_program.dart';
 import '../services/share_service.dart';
 import '../services/archive_share_service.dart';
+import '../services/cloud_project_actions.dart';
 import '../services/studio_profile.dart';
 import '../services/web_preview_file.dart';
 import '../services/task_activity_service.dart';
@@ -4010,14 +4011,29 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _sharingArchive = false;
 
   Future<void> _shareArchiveEntry(Project owner, String path) async {
-    if (_sharingArchive || owner.isCloud) return;
+    if (_sharingArchive) return;
     _sharingArchive = true;
     final labels = StudioLocalizations.of(context);
-    bool current() => mounted;
+    final auth = widget.auth;
+    final token = auth.token;
+    final accountId = auth.user?.id;
+    var invalidated = false;
+    void authChanged() => invalidated = true;
+    if (owner.isCloud) auth.addListener(authChanged);
+    bool current() =>
+        mounted &&
+        (!owner.isCloud ||
+            !invalidated && auth.token == token && auth.user?.id == accountId);
+    final actions = owner.isCloud
+        ? CloudProjectActions(auth: auth, store: widget.store)
+        : null;
     try {
       final result = await ArchiveShareService.shareSelection(
         owner,
         selectedPath: path,
+        token: token,
+        accountId: accountId,
+        cloudActions: actions,
       );
       if (!mounted || !current()) return;
       if (result.status == ArchiveShareStatus.unsupported) {
@@ -4060,6 +4076,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         ).showSnackBar(SnackBar(content: Text(labels.projectShareFailed)));
       }
     } finally {
+      if (owner.isCloud) auth.removeListener(authChanged);
+      actions?.dispose();
       _sharingArchive = false;
     }
   }

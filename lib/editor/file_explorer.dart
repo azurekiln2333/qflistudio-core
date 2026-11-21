@@ -1172,7 +1172,7 @@ class _FileExplorerState extends State<FileExplorer> {
             ],
           ),
         ),
-      if (widget.onShareEntry != null && !owner.isCloud)
+      if (widget.onShareEntry != null)
         const PopupMenuItem(
           value: 'share_zip',
           child: Row(

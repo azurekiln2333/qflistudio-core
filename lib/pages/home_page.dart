@@ -1136,7 +1136,7 @@ class _HomeTabState extends State<HomeTab>
           ? null
           : () => unawaited(_exportProjectArchive(project)),
       // R5/R6: sharing ZIP does not replace import-compatible .qsz export.
-      onShare: project.isCloud ? null : () => unawaited(_shareProject(project)),
+      onShare: () => unawaited(_shareProject(project)),
       cloudBusy:
           project.isCloud &&
           (_cloudActions.isBusy(project) ||
@@ -1148,11 +1148,29 @@ class _HomeTabState extends State<HomeTab>
   Future<void> _shareProject(Project project) async {
     if (_archiveBusyLabel != null) return;
     final l10n = StudioLocalizations.of(context);
-    if (project.isCloud) return;
-    bool current() => mounted;
-    setState(() => _archiveBusyLabel = l10n.preparingProjectShare);
+    final generation = _accountGeneration;
+    final token = widget.auth.token;
+    final accountId = widget.auth.user?.id;
+    final actions = _cloudActions;
+    bool current() =>
+        mounted &&
+        (!project.isCloud ||
+            generation == _accountGeneration &&
+                widget.auth.token == token &&
+                widget.auth.user?.id == accountId);
+    if (project.isCloud && (token == null || accountId == null)) return;
+    setState(
+      () => _archiveBusyLabel = project.isCloud
+          ? l10n.preparingCloudShare
+          : l10n.preparingProjectShare,
+    );
     try {
-      final result = await ArchiveShareService.shareProject(project);
+      final result = await ArchiveShareService.shareProject(
+        project,
+        token: project.isCloud ? token : null,
+        accountId: project.isCloud ? accountId : null,
+        cloudActions: project.isCloud ? actions : null,
+      );
       if (!mounted || !current()) return;
       if (result.status == ArchiveShareStatus.shared) {
         _showArchiveMessage(l10n.projectShareHandedOff);

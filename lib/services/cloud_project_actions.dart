@@ -160,6 +160,11 @@ class CloudProjectActions extends ChangeNotifier {
     }
   }
 
+  /// Workspace owners need not be present in the current Home list. Scope on
+  /// the project is authoritative; membership in projects is not required.
+  Future<CloudSnapshot> prepareSnapshot(Project project) =>
+      cache.prepareSnapshot(project: project, session: _capture());
+
   @override
   void dispose() {
     _disposed = true;

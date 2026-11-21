@@ -138,6 +138,11 @@ class StudioLocalizations {
       _pick('导出并分享 ZIP', '匯出並分享 ZIP', 'Export and share ZIP');
   String get preparingProjectShare =>
       _pick('正在准备项目 ZIP…', '正在準備專案 ZIP…', 'Preparing project ZIP…');
+  String get preparingCloudShare => _pick(
+    '正在更新云端快照并准备 ZIP…',
+    '正在更新雲端快照並準備 ZIP…',
+    'Updating cloud snapshot and preparing ZIP…',
+  );
   String get projectShareHandedOff => _pick(
     '已交给系统分享。是否发送由系统决定。',
     '已交給系統分享。是否傳送由系統決定。',

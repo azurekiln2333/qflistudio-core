@@ -6,8 +6,13 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/community/models.dart';
+import 'package:qfli_studio_core/config/api_config.dart';
+import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/services/api_client.dart';
+import 'package:qfli_studio_core/services/cloud_cache_service.dart';
+import 'package:qfli_studio_core/services/cloud_project_actions.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -112,6 +117,71 @@ void main() {
     expect(auth.token, 'new-token');
     expect(auth.user, same(otherUser));
   });
+
+  test(
+    'cloud snapshot invalidates same-token A-B-A but survives profile updates',
+    () async {
+      final store = ProjectStore(
+        storageFile: File(p.join(root.path, 'projects.json')),
+      );
+      await store.load();
+      final cache = CloudCacheService(
+        api: api,
+        projectsRootOverride: p.join(root.path, 'projects'),
+      );
+      final actions = CloudProjectActions(
+        auth: auth,
+        store: store,
+        api: api,
+        cache: cache,
+      );
+      final project = Project.create(
+        name: 'owner',
+        path: 'workspace',
+        cloudId: 'proj_a',
+        cloudOrigin: ApiConfig.origin,
+        cloudAccountId: sameUser.id,
+      );
+      final snapshot = await actions.prepareSnapshot(project);
+      final generation = auth.sessionGeneration;
+      await auth.updatePoints(points: 10);
+      expect(auth.sessionGeneration, generation);
+      snapshot.ensureCurrent();
+      final profile = auth.refreshMe();
+      await api.started.future;
+      api.response.complete(
+        const CommunityUser(
+          id: 'user_a',
+          username: 'a',
+          nickname: 'fresh profile',
+          bio: '',
+          avatarColor: '#FFFFFF',
+          points: 10,
+          checkinStreak: 0,
+          provider: 'test',
+        ),
+      );
+      await profile;
+      expect(auth.sessionGeneration, generation);
+      expect(auth.user?.nickname, 'fresh profile');
+      snapshot.ensureCurrent();
+      final b = auth.signIn('other-token', otherUser);
+      final a = auth.signIn('same-token', sameUser);
+      expect(
+        () => snapshot.ensureCurrent(),
+        throwsA(isA<CloudOperationException>()),
+      );
+      await Future.wait([b, a]);
+      expect(
+        () => snapshot.ensureCurrent(),
+        throwsA(isA<CloudOperationException>()),
+      );
+      await snapshot.release();
+      actions.dispose();
+      cache.dispose();
+      store.dispose();
+    },
+  );
 }
 
 class _ProfileApi extends ApiClient {

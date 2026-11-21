@@ -17,6 +17,7 @@ void main() {
   Future<void> mount(
     WidgetTester tester, {
     bool busy = false,
+    VoidCallback? share,
     VoidCallback? remove,
   }) => tester.pumpWidget(
     MaterialApp(
@@ -29,6 +30,7 @@ void main() {
               onOpen: () {},
               onRemove: remove ?? () {},
               cloudBusy: busy,
+              onShare: share ?? () {},
             ),
           ),
         ),
@@ -36,11 +38,26 @@ void main() {
     ),
   );
 
+  testWidgets('R6 cloud cards offer ZIP sharing without a local directory', (
+    tester,
+  ) async {
+    var shared = 0;
+    await mount(tester, share: () => shared++);
+    await tester.tap(find.byType(PopupMenuButton<ProjectCardAction>));
+    await tester.pumpAndSettle();
+    expect(find.text('导出并分享 ZIP'), findsOneWidget);
+    // Existing qsz export stays local-only.
+    expect(find.text('压缩导出项目'), findsNothing);
+    await tester.tap(find.text('导出并分享 ZIP'));
+    await tester.pumpAndSettle();
+    expect(shared, 1);
+  });
+
   testWidgets('R3 busy cloud deletion cannot be duplicated', (tester) async {
     await mount(tester, busy: true);
     await tester.tap(find.byType(PopupMenuButton<ProjectCardAction>));
     await tester.pumpAndSettle();
-    for (final action in [ProjectCardAction.remove]) {
+    for (final action in [ProjectCardAction.remove, ProjectCardAction.share]) {
       final item = tester
           .widgetList<PopupMenuItem<ProjectCardAction>>(
             find.byType(PopupMenuItem<ProjectCardAction>),

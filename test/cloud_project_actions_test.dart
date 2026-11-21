@@ -285,6 +285,37 @@ void main() {
       expect(actions.projects, [project]);
     },
   );
+
+  test('workspace export does not require registry membership', () async {
+    final standalone = Project.create(
+      name: 'workspace owner',
+      path: 'unused',
+      cloudId: 'proj_detached',
+      cloudOrigin: scope.origin,
+      cloudAccountId: scope.accountId,
+    );
+    final snapshot = await actions.prepareSnapshot(standalone);
+    expect(snapshot.fileCount, 1);
+    expect(File(p.join(snapshot.path, 'remote')).readAsStringSync(), 'remote');
+    snapshot.ensureCurrent();
+    await snapshot.release();
+  });
+
+  test(
+    'disposing a facade does not invalidate another editor session',
+    () async {
+      final snapshot = await actions.prepareSnapshot(project);
+      final second = CloudProjectActions(
+        auth: auth,
+        store: store,
+        api: api,
+        cache: cache,
+      );
+      second.dispose();
+      snapshot.ensureCurrent();
+      await snapshot.release();
+    },
+  );
 }
 
 CommunityUser _user(String id) => CommunityUser(

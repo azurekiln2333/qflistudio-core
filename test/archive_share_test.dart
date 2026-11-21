@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
@@ -5,8 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:qfli_studio_core/community/models.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/services/archive_share_service.dart';
+import 'package:qfli_studio_core/services/cloud_cache_service.dart';
+import 'package:qfli_studio_core/services/cloud_project_actions.dart';
+import 'package:qfli_studio_core/store/auth_store.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/services/project_zip_service.dart';
 import 'package:qfli_studio_core/services/share_service.dart';
 
@@ -182,6 +188,159 @@ void main() {
     },
   );
 
+  test(
+    'cloud ZIP uses only complete snapshot payload, never workspace or manifest',
+    () async {
+      final snapshotPath = p.join(fixture.path, 'cache/snapshot/files');
+      await file('cache/snapshot/files/raw.bin', [0, 255, 1]);
+      await file('cache/snapshot/manifest.json', [9]);
+      await file('workspace/unsent.txt', [8]);
+      final auth = AuthStore();
+      await auth.signIn('session-a', _user('account-a'));
+      final store = ProjectStore(
+        storageFile: File(p.join(fixture.path, 'registry.json')),
+      );
+      final cache = CloudCacheService();
+      final actions = _Snapshots(
+        auth: auth,
+        store: store,
+        cache: cache,
+        payload: snapshotPath,
+      );
+      addTearDown(() {
+        actions.dispose();
+        cache.dispose();
+        store.dispose();
+        auth.dispose();
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (_) async => true);
+      final project = Project.create(
+        name: 'cloud',
+        path: p.join(fixture.path, 'workspace'),
+        cloudId: 'proj_cloud',
+      );
+      final result = await ArchiveShareService.shareProject(
+        project,
+        token: 'session-a',
+        accountId: 'account-a',
+        cloudActions: actions,
+      );
+      final zip = ZipDecoder().decodeBytes(
+        await File(result.path).readAsBytes(),
+      );
+      expect(zip.map((entry) => entry.name), ['raw.bin']);
+      expect(zip.single.content, [0, 255, 1]);
+      expect(actions.snapshots, 1);
+      expect(actions.releases, 1);
+      expect(await File(p.join(project.path, 'unsent.txt')).readAsBytes(), [8]);
+    },
+  );
+
+  test(
+    'cloud generation is captured before path preparation and A-B-A cancels handoff',
+    () async {
+      final payload = p.join(fixture.path, 'payload');
+      await file('payload/raw.bin', [1]);
+      final auth = AuthStore();
+      await auth.signIn('session-a', _user('account-a'));
+      final store = ProjectStore(
+        storageFile: File(p.join(fixture.path, 'registry.json')),
+      );
+      final cache = CloudCacheService();
+      final actions = _Snapshots(
+        auth: auth,
+        store: store,
+        cache: cache,
+        payload: payload,
+      );
+      addTearDown(() {
+        actions.dispose();
+        cache.dispose();
+        store.dispose();
+        auth.dispose();
+      });
+      final paths = _GatedPaths(p.join(fixture.path, 'support'));
+      PathProviderPlatform.instance = paths;
+      var shares = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (_) async {
+            shares++;
+            return true;
+          });
+      final pending = ArchiveShareService.shareProject(
+        Project.create(
+          name: 'cloud',
+          path: p.join(fixture.path, 'workspace'),
+          cloudId: 'proj_cloud',
+        ),
+        token: 'session-a',
+        accountId: 'account-a',
+        cloudActions: actions,
+      );
+      final rejected = expectLater(
+        pending,
+        throwsA(isA<CloudOperationException>()),
+      );
+      await paths.started.future;
+      expect(
+        actions.snapshots,
+        1,
+        reason: 'The snapshot session is captured before path-provider I/O.',
+      );
+      actions.generation++; // A -> B.
+      actions.generation++; // B -> A, even with equal token/account values.
+      paths.release.complete();
+      await rejected;
+      expect(shares, 0);
+      expect(actions.releases, 1);
+    },
+  );
+
+  test(
+    'a failed cloud snapshot never reaches the native share transport',
+    () async {
+      final auth = AuthStore();
+      await auth.signIn('session-a', _user('account-a'));
+      final store = ProjectStore(
+        storageFile: File(p.join(fixture.path, 'registry.json')),
+      );
+      final cache = CloudCacheService();
+      final actions = _Snapshots(
+        auth: auth,
+        store: store,
+        cache: cache,
+        payload: fixture.path,
+      )..fail = true;
+      addTearDown(() {
+        actions.dispose();
+        cache.dispose();
+        store.dispose();
+        auth.dispose();
+      });
+      var shares = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (_) async {
+            shares++;
+            return true;
+          });
+      await expectLater(
+        ArchiveShareService.shareProject(
+          Project.create(
+            name: 'cloud',
+            path: fixture.path,
+            cloudId: 'proj_cloud',
+          ),
+          token: 'session-a',
+          accountId: 'account-a',
+          cloudActions: actions,
+        ),
+        throwsA(isA<CloudOperationException>()),
+      );
+      expect(shares, 0);
+    },
+  );
+
   test('native failure is not silently reported as unsupported', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (_) async {
@@ -192,6 +351,72 @@ void main() {
       throwsA(isA<PlatformException>()),
     );
   });
+}
+
+CommunityUser _user(String id) => CommunityUser(
+  id: id,
+  username: id,
+  nickname: id,
+  bio: '',
+  avatarColor: '#000000',
+  points: 0,
+  checkinStreak: 0,
+  provider: 'test',
+);
+
+class _Snapshots extends CloudProjectActions {
+  _Snapshots({
+    required super.auth,
+    required super.store,
+    required super.cache,
+    required this.payload,
+  });
+  final String payload;
+  int snapshots = 0;
+  int releases = 0;
+  int generation = 0;
+  bool fail = false;
+  @override
+  Future<CloudSnapshot> prepareSnapshot(Project project) {
+    snapshots++;
+    final captured = generation;
+    if (fail) {
+      return Future.error(
+        const CloudOperationException('partial', 'Snapshot download failed.'),
+      );
+    }
+    return Future.value(
+      CloudSnapshot(
+        path: payload,
+        fileCount: 1,
+        bytes: 3,
+        cachedAt: DateTime.utc(2026),
+        ensureCurrent: () {
+          if (generation != captured) {
+            throw const CloudOperationException(
+              'sessionChanged',
+              'Account changed.',
+            );
+          }
+        },
+        release: () async {
+          releases++;
+        },
+      ),
+    );
+  }
+}
+
+class _GatedPaths extends _Paths {
+  _GatedPaths(super.path);
+  final started = Completer<void>();
+  final release = Completer<void>();
+  @override
+  Future<String> getApplicationSupportPath() async {
+    if (!started.isCompleted) started.complete();
+    await release.future;
+    return path;
+  }
 }
 
 class _Paths extends PathProviderPlatform {

@@ -395,8 +395,7 @@ class _ProjectCardState extends State<ProjectCard> with WidgetsBindingObserver {
                       ),
                     // R5/R6: cloud sharing downloads a complete snapshot first.
                     if (widget.onShare != null &&
-                        !project.isCloud &&
-                        _canExport)
+                        (project.isCloud || _canExport))
                       PopupMenuItem(
                         value: ProjectCardAction.share,
                         enabled: !widget.cloudBusy,

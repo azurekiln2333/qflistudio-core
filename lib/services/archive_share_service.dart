@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/project.dart';
+import 'cloud_project_actions.dart';
 import 'project_zip_service.dart';
 import 'share_service.dart';
 
@@ -22,26 +23,65 @@ class ArchiveShareResult {
 /// Selection/project ZIP preparation boundary for editor and Home.
 /// Cloud snapshots are C-owned and never mutate the editor working tree.
 abstract final class ArchiveShareService {
-  static Future<ArchiveShareResult> shareProject(Project project) =>
-      shareSelection(project, selectedPath: project.path);
+  static Future<ArchiveShareResult> shareProject(
+    Project project, {
+    String? token,
+    String? accountId,
+    CloudProjectActions? cloudActions,
+  }) => shareSelection(
+    project,
+    selectedPath: project.path,
+    token: token,
+    accountId: accountId,
+    cloudActions: cloudActions,
+  );
 
   static Future<ArchiveShareResult> shareSelection(
     Project project, {
     required String selectedPath,
+    String? token,
+    String? accountId,
+    CloudProjectActions? cloudActions,
   }) async {
     final root = p.normalize(p.absolute(project.path));
     final selected = p.normalize(p.absolute(selectedPath));
     if (!p.equals(root, selected) && !p.isWithin(root, selected)) {
       throw const ProjectZipException('Selected entry is outside its project.');
     }
-    final selectedIsRoot = p.equals(selected, root);
+    final relative = p.relative(selected, from: root);
     final name = _archiveName(
-      selectedIsRoot ? project.name : p.basename(selected),
+      relative == '.' ? project.name : p.basename(selected),
     );
     if (project.isCloud) {
-      throw const ProjectZipException(
-        'Cloud sharing requires a complete snapshot.',
-      );
+      if (cloudActions == null) {
+        throw const ProjectZipException(
+          'Cloud sharing requires the current account snapshot service.',
+        );
+      }
+      if ((token != null && cloudActions.auth.token != token) ||
+          (accountId != null && cloudActions.auth.user?.id != accountId)) {
+        throw const ProjectZipException(
+          'Cloud account changed before sharing.',
+        );
+      }
+      // Capture C's generation synchronously, before the first path-provider or
+      // filesystem await. prepareSnapshot captures _capture() at invocation.
+      // The returned snapshot retains that exact generation, including A-B-A.
+      final pending = cloudActions.prepareSnapshot(project);
+      final snapshot = await pending;
+      try {
+        snapshot.ensureCurrent();
+        return await _prepareAndShare(
+          root: snapshot.path,
+          selected: relative == '.'
+              ? snapshot.path
+              : p.join(snapshot.path, relative),
+          name: name,
+          ensureCurrent: snapshot.ensureCurrent,
+        );
+      } finally {
+        await snapshot.release();
+      }
     }
     return _prepareAndShare(root: root, selected: selected, name: name);
   }
@@ -50,21 +90,27 @@ abstract final class ArchiveShareService {
     required String root,
     required String selected,
     required String name,
+    void Function()? ensureCurrent,
   }) async {
+    ensureCurrent?.call();
     // Application-support storage survives sheet dismissal/process restarts.
     // Only this dedicated subtree is exposed by native sharing providers.
     final support = await getApplicationSupportDirectory();
+    ensureCurrent?.call();
     final shareRoot = Directory(p.join(support.path, 'archive_shares'));
     await shareRoot.create(recursive: true);
+    ensureCurrent?.call();
     final operation = await shareRoot.createTemp('share-');
     final archive = p.join(operation.path, '$name.zip');
     var handoffStarted = false;
     try {
+      ensureCurrent?.call();
       await ProjectZipService.exportSelectionToFile(
         projectRoot: root,
         selectedPath: selected,
         destination: archive,
       );
+      ensureCurrent?.call();
       // A native failure can have an uncertain outcome. Once invoked, retain
       // the file even on errors: a receiver may already hold its URI.
       handoffStarted = true;
