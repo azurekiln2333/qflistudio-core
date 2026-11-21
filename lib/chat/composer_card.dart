@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import '../services/app_paths.dart';
 import '../vibe_coding/vibe_agent_facade.dart';
+import 'agent_context_indicator.dart';
 import 'attachment_picker.dart';
 import 'composer_state.dart';
 
@@ -30,6 +31,7 @@ class ComposerCard extends StatefulWidget {
     this.modelsError,
     this.onRetryModels,
     this.desktopKeyboard,
+    this.contextUsage,
   });
 
   final ComposerState state;
@@ -44,6 +46,7 @@ class ComposerCard extends StatefulWidget {
 
   final List<AgentModelOption> models;
   final List<AgentSkillRef> skills;
+  final AgentContextUsage? contextUsage;
 
   /// 模型列表还在加载：选择器显示「模型…」和一个小转圈。
   final bool modelsLoading;
@@ -225,7 +228,16 @@ class _ComposerCardState extends State<ComposerCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _buildInput(context),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: _buildInput(context)),
+                      if (widget.contextUsage case final usage?) ...[
+                        const SizedBox(width: 6),
+                        _buildContextIndicator(usage),
+                      ],
+                    ],
+                  ),
                   if (_state.attachments.isNotEmpty) _buildAttachments(context),
                   const SizedBox(height: 4),
                   _buildToolRow(context),
@@ -235,6 +247,27 @@ class _ComposerCardState extends State<ComposerCard> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildContextIndicator(AgentContextUsage usage) {
+    final composer = _state;
+    final modelId = composer.modelId;
+    AgentModelOption? selected;
+    for (final model in widget.models) {
+      if (model.id == modelId) {
+        selected = model;
+        break;
+      }
+    }
+    return AgentContextIndicator(
+      key: ObjectKey(composer),
+      usage: usage,
+      modelLabel: selected?.label ?? modelId,
+      reportedCapacity: selected?.contextWindowTokens,
+      manualCapacity: composer.contextWindowFor(modelId),
+      onCapacityChanged: (value) =>
+          composer.setContextWindowFor(modelId, value),
     );
   }
 

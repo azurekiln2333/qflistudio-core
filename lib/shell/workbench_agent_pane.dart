@@ -134,6 +134,7 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
       modelId: sibling?.modelId ?? fallback?.id,
       reasoningEffort:
           sibling?.reasoningEffort ?? (efforts.isEmpty ? null : efforts.first),
+      contextWindows: sibling?.contextWindows ?? const {},
     );
   }
 
@@ -687,6 +688,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
                 running: _working,
                 models: _models,
                 skills: _skills,
+                contextUsage:
+                    facade?.contextUsage ?? const AgentContextUsage.empty(),
                 modelsLoading: _modelsLoading,
                 modelsError: _modelsError,
                 onRetryModels: _loadModels,

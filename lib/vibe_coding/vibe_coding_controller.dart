@@ -14,6 +14,7 @@ import 'package:flutter/scheduler.dart';
 import '../interop/interop_runner.dart';
 import '../services/ai_file_header.dart';
 import '../services/api_client.dart';
+import 'agent_context_usage.dart';
 import 'agent_request_scheduler.dart';
 import 'vibe_loop_guard.dart';
 import 'vibe_models.dart';
@@ -49,6 +50,7 @@ export 'vibe_skills.dart'
         parseVibeSkill,
         vibePromptWantsWeb;
 export 'vibe_models.dart';
+export 'agent_context_usage.dart' show AgentContextCategory, AgentContextUsage;
 export 'vibe_rules.dart'
     show
         loadVibeRules,
@@ -185,6 +187,9 @@ class VibeCodingController extends ChangeNotifier {
       );
 
   final List<Map<String, dynamic>> _history = [];
+  AgentContextUsage? _cachedContextUsage;
+  int? _lastReportedInputTokens;
+  Map<AgentContextCategory, String> _contextSystemSections = const {};
   final List<VibeMessage> _messages = [];
   List<VibePlanItem> _plan = const [];
   List<VibeSkill> _skills = const [];
@@ -299,6 +304,20 @@ class VibeCodingController extends ChangeNotifier {
   /// 才适合保存。内容可能含项目文件片段，不得写入日志。
   List<Map<String, dynamic>> get history => List.unmodifiable(_history);
 
+  /// Cached request-context accounting. Streaming text does not rescan history.
+  AgentContextUsage get contextUsage =>
+      _cachedContextUsage ??= estimateAgentContextUsage(
+        history: _history,
+        tools: _toolSpecs(),
+        systemSections: {
+          AgentContextCategory.systemPrompt: _systemPrompt(),
+          ..._contextSystemSections,
+        },
+        lastReportedInputTokens: _lastReportedInputTokens,
+      );
+
+  void _invalidateContextUsage() => _cachedContextUsage = null;
+
   /// 指定后续 send 使用的模型与推理强度；null 则回到默认。
   ///
   /// 推理强度只对支持的模型生效，服务端未放行时会被拒绝。
@@ -320,6 +339,7 @@ class VibeCodingController extends ChangeNotifier {
     ]);
     if (restored.isEmpty) return;
     _history.addAll(restored);
+    _invalidateContextUsage();
   }
 
   bool get canSend =>
@@ -361,6 +381,7 @@ class VibeCodingController extends ChangeNotifier {
     _phase = VibePhase.running;
     _messages.add(VibeMessage(isUser: true, text: prompt));
     _history.add({'role': 'user', 'content': prompt});
+    _invalidateContextUsage();
     _trimHistory();
     _notify();
     _activeRun = _run(prompt);
@@ -511,6 +532,7 @@ class VibeCodingController extends ChangeNotifier {
         }
         _carryReasoning(assistant, reply);
         _history.add(assistant);
+        _invalidateContextUsage();
         _calibrateContent(turn, reply);
         if (parsed.isEmpty) {
           _trimHistory();
@@ -563,6 +585,7 @@ class VibeCodingController extends ChangeNotifier {
             'tool_call_id': call.id,
             'content': _bounded(outcome.modelText, kVibeMaxToolResultChars),
           });
+          _invalidateContextUsage();
         }
         _trimHistory();
         // 终端不可用时模型容易反复重试。已经写好文件、结构检查也通过时，
@@ -655,12 +678,15 @@ class VibeCodingController extends ChangeNotifier {
     final skills = _skills;
     final rules = _rules;
     if (skills.isEmpty && rules.isEmpty) return;
-    final buffer = StringBuffer(_systemPrompt());
+    final sections = <AgentContextCategory, String>{
+      AgentContextCategory.systemPrompt: _systemPrompt(),
+    };
     if (rules.isNotEmpty) {
-      buffer.write('\n\n项目规则（来自仓库，必须遵守）：\n$rules');
+      sections[AgentContextCategory.projectRules] =
+          '\n\n项目规则（来自仓库，必须遵守）：\n$rules';
     }
     if (skills.isNotEmpty) {
-      buffer.write(
+      final buffer = StringBuffer(
         '\n\n可用技能（只列出名称与说明）：\n'
         '${buildVibeSkillIndex(skills)}',
       );
@@ -669,8 +695,11 @@ class VibeCodingController extends ChangeNotifier {
         buffer.write('\n本次需求是网页类任务，建议先 use_skill web-app-scaffold。');
       }
       buffer.write('\n需要完整步骤时调用 use_skill；不要凭空重复技能内容。');
+      sections[AgentContextCategory.skills] = buffer.toString();
     }
-    _history[0] = {'role': 'system', 'content': buffer.toString()};
+    _contextSystemSections = sections;
+    _history[0] = {'role': 'system', 'content': sections.values.join()};
+    _invalidateContextUsage();
     _plan = const [];
     _notify();
   }
@@ -776,6 +805,7 @@ class VibeCodingController extends ChangeNotifier {
         'tool_call_id': call.id,
         'content': 'error(cancelled): 用户取消了执行',
       });
+      _invalidateContextUsage();
     }
   }
 
@@ -1550,7 +1580,18 @@ class VibeCodingController extends ChangeNotifier {
         details: const {'code': 'AI_STREAM_INCOMPLETE'},
       );
     }
+    _lastReportedInputTokens = _reportedInputTokens(result.usage);
+    _invalidateContextUsage();
     return result;
+  }
+
+  static int? _reportedInputTokens(Map<String, dynamic>? usage) {
+    if (usage == null) return null;
+    for (final key in const ['prompt_tokens', 'input_tokens']) {
+      final value = usage[key];
+      if (value is int && value >= 0) return value;
+    }
+    return null;
   }
 
   /// 思考增量：第一条新建思考消息并开始计时。
@@ -1858,6 +1899,7 @@ class VibeCodingController extends ChangeNotifier {
       ..clear()
       ..add({'role': 'system', 'content': _systemPrompt()})
       ..addAll(kept);
+    _invalidateContextUsage();
   }
 
   /// 历史的字节预算。给中转的 512 KiB 请求体留出余量。

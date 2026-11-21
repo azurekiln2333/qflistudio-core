@@ -136,12 +136,19 @@ class AiChatResult {
 
 /// 可用模型；[reasoningEfforts] 为空表示不提供推理强度选择。
 class AiModelInfo {
-  const AiModelInfo({required this.id, this.reasoningEfforts = const []});
+  const AiModelInfo({
+    required this.id,
+    this.reasoningEfforts = const [],
+    this.contextWindowTokens,
+  });
 
   final String id;
 
   /// 服务端声明的推理强度选项；空列表表示该模型不支持或未声明。
   final List<String> reasoningEfforts;
+
+  /// Positive token capacity explicitly declared by the model directory.
+  final int? contextWindowTokens;
 }
 
 /// API 调用异常：message 为用户可读文案。
@@ -1756,7 +1763,28 @@ class ApiClient {
           }
         }
       }
-      models.add(AiModelInfo(id: id.trim(), reasoningEfforts: efforts));
+      int? contextWindowTokens;
+      for (final key in const [
+        'context_window',
+        'contextWindow',
+        'context_length',
+        'max_context_tokens',
+        'context_window_tokens',
+        'contextWindowTokens',
+      ]) {
+        final value = entry[key];
+        if (value is int && value > 0) {
+          contextWindowTokens = value;
+          break;
+        }
+      }
+      models.add(
+        AiModelInfo(
+          id: id.trim(),
+          reasoningEfforts: efforts,
+          contextWindowTokens: contextWindowTokens,
+        ),
+      );
     }
     return models;
   }

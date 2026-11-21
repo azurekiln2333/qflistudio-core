@@ -21,6 +21,8 @@ import 'agent_request_scheduler.dart';
 import 'project_write_leases.dart';
 import 'vibe_coding_controller.dart';
 
+export 'agent_context_usage.dart';
+
 /// 写操作权限。
 enum AgentPermissionMode {
   /// 只读：拒绝一切写入。
@@ -65,11 +67,13 @@ class AgentModelOption {
     required this.id,
     required this.label,
     this.reasoningEfforts = const [],
+    this.contextWindowTokens,
   });
 
   final String id;
   final String label;
   final List<String> reasoningEfforts;
+  final int? contextWindowTokens;
 
   bool get supportsReasoning => reasoningEfforts.isNotEmpty;
 }
@@ -273,6 +277,9 @@ abstract class AgentFacade extends ChangeNotifier {
   List<AgentMessageView> get messages;
   AgentRunState get state;
   String? get lastError;
+
+  /// 已装载上下文的估算，不包含输入草稿。
+  AgentContextUsage get contextUsage => const AgentContextUsage.empty();
 
   /// 最近一次失败的分类。没有失败时为 null。由 pi-B 在返工阶段实现。
   AgentErrorInfo? get lastErrorInfo => null;
@@ -503,6 +510,14 @@ class VibeAgentFacade extends AgentFacade {
 
   @override
   String? get lastError => _controller.lastError;
+
+  @override
+  AgentContextUsage get contextUsage {
+    final usage = _controller.contextUsage;
+    return _historyLoaded || _meta.messageCount == 0
+        ? usage
+        : usage.copyWith(historyLoaded: false);
+  }
 
   @override
   AgentErrorInfo? get lastErrorInfo {
@@ -848,7 +863,6 @@ class VibeAgentFacade extends AgentFacade {
   /// 读不到历史不影响发送：最多少一点上下文。
   Future<void> _ensureHistoryLoaded() async {
     if (_historyLoaded) return;
-    _historyLoaded = true;
     try {
       final history = await _store.readHistory(_meta.id);
       if (history.isNotEmpty && !_disposed) {
@@ -856,6 +870,9 @@ class VibeAgentFacade extends AgentFacade {
       }
     } on Object {
       // 历史缺失不阻塞发送。
+    } finally {
+      _historyLoaded = true;
+      if (!_disposed) notifyListeners();
     }
   }
 
@@ -1305,6 +1322,7 @@ class VibeAgentRuntime implements AgentRuntime {
               id: model.id,
               label: model.id,
               reasoningEfforts: model.reasoningEfforts,
+              contextWindowTokens: model.contextWindowTokens,
             ),
         ];
         await _writeModelsCache(options);
@@ -1528,6 +1546,10 @@ class VibeAgentRuntime implements AgentRuntime {
                       if (effort is String) effort,
                   ]
                 : const [],
+            contextWindowTokens: switch (entry['contextWindowTokens']) {
+              final int value when value > 0 => value,
+              _ => null,
+            },
           ),
         );
       }
@@ -1558,6 +1580,8 @@ class VibeAgentRuntime implements AgentRuntime {
                 'id': model.id,
                 'label': model.label,
                 'reasoning_efforts': model.reasoningEfforts,
+                if (model.contextWindowTokens != null)
+                  'contextWindowTokens': model.contextWindowTokens,
               },
           ],
         }),

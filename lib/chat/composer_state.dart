@@ -23,13 +23,15 @@ class ComposerState extends ChangeNotifier {
     String? projectRoot,
     String? modelId,
     String? reasoningEffort,
+    Map<String, int> contextWindows = const {},
   }) : _permission = permission,
        _defaults = defaults,
        _projectId = projectId,
        _projectRoot = projectRoot,
        _modelId = modelId,
        // 没有模型就没有推理强度：避免把 A 模型的档位发给空选择。
-       _reasoningEffort = modelId == null ? null : reasoningEffort;
+       _reasoningEffort = modelId == null ? null : reasoningEffort,
+       _contextWindows = Map.of(contextWindows);
 
   ComposerDefaultsStore? _defaults;
   String? _projectId;
@@ -40,6 +42,7 @@ class ComposerState extends ChangeNotifier {
   AgentPermissionMode _permission;
   String? _modelId;
   String? _reasoningEffort;
+  final Map<String, int> _contextWindows;
   bool _loading = false;
   bool _disposed = false;
   Future<void> _saves = Future<void>.value();
@@ -88,6 +91,24 @@ class ComposerState extends ChangeNotifier {
     _scheduleSave();
   }
 
+  Map<String, int> get contextWindows => Map.unmodifiable(_contextWindows);
+
+  int? contextWindowFor(String? modelId) => _contextWindows[modelId ?? ''];
+
+  /// 按模型保存用户设置的容量，null 恢复接口值。
+  void setContextWindowFor(String? modelId, int? value) {
+    if (value != null && value <= 0) return;
+    final key = modelId ?? '';
+    if (_contextWindows[key] == value) return;
+    if (value == null) {
+      _contextWindows.remove(key);
+    } else {
+      _contextWindows[key] = value;
+    }
+    notifyListeners();
+    _scheduleSave();
+  }
+
   /// 默认值是否还在读盘。
   bool get loading => _loading;
 
@@ -100,6 +121,7 @@ class ComposerState extends ChangeNotifier {
     ComposerDefaultsStore? defaults,
     String? projectRoot,
   }) async {
+    if (_projectId != projectId) _contextWindows.clear();
     _projectId = projectId;
     if (defaults != null) _defaults = defaults;
     if (projectRoot != null) _projectRoot = projectRoot;
@@ -115,11 +137,14 @@ class ComposerState extends ChangeNotifier {
     _notify();
     try {
       final saved = await store.read(projectId);
-      if (_disposed) return;
+      if (_disposed || _projectId != projectId) return;
       if (saved != null) {
         _permission = saved.permission;
         _modelId = saved.modelId;
         _reasoningEffort = saved.reasoningEffort;
+        _contextWindows
+          ..clear()
+          ..addAll(saved.contextWindows);
       }
     } finally {
       _loading = false;
@@ -186,6 +211,7 @@ class ComposerState extends ChangeNotifier {
     permission: _permission,
     modelId: _modelId,
     reasoningEffort: _reasoningEffort,
+    contextWindows: Map.unmodifiable(_contextWindows),
   );
 
   /// 等已排队的写入完成。离开页面前调用，避免丢掉最后一次选择。
@@ -195,8 +221,9 @@ class ComposerState extends ChangeNotifier {
     final store = _defaults;
     final projectId = _projectId;
     if (store == null || projectId == null || _loading) return;
-    // 串行排队：连续改三个选项时，后一次写入必须看到前一次的结果。
-    _saves = _saves.then((_) => store.write(projectId, defaults));
+    // Capture the model choices before another project or model is selected.
+    final snapshot = defaults;
+    _saves = _saves.then((_) => store.write(projectId, snapshot));
   }
 
   void _notify() {
@@ -225,16 +252,19 @@ class ComposerDefaults {
     this.permission = AgentPermissionMode.askEveryWrite,
     this.modelId,
     this.reasoningEffort,
+    this.contextWindows = const {},
   });
 
   final AgentPermissionMode permission;
   final String? modelId;
   final String? reasoningEffort;
+  final Map<String, int> contextWindows;
 
   Map<String, Object?> toJson() => {
     'permission': permission.name,
     if (modelId != null) 'modelId': modelId,
     if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
+    if (contextWindows.isNotEmpty) 'contextWindows': contextWindows,
   };
 
   /// 坏字段逐项回落，不让一个坏值丢掉整个文件。
@@ -247,12 +277,19 @@ class ComposerDefaults {
     );
     final modelId = value['modelId'];
     final effort = value['reasoningEffort'];
+    final windows = value['contextWindows'];
     return ComposerDefaults(
       permission: permission,
       modelId: modelId is String && modelId.trim().isNotEmpty ? modelId : null,
       reasoningEffort: effort is String && effort.trim().isNotEmpty
           ? effort
           : null,
+      contextWindows: Map.unmodifiable({
+        if (windows is Map)
+          for (final entry in windows.entries)
+            if (entry.key is String && entry.value is int && entry.value > 0)
+              entry.key as String: entry.value as int,
+      }),
     );
   }
 
@@ -261,10 +298,21 @@ class ComposerDefaults {
       other is ComposerDefaults &&
       other.permission == permission &&
       other.modelId == modelId &&
-      other.reasoningEffort == reasoningEffort;
+      other.reasoningEffort == reasoningEffort &&
+      mapEquals(other.contextWindows, contextWindows);
 
   @override
-  int get hashCode => Object.hash(permission, modelId, reasoningEffort);
+  int get hashCode {
+    final keys = contextWindows.keys.toList()..sort();
+    return Object.hash(
+      permission,
+      modelId,
+      reasoningEffort,
+      Object.hashAll([
+        for (final key in keys) Object.hash(key, contextWindows[key]),
+      ]),
+    );
+  }
 }
 
 /// 输入卡片选择的持久化边界。
