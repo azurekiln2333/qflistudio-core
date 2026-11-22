@@ -239,7 +239,18 @@ void main() {
 
     await _tab(tester, Icons.apps_outlined);
     final jsonCard = find.text('JSON 格式化');
-    await tester.ensureVisible(jsonCard);
+    // The browser builds cards lazily and defaults to one column, so the JSON
+    // card stays outside the build cache extent until the list is scrolled.
+    await tester.scrollUntilVisible(
+      jsonCard,
+      220,
+      scrollable: find
+          .descendant(
+            of: find.byKey(const PageStorageKey<String>('tools-scroll')),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     // 工具卡片按 netrix 的密度长高（176 dp），滚动后要等一帧再点。
     await tester.pump();
     await tester.tap(jsonCard);
