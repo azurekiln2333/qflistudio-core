@@ -3,6 +3,8 @@
 //
 // 本地不跑测试（brief 规定），这些用例交给云端 CI。
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/harness/harness_host.dart';
 import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
@@ -418,6 +420,38 @@ void main() {
     expect(remote.disposeCount, 1);
   });
 
+  test('shutdown waits for host disposal to finish', () async {
+    final slow = _SlowDisposeHost();
+    final hub = HarnessHub(hosts: [slow], desktop: true);
+    await pumpEventQueue();
+
+    var finished = false;
+    final pending = hub.shutdown().then((_) => finished = true);
+    await pumpEventQueue();
+
+    // dispose 只是发起释放：子进程的终止信号还在路上，shutdown 得等它。
+    expect(slow.disposeStarted, isTrue);
+    expect(finished, isFalse);
+
+    slow.finishDispose();
+    await pending;
+    expect(finished, isTrue);
+  });
+
+  test('shutdownOpenHubs releases every hub that is still open', () async {
+    final first = HarnessHub(hosts: [local], desktop: true);
+    final second = HarnessHub(hosts: [remote], desktop: true);
+    await pumpEventQueue();
+
+    await HarnessHub.shutdownOpenHubs();
+
+    expect(local.disposeCount, 1);
+    expect(remote.disposeCount, 1);
+    // 两个 hub 都已释放：再调一次是空操作。
+    await first.shutdown();
+    await second.shutdown();
+  });
+
   test('a hub that does not own its hosts leaves them running', () async {
     // 共享主机（应用级单例）的形态：关闭编辑页只摘监听，不释放主机。
     final hub = HarnessHub(
@@ -461,6 +495,7 @@ Future<void> openHost(HarnessHub hub, String id) async {
 }
 
 /// 主机自定义的结构化安装说明（对应 Pi-B 的 `HerdrInstallHint`）。
+/// 主机自定义的结构化安装说明（对应 Pi-B 的 `HerdrInstallHint`）。
 class _StructuredHint {
   const _StructuredHint(this.message);
 
@@ -486,4 +521,22 @@ class _StructuredHintHost extends FakeHarnessHost {
 
   @override
   Object? get installHint => const _StructuredHint('服务未运行，请重启 Herdr');
+}
+
+/// 释放要花一点时间的主机：用来验证 shutdown 真的等到释放跑完。
+class _SlowDisposeHost extends FakeHarnessHost {
+  _SlowDisposeHost()
+    : super(id: 'slow', label: '慢主机', kind: HarnessHostKind.local);
+
+  final Completer<void> _gate = Completer<void>();
+  bool disposeStarted = false;
+
+  @override
+  Future<void> dispose() async {
+    disposeStarted = true;
+    await _gate.future;
+    await super.dispose();
+  }
+
+  void finishDispose() => _gate.complete();
 }

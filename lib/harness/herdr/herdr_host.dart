@@ -278,7 +278,9 @@ class HerdrHost implements HarnessHost {
     final handles = _handles.values.toList();
     _handles.clear();
     for (final handle in handles) {
-      handle.dispose();
+      // 等 attach 客户端真的被 kill：主机释放完应用马上退，不 wait 就会
+      // 留下孤儿进程占着窗格。
+      await handle.dispose();
     }
     await _sessions.close();
     _state.dispose();

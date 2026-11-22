@@ -148,6 +148,7 @@ class HarnessHub extends ChangeNotifier {
     // 只订阅打开面板就要显示的那台，其余等用户切过去。
     final current = _currentHostId;
     if (current != null) ensureListening(current);
+    _openHubs.add(this);
   }
 
   /// 平台策略：桌面版能用本机和 Herdr，手机端只能用已绑定电脑和内置 Agent。
@@ -197,6 +198,22 @@ class HarnessHub extends ChangeNotifier {
   HarnessSessionHandle? _activeHandle;
   bool _opening = false;
   bool _disposed = false;
+
+  /// [dispose] 发起的清理；[shutdown] 等它。
+  Future<void>? _shutdown;
+
+  /// 还活着的 hub，退出钩子用一次 [shutdownOpenHubs] 统一收尾。
+  static final Set<HarnessHub> _openHubs = <HarnessHub>{};
+
+  /// 释放所有还活着的 hub，并等它们真的释放完。
+  ///
+  /// 应用退出前调一次。只调 `dispose()` 不够：它是同步的，里面那些
+  /// `await`（终止子进程、关连接）可能还没跑完进程就退了。
+  static Future<void> shutdownOpenHubs() async {
+    for (final hub in List<HarnessHub>.of(_openHubs)) {
+      await hub.shutdown();
+    }
+  }
 
   /// 平台是否按桌面版处理，测试可注入。
   bool get isDesktop => _desktop;
@@ -551,21 +568,49 @@ class HarnessHub extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_disposed) return;
     _disposed = true;
+    _openHubs.remove(this);
     for (final entry in _subs.entries) {
       unawaited(entry.value.cancel());
     }
     _subs.clear();
     _listening.clear();
+    final closing = <Future<void>>[];
     for (final host in _hosts) {
       final listener = _stateListeners.remove(host.id);
       if (listener != null) host.state.removeListener(listener);
-      if (_ownsHosts) unawaited(host.dispose());
+      if (_ownsHosts) closing.add(host.dispose());
     }
     final handle = _activeHandle;
     _activeHandle = null;
     _activeSession = null;
-    if (handle != null) unawaited(handle.detach());
+    if (handle != null) closing.add(handle.detach());
+    _shutdown = _drain(closing);
     super.dispose();
+  }
+
+  /// 释放并**等清理跑完**。
+  ///
+  /// [dispose] 是同步的（ChangeNotifier 的要求），它发起的释放还在路上：
+  /// 一张会话视图要先把 `herdr agent attach` 的客户端 kill 掉，终止信号得
+  /// 过几个 await 才发得出去。进程这时退出就会留下孤儿 attach，下次打开
+  /// 还会说窗格被占用。所以退出钩子（见 `QfliApp`）等这一个。
+  Future<void> shutdown() {
+    final pending = _shutdown;
+    if (pending != null) return pending;
+    dispose();
+    return _shutdown ?? Future<void>.value();
+  }
+
+  /// 一项一项等收尾；单项失败不挡其它项。
+  static Future<void> _drain(List<Future<void>> futures) async {
+    for (final future in futures) {
+      try {
+        await future;
+      } on Object {
+        // 一台主机释放失败不该挡住其它主机与子进程的收尾。
+      }
+    }
   }
 }

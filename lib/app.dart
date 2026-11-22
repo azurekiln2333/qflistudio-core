@@ -1,3 +1,5 @@
+import 'dart:ui' show AppExitResponse;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -5,6 +7,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'i18n/studio_localizations.dart';
 import 'editor/editor_fonts.dart';
 import 'editor/retained_editor_host.dart';
+import 'harness/hub/harness_hub.dart';
 import 'pages/home_page.dart';
 import 'pages/restore_complete_page.dart';
 import 'services/app_restore_gate.dart';
@@ -48,6 +51,9 @@ class _QfliAppState extends State<QfliApp> {
   >
   _appearance;
 
+  /// 退出钩子：把还活着的 harness 主机（以及它们的子进程）收尾完再放行。
+  AppLifecycleListener? _lifecycle;
+
   SettingsStore get _settings => widget.settings ?? _fallbackSettings;
 
   @override
@@ -62,6 +68,16 @@ class _QfliAppState extends State<QfliApp> {
     _settings.addListener(_updateAppearance);
     widget.ready?.addListener(_updateAppearance);
     AppRestoreGate.status.addListener(_updateAppearance);
+    _lifecycle = AppLifecycleListener(onExitRequested: _onExitRequested);
+  }
+
+  /// 关窗前等子进程结束。
+  ///
+  /// 桌面端的终端与 Herdr 都是子进程：Dart 侧不 await 释放，它们会比应用活得
+  /// 久，下次打开会说窗格被占用。手机上不会走到这里（没有本机子进程）。
+  Future<AppExitResponse> _onExitRequested() async {
+    await HarnessHub.shutdownOpenHubs();
+    return AppExitResponse.exit;
   }
 
   void _updateAppearance() {
@@ -90,6 +106,7 @@ class _QfliAppState extends State<QfliApp> {
 
   @override
   void dispose() {
+    _lifecycle?.dispose();
     _settings.removeListener(_updateAppearance);
     widget.ready?.removeListener(_updateAppearance);
     AppRestoreGate.status.removeListener(_updateAppearance);

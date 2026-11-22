@@ -116,11 +116,16 @@ class HerdrSessionHandle implements HarnessSessionHandle {
     unawaited(_onChanged());
   }
 
-  void dispose() {
+  /// Releases the view without waiting: the pane keeps running.
+  ///
+  /// Callers that must know the attach client is gone (a host shutting down
+  /// before the process exits) await the returned future.
+  Future<void> dispose() async {
     if (!_detached) {
       _detached = true;
-      unawaited(_terminal.close());
+      await _terminal.close();
     }
+    if (_statusDisposed) return;
     _statusDisposed = true;
     _status.dispose();
   }
