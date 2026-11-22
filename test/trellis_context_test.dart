@@ -56,6 +56,35 @@ void main() {
       final project = await TrellisProject.load(root.path);
       final text = buildTrellisContext(project!);
       expect(text.length, lessThanOrEqualTo(kTrellisContextMaxChars));
+      // 只列前 maxTasks 个任务，标题再长也裁到上限，所以这份上下文根本没到
+      // 字符上限，不该带截断标记。撑大预算的是行数上限，这里钉住它。
+      expect(text, contains('列出前 $kTrellisContextMaxTasks 个'));
+      expect(text, isNot(contains('上下文已截断')));
+    });
+
+    test(
+      'clamps the context when one block alone exceeds the budget',
+      () async {
+        final root = makeTrellisProject();
+        // 规范索引逐条列出，不按数量截断；层多到一定地步，单这一块就会超预算。
+        for (var i = 0; i < 80; i++) {
+          writeFixture(root, '.trellis/spec/layer-$i/index.md', '# L$i\n');
+        }
+        final project = await TrellisProject.load(root.path);
+
+        // 先证明夹具真的超了预算，否则下面那条“截断过”的断言会假通过。
+        final unclamped = buildTrellisContext(project!, maxChars: 1 << 20);
+        expect(unclamped.length, greaterThan(kTrellisContextMaxChars));
+
+        final text = buildTrellisContext(project);
+        expect(text.length, lessThanOrEqualTo(kTrellisContextMaxChars));
+        expect(text, contains('上下文已截断'));
+      },
+    );
+
+    test('clamp keeps the cut on a line boundary inside the budget', () {
+      final text = clampTrellisContext('${'一行内容' * 400}\n', 200);
+      expect(text.length, lessThanOrEqualTo(200));
       expect(text, contains('上下文已截断'));
     });
 
