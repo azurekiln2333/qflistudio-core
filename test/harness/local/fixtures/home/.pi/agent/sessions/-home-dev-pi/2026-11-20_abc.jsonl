@@ -1,0 +1,4 @@
+{"type":"session","id":"pi-1","cwd":"/home/dev/pi","timestamp":"2026-11-20T10:00:00.000Z"}
+{"type":"message","timestamp":"2026-11-20T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"帮我加一个单元测试"}]}}
+{"type":"message","timestamp":"2026-11-20T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"好的，先看现有测试。"},{"type":"tool_use","name":"read","input":{"path":"test/a_test.dart"}}]}}
+{"type":"permission_request","requestId":"req-7","prompt":"允许写入 test/a_test.dart 吗？","options":["allow","deny"],"timestamp":"2026-11-20T10:00:03.000Z"}
