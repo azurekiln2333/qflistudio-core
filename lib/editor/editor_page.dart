@@ -969,6 +969,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _inlineDocuments.clear();
     _inlineFocusDocuments.clear();
     _editor.dispose();
+    // 收尾回调可能在早先的取消动作之后又挂上定时器：这里再扫一遍再交给框架。
+    _historyTimer?.cancel();
+    _historyTimer = null;
+    for (final timer in _activityTimers.values) {
+      timer.cancel();
+    }
+    _activityTimers.clear();
     unawaited(
       _stopPreview().catchError((Object error) {
         debugPrint('Editor preview cleanup failed: $error');
@@ -1076,9 +1083,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _scheduleHistorySave() {
-    // 销毁之后再挂定时器就是泄漏：重建树、晚到的 openPath 回调、`_editor.dispose()`
-    // 里的通知都可能在这之后才走到这里。测试里表现为“widget tree 销毁后仍有定时器”。
-    if (!mounted) return;
+    // `mounted` 在整个 dispose 体内都是 true，用它挡不住销毁窗口：
+    // `_editor.dispose()`、晚到的 openPath 回调与自动保存收尾都在那之后才走到这里。
+    // 销毁开始后再挂 1.5 秒定时器就是泄漏，改用 `_leaving`。
+    if (_leaving) return;
     _historyTimer?.cancel();
     _historyTimer = Timer(const Duration(milliseconds: 1500), () {
       unawaited(_saveHistory());
@@ -1086,12 +1094,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _onFileContentChanged(OpenFile open) {
+    if (_leaving) return;
     _scheduleHistorySave();
     // A buffer whose project was removed must not be written back and recreate
     // the deleted directory; the user exports it explicitly instead.
     if (_isOrphaned(open)) return;
     if (!widget.settings.autoSave && !widget.project.isCloud) return;
-    if (!mounted) return;
     _activityTimers.remove(open.path)?.cancel();
     final editGeneration = (_autoEditGeneration[open.path] ?? 0) + 1;
     _autoEditGeneration[open.path] = editGeneration;
