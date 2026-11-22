@@ -266,6 +266,8 @@ void main() {
 
       runtime.liveStatuses['session-0'] = AgentLiveStatus.failed;
       facade.seedError(message: '余额不足');
+      // 流是异步投递的：通知发出去以后要等微任务队列，否则读到的还是空列表。
+      await pumpEventQueue();
 
       final failure = events.where((e) => e.text == '余额不足').single;
       expect(failure.role, TranscriptRole.system);
