@@ -148,8 +148,9 @@ public final class QfliPickerPlugin implements FlutterPlugin, ActivityAware,
                                 .setType("application/zip")
                                 .putExtra(Intent.EXTRA_STREAM, uri)
                                 .putExtra(Intent.EXTRA_TITLE, title)
-                                .setClipData(ClipData.newRawUri("ZIP archive", uri))
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        // setClipData returns void, so it cannot sit in the builder chain.
+                        share.setClipData(ClipData.newRawUri("ZIP archive", uri));
                         Intent chooser = Intent.createChooser(share, title)
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         activityBinding.getActivity().startActivity(chooser);
