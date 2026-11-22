@@ -50,6 +50,7 @@ class HerdrHost implements HarnessHost {
     HerdrExecutableLocator? locator,
     this.idleRefresh = const Duration(seconds: 30),
     this.waitBudget = const Duration(seconds: 20),
+    this.waitFloor = const Duration(milliseconds: 250),
     this.attachTakeover = false,
   }) : _executablePath = executablePath,
        _cli = cli,
@@ -64,6 +65,14 @@ class HerdrHost implements HarnessHost {
 
   /// How long one `agent wait` blocks before the loop re-reads the list.
   final Duration waitBudget;
+
+  /// Floor between two `agent wait` attempts.
+  ///
+  /// `agent wait` can return at once: the budget expired, the pane went away, or
+  /// the server answered with an error. Without a floor the loop would re-read
+  /// the list and wait again with no pause, which pegs a core and spawns one
+  /// CLI process per turn. The budget bounds staleness, this bounds the rate.
+  final Duration waitFloor;
 
   /// Pass `--takeover` to `agent attach`. Off by default: Studio must not steal
   /// the pane from the user's own Herdr client.
@@ -421,6 +430,7 @@ class HerdrHost implements HarnessHost {
   /// One long wait that must never break the loop: a timeout, a closed pane or a
   /// transient CLI failure all mean "refresh and try again".
   Future<void> _waitQuietly(HerdrCli cli, HerdrAgentInfo agent) async {
+    final started = Stopwatch()..start();
     try {
       await cli.wait(
         agent.target,
@@ -435,15 +445,24 @@ class HerdrHost implements HarnessHost {
     } on HerdrException {
       // Expected: the budget expired, or the pane went away.
     }
+    // A wait that came back immediately must not turn the loop into a busy
+    // spin: sleep the rest of the floor before the next attempt.
+    final elapsed = started.elapsed;
+    if (elapsed < waitFloor) await _sleep(waitFloor - elapsed);
   }
 
   Future<void> _sleep(Duration duration) async {
     if (_disposed) return;
     final wake = _wake = Completer<void>();
-    await Future.any<void>(<Future<void>>[
-      Future<void>.delayed(duration),
-      wake.future,
-    ]);
+    // A plain `Future.delayed` cannot be cancelled: after dispose it would sit
+    // in the timer queue for up to [idleRefresh] and keep the isolate alive.
+    // Own the timer so disposing frees it right away.
+    final tick = Completer<void>();
+    final timer = Timer(duration, () {
+      if (!tick.isCompleted) tick.complete();
+    });
+    await Future.any<void>(<Future<void>>[tick.future, wake.future]);
+    timer.cancel();
     if (identical(_wake, wake)) _wake = null;
   }
 
