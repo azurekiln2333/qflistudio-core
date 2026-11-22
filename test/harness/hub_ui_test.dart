@@ -336,7 +336,10 @@ void main() {
       expect(find.text('STUDIO-PANE'), findsNothing);
       expect(find.text('选择一个会话'), findsOneWidget);
 
-      await tester.tap(find.byKey(const ValueKey('hub-session-local-l1')));
+      // 会话列表是面板的兄弟组件（编辑器侧边栏里的 HubSessionList），
+      // 不在面板内部；面板只负责详情。这里直接通过 hub 打开，
+      // 验证面板自己会从空态切成会话视图。
+      await hub.openSession(hub.sessionsOf('local').first);
       await _settle(tester);
 
       expect(find.text('Claude 会话'), findsOneWidget);
