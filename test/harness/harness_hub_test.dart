@@ -87,11 +87,28 @@ void main() {
     await studio.dispose();
   });
 
+  /// 建 hub 并登记兜底释放。
+  ///
+  /// 用例里断言失败会跳出函数，`hub.dispose()` 可能不再执行；那样 hub 会留在
+  /// [HarnessHub.shutdownOpenHubs] 的全局表里，下一个用例就要等一次可能永不
+  /// 完成的释放。这里统一登记：等不到就报失败，不让测试进程卡住。
+  HarnessHub trackHub(HarnessHub hub) {
+    addTearDown(() async {
+      await hub.shutdown().timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => fail('hub 收尾 30 秒没有完成'),
+      );
+    });
+    return hub;
+  }
+
   HarnessHub buildHub({bool desktop = true, String? initialHostId}) =>
-      HarnessHub(
-        hosts: [studio, local, herdr, remote],
-        desktop: desktop,
-        initialHostId: initialHostId,
+      trackHub(
+        HarnessHub(
+          hosts: [studio, local, herdr, remote],
+          desktop: desktop,
+          initialHostId: initialHostId,
+        ),
       );
 
   test('desktop keeps every host and opens on the studio one', () async {
@@ -111,16 +128,22 @@ void main() {
   });
 
   test('a hub without a studio host falls back to the local one', () async {
-    final hub = HarnessHub(
-      hosts: [
-        FakeHarnessHost(id: 'local', label: '本机', kind: HarnessHostKind.local),
-        FakeHarnessHost(
-          id: 'herdr',
-          label: 'Herdr',
-          kind: HarnessHostKind.local,
-        ),
-      ],
-      desktop: true,
+    final hub = trackHub(
+      HarnessHub(
+        hosts: [
+          FakeHarnessHost(
+            id: 'local',
+            label: '本机',
+            kind: HarnessHostKind.local,
+          ),
+          FakeHarnessHost(
+            id: 'herdr',
+            label: 'Herdr',
+            kind: HarnessHostKind.local,
+          ),
+        ],
+        desktop: true,
+      ),
     );
     await pumpEventQueue();
 
@@ -265,8 +288,9 @@ void main() {
   });
 
   test('the hub reads a structured hint from a host', () async {
-    final host = _StructuredHintHost();
-    final hub = HarnessHub(hosts: [host], desktop: true);
+    final hub = trackHub(
+      HarnessHub(hosts: [_StructuredHintHost()], desktop: true),
+    );
     await pumpEventQueue();
     expect(hub.hintOf('herdr'), '服务未运行，请重启 Herdr');
     hub.dispose();
@@ -378,11 +402,11 @@ void main() {
   });
 
   test('launching without a host reports a readable error', () async {
-    final hub = HarnessHub(hosts: const [], desktop: true);
+    final hub = trackHub(HarnessHub(hosts: const [], desktop: true));
     await pumpEventQueue();
 
     expect(hub.currentHost, isNull);
-    expect(hub.launchMenu(), completion(isEmpty));
+    await expectLater(hub.launchMenu(), completion(isEmpty));
     await expectLater(
       hub.launch(const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp')),
       throwsA(isA<HarnessHubException>()),
@@ -422,7 +446,9 @@ void main() {
 
   test('shutdown waits for host disposal to finish', () async {
     final slow = _SlowDisposeHost();
-    final hub = HarnessHub(hosts: [slow], desktop: true);
+    final hub = trackHub(HarnessHub(hosts: [slow], desktop: true));
+    // 断言失败跳出用例时也要把门打开：不然兜底释放永远等不完。
+    addTearDown(slow.finishDispose);
     await pumpEventQueue();
 
     var finished = false;
@@ -436,11 +462,11 @@ void main() {
     slow.finishDispose();
     await pending;
     expect(finished, isTrue);
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('shutdownOpenHubs releases every hub that is still open', () async {
-    final first = HarnessHub(hosts: [local], desktop: true);
-    final second = HarnessHub(hosts: [remote], desktop: true);
+    final first = trackHub(HarnessHub(hosts: [local], desktop: true));
+    final second = trackHub(HarnessHub(hosts: [remote], desktop: true));
     await pumpEventQueue();
 
     await HarnessHub.shutdownOpenHubs();
@@ -450,14 +476,12 @@ void main() {
     // 两个 hub 都已释放：再调一次是空操作。
     await first.shutdown();
     await second.shutdown();
-  });
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('a hub that does not own its hosts leaves them running', () async {
     // 共享主机（应用级单例）的形态：关闭编辑页只摘监听，不释放主机。
-    final hub = HarnessHub(
-      hosts: [local, remote],
-      desktop: true,
-      ownsHosts: false,
+    final hub = trackHub(
+      HarnessHub(hosts: [local, remote], desktop: true, ownsHosts: false),
     );
     await pumpEventQueue();
     hub.dispose();
@@ -467,7 +491,7 @@ void main() {
     expect(remote.disposeCount, 0);
 
     // 主机仍然可用：再建一个 hub 仍能读到会话。
-    final again = HarnessHub(hosts: [local, remote], desktop: true);
+    final again = trackHub(HarnessHub(hosts: [local, remote], desktop: true));
     await pumpEventQueue();
     expect(again.currentSessions, isNotEmpty);
     again.dispose();
@@ -538,5 +562,8 @@ class _SlowDisposeHost extends FakeHarnessHost {
     await super.dispose();
   }
 
-  void finishDispose() => _gate.complete();
+  void finishDispose() {
+    // 幂等：断言失败后的兜底路径也会调一次。
+    if (!_gate.isCompleted) _gate.complete();
+  }
 }
