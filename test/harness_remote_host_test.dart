@@ -374,8 +374,18 @@ Future<List<HarnessSessionInfo>> _waitForCount(
   int count,
 ) => _waitFor(host, (list) => list.length >= count);
 
+/// 每个用例都带超时：一旦哪个 await 永远不回来，要失败得又快又准。
+void testT(String description, Future<void> Function() body) =>
+    test(description, () => body().timeout(const Duration(seconds: 15)));
+
+/// 登记主机，用例失败也释放：定时器与推送订阅不会因为断言失败就停下。
+RemoteHarnessHost tracked(RemoteHarnessHost host) {
+  addTearDown(host.dispose);
+  return host;
+}
+
 void main() {
-  test('merges Claude, Herdr and Codex sessions into one list', () async {
+  testT('merges Claude, Herdr and Codex sessions into one list', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 's1', pending: 1));
     remote.put(
@@ -390,10 +400,8 @@ void main() {
     final codex = FakeRemoteCodexPort(
       threads: <protocol.CodexThread>[_thread()],
     );
-    final host = RemoteHarnessHost(
-      remote: remote,
-      herdr: herdrPort,
-      codex: codex,
+    final host = tracked(
+      RemoteHarnessHost(remote: remote, herdr: herdrPort, codex: codex),
     );
 
     final list = await _waitForCount(host, 4);
@@ -412,7 +420,7 @@ void main() {
     await host.dispose();
   });
 
-  test('maps statuses and capabilities per surface', () async {
+  testT('maps statuses and capabilities per surface', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 's1', status: protocol.SessionStatus.waiting));
     remote.put(
@@ -422,11 +430,9 @@ void main() {
         status: protocol.SessionStatus.closed,
       ),
     );
-    final host = RemoteHarnessHost(
-      remote: remote,
-      herdr: FakeRemoteHerdrPort()
-        ..agentList.add(_agent(status: herdr.HerdrAgentStatus.blocked)),
-    );
+    final herdrPort = FakeRemoteHerdrPort()
+      ..agentList.add(_agent(status: herdr.HerdrAgentStatus.blocked));
+    final host = tracked(RemoteHarnessHost(remote: remote, herdr: herdrPort));
     final list = await _waitForCount(host, 3);
     final byId = <String, HarnessSessionInfo>{
       for (final info in list) info.id: info,
@@ -446,12 +452,12 @@ void main() {
     await host.dispose();
   });
 
-  test(
+  testT(
     'a Claude transcript streams history and keeps approvals explicit',
     () async {
       final remote = FakeRemoteSessionPort();
       remote.put(_session(id: 's1'));
-      final host = RemoteHarnessHost(remote: remote);
+      final host = tracked(RemoteHarnessHost(remote: remote));
       final handle = await host.open('session:s1');
       expect(handle.transcript, isNotNull);
 
@@ -513,10 +519,10 @@ void main() {
     },
   );
 
-  test('an unknown approval decision is a refusal, never consent', () async {
+  testT('an unknown approval decision is a refusal, never consent', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 's1'));
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
     final handle = await host.open('session:s1');
     remote.pushEvent(
       's1',
@@ -537,7 +543,7 @@ void main() {
     await host.dispose();
   });
 
-  test('a terminal session streams bytes and types exact input', () async {
+  testT('a terminal session streams bytes and types exact input', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(
       _session(
@@ -546,7 +552,7 @@ void main() {
         status: protocol.SessionStatus.running,
       ),
     );
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
     final handle = await host.open('session:t1');
     expect(handle.terminal, isNotNull);
     expect(handle.transcript, isNull);
@@ -577,10 +583,10 @@ void main() {
     await host.dispose();
   });
 
-  test('a terminal replays the screen it missed and clears on reset', () async {
+  testT('a terminal replays the screen it missed and clears on reset', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 't1', kind: 'terminal'));
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
 
     final first = await host.open('session:t1');
     final live = <String>[];
@@ -629,10 +635,10 @@ void main() {
     await host.dispose();
   });
 
-  test('a stopped session does not hand out a dead handle', () async {
+  testT('a stopped session does not hand out a dead handle', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 's1'));
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
     final handle = await host.open('session:s1');
     await handle.stop();
 
@@ -642,10 +648,10 @@ void main() {
     await host.dispose();
   });
 
-  test('a stopped Herdr pane reopens with a live handle', () async {
+  testT('a stopped Herdr pane reopens with a live handle', () async {
     final remote = FakeRemoteSessionPort();
     final herdrPort = FakeRemoteHerdrPort()..agentList.add(_agent());
-    final host = RemoteHarnessHost(remote: remote, herdr: herdrPort);
+    final host = tracked(RemoteHarnessHost(remote: remote, herdr: herdrPort));
     await _waitForCount(host, 1);
 
     final handle = await host.open('herdr:w37:p14');
@@ -661,18 +667,20 @@ void main() {
     await host.dispose();
   });
 
-  test('the host id is resolved once and namespaced once', () async {
+  testT('the host id is resolved once and namespaced once', () async {
     final remote = FakeRemoteSessionPort(hostId: '');
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
     expect(host.id, 'remote');
     // Pairing arrives after construction: the id must not change under the hub.
     remote.hostId = 'agent-42';
     expect(host.id, 'remote');
 
-    final named = RemoteHarnessHost(remote: remote);
+    final named = tracked(RemoteHarnessHost(remote: remote));
     expect(named.id, 'remote:agent-42');
 
-    final explicit = RemoteHarnessHost(remote: remote, hostId: 'remote:pc-9');
+    final explicit = tracked(
+      RemoteHarnessHost(remote: remote, hostId: 'remote:pc-9'),
+    );
     expect(explicit.id, 'remote:pc-9');
 
     await host.dispose();
@@ -680,12 +688,12 @@ void main() {
     await explicit.dispose();
   });
 
-  test('a Codex row follows the thread status', () async {
+  testT('a Codex row follows the thread status', () async {
     final remote = FakeRemoteSessionPort();
     final codex = FakeRemoteCodexPort(
       threads: <protocol.CodexThread>[_thread(status: 'active')],
     );
-    final host = RemoteHarnessHost(remote: remote, codex: codex);
+    final host = tracked(RemoteHarnessHost(remote: remote, codex: codex));
     await _waitForCount(host, 1);
     final handle = await host.open('codex:thread-1');
     expect(handle.status.value, HarnessSessionStatus.working);
@@ -702,10 +710,10 @@ void main() {
     await host.dispose();
   });
 
-  test('stop closes the session; detach does not', () async {
+  testT('stop closes the session; detach does not', () async {
     final remote = FakeRemoteSessionPort();
     remote.put(_session(id: 's1'));
-    final host = RemoteHarnessHost(remote: remote);
+    final host = tracked(RemoteHarnessHost(remote: remote));
     final handle = await host.open('session:s1');
     await handle.stop();
     expect(remote.calls, contains('closeSession:s1'));
@@ -713,12 +721,12 @@ void main() {
     await host.dispose();
   });
 
-  test(
+  testT(
     'Herdr panes on the paired computer replay snapshots and send keys',
     () async {
       final remote = FakeRemoteSessionPort();
       final herdrPort = FakeRemoteHerdrPort()..agentList.add(_agent());
-      final host = RemoteHarnessHost(remote: remote, herdr: herdrPort);
+      final host = tracked(RemoteHarnessHost(remote: remote, herdr: herdrPort));
       await _waitForCount(host, 1);
       final handle = await host.open('herdr:w37:p14');
       expect(handle.terminal, isNotNull);
@@ -753,14 +761,14 @@ void main() {
     },
   );
 
-  test(
+  testT(
     'Codex threads expose a transcript and answer pending approvals',
     () async {
       final remote = FakeRemoteSessionPort();
       final codex = FakeRemoteCodexPort(
         threads: <protocol.CodexThread>[_thread()],
       );
-      final host = RemoteHarnessHost(remote: remote, codex: codex);
+      final host = tracked(RemoteHarnessHost(remote: remote, codex: codex));
       await _waitForCount(host, 1);
 
       final handle = await host.open('codex:thread-1');
@@ -814,11 +822,11 @@ void main() {
     },
   );
 
-  test(
+  testT(
     'launch creates a Claude session or a terminal on the desktop',
     () async {
       final remote = FakeRemoteSessionPort();
-      final host = RemoteHarnessHost(remote: remote);
+      final host = tracked(RemoteHarnessHost(remote: remote));
       final claude = await host.launch(
         const HarnessLaunchRequest(providerId: 'claude', cwd: r'D:\work'),
       );
@@ -840,14 +848,14 @@ void main() {
     },
   );
 
-  test(
+  testT(
     'an offline computer reports offline and offers no remote launch',
     () async {
       final remote = FakeRemoteSessionPort(
         isOnline: false,
         phase: ConnectionPhase.agentOffline,
       );
-      final host = RemoteHarnessHost(remote: remote);
+      final host = tracked(RemoteHarnessHost(remote: remote));
       expect(host.state.value, HarnessHostState.offline);
       await expectLater(
         host.launch(

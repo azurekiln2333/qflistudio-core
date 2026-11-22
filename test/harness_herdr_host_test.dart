@@ -200,13 +200,25 @@ HerdrHost _host(
   HarnessPtyFactory? pty,
   Duration idleRefresh = const Duration(milliseconds: 20),
   Duration waitBudget = const Duration(milliseconds: 150),
-}) => HerdrHost(
-  cli: fake.cli(),
-  ptyFactory: pty,
-  locator: ({String? explicitPath}) async => 'herdr',
-  idleRefresh: idleRefresh,
-  waitBudget: waitBudget,
-);
+  Duration waitFloor = const Duration(milliseconds: 20),
+}) {
+  final host = HerdrHost(
+    cli: fake.cli(),
+    ptyFactory: pty,
+    locator: ({String? explicitPath}) async => 'herdr',
+    idleRefresh: idleRefresh,
+    waitBudget: waitBudget,
+    waitFloor: waitFloor,
+  );
+  // 断言失败也要释放：刷新循环与快照定时器不会自己停，留一个就能把
+  // 整个测试进程拖住。
+  addTearDown(host.dispose);
+  return host;
+}
+
+/// 每个用例都带超时：一旦哪个 await 永远不回来，要失败得又快又准。
+void testT(String description, Future<void> Function() body) =>
+    test(description, () => body().timeout(const Duration(seconds: 15)));
 
 /// The host publishes its first list after the first refresh; poll the snapshot
 /// instead of depending on which event a broadcast stream happens to deliver.
@@ -214,20 +226,26 @@ Future<List<HarnessSessionInfo>> _sessions(
   HerdrHost host, {
   int min = 1,
 }) async {
-  host.watchSessions().listen((_) {});
-  for (var attempt = 0; attempt < 200; attempt++) {
-    final list = host.currentSessions;
-    if (list.length >= min) return list;
-    await Future<void>.delayed(const Duration(milliseconds: 5));
+  // 订阅只用来启动刷新循环，读快照就够了：用完取消，不留给后面用例。
+  final subscription = host.watchSessions().listen((_) {});
+  try {
+    for (var attempt = 0; attempt < 200; attempt++) {
+      final list = host.currentSessions;
+      if (list.length >= min) return list;
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    return host.currentSessions;
+  } finally {
+    await subscription.cancel();
   }
-  return host.currentSessions;
 }
 
 void main() {
-  test(
+  testT(
     'reports unsupported with an install hint when herdr is missing',
     () async {
       final host = HerdrHost(locator: ({String? explicitPath}) async => null);
+      addTearDown(host.dispose);
       expect(host.state.value, HarnessHostState.offline);
       await host.providers();
       expect(host.state.value, HarnessHostState.unsupported);
@@ -237,7 +255,7 @@ void main() {
     },
   );
 
-  test('lists agent panes with mapped status, cwd and provider', () async {
+  testT('lists agent panes with mapped status, cwd and provider', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake);
     final list = await _sessions(host, min: 2);
@@ -272,24 +290,50 @@ void main() {
     await host.dispose();
   });
 
-  test('drives status refresh through agent wait, not tight polling', () async {
+  testT(
+    'drives status refresh through agent wait, not tight polling',
+    () async {
+      final fake = _FakeHerdrCli();
+      // 用够长的地板观察节流：400 ms 里最多几次，而不是上千次。
+      final host = _host(fake, waitFloor: const Duration(milliseconds: 100));
+      await _sessions(host, min: 2);
+      for (var attempt = 0; attempt < 100; attempt++) {
+        if (fake.waitRequests.isNotEmpty) break;
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      expect(fake.waitRequests, isNotEmpty);
+      expect(fake.waitRequests.first[2], 'pi-ui');
+      expect(
+        fake.waitRequests.first,
+        containsAllInOrder(<String>['agent', 'wait', 'pi-ui', '--until']),
+      );
+
+      // 这个假 CLI 让 `agent wait` 立即超时返回。没有地板时循环会空转：
+      // 400 ms 能塞进上千次，有地板时最多几次。
+      final before = fake.waitRequests.length;
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      expect(fake.waitRequests.length - before, lessThan(6));
+
+      await host.dispose();
+    },
+  );
+
+  testT('dispose stops the refresh loop', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake);
-    await _sessions(host, min: 2);
-    for (var attempt = 0; attempt < 100; attempt++) {
-      if (fake.waitRequests.isNotEmpty) break;
-      await Future<void>.delayed(const Duration(milliseconds: 5));
-    }
-    expect(fake.waitRequests, isNotEmpty);
-    expect(fake.waitRequests.first[2], 'pi-ui');
-    expect(
-      fake.waitRequests.first,
-      containsAllInOrder(<String>['agent', 'wait', 'pi-ui', '--until']),
-    );
+    await _sessions(host);
+
     await host.dispose();
+    // 放正在飞的那次读取跑完，再记基准。
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    final calls = fake.argv.length;
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    // 释放之后不该再跑任何 CLI 调用。
+    expect(fake.argv.length, calls);
   });
 
-  test('providers list herdr agent kinds, not a bare shell', () async {
+  testT('providers list herdr agent kinds, not a bare shell', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake);
     final providers = await host.providers();
@@ -304,7 +348,7 @@ void main() {
     await host.dispose();
   });
 
-  test('open attaches the pane in a PTY and forwards bytes', () async {
+  testT('open attaches the pane in a PTY and forwards bytes', () async {
     final fake = _FakeHerdrCli();
     final pty = _FakePtyFactory();
     final host = _host(fake, pty: pty);
@@ -332,7 +376,7 @@ void main() {
     await host.dispose();
   });
 
-  test(
+  testT(
     'sendPrompt submits through agent prompt; reply needs a terminal',
     () async {
       final fake = _FakeHerdrCli();
@@ -356,7 +400,7 @@ void main() {
     },
   );
 
-  test('stop closes the pane after an explicit call', () async {
+  testT('stop closes the pane after an explicit call', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake, pty: _FakePtyFactory());
     await _sessions(host, min: 2);
@@ -369,7 +413,7 @@ void main() {
     await host.dispose();
   });
 
-  test('launch creates a workspace and starts the requested agent', () async {
+  testT('launch creates a workspace and starts the requested agent', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake, pty: _FakePtyFactory());
     await _sessions(host, min: 2);
@@ -400,7 +444,7 @@ void main() {
     await host.dispose();
   });
 
-  test('a plain shell is refused on the herdr host', () async {
+  testT('a plain shell is refused on the herdr host', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake);
     await _sessions(host, min: 2);
@@ -417,7 +461,7 @@ void main() {
     await host.dispose();
   });
 
-  test('a failing PTY falls back to the snapshot terminal', () async {
+  testT('a failing PTY falls back to the snapshot terminal', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake, pty: _FailingPtyFactory());
     await _sessions(host, min: 2);
@@ -438,11 +482,12 @@ void main() {
     await host.dispose();
   });
 
-  test('a broken executable is reported as unsupported, not online', () async {
+  testT('a broken executable is reported as unsupported, not online', () async {
     final host = HerdrHost(
       locator: ({String? explicitPath}) async => 'C:/broken/herdr.exe',
       runner: _MissingRunner(),
     );
+    addTearDown(host.dispose);
     host.watchSessions().listen((_) {});
     for (var attempt = 0; attempt < 100; attempt++) {
       if (host.state.value == HarnessHostState.unsupported) break;
@@ -453,13 +498,14 @@ void main() {
     await host.dispose();
   });
 
-  test(
+  testT(
     'an explicit path that cannot run is not called "not installed"',
     () async {
       final host = HerdrHost(
         executablePath: 'D:/tools/herdr.exe',
         locator: ({String? explicitPath}) async => null,
       );
+      addTearDown(host.dispose);
       await host.providers();
       expect(host.state.value, HarnessHostState.unsupported);
       expect(host.installHint!.title, 'Herdr 路径无效');
@@ -468,7 +514,7 @@ void main() {
     },
   );
 
-  test('a stopped pane reopens with a live terminal', () async {
+  testT('a stopped pane reopens with a live terminal', () async {
     final fake = _FakeHerdrCli();
     final host = _host(fake);
     await _sessions(host, min: 2);
@@ -490,7 +536,7 @@ void main() {
     await host.dispose();
   });
 
-  test('a kind herdr knows but we do not is not hidden', () async {
+  testT('a kind herdr knows but we do not is not hidden', () async {
     final host = _host(_FakeHerdrCli());
     final providers = await host.providers();
     final byId = <String, HarnessProviderInfo>{
@@ -514,7 +560,7 @@ void main() {
     await host.dispose();
   });
 
-  test('an unexpected refresh error does not stop the loop', () async {
+  testT('an unexpected refresh error does not stop the loop', () async {
     final host = _host(_FlakyHerdrCli());
     // The first `agent list` throws a plain StateError; the list still arrives.
     final list = await _sessions(host, min: 2);
@@ -522,7 +568,7 @@ void main() {
     await host.dispose();
   });
 
-  test('dispose releases the injected pty factory', () async {
+  testT('dispose releases the injected pty factory', () async {
     // 工厂握着 PTY 启动器与进程订阅：主机不释放它，每关一个编辑页就漏一套。
     final fake = _FakeHerdrCli();
     var disposed = 0;
@@ -534,6 +580,7 @@ void main() {
       idleRefresh: const Duration(milliseconds: 20),
       waitBudget: const Duration(milliseconds: 150),
     );
+    addTearDown(host.dispose);
     await _sessions(host);
 
     await host.dispose();
@@ -541,13 +588,14 @@ void main() {
     expect(disposed, 1);
   });
 
-  test('dispose survives a factory that throws on release', () async {
+  testT('dispose survives a factory that throws on release', () async {
     final fake = _FakeHerdrCli();
     final host = HerdrHost(
       cli: fake.cli(),
       disposePtyFactory: () async => throw StateError('boom'),
       locator: ({String? explicitPath}) async => 'herdr',
     );
+    addTearDown(host.dispose);
     await host.providers();
 
     // 工厂释放失败不能把主机的其它收尾（会话流、状态）挡住。
