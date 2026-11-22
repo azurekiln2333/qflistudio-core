@@ -66,6 +66,35 @@ jobs:
       - name: Run the complete test suite
         if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         run: flutter test --no-pub --reporter json 2>&1 | tee "$RUNNER_TEMP/core-test.json"
+      - name: Report failed tests
+        if: ${{ failure() && steps.packages.outcome == 'success' }}
+        run: |
+          python3 - "$RUNNER_TEMP/core-test.json" <<'PY'
+          import json, sys
+          suites, tests, errors = {}, {}, {}
+          for line in open(sys.argv[1], encoding='utf-8', errors='replace'):
+              line = line.strip()
+              if not line.startswith('{'):
+                  continue
+              try:
+                  e = json.loads(line)
+              except ValueError:
+                  continue
+              kind = e.get('type')
+              if kind == 'suite':
+                  suites[e['suite']['id']] = e['suite'].get('path') or ''
+              elif kind == 'testStart':
+                  t = e['test']
+                  tests[t['id']] = (suites.get(t.get('suiteID'), ''), t.get('name', '?'))
+              elif kind == 'error':
+                  errors.setdefault(e['testID'], e.get('error') or '')
+              elif kind == 'testDone' and e.get('result') != 'success' and not e.get('hidden'):
+                  path, name = tests.get(e['testID'], ('', '?'))
+                  lines = errors.get(e['testID'], '').strip().splitlines()
+                  first = lines[0][:200] if lines else e.get('result', '')
+                  text = ' '.join(f'{path} :: {name} :: {first}'.split()).replace('%', '%25')
+                  print(f'::error title=Failed test::{text}')
+          PY
       - name: Upload verification logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
