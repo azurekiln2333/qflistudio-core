@@ -164,28 +164,58 @@ class TrellisContextLoader {
       final process = await supervisor.start(pythonExecutable, [
         script.path,
       ], workingDirectory: projectRoot);
-      final stdoutText = process.stdout
-          .transform(const Utf8Decoder(allowMalformed: true))
-          .join();
-      final stderrDrained = process.stderr.drain<void>();
-      final exit = process.exitCode;
-      final completed = await Future.any<Object?>([
-        stdoutText,
-        Future<Object?>.delayed(timeout, () => null),
-      ]);
-      if (completed is! String) {
-        await process.cancel();
-        return null;
-      }
-      final code = await exit;
-      await stderrDrained;
-      if (code != 0) return null;
-      return completed;
+      // 整轮共用一个时限：只给 stdout 设限时，脚本打印完却一直不退出（等
+      // stdin、或自家的子进程占着管道）会让 `exitCode` 永远等下去，调用方
+      // 的一次会话加载就卡在这里。收不到就不等了，交给 dispose 收尸。
+      final stdoutText = await awaitWithin(
+        process.stdout
+            .transform(const Utf8Decoder(allowMalformed: true))
+            .join(),
+        timeout,
+      );
+      final code = stdoutText == null
+          ? null
+          : await awaitWithin(process.exitCode, timeout);
+      if (stdoutText == null || code == null || code != 0) return null;
+      // stderr 只是防管道堵死的排水口；排不完也不影响已经拿到的上下文。
+      await awaitWithin(
+        process.stderr.drain<bool>().then((_) => true),
+        timeout,
+      );
+      return stdoutText;
     } on Object {
       return null;
     } finally {
       await supervisor.dispose();
     }
+  }
+}
+
+/// 在 [limit] 内等 [future]；超时返回 null。
+///
+/// 等不下去时必须自己收手：`Future.timeout` 只让调用方先走，原 future 依旧
+/// 挂着，进程还在跑。这里让调用方明确知道“没等到”，随后由进程监督器杀掉
+/// 子进程，管道随之关闭。
+Future<T?> awaitWithin<T>(Future<T> future, Duration limit) async {
+  final done = Completer<T?>();
+  final timer = Timer(limit, () {
+    if (!done.isCompleted) done.complete(null);
+  });
+  unawaited(
+    future.then<void>(
+      (value) {
+        if (!done.isCompleted) done.complete(value);
+      },
+      onError: (Object error, StackTrace stack) {
+        // 放弃等待之后才到的错误没人接，丢掉即可。
+        if (!done.isCompleted) done.completeError(error, stack);
+      },
+    ),
+  );
+  try {
+    return await done.future;
+  } finally {
+    timer.cancel();
   }
 }
 

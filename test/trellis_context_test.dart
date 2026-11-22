@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -172,6 +173,40 @@ void main() {
 
       // 链接被拒后回退到 Dart 解析，结果仍然可用。
       expect(text, contains('### Trellis 项目上下文'));
+    });
+  });
+
+  group('script deadline', () {
+    test('gives up on a wait that never ends', () async {
+      final pending = Completer<String>();
+      final settled = await awaitWithin(
+        pending.future,
+        const Duration(milliseconds: 20),
+      );
+      expect(settled, isNull);
+      // 放弃等待不等于失信：原 future 仍然可以正常完成。
+      pending.complete('晚到的正文');
+      expect(await pending.future, '晚到的正文');
+    });
+
+    test('passes a value that arrives in time', () async {
+      expect(
+        await awaitWithin(
+          Future<String>.value('正文'),
+          const Duration(seconds: 1),
+        ),
+        '正文',
+      );
+    });
+
+    test('keeps the error instead of hiding it', () async {
+      await expectLater(
+        awaitWithin(
+          Future<String>.error(const FileSystemException('读不到')),
+          const Duration(seconds: 1),
+        ),
+        throwsA(isA<FileSystemException>()),
+      );
     });
   });
 
