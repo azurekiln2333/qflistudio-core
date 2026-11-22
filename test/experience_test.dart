@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/app.dart';
+import 'package:qfli_studio_core/config/api_config.dart';
+import 'package:qfli_studio_core/models/cloud_project.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/pages/community/post_list_page.dart';
 import 'package:qfli_studio_core/pages/profile_page.dart';
@@ -80,11 +82,23 @@ void main() {
       storageFile: File(p.join(directory.path, 'projects.json')),
     );
     addTearDown(store.dispose);
+    // 云端项目按账号隔离：本用例要带上作用域与登录世代，否则写入会被拒。
+    final scope = CloudProjectScope(
+      origin: ApiConfig.origin,
+      accountId: 'user_a',
+    );
+    final session = CloudSession(
+      scope: scope,
+      token: 'test-only',
+      isCurrent: () => true,
+    );
     await store.load();
     await store.addCloudProject(
       name: 'old',
       cloudId: '7',
       cachePath: directory.path,
+      scope: scope,
+      session: session,
     );
     await store.setFavorite(store.projects.single, true);
     final lastOpened = store.projects.single.lastOpenedAt;
@@ -92,9 +106,22 @@ void main() {
       name: 'new',
       path: directory.path,
       cloudId: '7',
+      cloudOrigin: scope.origin,
+      cloudAccountId: scope.accountId,
     );
-    await store.mergeCloudProjects([incoming]);
-    await store.mergeCloudProjects([incoming]);
+    final ticket = store.invalidateCloudRefresh(scope);
+    await store.mergeCloudProjects(
+      [incoming],
+      scope: scope,
+      generation: ticket,
+      session: session,
+    );
+    await store.mergeCloudProjects(
+      [incoming],
+      scope: scope,
+      generation: ticket,
+      session: session,
+    );
     expect(store.projects, hasLength(1));
     expect(store.projects.single.name, 'new');
     expect(store.projects.single.favorite, isTrue);
