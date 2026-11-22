@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/config/api_config.dart';
+import 'package:qfli_studio_core/models/cloud_project.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/services/api_client.dart';
 import 'package:qfli_studio_core/services/cloud_sync_service.dart';
@@ -43,10 +44,21 @@ void main() {
     expect(local.isCloud, isFalse);
     expect(local.path, legacy.path);
     expect(Project.fromJson(project.toJson()).isCloud, isTrue);
+    final scope = CloudProjectScope(
+      origin: ApiConfig.origin,
+      accountId: 'user_a',
+    );
     final service = await CloudSyncService.open(
       cloudId: 'proj_0123456789abcdef0123456789abcdef',
       name: 'demo',
       testHome: directory.path,
+      // 云端缓存按账号隔离：旧镜像不归属任何账号，新开启必须带作用域。
+      scope: scope,
+      session: CloudSession(
+        scope: scope,
+        token: 'test-only',
+        isCurrent: () => true,
+      ),
     );
     expect(service.localPath, isNot(legacy.path));
     expect(service.existsAnyFile(), isFalse);
