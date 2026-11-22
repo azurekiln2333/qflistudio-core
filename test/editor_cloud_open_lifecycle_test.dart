@@ -117,6 +117,10 @@ void main() {
       isFalse,
       reason: 'A service returned after unmount never reaches page.dispose.',
     );
+    // 页面自身的一次性定时器只有两个：历史保存 1.5 s、自动保存 2 s。
+    // 把假时钟推过这两个窗口，让断言只针对租约；周期定时器不会被清空，
+    // 所以这步不会掩盖无界泄漏。
+    await tester.pump(const Duration(seconds: 15));
     expect(tester.takeException(), isNull);
   });
 
