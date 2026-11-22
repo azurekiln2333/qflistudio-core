@@ -148,7 +148,11 @@ void main() {
         busy: true,
       );
       await tester.tap(find.byType(PopupMenuButton<ProjectCardAction>));
-      await tester.pumpAndSettle();
+      // Caching before the remote tree arrives has no file totals, so the
+      // progress bar is indeterminate and never settles. Advance the menu
+      // route with explicit pumps instead of waiting for a still frame.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       for (final action in [
         ProjectCardAction.remove,
         ProjectCardAction.cache,
