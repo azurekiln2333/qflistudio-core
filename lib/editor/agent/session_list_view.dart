@@ -60,19 +60,29 @@ class SessionListView extends StatelessWidget {
                   : ListView.builder(
                       // 与文件树同一套纵向节奏：上下各 8，行间不加分隔。
                       padding: const EdgeInsets.symmetric(vertical: 8),
-                      itemCount: sessions.length + (extra == null ? 0 : 1),
+                      // 内置会话为空时仍要画空态说明：外部会话不能替内置
+                      // 列表说话。以前只看 `extra` 是否为空，结果有主机的那一
+                      // 栏会得到一张空白卡片，新建入口也跟着消失。
+                      itemCount:
+                          (sessions.isEmpty ? 1 : 0) +
+                          sessions.length +
+                          (extra == null ? 0 : 1),
                       itemBuilder: (context, index) {
-                        if (index >= sessions.length) return extra!;
+                        var slot = index;
+                        if (sessions.isEmpty) {
+                          if (slot == 0) return _buildEmpty(context);
+                          slot -= 1;
+                        }
+                        if (slot >= sessions.length) return extra!;
+                        final meta = sessions[slot];
                         return _SessionRow(
-                          meta: sessions[index],
-                          status: runtime.statusOf(sessions[index].id),
-                          selected: sessions[index].id == state.sessionId,
+                          meta: meta,
+                          status: runtime.statusOf(meta.id),
+                          selected: meta.id == state.sessionId,
                           onSelect: onSelect,
-                          onRename: (title) => runtime.sessions.rename(
-                            sessions[index].id,
-                            title,
-                          ),
-                          onDelete: () => _delete(sessions[index]),
+                          onRename: (title) =>
+                              runtime.sessions.rename(meta.id, title),
+                          onDelete: () => _delete(meta),
                         );
                       },
                     ),
