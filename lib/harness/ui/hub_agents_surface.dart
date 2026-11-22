@@ -90,6 +90,11 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
   /// 没配对时点击先带用户去配对，配好了再点一次。
   VoidCallback? get _remoteEntry {
     if (widget.openRemoteHost == null) return null;
+    // 已经有已绑定电脑在列表里：占位芯片让位给真正的主机芯片，
+    // 否则同一台电脑会出现两个入口。
+    if (widget.hub.hosts.any((host) => host.kind == HarnessHostKind.remote)) {
+      return null;
+    }
     if (_remoteUnavailable && widget.onAddComputer != null) {
       return widget.onAddComputer!;
     }
