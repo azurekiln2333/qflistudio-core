@@ -100,6 +100,15 @@ void main() {
     initialHostId: initialHostId,
   );
 
+  /// 等 hub 收到主机的第一份会话列表。
+  ///
+  /// [HarnessHost.watchSessions] 的首次快照是异步送来的，`buildHub()`
+  /// 之后立刻读 `sessionsOf()` 只会拿到空列表，`.first` 会抛
+  /// `Bad state: No element`。
+  Future<void> awaitSessions(WidgetTester tester) async {
+    await tester.pump();
+  }
+
   testWidgets('host switcher lists hosts, shows the online dot and switches', (
     tester,
   ) async {
@@ -192,6 +201,7 @@ void main() {
     // hub 要活到控件树拆完：在用例体内释放会让还在挂载的视图拿着一台已释放的
     // ChangeNotifier，拆卸阶段一碰就报错。
     addTearDown(hub.dispose);
+    await awaitSessions(tester);
     final handle = await hub.openSession(hub.sessionsOf('local').first);
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
@@ -219,6 +229,7 @@ void main() {
   ) async {
     final hub = buildHub();
     addTearDown(hub.dispose);
+    await awaitSessions(tester);
     final handle = await hub.openSession(hub.sessionsOf('local').first);
     var closed = 0;
     await tester.pumpWidget(
@@ -240,6 +251,7 @@ void main() {
   testWidgets('chat tab sends prompts through the handle', (tester) async {
     final hub = buildHub();
     addTearDown(hub.dispose);
+    await awaitSessions(tester);
     final handle =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
@@ -262,6 +274,7 @@ void main() {
   testWidgets('approval options reply with the request id', (tester) async {
     final hub = buildHub();
     addTearDown(hub.dispose);
+    await awaitSessions(tester);
     final handle =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
@@ -316,8 +329,9 @@ void main() {
 
       expect(find.text('STUDIO-PANE'), findsOneWidget);
 
+      // 切主机要等会话列表和供应商列表都落到 hub 上，单帧不够。
       await tester.tap(find.text('本机'));
-      await tester.pump();
+      await _settle(tester);
 
       expect(find.text('STUDIO-PANE'), findsNothing);
       expect(find.text('选择一个会话'), findsOneWidget);
@@ -440,6 +454,7 @@ void main() {
     tester,
   ) async {
     final hub = buildHub();
+    await awaitSessions(tester);
     final handle =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
@@ -475,6 +490,7 @@ void main() {
 
   testWidgets('chat view rebinds when the handle changes', (tester) async {
     final hub = buildHub();
+    await awaitSessions(tester);
     final first =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
