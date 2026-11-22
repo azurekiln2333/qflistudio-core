@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/harness/harness_host.dart';
@@ -378,6 +380,10 @@ Future<List<HarnessSessionInfo>> _waitForCount(
 void testT(String description, Future<void> Function() body) =>
     test(description, () => body().timeout(const Duration(seconds: 15)));
 
+/// 终端输出是 UTF-8 字节，不是码位表。按字节逐个转字符会把 `π` 这类
+/// 多字节字符拆坏，所以统一用 UTF-8 解码。
+String _text(Uint8List data) => utf8.decode(data, allowMalformed: true);
+
 /// 登记主机，用例失败也释放：定时器与推送订阅不会因为断言失败就停下。
 RemoteHarnessHost tracked(RemoteHarnessHost host) {
   addTearDown(host.dispose);
@@ -591,7 +597,7 @@ void main() {
     final first = await host.open('session:t1');
     final live = <String>[];
     final firstSub = first.terminal!.output.listen(
-      (data) => live.add(String.fromCharCodes(data)),
+      (data) => live.add(_text(data)),
     );
     remote.pushEvent(
       't1',
@@ -611,7 +617,7 @@ void main() {
     final second = await host.open('session:t1');
     final replay = <String>[];
     final secondSub = second.terminal!.output.listen(
-      (data) => replay.add(String.fromCharCodes(data)),
+      (data) => replay.add(_text(data)),
     );
     await Future<void>.delayed(const Duration(milliseconds: 10));
     expect(replay.join(), 'PS> ');
@@ -734,7 +740,7 @@ void main() {
 
       final chunks = <String>[];
       final subscription = handle.terminal!.output.listen(
-        (data) => chunks.add(String.fromCharCodes(data)),
+        (data) => chunks.add(_text(data)),
       );
       // Push after subscribing: the terminal is a view, not a buffer.
       herdrPort.paneTexts['w37:p14'] = 'π > ready\n';
