@@ -357,17 +357,21 @@ protocol.CodexThread _thread({
   canResume: true,
 );
 
+/// 有界轮询：条件成立就返回，最多等 1 s。不要在异步副作用上赌固定时长。
+Future<void> _waitUntil(bool Function() done) async {
+  for (var attempt = 0; attempt < 200; attempt++) {
+    if (done()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
 /// Sessions arrive from pushes, so wait for the snapshot instead of depending on
 /// which broadcast event a test happens to observe.
 Future<List<HarnessSessionInfo>> _waitFor(
   RemoteHarnessHost host,
   bool Function(List<HarnessSessionInfo>) predicate,
 ) async {
-  for (var attempt = 0; attempt < 200; attempt++) {
-    final list = host.currentSessions;
-    if (predicate(list)) return list;
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-  }
+  await _waitUntil(() => predicate(host.currentSessions));
   return host.currentSessions;
 }
 
@@ -745,14 +749,12 @@ void main() {
       // Push after subscribing: the terminal is a view, not a buffer.
       herdrPort.paneTexts['w37:p14'] = 'π > ready\n';
       herdrPort.notifyListeners();
-      for (var attempt = 0; attempt < 100; attempt++) {
-        if (chunks.join().contains('π > ready')) break;
-        await Future<void>.delayed(const Duration(milliseconds: 5));
-      }
+      await _waitUntil(() => chunks.join().contains('π > ready'));
       expect(chunks.join(), contains('π > ready'));
 
+      // 输入合批 12 ms 后才发往窗格。等它落地，不要赌 10 ms 的固定等待。
       handle.terminal!.write(Uint8List.fromList(<int>[0x1b, 0x5b, 0x41]));
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await _waitUntil(() => herdrPort.calls.contains('sendKeys:w37:p14:up'));
       expect(herdrPort.calls, contains('sendKeys:w37:p14:up'));
 
       await expectLater(
