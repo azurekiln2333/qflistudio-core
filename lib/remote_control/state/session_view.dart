@@ -43,6 +43,40 @@ class SessionView extends ChangeNotifier {
   Terminal? _terminal;
   void Function(String)? onTerminalInput;
 
+  /// Bumped whenever the stored event list changes. A harness pump reads this
+  /// first: streaming text and status changes notify without touching it.
+  int _revision = 0;
+  int get eventRevision => _revision;
+
+  /// Raw terminal bytes kept so a host that renders its own emulator (the
+  /// harness hub) can show the screen it missed. Bounded, never a full log.
+  static const int _terminalLogLimit = 32 * 1024;
+  final List<String> _terminalLog = <String>[];
+  int _terminalLogChars = 0;
+  final List<_TerminalOutputListener> _terminalOutputListeners =
+      <_TerminalOutputListener>[];
+
+  /// Recent raw output, oldest first, for a listener that attaches late.
+  List<String> get terminalLog => List<String>.unmodifiable(_terminalLog);
+
+  /// Calls [onData] with every raw chunk, live and replayed from backlog.
+  ///
+  /// [onReset] fires when the backlog restarts from scratch, so a second
+  /// emulator clears before the replay instead of stacking two screens.
+  /// [terminal] is still fed, so both kinds of view can coexist.
+  void addTerminalOutputListener(
+    void Function(String data) onData, {
+    void Function()? onReset,
+  }) {
+    _terminalOutputListeners.add(_TerminalOutputListener(onData, onReset));
+  }
+
+  void removeTerminalOutputListener(void Function(String data) onData) {
+    _terminalOutputListeners.removeWhere(
+      (listener) => listener.onData == onData,
+    );
+  }
+
   /// Keep the parsed screen across navigation, never an unbounded raw log.
   Terminal get terminal => _terminal ??= _createTerminal();
 
@@ -101,6 +135,16 @@ class SessionView extends ChangeNotifier {
       _results.clear();
       _resolved.clear();
       _streaming = '';
+      _revision += 1;
+      if (_terminalLog.isNotEmpty) {
+        _terminalLog.clear();
+        _terminalLogChars = 0;
+      }
+      for (final listener in List<_TerminalOutputListener>.of(
+        _terminalOutputListeners,
+      )) {
+        listener.onReset?.call();
+      }
     }
     _replaying = true;
     try {
@@ -129,9 +173,11 @@ class SessionView extends ChangeNotifier {
     _lastSeq = e.seq;
     if (e is TerminalOutputEvent) {
       terminal.write(e.data);
+      _recordTerminalOutput(e.data);
       return true;
     }
     _events.add(e);
+    _revision += 1;
     if (_info.isTerminal && _events.length > 100) _events.removeAt(0);
     switch (e) {
       case ToolResultEvent():
@@ -146,4 +192,26 @@ class SessionView extends ChangeNotifier {
     }
     return true;
   }
+
+  void _recordTerminalOutput(String data) {
+    if (data.isEmpty) return;
+    _terminalLog.add(data);
+    _terminalLogChars += data.length;
+    while (_terminalLogChars > _terminalLogLimit && _terminalLog.length > 1) {
+      _terminalLogChars -= _terminalLog.removeAt(0).length;
+    }
+    for (final listener in List<_TerminalOutputListener>.of(
+      _terminalOutputListeners,
+    )) {
+      listener.onData(data);
+    }
+  }
+}
+
+/// One harness view that renders raw terminal bytes itself.
+class _TerminalOutputListener {
+  const _TerminalOutputListener(this.onData, this.onReset);
+
+  final void Function(String data) onData;
+  final void Function()? onReset;
 }
