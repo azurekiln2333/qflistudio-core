@@ -29,6 +29,10 @@ void main() {
       find.byKey(const ValueKey('github-pat')),
       'ci-only-token',
     );
+    // The connect button is disabled while the field is empty, and enterText
+    // does not pump a frame after it types. Without this pump the tap lands on
+    // the stale disabled button and the token never reaches the controller.
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('github-pat-connect')));
     await tester.pump();
     expect(auth.patReceived, 'ci-only-token');
