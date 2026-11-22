@@ -176,12 +176,19 @@ class _LogSessionHandle implements HarnessSessionHandle {
   }
 
   Future<void> _pump(StreamController<TranscriptEvent> controller) async {
-    final events = await _entry.reader.read(_entry.ref.filePath);
-    for (final event in events) {
-      if (controller.isClosed) return;
-      controller.add(event);
+    try {
+      final events = await _entry.reader.read(_entry.ref.filePath);
+      for (final event in events) {
+        if (controller.isClosed) return;
+        controller.add(event);
+      }
+    } on Object {
+      // 读盘失败不能把流憋死：订阅方 `await transcript.toList()` 等的是
+      // done，控制器不关就永远不会返回。错误本身不给界面看（日志内容不进
+      // 诊断），调用方看到的是“这个历史会话没有事件”。
+    } finally {
+      if (!controller.isClosed) await controller.close();
     }
-    if (!controller.isClosed) await controller.close();
   }
 
   @override
