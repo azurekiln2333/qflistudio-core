@@ -104,10 +104,11 @@ class GitHubAuthController extends ChangeNotifier {
     final generation = _beginIntent();
     _setBusy(true, status: GitHubAuthStatus.loading);
     try {
-      final token = await GitHubCredentialOperations.serializedForIntent(
-        generation,
-        _credentialStore.readAccessToken,
-      );
+      // A restore read must not hold the mutation queue. `disconnect()` awaits
+      // that queue, so a stalled vault read would block sign-out and every
+      // later credential operation in the process. The generation fence below
+      // already discards a stale result, so the read needs no serialization.
+      final token = await _credentialStore.readAccessToken();
       if (!_isCurrent(generation)) return;
       if (token == null || token.isEmpty) {
         _clearIdentity(keepStatus: true);
