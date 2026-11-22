@@ -156,7 +156,9 @@ void main() {
     await pumpEventQueue();
 
     expect(hub.hosts.map((host) => host.id), ['studio', 'remote-pc']);
-    expect(hub.currentHostId, 'remote-pc');
+    // 默认选中内置 Agent，手机端也不例外：本机与 Herdr 被平台表过滤掉，
+    // 但可见的第一台主机仍是内置 Agent（见 _pickInitialHost）。
+    expect(hub.currentHostId, 'studio');
     hub.dispose();
   });
 
