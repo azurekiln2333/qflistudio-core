@@ -189,6 +189,9 @@ void main() {
 
   testWidgets('stopping a session asks for confirmation first', (tester) async {
     final hub = buildHub();
+    // hub 要活到控件树拆完：在用例体内释放会让还在挂载的视图拿着一台已释放的
+    // ChangeNotifier，拆卸阶段一碰就报错。
+    addTearDown(hub.dispose);
     final handle = await hub.openSession(hub.sessionsOf('local').first);
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
@@ -209,13 +212,13 @@ void main() {
     await _settle(tester);
 
     expect(handle.stopCount, 1);
-    hub.dispose();
   });
 
   testWidgets('closing the view detaches and keeps the session running', (
     tester,
   ) async {
     final hub = buildHub();
+    addTearDown(hub.dispose);
     final handle = await hub.openSession(hub.sessionsOf('local').first);
     var closed = 0;
     await tester.pumpWidget(
@@ -232,11 +235,11 @@ void main() {
     expect((handle as FakeSessionHandle).detachCount, 1);
     expect(handle.stopCount, 0);
     expect(hub.activeSession, isNull);
-    hub.dispose();
   });
 
   testWidgets('chat tab sends prompts through the handle', (tester) async {
     final hub = buildHub();
+    addTearDown(hub.dispose);
     final handle =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
@@ -254,11 +257,11 @@ void main() {
     await _settle(tester);
 
     expect(handle.prompts, ['跑一下测试']);
-    hub.dispose();
   });
 
   testWidgets('approval options reply with the request id', (tester) async {
     final hub = buildHub();
+    addTearDown(hub.dispose);
     final handle =
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
@@ -283,7 +286,6 @@ void main() {
 
     expect(handle.replies.single.requestId, 'req-1');
     expect(handle.replies.single.choice, '允许');
-    hub.dispose();
   });
 
   testWidgets(
@@ -299,6 +301,8 @@ void main() {
         desktop: true,
         initialHostId: 'studio',
       );
+      addTearDown(hub.dispose);
+      addTearDown(studio.dispose);
       await tester.pumpWidget(
         _wrap(
           HubAgentsSurface(
@@ -323,9 +327,6 @@ void main() {
 
       expect(find.text('Claude 会话'), findsOneWidget);
       expect(find.byKey(const ValueKey('hub-tab-0')), findsOneWidget);
-
-      hub.dispose();
-      await studio.dispose();
     },
   );
 
