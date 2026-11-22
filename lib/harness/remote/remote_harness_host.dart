@@ -109,18 +109,21 @@ class RemoteHarnessHost implements HarnessHost {
     return Stream.multi((controller) {
       _watchCount += 1;
       _startCodexTimer();
-      controller.add(_latest);
       final subscription = _sessions.stream.listen(
         controller.add,
         onError: controller.addError,
         onDone: controller.close,
       );
+      // 先挂上取消回调，再发第一帧：有人在第一帧就取消（`.first` 或
+      // 建好就拆的界面）时，计数也要减回去。计数不归零，20 s 的定时器
+      // 就会一直跑，测试进程也跟着不退出。
       controller.onCancel = () {
         subscription.cancel();
-        _watchCount -= 1;
+        if (_watchCount > 0) _watchCount -= 1;
         // No listener, no polling: the catalog is only for the visible list.
         if (_watchCount <= 0) _stopCodexTimer();
       };
+      controller.add(_latest);
     });
   }
 
