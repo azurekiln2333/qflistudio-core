@@ -1076,6 +1076,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _scheduleHistorySave() {
+    // 销毁之后再挂定时器就是泄漏：重建树、晚到的 openPath 回调、`_editor.dispose()`
+    // 里的通知都可能在这之后才走到这里。测试里表现为“widget tree 销毁后仍有定时器”。
+    if (!mounted) return;
     _historyTimer?.cancel();
     _historyTimer = Timer(const Duration(milliseconds: 1500), () {
       unawaited(_saveHistory());
@@ -1088,6 +1091,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     // the deleted directory; the user exports it explicitly instead.
     if (_isOrphaned(open)) return;
     if (!widget.settings.autoSave && !widget.project.isCloud) return;
+    if (!mounted) return;
     _activityTimers.remove(open.path)?.cancel();
     final editGeneration = (_autoEditGeneration[open.path] ?? 0) + 1;
     _autoEditGeneration[open.path] = editGeneration;
