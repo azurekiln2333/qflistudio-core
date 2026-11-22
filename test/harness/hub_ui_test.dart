@@ -2,6 +2,11 @@
 // 确认、关闭视图只 detach、手机端按键栏。
 //
 // 本地不执行测试（brief 规定），这些用例交给云端 CI。
+//
+// 全文件不用 `pumpAndSettle()`：界面里有不确定进度的转圈（会话状态
+// 「运行中」、会话打开中、输入卡片发送中），它们一直请求下一帧，
+// `pumpAndSettle()` 永远等不到静止，只能耗满 10 分钟超时才报错。统一用
+// [_settle] 推进固定帧数，足够走完对话框这类有限动画。
 
 import 'dart:async';
 
@@ -25,6 +30,16 @@ Widget _wrap(Widget child) => MaterialApp(
   theme: ThemeData(useMaterial3: true),
   home: Scaffold(body: child),
 );
+
+/// 推进固定帧数，代替会一直转圈的 `pumpAndSettle()`。
+///
+/// 600 毫秒足以走完对话框、指示器切换这类有限动画；再多的等待要靠
+/// `expect` 断言界面状态，而不是等动画静止。
+Future<void> _settle(WidgetTester tester) async {
+  for (var frame = 0; frame < 10; frame++) {
+    await tester.pump(const Duration(milliseconds: 60));
+  }
+}
 
 void main() {
   late FakeHarnessHost local;
@@ -178,20 +193,20 @@ void main() {
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     await tester.tap(find.byKey(const ValueKey('hub-session-stop')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(find.byKey(const ValueKey('hub-stop-dialog')), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('hub-stop-cancel')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect((handle as FakeSessionHandle).stopCount, 0);
 
     await tester.tap(find.byKey(const ValueKey('hub-session-stop')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     await tester.tap(find.byKey(const ValueKey('hub-stop-confirm')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     expect(handle.stopCount, 1);
     hub.dispose();
@@ -208,10 +223,10 @@ void main() {
         HubSessionView(hub: hub, session: handle.info, onClose: () => closed++),
       ),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     await tester.tap(find.byKey(const ValueKey('hub-session-close')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     expect(closed, 1);
     expect((handle as FakeSessionHandle).detachCount, 1);
@@ -228,7 +243,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     await tester.enterText(
       find.byKey(const ValueKey('hub-composer-input')),
@@ -236,7 +251,7 @@ void main() {
     );
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('hub-composer-send')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     expect(handle.prompts, ['跑一下测试']);
     hub.dispose();
@@ -250,7 +265,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     handle.addEvent(
       const TranscriptEvent(
@@ -261,10 +276,10 @@ void main() {
         options: ['允许', '拒绝'],
       ),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     await tester.tap(find.text('允许'));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     expect(handle.replies.single.requestId, 'req-1');
     expect(handle.replies.single.choice, '允许');
@@ -304,7 +319,7 @@ void main() {
       expect(find.text('选择一个会话'), findsOneWidget);
 
       await tester.tap(find.byKey(const ValueKey('hub-session-local-l1')));
-      await tester.pumpAndSettle();
+      await _settle(tester);
 
       expect(find.text('Claude 会话'), findsOneWidget);
       expect(find.byKey(const ValueKey('hub-tab-0')), findsOneWidget);
@@ -368,7 +383,7 @@ void main() {
     expect(find.byKey(const ValueKey('hub-remote-connecting')), findsOneWidget);
 
     gate.complete(paired);
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     // 连上之后主机入列、切过去，占位芯片让位给真正的主机芯片。
     expect(hub.currentHostId, 'remote-pc2');
@@ -408,7 +423,7 @@ void main() {
     await tester.pump();
 
     await tester.tap(find.byKey(const ValueKey('hub-host-pending-remote')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     // 没配对：主机数不变，入口还在，再点时带去配对而不是又空转一次。
     expect(hub.hosts, hasLength(1));
@@ -432,7 +447,7 @@ void main() {
     await tester.pumpWidget(
       _wrap(HubSessionView(hub: hub, session: handle.info)),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     await tester.enterText(
       find.byKey(const ValueKey('hub-composer-input')),
@@ -444,16 +459,16 @@ void main() {
 
     // 点停止：先弹确认，会话还没结束。
     await tester.tap(find.byKey(const ValueKey('hub-composer-stop')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(find.byKey(const ValueKey('hub-stop-dialog')), findsOneWidget);
     expect(handle.stopCount, 0);
 
     await tester.tap(find.byKey(const ValueKey('hub-stop-cancel')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(handle.stopCount, 0);
 
     handle.sendGate!.complete();
-    await tester.pumpAndSettle();
+    await _settle(tester);
     hub.dispose();
   });
 
@@ -463,7 +478,7 @@ void main() {
         await hub.openSession(hub.sessionsOf('local').first)
             as FakeSessionHandle;
     await tester.pumpWidget(_wrap(HubChatView(handle: first)));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     first.addEvent(
       const TranscriptEvent(
@@ -472,7 +487,7 @@ void main() {
         text: '第一个会话的话',
       ),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(find.text('第一个会话的话'), findsOneWidget);
 
     // 同一个 State 换句柄：旧会话的事件不能留着。
@@ -480,7 +495,7 @@ void main() {
       info: fakeSession(hostId: 'local', id: 'l9', title: '第二个会话'),
     );
     await tester.pumpWidget(_wrap(HubChatView(handle: second)));
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(find.text('第一个会话的话'), findsNothing);
 
     second.addEvent(
@@ -490,7 +505,7 @@ void main() {
         text: '第二个会话的话',
       ),
     );
-    await tester.pumpAndSettle();
+    await _settle(tester);
     expect(find.text('第二个会话的话'), findsOneWidget);
     hub.dispose();
   });
@@ -546,7 +561,7 @@ void main() {
       expect(terminal.buffer.getText(), isNot(contains('\uFFFD')));
 
       await channel.close();
-      await tester.pumpAndSettle();
+      await _settle(tester);
     },
   );
 
@@ -625,7 +640,7 @@ void main() {
     );
 
     await tester.tap(find.byKey(const ValueKey('hub-key-paste')));
-    await tester.pumpAndSettle();
+    await _settle(tester);
 
     expect(pasted, ['ls -la']);
   });
