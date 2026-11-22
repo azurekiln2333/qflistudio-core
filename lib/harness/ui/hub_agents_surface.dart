@@ -4,6 +4,8 @@
 // 没有可用主机时原样显示，外部主机的会话则在这里换成 [HubSessionView]。
 // 不新开页面，也不另起一套应用外壳。
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../harness_host.dart';
@@ -13,13 +15,14 @@ import 'hub_session_list.dart';
 import 'hub_session_view.dart';
 
 /// Agents 面板上方的 hub 容器。
-class HubAgentsSurface extends StatelessWidget {
+class HubAgentsSurface extends StatefulWidget {
   const HubAgentsSurface({
     super.key,
     required this.hub,
     required this.studioPane,
     required this.projectRoot,
     this.onAddComputer,
+    this.openRemoteHost,
     this.compact = false,
   });
 
@@ -34,11 +37,46 @@ class HubAgentsSurface extends StatelessWidget {
   /// 打开设备与远程（配对）。为空时不显示添加入口。
   final VoidCallback? onAddComputer;
 
+  /// 已绑定电脑的主机要先异步打开存储，所以由调用方注入。
+  ///
+  /// 为空时不自动装配（测试与预览保持纯内存），装配好的主机交给 hub，
+  /// 随页面销毁一起释放。
+  final Future<HarnessHost?> Function()? openRemoteHost;
+
   /// 手机端：会话视图带返回键和终端按键栏。
   final bool compact;
 
   @override
+  State<HubAgentsSurface> createState() => _HubAgentsSurfaceState();
+}
+
+class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
+  @override
+  void initState() {
+    super.initState();
+    final opener = widget.openRemoteHost;
+    if (opener != null) unawaited(_attachRemoteHost(opener));
+  }
+
+  Future<void> _attachRemoteHost(Future<HarnessHost?> Function() opener) async {
+    HarnessHost? host;
+    try {
+      host = await opener();
+    } on Object {
+      // 打不开远程存储只影响已绑定电脑那一栏，不拦内置 Agent 和本机。
+      return;
+    }
+    if (host == null) return;
+    if (!mounted) {
+      await host.dispose();
+      return;
+    }
+    widget.hub.addHost(host);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final hub = widget.hub;
     return AnimatedBuilder(
       animation: hub,
       builder: (context, _) {
@@ -55,9 +93,9 @@ class HubAgentsSurface extends StatelessWidget {
               _HostHeader(
                 hub: hub,
                 host: host,
-                onAddComputer: onAddComputer,
-                compact: compact,
-                projectRoot: projectRoot,
+                onAddComputer: widget.onAddComputer,
+                compact: widget.compact,
+                projectRoot: widget.projectRoot,
               ),
             if (host == null && hub.hostBuildError != null)
               _HostBuildFailure(error: hub.hostBuildError!),
@@ -67,14 +105,14 @@ class HubAgentsSurface extends StatelessWidget {
                       key: ValueKey('hub-view-${active.hostId}-${active.id}'),
                       hub: hub,
                       session: active,
-                      compact: compact,
+                      compact: widget.compact,
                     )
                   : host == null || host.kind == HarnessHostKind.studio
-                  ? studioPane
+                  ? widget.studioPane
                   : _HostEmptyState(
                       hub: hub,
                       host: host,
-                      projectRoot: projectRoot,
+                      projectRoot: widget.projectRoot,
                     ),
             ),
           ],

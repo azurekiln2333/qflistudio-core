@@ -4,6 +4,7 @@
 // 编辑器页按平台策略组出来，测试和预览用假主机，见 harness_hosts.dart。
 
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 
@@ -133,18 +134,10 @@ class HarnessHub extends ChangeNotifier {
     bool ownsHosts = true,
     this.hostBuildError,
   }) : _desktop = desktop,
-       _ownsHosts = ownsHosts,
-       _hosts = List<HarnessHost>.unmodifiable(
-         hosts.where(
-           (host) => hostVisibleOnPlatform(host.kind, desktop: desktop),
-         ),
-       ) {
-    for (final host in _hosts) {
-      _states[host.id] = host.state.value;
-      void onState() => _onHostState(host);
-      _stateListeners[host.id] = onState;
-      host.state.addListener(onState);
-      _listen(host);
+       _ownsHosts = ownsHosts {
+    for (final host in hosts) {
+      if (!hostVisibleOnPlatform(host.kind, desktop: desktop)) continue;
+      _attachHost(host);
     }
     _currentHostId = _pickInitialHost(initialHostId);
   }
@@ -172,7 +165,12 @@ class HarnessHub extends ChangeNotifier {
   /// 装配主机时的异常；没有异常或没有注册工厂时为 null。
   final Object? hostBuildError;
 
-  final List<HarnessHost> _hosts;
+  final List<HarnessHost> _hosts = <HarnessHost>[];
+
+  /// 只读视图：列表会随 [addHost] 增长，所以视图要跟着底层列表走。
+  late final List<HarnessHost> _hostsView = UnmodifiableListView<HarnessHost>(
+    _hosts,
+  );
   final Map<String, HarnessHostState> _states = <String, HarnessHostState>{};
   final Map<String, VoidCallback> _stateListeners = <String, VoidCallback>{};
   final Map<String, List<HarnessSessionInfo>> _sessions =
@@ -193,7 +191,7 @@ class HarnessHub extends ChangeNotifier {
   bool get isDesktop => _desktop;
 
   /// 已按平台过滤的主机，顺序即界面顺序。
-  List<HarnessHost> get hosts => _hosts;
+  List<HarnessHost> get hosts => _hostsView;
 
   HarnessHost? hostById(String id) {
     for (final host in _hosts) {
@@ -461,6 +459,36 @@ class HarnessHub extends ChangeNotifier {
     if (_states[host.id] == state) return;
     _states[host.id] = state;
     notifyListeners();
+  }
+
+  /// 运行时追加一台主机。
+  ///
+  /// 已绑定电脑要先异步打开存储才能装配，而 hub 的构造是同步的，所以远程主机
+  /// 走这条路径。平台策略与构造时一致；重复 id 或该平台不可见的主机会被直接
+  /// 释放，不留给界面一个点了会失败的空壳。
+  void addHost(HarnessHost host) {
+    if (_disposed) {
+      unawaited(host.dispose());
+      return;
+    }
+    if (!hostVisibleOnPlatform(host.kind, desktop: _desktop) ||
+        hostById(host.id) != null) {
+      unawaited(host.dispose());
+      return;
+    }
+    _attachHost(host);
+    _currentHostId ??= _pickInitialHost(null);
+    notifyListeners();
+  }
+
+  /// 把一台主机接上监听；构造与 [addHost] 共用。
+  void _attachHost(HarnessHost host) {
+    _hosts.add(host);
+    _states[host.id] = host.state.value;
+    void onState() => _onHostState(host);
+    _stateListeners[host.id] = onState;
+    host.state.addListener(onState);
+    _listen(host);
   }
 
   String? _pickInitialHost(String? initialHostId) {

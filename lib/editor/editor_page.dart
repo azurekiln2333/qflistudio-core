@@ -81,6 +81,7 @@ import 'agent/session_list_view.dart';
 import '../harness/harness_host.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/hub/harness_hosts.dart';
+import '../harness/hub/default_harness_hosts.dart';
 import '../harness/ui/hub_agents_surface.dart';
 import '../harness/ui/hub_session_list.dart';
 import '../pages/devices_remote_page.dart';
@@ -456,6 +457,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         store: widget.store,
         settings: widget.settings,
         projectRoot: widget.project.path,
+        runtime: widget.agentRuntime,
+        projectId: widget.project.id,
+        signedIn: () => widget.auth.isLoggedIn,
       );
       // 注入的运行时已就绪：现在就订阅它的文件变更事件。
       _syncAgentFileEvents();
@@ -1998,6 +2002,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               hub: hub,
               studioPane: studioPane,
               projectRoot: widget.project.path,
+              openRemoteHost: openRemoteHarnessHost,
               compact:
                   layoutOf(MediaQuery.sizeOf(context).width) ==
                   WorkbenchLayout.narrow,

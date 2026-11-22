@@ -13,17 +13,23 @@ import 'package:flutter/foundation.dart';
 
 import '../harness_host.dart';
 import '../../services/app_paths.dart';
+import '../../vibe_coding/vibe_agent_facade.dart';
 import 'harness_hub.dart';
 
 /// 装配主机时能从编辑器页拿到的依赖。
 ///
-/// 只放各家主机真正需要的东西：登录态、项目仓库、设置、当前项目根。
+/// 只放各家主机真正需要的东西：登录态、项目仓库、设置、当前项目根，以及
+/// 内置 Agent 主机的运行时与项目标识（`null` 表示这一页不开内置 Agent）。
 class HubHostContext {
   const HubHostContext({
     required this.auth,
     required this.projectStore,
     required this.settings,
     required this.projectRoot,
+    this.runtime,
+    this.projectId,
+    this.signedIn,
+    this.desktop = true,
   });
 
   final Object auth;
@@ -32,6 +38,18 @@ class HubHostContext {
 
   /// 当前打开项目的绝对路径，可作为新会话的默认工作目录。
   final String projectRoot;
+
+  /// 内置 Agent 的运行时；未启用 Agent 时为 null。
+  final AgentRuntime? runtime;
+
+  /// 内置 Agent 会话所属的项目 id。
+  final String? projectId;
+
+  /// 登录态探针，交给内置 Agent 主机。
+  final bool Function()? signedIn;
+
+  /// 是否按桌面端装配（默认是）。手机端不装本机 PTY 与 Herdr 主机。
+  final bool desktop;
 }
 
 /// 返回主机列表的工厂。返回顺序就是界面上的顺序。
@@ -103,19 +121,27 @@ HarnessHub harnessHubFor({
   required Object store,
   required Object settings,
   required String projectRoot,
+  AgentRuntime? runtime,
+  String? projectId,
+  bool Function()? signedIn,
   bool? desktop,
 }) {
+  final isDesktop = desktop ?? AppPaths.isDesktop;
   final hosts = HarnessHosts.build(
     HubHostContext(
       auth: auth,
       projectStore: store,
       settings: settings,
       projectRoot: projectRoot,
+      runtime: runtime,
+      projectId: projectId,
+      signedIn: signedIn,
+      desktop: isDesktop,
     ),
   );
   return HarnessHub(
     hosts: hosts,
-    desktop: desktop ?? AppPaths.isDesktop,
+    desktop: isDesktop,
     hostBuildError: HarnessHosts.lastBuildError,
   );
 }
