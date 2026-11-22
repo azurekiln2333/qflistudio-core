@@ -1,5 +1,6 @@
-/// 技能目录与现有代理生态兼容：用户目录 `~/.qfli/skills`、项目内 `.qfli/skills`、
-/// `.claude/skills`、`.agents/skills`，外加随包发布的内置技能。提示词里只放名称与描述。
+/// 技能目录与现有代理生态兼容：用户目录 `~/.qfli/skills`、`~/.claude/skills`、
+/// `~/.agents/skills`、`~/.pi/skills`、`~/.codex/skills`，项目内的同名目录，
+/// 外加随包发布的内置技能。提示词里只放名称与描述。
 ///
 /// 来源优先级（低 → 高）：内置 < 用户级 < 项目级。同名技能后者覆盖前者；
 /// 同一来源内部则先出现者胜出。
@@ -11,7 +12,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
-/// 一个已发现的技能。[body] 在加载时读入，[use_skill] 直接返回。
+/// 一个已发现的技能。[body] 可以直接持有正文，也可以留空并在 [resolveBody]
+/// 时按 [bodyPath] 读盘。发现阶段只读 frontmatter，正文按需加载。
 class VibeSkill {
   const VibeSkill({
     required this.name,
@@ -19,19 +21,47 @@ class VibeSkill {
     required this.body,
     required this.source,
     this.truncated = false,
+    this.bodyPath,
   });
 
   final String name;
   final String description;
 
   /// 去掉 frontmatter 的正文；超长时保留开头并标注截断。
+  ///
+  /// 懒加载得到的技能这里为空串，正文由 [resolveBody] 读取。
   final String body;
 
   /// 来源标签：[VibeSkillSource] 的 `label`。
   final String source;
   final bool truncated;
 
+  /// `SKILL.md` 的绝对路径；只有懒加载的技能才有值。
+  final String? bodyPath;
+
   bool get isBuiltIn => source == VibeSkillSource.builtIn.label;
+
+  /// 正文是否已随技能一起读入。
+  bool get hasInlineBody => body.isNotEmpty;
+
+  /// 去掉正文，保留元数据；正文改成按需读取。
+  VibeSkill withoutBody(String path) => VibeSkill(
+    name: name,
+    description: description,
+    body: '',
+    source: source,
+    bodyPath: path,
+  );
+
+  /// 取正文：已读入的直接返回，否则按需读盘。
+  ///
+  /// 读不到时返回空串，调用方据此报告技能不可用，不编造内容。
+  Future<String> resolveBody() async {
+    if (body.isNotEmpty) return body;
+    final path = bodyPath;
+    if (path == null) return '';
+    return readVibeSkillBody(path);
+  }
 }
 
 /// 技能来源，决定去重顺序与是否受项目语言过滤。
@@ -40,6 +70,8 @@ enum VibeSkillSource {
   projectQfli('.qfli/skills'),
   claude('.claude/skills'),
   agents('.agents/skills'),
+  pi('.pi/skills'),
+  codex('.codex/skills'),
   builtIn('内置技能');
 
   const VibeSkillSource(this.label);
@@ -67,10 +99,12 @@ const Map<String, Set<String>> kVibeBuiltInSkillLanguages = {
 /// 从 `SKILL.md` 文本解析技能；缺少描述返回 null。
 ///
 /// frontmatter 是文件开头的 `---` 块，只读取 `name` 与 `description`。
+/// 传 [bodyPath] 时，技能保留文件位置，后续可用 [VibeSkill.resolveBody] 重读。
 VibeSkill? parseVibeSkill(
   String text, {
   required String fallbackName,
   required VibeSkillSource source,
+  String? bodyPath,
 }) {
   final normalized = text.replaceAll('\r\n', '\n');
   String? name;
@@ -120,7 +154,7 @@ VibeSkill? parseVibeSkill(
       flush();
       name = block['name'];
       description = block['description'];
-      body = lines.sublist(end + 1).join('\n');
+      body = _bodyOf(normalized);
     }
   }
   final resolvedName = (name == null || name.trim().isEmpty)
@@ -138,7 +172,51 @@ VibeSkill? parseVibeSkill(
         : trimmedBody,
     source: source.label,
     truncated: truncated,
+    bodyPath: bodyPath,
   );
+}
+
+/// 去掉开头的 frontmatter 块，返回正文；没有 frontmatter 时返回原文。
+String _bodyOf(String normalized) {
+  final lines = normalized.split('\n');
+  if (lines.isEmpty || lines.first.trim() != '---') return normalized;
+  for (var index = 1; index < lines.length; index++) {
+    if (lines[index].trim() == '---') {
+      return lines.sublist(index + 1).join('\n');
+    }
+  }
+  return normalized;
+}
+
+/// 读一份技能的正文；文件不存在或不可读时返回空串。
+///
+/// 只读开头一段，正文超过 [kVibeSkillMaxBodyChars] 时保留开头并标注截断。
+Future<String> readVibeSkillBody(String path) async {
+  if (FileSystemEntity.typeSync(path, followLinks: false) !=
+      FileSystemEntityType.file) {
+    return '';
+  }
+  final String text;
+  try {
+    text = await _readHead(File(path));
+  } on FileSystemException {
+    return '';
+  }
+  final body = _bodyOf(text.replaceAll('\r\n', '\n')).trim();
+  if (body.length <= kVibeSkillMaxBodyChars) return body;
+  return '${body.substring(0, kVibeSkillMaxBodyChars)}\n\n（技能正文已截断）';
+}
+
+/// 只读技能文件的开头。
+///
+/// UTF-8 一个字符最多 4 字节，按 4 倍上限读才能保证按字符截断时不丢内容。
+Future<String> _readHead(File file) async {
+  const limit = kVibeSkillMaxBodyChars * 4 + 1024;
+  if (await file.length() <= limit) return file.readAsString();
+  final bytes = await file
+      .openRead(0, limit)
+      .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
+  return utf8.decode(bytes, allowMalformed: true);
 }
 
 String _unquote(String value) {
@@ -163,9 +241,12 @@ class VibeSkillLibrary {
     this.maxEntries = kVibeMaxSkillEntries,
     this.maxIndexChars = kVibeMaxSkillIndexChars,
     String? userSkillsDir,
+    List<String>? userSkillsDirs,
     this.includeUserSkills = true,
+    this.lazyBodies = false,
   }) : _bundle = bundle ?? rootBundle,
-       _userSkillsDir = userSkillsDir;
+       _userSkillsDir = userSkillsDir,
+       _userSkillsDirs = userSkillsDirs;
 
   final String projectRoot;
   final String language;
@@ -173,8 +254,16 @@ class VibeSkillLibrary {
   final int maxEntries;
   final int maxIndexChars;
 
-  /// 显式指定的用户级技能目录；为 null 时按 [defaultUserSkillsDir] 推算。
+  /// 只读 frontmatter，正文留给 [VibeSkill.resolveBody]。
+  ///
+  /// 列表、索引这类只要名称与描述的路径传 true，避免为每个技能读全文。
+  final bool lazyBodies;
+
+  /// 显式指定的用户级技能目录；为 null 时按 [defaultUserSkillsDirs] 推算。
   final String? _userSkillsDir;
+
+  /// 显式指定的多个用户级技能目录；优先于 [_userSkillsDir]。
+  final List<String>? _userSkillsDirs;
 
   /// 是否读用户级目录；嵌入式或测试可关掉。
   final bool includeUserSkills;
@@ -183,10 +272,45 @@ class VibeSkillLibrary {
   ///
   /// 没有 HOME（部分移动端）时返回 null，不报错也不猜路径。
   static String? defaultUserSkillsDir() {
+    final home = _homeDir();
+    if (home == null) return null;
+    return p.join(home, '.qfli', 'skills');
+  }
+
+  /// 用户级技能目录，按优先级排列。
+  ///
+  /// 同一个技能名多份定义时先用 `~/.qfli/skills`，依次到 `~/.codex/skills`。
+  static List<String> defaultUserSkillsDirs() {
+    final home = _homeDir();
+    if (home == null) return const [];
+    return [
+      for (final dir in userSkillDirNames) p.joinAll([home, ...dir.split('/')]),
+    ];
+  }
+
+  /// 用户级技能子目录，顺序即优先级。
+  static const List<String> userSkillDirNames = [
+    '.qfli/skills',
+    '.claude/skills',
+    '.agents/skills',
+    '.pi/skills',
+    '.codex/skills',
+  ];
+
+  /// 项目内技能子目录，顺序即优先级。
+  static const List<String> projectSkillDirNames = [
+    '.qfli/skills',
+    '.claude/skills',
+    '.agents/skills',
+    '.pi/skills',
+    '.codex/skills',
+  ];
+
+  static String? _homeDir() {
     final home =
         Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
     if (home == null || home.trim().isEmpty) return null;
-    return p.join(home.trim(), '.qfli', 'skills');
+    return home.trim();
   }
 
   static const List<String> builtInAssetDirs = [
@@ -241,22 +365,30 @@ class VibeSkillLibrary {
 
   List<String> _userDirs() {
     if (!includeUserSkills) return const [];
-    final dir = _userSkillsDir ?? defaultUserSkillsDir();
-    return dir == null ? const [] : [dir];
+    final explicit = _userSkillsDirs;
+    if (explicit != null) return explicit;
+    final single = _userSkillsDir;
+    if (single != null) return [single];
+    return defaultUserSkillsDirs();
   }
 
   List<String> _projectDirs() => [
-    p.join(projectRoot, '.qfli', 'skills'),
-    p.join(projectRoot, '.claude', 'skills'),
-    p.join(projectRoot, '.agents', 'skills'),
+    for (final dir in projectSkillDirNames)
+      p.joinAll([projectRoot, ...dir.split('/')]),
   ];
 
   VibeSkillSource? _sourceFor(String dir) {
-    final normalized = dir.replaceAll('\\', '/');
-    if (normalized.contains('/.qfli/')) return VibeSkillSource.projectQfli;
-    if (normalized.contains('/.claude/')) return VibeSkillSource.claude;
-    if (normalized.contains('/.agents/')) return VibeSkillSource.agents;
-    return null;
+    // 只认最后两段，避免项目路径里恰好出现同名目录时误判。
+    final parts = p.split(p.normalize(dir));
+    if (parts.length < 2 || parts.last != 'skills') return null;
+    return switch (parts[parts.length - 2]) {
+      '.qfli' => VibeSkillSource.projectQfli,
+      '.claude' => VibeSkillSource.claude,
+      '.agents' => VibeSkillSource.agents,
+      '.pi' => VibeSkillSource.pi,
+      '.codex' => VibeSkillSource.codex,
+      _ => null,
+    };
   }
 
   bool _languageAccepts(String name) {
@@ -273,7 +405,14 @@ class VibeSkillLibrary {
     final type = FileSystemEntity.typeSync(dir, followLinks: false);
     if (type != FileSystemEntityType.directory) return const [];
     final skills = <VibeSkill>[];
-    final entries = await Directory(dir).list(followLinks: false).toList();
+    final List<FileSystemEntity> entries;
+    try {
+      entries = await Directory(dir).list(followLinks: false).toList();
+    } on FileSystemException {
+      // 目录存在但列不出来（权限、占用、路径过长）时只跳过这一份，
+      // 不让整次技能加载失败。
+      return const [];
+    }
     entries.sort((a, b) => a.path.compareTo(b.path));
     for (final entry in entries) {
       if (entry is! Directory) continue;
@@ -286,8 +425,10 @@ class VibeSkillLibrary {
           text,
           fallbackName: p.basename(entry.path),
           source: source,
+          bodyPath: file.path,
         );
-        if (skill != null) skills.add(skill);
+        if (skill == null) continue;
+        skills.add(lazyBodies ? skill.withoutBody(file.path) : skill);
       } on FileSystemException {
         // 不可读的技能目录跳过，不影响其余技能。
       }
@@ -295,16 +436,21 @@ class VibeSkillLibrary {
     return skills;
   }
 
-  /// 读技能文件；正文上限的两倍足以覆盖 frontmatter。
+  /// 读技能文件；按 UTF-8 最坏情况预留 4 倍字节，避免多字节正文被静默截断。
   Future<String> _readCapped(File file) async {
-    final length = await file.length();
-    final limit = kVibeSkillMaxBodyChars * 2 + 1024;
-    if (length <= limit) return file.readAsString();
+    const limit = kVibeSkillMaxBodyChars * 4 + 1024;
+    if (!lazyBodies) {
+      final length = await file.length();
+      if (length <= limit) return file.readAsString();
+    }
     final bytes = await file
-        .openRead(0, limit)
+        .openRead(0, lazyBodies ? _metadataHeadBytes : limit)
         .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
     return utf8.decode(bytes, allowMalformed: true);
   }
+
+  /// 只读 frontmatter 时读多少字节。
+  static const int _metadataHeadBytes = 16 * 1024;
 
   Future<List<VibeSkill>> _builtIns() async {
     final cached = _builtInCache;

@@ -142,6 +142,7 @@ void main() {
         projectRoot: root.path,
         language: 'python',
         bundle: assets,
+        includeUserSkills: false,
       );
 
       final skills = await library.load();
@@ -175,6 +176,7 @@ void main() {
       final library = VibeSkillLibrary(
         projectRoot: root.path,
         bundle: _FakeAssets({}),
+        includeUserSkills: false,
       );
       final skills = await library.load();
       expect(skills.map((s) => s.name), ['real']);
@@ -188,6 +190,7 @@ void main() {
       final library = VibeSkillLibrary(
         projectRoot: root.path,
         bundle: _FakeAssets({}),
+        includeUserSkills: false,
       );
       final skills = await library.load();
       expect(skills.map((s) => s.name), ['local']);

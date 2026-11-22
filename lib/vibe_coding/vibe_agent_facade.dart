@@ -1167,6 +1167,8 @@ class VibeAgentRuntime implements AgentRuntime {
     String Function()? configuredModel,
     AgentRequestScheduler? scheduler,
     Directory? cacheDir,
+    VibeSkillLibrary Function(String projectRoot, String language)?
+    skillLibraryFactory,
     this.maxIdleFacades = 8,
     this.pageSize = 60,
   }) : _api = api,
@@ -1180,7 +1182,8 @@ class VibeAgentRuntime implements AgentRuntime {
        _interopRunnerOf = interopRunnerOf,
        _configuredModel = configuredModel,
        _scheduler = scheduler ?? AgentRequestScheduler(),
-       _cacheDir = cacheDir {
+       _cacheDir = cacheDir,
+       _skillLibraryFactory = skillLibraryFactory {
     _sessions.addListener(_onSessionsChanged);
   }
 
@@ -1204,6 +1207,10 @@ class VibeAgentRuntime implements AgentRuntime {
   final String Function()? _configuredModel;
   final AgentRequestScheduler _scheduler;
   final Directory? _cacheDir;
+
+  /// 技能库工厂；测试可注入不扫用户目录的实例，避免结果依赖开发机。
+  final VibeSkillLibrary Function(String projectRoot, String language)?
+  _skillLibraryFactory;
 
   final Map<String, VibeAgentFacade> _facades = {};
 
@@ -1338,10 +1345,16 @@ class VibeAgentRuntime implements AgentRuntime {
 
   @override
   Future<List<AgentSkillRef>> skills(String projectId) async {
-    final library = VibeSkillLibrary(
-      projectRoot: _projectRootOf(projectId),
-      language: _languageOf?.call(projectId) ?? '',
-    );
+    final projectRoot = _projectRootOf(projectId);
+    final language = _languageOf?.call(projectId) ?? '';
+    final library =
+        _skillLibraryFactory?.call(projectRoot, language) ??
+        VibeSkillLibrary(
+          projectRoot: projectRoot,
+          language: language,
+          // 列表只要名称与描述，正文留给 use_skill。
+          lazyBodies: true,
+        );
     final skills = await library.load();
     return [
       for (final skill in skills)

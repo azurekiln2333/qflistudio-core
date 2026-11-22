@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -11,8 +12,22 @@ import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/session/agent_session.dart';
 import 'package:qfli_studio_core/vibe_coding/agent_request_scheduler.dart';
 import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
+import 'package:qfli_studio_core/vibe_coding/vibe_skills.dart';
 
 import 'support/ai_relay_fixture.dart';
+
+/// 空资产包：测试不依赖打包的内置技能。
+class _EmptyAssetBundle extends CachingAssetBundle {
+  _EmptyAssetBundle();
+
+  @override
+  Future<ByteData> load(String key) async =>
+      throw StateError('no packaged asset $key');
+
+  @override
+  Future<String> loadString(String key, {bool cache = true}) async =>
+      throw StateError('no packaged asset $key');
+}
 
 void main() {
   late Directory root;
@@ -49,6 +64,14 @@ void main() {
     projectRootOf: (_) => project.path,
     languageOf: (_) => 'python',
     configuredModel: configuredModel,
+    // 不扫开发机 $HOME：结果与耗时不能跟着机器变。
+    skillLibraryFactory: (String root, String language) => VibeSkillLibrary(
+      projectRoot: root,
+      language: language,
+      bundle: _EmptyAssetBundle(),
+      includeUserSkills: false,
+      lazyBodies: true,
+    ),
     // 测试里不真的等 1/2/4 秒。
     scheduler: AgentRequestScheduler(retryDelays: const []),
     cacheDir: cacheDir,

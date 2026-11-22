@@ -2,12 +2,15 @@
 ///
 /// 来源按优先级读取：`AGENTS.md`、`CLAUDE.md`、`.qfli/rules.md`。每个文件
 /// 与整体都有字符上限，超出时按行截断并标注。
+/// Trellis 项目先预留工作流入口，再合并规则文件。
 library;
 
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+
+import '../trellis/trellis_project.dart';
 
 /// 单个规则文件的上限（字符）。
 const int kVibeMaxRuleFileChars = 4 * 1024;
@@ -22,12 +25,27 @@ const List<String> kVibeRuleFiles = [
   '.qfli/rules.md',
 ];
 
+/// Trellis 项目的入口提示。
+///
+/// 只告诉模型去读哪些文件，不注入正文：正文按需用 read_file 读。
+const String kVibeTrellisRuleEntry = '''### Trellis workflow
+This project uses Trellis. Before editing, use read_file to read .trellis/workflow.md.
+Read the applicable package and layer index.md under .trellis/spec/. Follow its links only for the current change.
+If a task is active, read its prd.md and any design.md or implement.md before editing.
+Use the available skill index and call use_skill when a project skill applies.
+Read workflow, specs and skill bodies on demand. Do not load every file at once.''';
+
 /// 读取项目规则；没有规则时返回空串。
 ///
 /// 只读项目根目录下的普通文件。符号链接整份跳过，避免读出项目外内容。
+/// Trellis 入口先占预算，已有规则不会把它挤掉。
 String loadVibeRules(String projectRoot) {
   final sections = <String>[];
   var used = 0;
+  if (hasTrellisWorkflow(projectRoot)) {
+    sections.add(kVibeTrellisRuleEntry);
+    used = kVibeTrellisRuleEntry.length + 2;
+  }
   for (final relative in kVibeRuleFiles) {
     final file = File(p.joinAll([projectRoot, ...relative.split('/')]));
     final type = FileSystemEntity.typeSync(file.path, followLinks: false);
@@ -44,7 +62,9 @@ String loadVibeRules(String projectRoot) {
     final header = '### $relative';
     final budget = kVibeMaxRulesChars - used;
     if (budget <= header.length + 40) {
-      sections.add('（其余规则文件已达上限，未加载）');
+      // 剩余预算连提示都放不下时，宁可不写，也不挤掉 Trellis 入口。
+      const notice = '（其余规则文件已达上限，未加载）';
+      if (budget >= notice.length + 1) sections.add(notice);
       break;
     }
     const mark = '（规则已截断）';
@@ -61,6 +81,13 @@ String loadVibeRules(String projectRoot) {
   }
   return sections.join('\n\n');
 }
+
+/// 项目根下是否有可用的 Trellis 工作流。
+///
+/// 判断只有一份实现：委托 [TrellisProject.hasWorkflow]。`.trellis` 目录与
+/// `workflow.md` 都必须是普通条目；链接与空文件一律不算。
+bool hasTrellisWorkflow(String projectRoot) =>
+    TrellisProject.hasWorkflow(projectRoot);
 
 /// 只读取文件开头，避免加载超大规则文件。
 String _readHead(File file) {

@@ -14,6 +14,8 @@ import 'package:flutter/scheduler.dart';
 import '../interop/interop_runner.dart';
 import '../services/ai_file_header.dart';
 import '../services/api_client.dart';
+import '../trellis/trellis_commands.dart';
+import '../trellis/trellis_context.dart';
 import 'agent_context_usage.dart';
 import 'agent_request_scheduler.dart';
 import 'vibe_loop_guard.dart';
@@ -53,6 +55,8 @@ export 'vibe_models.dart';
 export 'agent_context_usage.dart' show AgentContextCategory, AgentContextUsage;
 export 'vibe_rules.dart'
     show
+        hasTrellisWorkflow,
+        kVibeTrellisRuleEntry,
         loadVibeRules,
         kVibeMaxRuleFileChars,
         kVibeMaxRulesChars,
@@ -70,18 +74,33 @@ abstract interface class VibeAgentContext {
 }
 
 /// 默认实现：读项目目录、内置资产与仓库规则文件。
-class VibeProjectAgentContext implements VibeAgentContext {
-  VibeProjectAgentContext({required this.projectRoot, this.language = ''});
+class VibeProjectAgentContext
+    implements VibeAgentContext, VibeTrellisContextSource {
+  VibeProjectAgentContext({
+    required this.projectRoot,
+    this.language = '',
+    this.trellisLoader = const TrellisContextLoader(),
+  });
 
   final String projectRoot;
   final String language;
 
+  /// Trellis 上下文来源；注入会话开头的精简上下文。
+  final TrellisContextLoader trellisLoader;
+
   @override
-  Future<List<VibeSkill>> skills() =>
-      VibeSkillLibrary(projectRoot: projectRoot, language: language).load();
+  Future<List<VibeSkill>> skills() => VibeSkillLibrary(
+    projectRoot: projectRoot,
+    language: language,
+    // 索引只要名称与说明；正文由 use_skill 按需读盘。
+    lazyBodies: true,
+  ).load();
 
   @override
   Future<String> rules() async => loadVibeRules(projectRoot);
+
+  @override
+  Future<String> trellisContext() => trellisLoader.load(projectRoot);
 }
 
 /// 一次写盘审批请求。
@@ -194,6 +213,11 @@ class VibeCodingController extends ChangeNotifier {
   List<VibePlanItem> _plan = const [];
   List<VibeSkill> _skills = const [];
   String _rules = '';
+
+  /// 本次会话的 Trellis 上下文；只读一次。
+  String _trellis = '';
+  bool _trellisLoaded = false;
+
   final List<String> _usedSkills = [];
 
   VibePhase _phase = VibePhase.idle;
@@ -444,7 +468,7 @@ class VibeCodingController extends ChangeNotifier {
 
   // ---- 循环 ----
 
-  /// 一次 send 的主体：准备技能与规则，然后进入模型/工具循环。
+  /// 一次 send 的主体：准备技能、规则与 Trellis 上下文，然后进入模型/工具循环。
   Future<void> _run(String prompt) async {
     _abort = Completer<void>();
     _usedTerminal = false;
@@ -452,11 +476,14 @@ class VibeCodingController extends ChangeNotifier {
     final guard = VibeLoopGuard();
     _finalizeOpenPlan(failed: true);
     final budget = _maxRounds ?? vibeRoundBudget(prompt);
-    _skills = await _agent.skills();
-    _rules = await _agent.rules();
+    // 技能与规则读不到时退化为空，不阻断会话。
+    _skills = await _readSkills();
+    _rules = await _readRules();
+    await _loadTrellis();
+    final routed = await _routeSlashCommand(prompt);
     if (_cancelRequested || _disposed) return;
     guard.markSnapshot(await _projectSnapshot());
-    _prepareContext(prompt);
+    _prepareContext(routed ?? prompt);
     try {
       for (var round = 0; round < budget; round++) {
         if (_cancelRequested || _disposed) {
@@ -666,6 +693,72 @@ class VibeCodingController extends ChangeNotifier {
     }
   }
 
+  /// 读技能列表；读取失败时退化为空列表，不打断本轮。
+  Future<List<VibeSkill>> _readSkills() async {
+    try {
+      return await _agent.skills();
+    } on Object {
+      return const [];
+    }
+  }
+
+  /// 读项目规则；读取失败时退化为空串，不打断本轮。
+  Future<String> _readRules() async {
+    try {
+      return await _agent.rules();
+    } on Object {
+      return '';
+    }
+  }
+
+  /// Trellis 上下文来源；代理上下文没实现时返回 null。
+  VibeTrellisContextSource? get _trellisSource =>
+      _agent is VibeTrellisContextSource
+      ? _agent as VibeTrellisContextSource
+      : null;
+
+  /// 载入本次会话的 Trellis 上下文；一个会话只读一次。
+  Future<void> _loadTrellis() async {
+    if (_trellisLoaded) return;
+    _trellisLoaded = true;
+    final source = _trellisSource;
+    if (source == null) return;
+    try {
+      _trellis = await source.trellisContext();
+    } on Object {
+      // 上下文读不到就不注入，不影响会话。
+      _trellis = '';
+    }
+    if (_trellis.isNotEmpty) _invalidateContextUsage();
+  }
+
+  /// 把 `/trellis:continue` 这类命令换成真正的指令；不是命令时返回 null。
+  ///
+  /// 界面仍显示用户输入的那一行，模型收到的历史换成展开后的指令。
+  Future<String?> _routeSlashCommand(String prompt) async {
+    if (_trellisSource == null) return null;
+    if (matchTrellisSlashCommand(prompt) == null) return null;
+    String? routed;
+    try {
+      routed = await routeTrellisSlashCommand(
+        prompt,
+        projectRoot: _files.projectRoot,
+        skills: _skills,
+      );
+    } on Object {
+      routed = null;
+    }
+    if (routed == null || routed.isEmpty) return null;
+    for (var index = _history.length - 1; index >= 0; index--) {
+      final entry = _history[index];
+      if (entry['role'] != 'user') continue;
+      _history[index] = {...entry, 'content': routed};
+      break;
+    }
+    _invalidateContextUsage();
+    return routed;
+  }
+
   /// 本轮工具列表。离线专属产品不暴露联网工具。
   ///
   /// `web_search` 已下线（整改任务书 §3-W3）：联网搜索的唯一上游是未披露的
@@ -673,17 +766,22 @@ class VibeCodingController extends ChangeNotifier {
   List<Map<String, dynamic>> _toolSpecs() =>
       vibeWebToolsAvailable ? vibeToolSpecsWithWeb() : vibeToolSpecs();
 
-  /// 载入本次 send 的技能与规则，并写入系统提示后可变的上下文块。
+  /// 载入本次 send 的技能、规则与 Trellis 上下文，并写入系统提示后可变的上下文块。
   void _prepareContext(String prompt) {
     final skills = _skills;
     final rules = _rules;
-    if (skills.isEmpty && rules.isEmpty) return;
+    final trellis = _trellis;
+    if (skills.isEmpty && rules.isEmpty && trellis.isEmpty) return;
     final sections = <AgentContextCategory, String>{
       AgentContextCategory.systemPrompt: _systemPrompt(),
     };
-    if (rules.isNotEmpty) {
-      sections[AgentContextCategory.projectRules] =
-          '\n\n项目规则（来自仓库，必须遵守）：\n$rules';
+    if (rules.isNotEmpty || trellis.isNotEmpty) {
+      final buffer = StringBuffer();
+      if (rules.isNotEmpty) {
+        buffer.write('\n\n项目规则（来自仓库，必须遵守）：\n$rules');
+      }
+      if (trellis.isNotEmpty) buffer.write('\n\n$trellis');
+      sections[AgentContextCategory.projectRules] = buffer.toString();
     }
     if (skills.isNotEmpty) {
       final buffer = StringBuffer(
@@ -968,7 +1066,7 @@ class VibeCodingController extends ChangeNotifier {
         case 'todo':
           return _updatePlan(args);
         case 'use_skill':
-          return _useSkill(args);
+          return await _useSkill(args);
         case 'web_fetch':
           return await _runWebTool(name, args);
         default:
@@ -1252,7 +1350,7 @@ class VibeCodingController extends ChangeNotifier {
   }
 
   /// `use_skill`：按名称返回技能正文。
-  _ToolOutcome _useSkill(Map<String, dynamic> args) {
+  Future<_ToolOutcome> _useSkill(Map<String, dynamic> args) async {
     final name = args['name'];
     if (name is! String || name.trim().isEmpty) {
       return _error('error', 'name 必须是非空字符串');
@@ -1266,12 +1364,16 @@ class VibeCodingController extends ChangeNotifier {
       return _error('skill', '没有名为 $wanted 的技能。$names');
     }
     final match = available.first;
+    final body = await match.resolveBody();
+    if (body.trim().isEmpty) {
+      return _error('skill', '技能 $wanted 的正文读取失败，请检查文件是否存在');
+    }
     if (!_usedSkills.contains(match.name)) _usedSkills.add(match.name);
     _notify();
     return _ToolOutcome(
       status: VibeToolStatus.ok,
       summary: '${match.name}（${match.source}）',
-      modelText: match.body,
+      modelText: body,
     );
   }
 
