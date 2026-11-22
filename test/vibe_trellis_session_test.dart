@@ -88,33 +88,38 @@ void main() {
     );
   }
 
-  test('injects the Trellis context once per session', () async {
-    final relay = _FakeRelay()
-      ..chatReplies.addAll([_textReply('第一轮'), _textReply('第二轮')]);
-    final context = _CountingContext(
-      projectRoot: project.path,
-      trellisLoader: const TrellisContextLoader(),
-    );
-    final controller = build(relay, context: context);
+  test(
+    'injects the Trellis context once per session',
+    timeout: const Timeout(Duration(seconds: 30)),
+    () async {
+      final relay = _FakeRelay()
+        ..chatReplies.addAll([_textReply('第一轮'), _textReply('第二轮')]);
+      final context = _CountingContext(
+        projectRoot: project.path,
+        trellisLoader: const TrellisContextLoader(),
+      );
+      final controller = build(relay, context: context);
 
-    controller.send('先做第一步');
-    await settle(controller, VibePhase.succeeded);
-    controller.send('再做第二步');
-    await settle(controller, VibePhase.succeeded);
+      controller.send('先做第一步');
+      await settle(controller, VibePhase.succeeded);
+      controller.send('再做第二步');
+      await settle(controller, VibePhase.succeeded);
 
-    final system =
-        ((relay.chatBodies.first['messages'] as List).first as Map)['content']
-            as String;
-    expect(system, contains('### Trellis 项目上下文'));
-    expect(system, contains('项目规则：不要改生成文件。'));
-    // Trellis 一个会话只读一次；技能与规则每次 send 重新读（磁盘上的改动要能生效）。
-    expect(context.trellisCalls, 1);
-    expect(context.skillCalls, 2);
-    expect(context.ruleCalls, 2);
-  });
+      final system =
+          ((relay.chatBodies.first['messages'] as List).first as Map)['content']
+              as String;
+      expect(system, contains('### Trellis 项目上下文'));
+      expect(system, contains('项目规则：不要改生成文件。'));
+      // Trellis 一个会话只读一次；技能与规则每次 send 重新读（磁盘上的改动要能生效）。
+      expect(context.trellisCalls, 1);
+      expect(context.skillCalls, 2);
+      expect(context.ruleCalls, 2);
+    },
+  );
 
   test(
     'replaces the current user message for a Trellis slash command',
+    timeout: const Timeout(Duration(seconds: 30)),
     () async {
       final relay = _FakeRelay()
         ..chatReplies.addAll([_textReply('先回答'), _textReply('继续做了')]);
@@ -144,50 +149,59 @@ void main() {
     },
   );
 
-  test('a failing skill or rule read does not stall the session', () async {
-    final relay = _FakeRelay()..chatReplies.add(_textReply('照常回答'));
-    final controller = build(
-      relay,
-      context: _CountingContext(
-        projectRoot: project.path,
-        failSkills: true,
-        failRules: true,
-      ),
-    );
+  test(
+    'a failing skill or rule read does not stall the session',
+    timeout: const Timeout(Duration(seconds: 30)),
+    () async {
+      final relay = _FakeRelay()..chatReplies.add(_textReply('照常回答'));
+      final controller = build(
+        relay,
+        context: _CountingContext(
+          projectRoot: project.path,
+          failSkills: true,
+          failRules: true,
+        ),
+      );
 
-    controller.send('读不到技能也要能聊');
-    await settle(controller, VibePhase.succeeded);
+      controller.send('读不到技能也要能聊');
+      await settle(controller, VibePhase.succeeded);
 
-    expect(controller.lastError, isNull);
-    final messages = (relay.chatBodies.single['messages'] as List)
-        .cast<Map<String, dynamic>>();
-    expect(messages.first['content'] as String, isNot(contains('项目规则')));
-  });
+      expect(controller.lastError, isNull);
+      final messages = (relay.chatBodies.single['messages'] as List)
+          .cast<Map<String, dynamic>>();
+      expect(messages.first['content'] as String, isNot(contains('项目规则')));
+    },
+  );
 
-  test('a project without a workflow gets no Trellis context', () async {
-    final root = Directory.systemTemp.createTempSync('no-trellis-');
-    addTearDown(() {
-      if (root.existsSync()) root.deleteSync(recursive: true);
-    });
-    File(p.join(root.path, 'README.md')).writeAsStringSync('# demo\n');
-    final relay = _FakeRelay()..chatReplies.add(_textReply('好的'));
-    final controller = VibeCodingController(
-      api: ApiClient(transport: relay.client),
-      tokenProvider: () => 'local-token',
-      projectRoot: root.path,
-      projectName: 'demo',
-      language: 'python',
-      maxRounds: 1,
-    );
+  test(
+    'a project without a workflow gets no Trellis context',
+    timeout: const Timeout(Duration(seconds: 30)),
+    () async {
+      final root = Directory.systemTemp.createTempSync('no-trellis-');
+      addTearDown(() {
+        if (root.existsSync()) root.deleteSync(recursive: true);
+      });
+      File(p.join(root.path, 'README.md')).writeAsStringSync('# demo\n');
+      final relay = _FakeRelay()..chatReplies.add(_textReply('好的'));
+      final controller = VibeCodingController(
+        api: ApiClient(transport: relay.client),
+        tokenProvider: () => 'local-token',
+        projectRoot: root.path,
+        projectName: 'demo',
+        language: 'python',
+        maxRounds: 1,
+      );
 
-    controller.send('你好');
-    await settle(controller, VibePhase.succeeded);
+      controller.send('你好');
+      await settle(controller, VibePhase.succeeded);
 
-    final system =
-        ((relay.chatBodies.single['messages'] as List).first as Map)['content']
-            as String;
-    expect(system, isNot(contains('Trellis')));
-  });
+      final system =
+          ((relay.chatBodies.single['messages'] as List).first
+                  as Map)['content']
+              as String;
+      expect(system, isNot(contains('Trellis')));
+    },
+  );
 }
 
 Map<String, dynamic> _textReply(String text) => {
