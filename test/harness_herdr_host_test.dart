@@ -521,6 +521,38 @@ void main() {
     expect(list, hasLength(2));
     await host.dispose();
   });
+
+  test('dispose releases the injected pty factory', () async {
+    // 工厂握着 PTY 启动器与进程订阅：主机不释放它，每关一个编辑页就漏一套。
+    final fake = _FakeHerdrCli();
+    var disposed = 0;
+    final host = HerdrHost(
+      cli: fake.cli(),
+      ptyFactory: _FakePtyFactory(),
+      disposePtyFactory: () async => disposed++,
+      locator: ({String? explicitPath}) async => 'herdr',
+      idleRefresh: const Duration(milliseconds: 20),
+      waitBudget: const Duration(milliseconds: 150),
+    );
+    await _sessions(host);
+
+    await host.dispose();
+
+    expect(disposed, 1);
+  });
+
+  test('dispose survives a factory that throws on release', () async {
+    final fake = _FakeHerdrCli();
+    final host = HerdrHost(
+      cli: fake.cli(),
+      disposePtyFactory: () async => throw StateError('boom'),
+      locator: ({String? explicitPath}) async => 'herdr',
+    );
+    await host.providers();
+
+    // 工厂释放失败不能把主机的其它收尾（会话流、状态）挡住。
+    await host.dispose();
+  });
 }
 
 /// A runner whose binary cannot be started; the host must report `unsupported`.

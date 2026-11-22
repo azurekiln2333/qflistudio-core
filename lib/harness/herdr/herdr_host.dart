@@ -46,6 +46,7 @@ class HerdrHost implements HarnessHost {
     HerdrCli? cli,
     HerdrCliRunner? runner,
     HarnessPtyFactory? ptyFactory,
+    this.disposePtyFactory,
     HerdrExecutableLocator? locator,
     this.idleRefresh = const Duration(seconds: 30),
     this.waitBudget = const Duration(seconds: 20),
@@ -67,6 +68,14 @@ class HerdrHost implements HarnessHost {
   /// Pass `--takeover` to `agent attach`. Off by default: Studio must not steal
   /// the pane from the user's own Herdr client.
   final bool attachTakeover;
+
+  /// Releases [ptyFactory] when this host is disposed.
+  ///
+  /// The factory owns the launcher and its process supervisor, so whoever
+  /// created it has to be able to drop it; [HerdrHost] cannot call `dispose`
+  /// itself because `HarnessPtyFactory` only promises `start`. Pass the
+  /// factory's own `dispose` when the host is the only owner.
+  final Future<void> Function()? disposePtyFactory;
 
   final String? _executablePath;
   HerdrCli? _cli;
@@ -274,6 +283,12 @@ class HerdrHost implements HarnessHost {
     await _sessions.close();
     _state.dispose();
     if (_ownsRunner) await _runner?.dispose();
+    // 工厂握着 PTY 启动器与它的进程订阅：不释放就等于每关一个编辑页漏一套。
+    try {
+      await disposePtyFactory?.call();
+    } on Object {
+      // 释放失败不该挡住主机自己的收尾。
+    }
   }
 
   // -------------------------------------------------------------------------

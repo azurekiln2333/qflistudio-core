@@ -53,7 +53,9 @@ List<HarnessHost> buildDefaultHarnessHosts(HubHostContext context) {
     hosts.add(LocalHarnessHost());
     // Herdr 只有在拿到真实 PTY 时才能 attach 窗格；拿不到时它自己退回快照
     // 终端（刷新 1.5 s 级），功能完整，所以工厂不需要按平台再分一次。
-    hosts.add(HerdrHost(ptyFactory: StudioMuxPtyFactory()));
+    // 工厂的启动器是惰性创建的，谁创建谁释放：交给主机在 dispose 时收尾。
+    final pty = StudioMuxPtyFactory();
+    hosts.add(HerdrHost(ptyFactory: pty, disposePtyFactory: pty.dispose));
   }
 
   return hosts;
