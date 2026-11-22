@@ -88,6 +88,15 @@ void main() {
     );
   }
 
+  /// 卸载编辑器，并把假时钟推过页面自身的一次性定时器窗口
+  /// （历史保存 1.5 秒、自动保存 2 秒）。不推完，这些有界定时器会被框架的
+  /// 泄漏断言当成遗留；周期定时器推多久都还在队列里，所以这步不会
+  /// 掩盖无界泄漏。
+  Future<void> unmount(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 15));
+  }
+
   testWidgets('late cloud open after editor disposal releases activity lease', (
     tester,
   ) async {
@@ -109,7 +118,7 @@ void main() {
     addTearDown(() => service?.dispose());
     expect(CloudWorkspaceActivity.active(key), isTrue);
     await mount(tester, (_) => gate.future);
-    await tester.pumpWidget(const SizedBox.shrink());
+    await unmount(tester);
     gate.complete(service!);
     await tester.pump();
     expect(
@@ -117,10 +126,6 @@ void main() {
       isFalse,
       reason: 'A service returned after unmount never reaches page.dispose.',
     );
-    // 页面自身的一次性定时器只有两个：历史保存 1.5 s、自动保存 2 s。
-    // 把假时钟推过这两个窗口，让断言只针对租约；周期定时器不会被清空，
-    // 所以这步不会掩盖无界泄漏。
-    await tester.pump(const Duration(seconds: 15));
     expect(tester.takeException(), isNull);
   });
 
@@ -138,7 +143,7 @@ void main() {
         ),
         isFalse,
       );
-      await tester.pumpWidget(const SizedBox.shrink());
+      await unmount(tester);
     },
   );
 
@@ -151,7 +156,7 @@ void main() {
     );
     await tester.pump();
     expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
+    await unmount(tester);
   });
 
   testWidgets(
@@ -159,7 +164,7 @@ void main() {
     (tester) async {
       final gate = Completer<CloudSyncService>();
       await mount(tester, (_) => gate.future);
-      await tester.pumpWidget(const SizedBox.shrink());
+      await unmount(tester);
       gate.completeError(const FileSystemException('late open failure'));
       await tester.pump();
       expect(tester.takeException(), isNull);
