@@ -1,3 +1,7 @@
+/// 每个用例都限时：卡住时要尽快报错。
+@Timeout(Duration(seconds: 20))
+library;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/harness/local/executable_locator.dart';
 import 'package:qfli_studio_core/harness/local/harness_provider.dart';

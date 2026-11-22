@@ -1,3 +1,10 @@
+/// 每个用例都限时。
+///
+/// 这些用例真读盘、真等流、真起定时器；一旦哪一步不返回，用例要尽快报错，
+/// 不能把整个 CI 拖到超时。20 秒远大于正常耗时（单条用例在百毫秒级）。
+@Timeout(Duration(seconds: 20))
+library;
+
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -5,6 +12,7 @@ import 'package:qfli_studio_core/harness/harness_host.dart';
 import 'package:qfli_studio_core/harness/local/executable_locator.dart';
 import 'package:qfli_studio_core/harness/local/local_harness_host.dart';
 import 'package:qfli_studio_core/harness/local/provider_registry.dart';
+import 'package:qfli_studio_core/harness/local/pty_process.dart';
 import 'package:qfli_studio_core/harness/local/studio_mux.dart';
 
 import 'support/fake_pty.dart';
@@ -359,14 +367,24 @@ void main() {
 
   group('不支持的平台', () {
     test('状态为 unsupported 且没有会话', () async {
-      final host = LocalHarnessHost(registry: registryFor(), supported: false);
+      final host = LocalHarnessHost(
+        registry: registryFor(),
+        // 显式给一个没有后端的 launcher：默认构造会在测试里真的建出平台
+        // PTY（Linux 是 ScriptPtyLauncher + ProcessSupervisor）。
+        launcher: const UnsupportedPtyLauncher(),
+        supported: false,
+      );
       addTearDown(host.dispose);
 
       expect(host.state.value, HarnessHostState.unsupported);
       expect(await host.watchSessions().first, isEmpty);
     });
     test('launch 抛 UnsupportedError', () async {
-      final host = LocalHarnessHost(registry: registryFor(), supported: false);
+      final host = LocalHarnessHost(
+        registry: registryFor(),
+        launcher: const UnsupportedPtyLauncher(),
+        supported: false,
+      );
       addTearDown(host.dispose);
 
       await expectLater(

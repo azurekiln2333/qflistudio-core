@@ -1,3 +1,7 @@
+/// 每个用例都限时：流没收尾时要尽快报错。
+@Timeout(Duration(seconds: 20))
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';

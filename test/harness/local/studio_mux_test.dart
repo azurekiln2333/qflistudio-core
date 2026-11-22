@@ -1,3 +1,7 @@
+/// 每个用例都限时：卡住要尽快报错，不能把整个 CI 拖到超时。
+@Timeout(Duration(seconds: 20))
+library;
+
 import 'dart:convert';
 import 'dart:typed_data';
 

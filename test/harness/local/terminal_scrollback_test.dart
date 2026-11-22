@@ -1,3 +1,7 @@
+/// 每个用例都限时：卡住时要尽快报错。
+@Timeout(Duration(seconds: 20))
+library;
+
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
