@@ -78,6 +78,12 @@ import 'agent/agent_pane_switcher.dart';
 import 'agent/editor_agent_host.dart';
 import 'agent/editor_sidebar_tabs.dart';
 import 'agent/session_list_view.dart';
+import '../harness/harness_host.dart';
+import '../harness/hub/harness_hub.dart';
+import '../harness/hub/harness_hosts.dart';
+import '../harness/ui/hub_agents_surface.dart';
+import '../harness/ui/hub_session_list.dart';
+import '../pages/devices_remote_page.dart';
 
 enum _BottomPanel {
   none,
@@ -165,6 +171,7 @@ class EditorPage extends StatefulWidget {
     required this.settings,
     this.initialOpenPath,
     this.openRequest = 0,
+    this.agentPaneRequest = 0,
     this.onMinimize,
     this.onClose,
     this.retainedVisibility,
@@ -191,6 +198,12 @@ class EditorPage extends StatefulWidget {
   /// A new request also opens a file when this page is already mounted. Existing
   /// open files are selected through EditorController without replacing text.
   final int openRequest;
+
+  /// 每次递增都把 Agent 面板切到前台。
+  ///
+  /// 从「工具 → 远程电脑」旧入口跳进来时用它直接落在 Agents 面板上，
+  /// 而不是先落在编辑器里让人再找按钮。
+  final int agentPaneRequest;
   final VoidCallback? onMinimize;
   final VoidCallback? onClose;
   final ValueListenable<bool>? retainedVisibility;
@@ -309,6 +322,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   ///
   /// 离线产品为 null，页面上不出现任何 agent 控件。
   EditorAgentHost? _agentHost;
+
+  /// harness hub：本机、Herdr、已绑定电脑和内置 Agent 的主机池。
+  ///
+  /// 和 agent 宿主同级：主机由 [HarnessHosts] 装配，没有注册时为空，
+  /// 面板只显示内置 Agent 的原生会话。
+  HarnessHub? _harnessHub;
 
   /// agent 文件变更事件的订阅；换运行时或销毁时摘掉。
   StreamSubscription<AgentFileChange>? _agentFileSub;
@@ -432,8 +451,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       host.addListener(_onAgentHostChanged);
       _agentHost = host;
       _lastMainPane = host.state.mainPane;
+      _harnessHub = harnessHubFor(
+        auth: widget.auth,
+        store: widget.store,
+        settings: widget.settings,
+        projectRoot: widget.project.path,
+      );
       // 注入的运行时已就绪：现在就订阅它的文件变更事件。
       _syncAgentFileEvents();
+      if (widget.agentPaneRequest > 0) {
+        // 旧「远程电脑」入口跳进来：首帧之后直接落在 Agents 面板上。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _revealAgentPane();
+        });
+      }
     }
     OpenPerformance.mark('EditorPage initState');
     _editor.addListener(_syncTabController);
@@ -508,6 +539,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         )) {
       _reconcileWorkspaceMembers();
     }
+    if (oldWidget.agentPaneRequest != widget.agentPaneRequest) {
+      _revealAgentPane();
+    }
+  }
+
+  /// 把 Agent 面板切到前台，并把右栏展开。
+  ///
+  /// 宽屏展开对话流；中窄屏切到 Agent 分段。没有 agent 的离线产品直接忽略。
+  void _revealAgentPane() {
+    final host = _agentHost;
+    if (host == null) return;
+    host.activate();
+    host.state.setAgentPaneCollapsed(false);
+    host.state.showMainPane(MainPane.agent);
   }
 
   static bool _sameWorkspaceMembers(List<Project> a, List<Project> b) {
@@ -882,6 +927,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _agentHost?.removeListener(_onAgentHostChanged);
     _agentHost?.dispose();
     _agentHost = null;
+    _harnessHub?.dispose();
+    _harnessHub = null;
     _hiddenViews.clear();
     // TEMP-DIAG (remove after device verification).
     FocusManager.instance.removeListener(_diagFocus);
@@ -1762,6 +1809,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   void _selectAgentSession(String sessionId) {
     final host = _agentHost;
     if (host == null) return;
+    // 选内置 Agent 的会话时先摘掉外部主机视图，两个面板不会同时占着右栅。
+    unawaited(_harnessHub?.closeActiveSession());
     host.selectSession(sessionId);
     final layout = layoutOf(MediaQuery.sizeOf(context).width);
     if (layout == WorkbenchLayout.wide) {
@@ -1900,6 +1949,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 onSelect: _selectAgentSession,
                 onCreate: _createAgentSession,
                 embedded: true,
+                // 同一个卡片里接着列其它主机的会话：用户看到的是一份列表，
+                // 内置 Agent 的会话仍在上面原有的位置。
+                extra: _harnessHub == null
+                    ? null
+                    : HubSessionListSection(
+                        hub: _harnessHub!,
+                        cwd: widget.project.path,
+                        onSelect: _openHubSession,
+                      ),
               ),
         onNewSession: _createAgentSession,
         onStopAllSessions: () => _stopAllAgentSessions(runtime),
@@ -1911,25 +1969,60 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   ///
   /// 外面包 [LoginGateScope]：输入卡片的登录门控需要一个能读到登录态的
   /// 作用域，编辑器页现在是唯一的提供者。
-  Widget _buildAgentPane(EditorAgentHost host, {required bool active}) =>
-      LoginGateScope(
-        auth: widget.auth,
-        child: EditorAgentPane(
-          key: _agentPaneKey,
-          project: widget.project,
-          runtime: host.runtime,
-          auth: widget.auth,
-          settings: widget.settings,
-          sessionId: host.state.sessionId,
-          onSessionOpened: _selectAgentSession,
-          error: host.error,
-          onRetry: host.activate,
-          composerDefaults: _composerDefaults,
-          onOpenFile: _openAgentFile,
-          fileExists: _agentFileExists,
-          active: active,
-        ),
-      );
+  ///
+  /// [HarnessHub] 有主机时，顶部多一条主机选择器；选中外部主机的会话后
+  /// 面板换成该会话的对话/终端视图，内置 Agent 的原有面板作为默认内容
+  /// 原样传下去，不重建也不改它自己的逻辑。
+  Widget _buildAgentPane(EditorAgentHost host, {required bool active}) {
+    final studioPane = EditorAgentPane(
+      key: _agentPaneKey,
+      project: widget.project,
+      runtime: host.runtime,
+      auth: widget.auth,
+      settings: widget.settings,
+      sessionId: host.state.sessionId,
+      onSessionOpened: _selectAgentSession,
+      error: host.error,
+      onRetry: host.activate,
+      composerDefaults: _composerDefaults,
+      onOpenFile: _openAgentFile,
+      fileExists: _agentFileExists,
+      active: active,
+    );
+    final hub = _harnessHub;
+    return LoginGateScope(
+      auth: widget.auth,
+      child: hub == null
+          ? studioPane
+          : HubAgentsSurface(
+              hub: hub,
+              studioPane: studioPane,
+              projectRoot: widget.project.path,
+              compact:
+                  layoutOf(MediaQuery.sizeOf(context).width) ==
+                  WorkbenchLayout.narrow,
+              onAddComputer: () =>
+                  openDevicesRemotePage(context, auth: widget.auth),
+            ),
+    );
+  }
+
+  /// 打开一个外部主机的会话，并把面板切到对话流。
+  Future<void> _openHubSession(HarnessSessionInfo session) async {
+    final hub = _harnessHub;
+    if (hub == null) return;
+    final host = _agentHost;
+    if (host != null) {
+      // 外部会话在对话流里看；窄屏先切到 Agent 分段，宽屏展开右栏。
+      host.state.showMainPane(MainPane.agent);
+      host.state.setAgentPaneCollapsed(false);
+    }
+    try {
+      await hub.openSession(session);
+    } on Object catch (error) {
+      if (mounted) _showSnack('打不开这个会话：$error');
+    }
+  }
 
   /// 相对项目根的路径现在是否还是一个文件。文件卡片据此决定可不可点。
   bool _agentFileExists(String relativePath) {

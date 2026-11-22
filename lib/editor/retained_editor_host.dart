@@ -29,6 +29,7 @@ Future<void> openEditorPage(
   SavedWorkspace? workspace,
   List<Project>? workspaceProjects,
   WorkspaceStore? workspaceStore,
+  bool revealAgentPane = false,
 }) async {
   final controller = RetainedEditorScope.maybeOf(context);
   if (controller != null) {
@@ -41,6 +42,7 @@ Future<void> openEditorPage(
       workspace: workspace,
       workspaceProjects: workspaceProjects,
       workspaceStore: workspaceStore,
+      revealAgentPane: revealAgentPane,
     );
     return;
   }
@@ -55,6 +57,7 @@ Future<void> openEditorPage(
         workspace: workspace,
         workspaceMembers: workspaceProjects ?? const [],
         workspaceStore: workspaceStore,
+        agentPaneRequest: revealAgentPane ? 1 : 0,
         // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
         agentEnabled: StudioProfile.current?.offlineOnly != true,
       ),
@@ -153,6 +156,7 @@ class RetainedEditorController extends ChangeNotifier {
     SavedWorkspace? workspace,
     List<Project>? workspaceProjects,
     WorkspaceStore? workspaceStore,
+    bool revealAgentPane = false,
   }) {
     final key = _resolveOpenKey(project, workspace);
     final session = _sessions.putIfAbsent(
@@ -167,6 +171,7 @@ class RetainedEditorController extends ChangeNotifier {
         workspaceStore: workspaceStore,
       ),
     );
+    if (revealAgentPane) session.agentPaneRequest++;
     if (workspace != null) {
       // Re-opening a saved workspace re-resolves its members. The effective
       // primary may have changed (missing primary → survivor); keep the live
@@ -185,7 +190,8 @@ class RetainedEditorController extends ChangeNotifier {
         session.workspaceRevision++;
         changed = true;
       }
-      if (workspaceStore != null && !identical(session.workspaceStore, workspaceStore)) {
+      if (workspaceStore != null &&
+          !identical(session.workspaceStore, workspaceStore)) {
         session.workspaceStore = workspaceStore;
         changed = true;
       }
@@ -230,10 +236,7 @@ class RetainedEditorController extends ChangeNotifier {
   }
 
   /// Attaches a newly saved workspace to the active session (test/UI helper).
-  void attachActiveWorkspace(
-    SavedWorkspace workspace,
-    List<Project> members,
-  ) {
+  void attachActiveWorkspace(SavedWorkspace workspace, List<Project> members) {
     final key = _active;
     if (key == null) return;
     attachWorkspace(key, workspace, members);
@@ -348,6 +351,9 @@ class _EditorSession {
   final visible = ValueNotifier<bool>(false);
   String? initialOpenPath;
   int openRequest = 0;
+
+  /// 递增即让页面把 Agent 面板切到前台。与 [openRequest] 同一套追增语义。
+  int agentPaneRequest = 0;
 
   String get label => workspace?.name ?? project.name;
 }
@@ -594,10 +600,7 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
         position: RelativeRect.fromRect(rect, Offset.zero & overlayBox.size),
         items: [
           for (final entry in controller._sessions.entries)
-            PopupMenuItem(
-              value: entry.key,
-              child: Text(entry.value.label),
-            ),
+            PopupMenuItem(value: entry.key, child: Text(entry.value.label)),
         ],
       );
     } finally {
@@ -676,6 +679,7 @@ class _SessionEditor extends StatelessWidget {
       settings: session.settings,
       initialOpenPath: session.initialOpenPath,
       openRequest: session.openRequest,
+      agentPaneRequest: session.agentPaneRequest,
       retainedVisibility: session.visible,
       workspace: session.workspace,
       workspaceMembers: session.workspaceProjects,

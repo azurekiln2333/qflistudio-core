@@ -17,6 +17,7 @@ class SessionListView extends StatelessWidget {
     this.onSelect,
     this.onCreate,
     this.embedded = false,
+    this.extra,
   });
 
   final AgentRuntime runtime;
@@ -38,6 +39,11 @@ class SessionListView extends StatelessWidget {
   /// 新建和「全部停止」，两种主体共用一套外框。
   final bool embedded;
 
+  /// 追加在会话行之后的额外内容（其它主机的会话）。
+  ///
+  /// 用同一个滚动区，侧边栏里内置会话和外部会话看起来是一份列表。
+  final Widget? extra;
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -49,21 +55,26 @@ class SessionListView extends StatelessWidget {
           children: [
             if (!embedded) ...[_buildHeader(context), const Divider(height: 1)],
             Expanded(
-              child: sessions.isEmpty
+              child: sessions.isEmpty && extra == null
                   ? _buildEmpty(context)
                   : ListView.builder(
                       // 与文件树同一套纵向节奏：上下各 8，行间不加分隔。
                       padding: const EdgeInsets.symmetric(vertical: 8),
-                      itemCount: sessions.length,
-                      itemBuilder: (context, index) => _SessionRow(
-                        meta: sessions[index],
-                        status: runtime.statusOf(sessions[index].id),
-                        selected: sessions[index].id == state.sessionId,
-                        onSelect: onSelect,
-                        onRename: (title) =>
-                            runtime.sessions.rename(sessions[index].id, title),
-                        onDelete: () => _delete(sessions[index]),
-                      ),
+                      itemCount: sessions.length + (extra == null ? 0 : 1),
+                      itemBuilder: (context, index) {
+                        if (index >= sessions.length) return extra!;
+                        return _SessionRow(
+                          meta: sessions[index],
+                          status: runtime.statusOf(sessions[index].id),
+                          selected: sessions[index].id == state.sessionId,
+                          onSelect: onSelect,
+                          onRename: (title) => runtime.sessions.rename(
+                            sessions[index].id,
+                            title,
+                          ),
+                          onDelete: () => _delete(sessions[index]),
+                        );
+                      },
                     ),
             ),
           ],

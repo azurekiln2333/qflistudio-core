@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../config/agreement_config.dart';
 import '../editor/ai_panel.dart';
+import '../remote_control/remote_computer_page.dart';
 import '../services/account_erasure_service.dart';
 import '../services/app_backup_service.dart';
 import '../services/app_paths.dart';
@@ -17,6 +18,7 @@ import '../store/settings_store.dart';
 import '../store/project_store.dart';
 import '../widgets/settings_section.dart';
 import 'auth/agreement_page.dart';
+import 'devices_remote_page.dart';
 import 'highlight_settings_page.dart';
 import 'editor_font_settings_page.dart';
 import '../editor/editor_fonts.dart';
@@ -118,6 +120,23 @@ class _SettingsPageState extends State<SettingsPage> {
       ],
     );
   }
+
+  /// 「设备与远程」：配对、已绑定电脑和撤销。
+  ///
+  /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
+  Widget _devicesSection(BuildContext context) => SettingsSection(
+    title: '设备与远程',
+    children: [
+      ListTile(
+        key: const ValueKey('settings-devices-remote'),
+        leading: const Icon(Icons.devices_other_outlined),
+        title: const Text('设备与远程'),
+        subtitle: const Text('配对电脑、查看绑定状态、撤销访问权限'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => openDevicesRemotePage(context, auth: widget.auth),
+      ),
+    ],
+  );
 
   void _openAgreement(String title, String url) {
     Navigator.of(context).push(
@@ -357,6 +376,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ],
                   ),
                 if (_showsAccountSection) _accountSection(context),
+                if (RemoteComputerPage.isSupported) _devicesSection(context),
                 SettingsSection(
                   title: '数据与存储',
                   children: [
