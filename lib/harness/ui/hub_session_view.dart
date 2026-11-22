@@ -46,7 +46,22 @@ class _HubSessionViewState extends State<HubSessionView> {
   @override
   void initState() {
     super.initState();
+    // hub 已经打开过这个会话时直接接上：第一帧就画出页头与内容，不再闪一次
+    // 转圈，也不再跟异步打开抢帧。
+    if (_adoptActiveHandle()) return;
     unawaited(_open());
+  }
+
+  /// 这个会话已经是 hub 的当前视图时，同步拿它的句柄。
+  bool _adoptActiveHandle() {
+    final active = widget.hub.activeHandle;
+    if (active == null ||
+        active.info.id != widget.session.id ||
+        active.info.hostId != widget.session.hostId) {
+      return false;
+    }
+    _handle = active;
+    return true;
   }
 
   @override
@@ -55,16 +70,24 @@ class _HubSessionViewState extends State<HubSessionView> {
     if (oldWidget.session.id != widget.session.id ||
         oldWidget.session.hostId != widget.session.hostId) {
       _tab = 0;
+      if (_adoptActiveHandle()) {
+        setState(() {});
+        return;
+      }
       unawaited(_open());
     }
   }
 
   Future<void> _open() async {
     final token = ++_openToken;
-    setState(() {
-      _error = null;
-      _handle = null;
-    });
+    // 第一帧不需要 setState：两个字段本来就是空的，重建也是同一棵树。
+    // 重新打开（重试、换会话）时才要把旧状态清掉。
+    if (_error != null || _handle != null) {
+      setState(() {
+        _error = null;
+        _handle = null;
+      });
+    }
     try {
       final handle = await widget.hub.openSession(widget.session);
       if (!mounted || token != _openToken) return;
