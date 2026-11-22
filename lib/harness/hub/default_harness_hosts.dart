@@ -72,7 +72,11 @@ Future<HarnessHost?> openRemoteHarnessHost() async {
   try {
     store = await RemoteStore.open();
   } on Object catch (error, stack) {
-    debugPrint('openRemoteHarnessHost: 打不开远程存储 $error\n$stack');
+    // 只在调试构建里打：发布版留一条带堆栈的日志没有用处，反而泄路径。
+    assert(() {
+      debugPrint('openRemoteHarnessHost: 打不开远程存储 $error\n$stack');
+      return true;
+    }());
     return null;
   }
   final controller = RemoteController(store: store);
