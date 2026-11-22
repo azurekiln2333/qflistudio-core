@@ -13,6 +13,9 @@ class HubHostSwitcher extends StatelessWidget {
     super.key,
     required this.hub,
     this.onAddComputer,
+    this.onOpenRemote,
+    this.remoteConnecting = false,
+    this.remoteUnavailable = false,
     this.dense = false,
   });
 
@@ -20,6 +23,18 @@ class HubHostSwitcher extends StatelessWidget {
 
   /// 打开设备与远程（配对）。为空时不显示添加入口。
   final VoidCallback? onAddComputer;
+
+  /// 打开已绑定的电脑。
+  ///
+  /// 已绑定电脑要先异步打开存储才能变成主机，所以它在列表里先是这一枚占位
+  /// 芯片，点了才去连；为空表示这个界面不管已绑定电脑。
+  final VoidCallback? onOpenRemote;
+
+  /// 正在打开已绑定电脑：占位芯片画成连接中。
+  final bool remoteConnecting;
+
+  /// 上次打开没成功（没配对、平台不支持）：占位芯片带说明。
+  final bool remoteUnavailable;
 
   /// 窄屏会话视图里用更紧的高度。
   final bool dense;
@@ -30,7 +45,7 @@ class HubHostSwitcher extends StatelessWidget {
       animation: hub,
       builder: (context, _) {
         final hosts = hub.hosts;
-        if (hosts.isEmpty && onAddComputer == null) {
+        if (hosts.isEmpty && onAddComputer == null && onOpenRemote == null) {
           return const SizedBox.shrink();
         }
         final scheme = Theme.of(context).colorScheme;
@@ -58,6 +73,15 @@ class HubHostSwitcher extends StatelessWidget {
                     hint: hub.hintOf(host.id),
                     dense: dense,
                     onTap: () => hub.selectHost(host.id),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                if (onOpenRemote != null) ...[
+                  _RemotePendingChip(
+                    dense: dense,
+                    connecting: remoteConnecting,
+                    unavailable: remoteUnavailable,
+                    onTap: onOpenRemote!,
                   ),
                   const SizedBox(width: 6),
                 ],
@@ -183,6 +207,73 @@ class _HostChip extends StatelessWidget {
     if (text == null || text.isEmpty) return content;
     // 不支持或未安装：把说明挂在悬浮提示上，不额外占一行。
     return Tooltip(message: text, child: content);
+  }
+}
+
+/// 「已绑定电脑」占位芯片：点它才去打开远程存储并连接。
+///
+/// 连上之前没有主机可画，所以先用一枚芯片占位，画成连接中或不可用，
+/// 而不是让面板里根本没有这个入口。
+class _RemotePendingChip extends StatelessWidget {
+  const _RemotePendingChip({
+    required this.dense,
+    required this.connecting,
+    required this.unavailable,
+    required this.onTap,
+  });
+
+  final bool dense;
+  final bool connecting;
+  final bool unavailable;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final state = connecting
+        ? HarnessHostState.connecting
+        : HarnessHostState.offline;
+    final content = InkWell(
+      key: const ValueKey('hub-host-pending-remote'),
+      onTap: connecting ? null : onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: Container(
+        padding: EdgeInsets.symmetric(
+          horizontal: dense ? 8 : 10,
+          vertical: dense ? 4 : 6,
+        ),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: unavailable ? scheme.outline : scheme.outlineVariant,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.devices_other_outlined,
+              size: dense ? 14 : 16,
+              color: scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              connecting ? '连接中…' : '已绑定电脑',
+              style:
+                  (dense
+                          ? theme.textTheme.labelMedium
+                          : theme.textTheme.labelLarge)
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(width: 6),
+            HubHostOnlineDot(state: state),
+          ],
+        ),
+      ),
+    );
+    if (!unavailable) return content;
+    return Tooltip(message: '没有可用的已绑定电脑，先添加一台。', child: content);
   }
 }
 

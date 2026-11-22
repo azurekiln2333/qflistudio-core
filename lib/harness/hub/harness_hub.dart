@@ -126,6 +126,11 @@ class HarnessHubException implements Exception {
 /// * [currentSessions] 是当前主机的会话，[groupsOf] 已按 provider 分好组；
 /// * [activeSession] 是正在看的会话，[activeHandle] 是它打开的视图，
 ///   关闭视图时调用 [closeActiveSession] 释放，不结束会话。
+///
+/// 会话订阅按需建立：hub 只订阅当前主机，其余主机等用户切过去或直接使用
+/// （[openSession]、[launch]）时才拉起，见 [ensureListening]。订阅的代价不小
+/// ——本机会起日志轮询定时器，Herdr 与已绑定电脑各起一个后台循环——同时开
+/// 几个编辑器页就不该有几套轮询。
 class HarnessHub extends ChangeNotifier {
   HarnessHub({
     required List<HarnessHost> hosts,
@@ -140,6 +145,9 @@ class HarnessHub extends ChangeNotifier {
       _attachHost(host);
     }
     _currentHostId = _pickInitialHost(initialHostId);
+    // 只订阅打开面板就要显示的那台，其余等用户切过去。
+    final current = _currentHostId;
+    if (current != null) ensureListening(current);
   }
 
   /// 平台策略：桌面版能用本机和 Herdr，手机端只能用已绑定电脑和内置 Agent。
@@ -181,6 +189,9 @@ class HarnessHub extends ChangeNotifier {
       <String, List<HarnessProviderInfo>>{};
   final Map<String, Object> _sessionErrors = <String, Object>{};
 
+  /// 已订阅会话列表的主机 id；订阅是按需建立的，见 [ensureListening]。
+  final Set<String> _listening = <String>{};
+
   String? _currentHostId;
   HarnessSessionInfo? _activeSession;
   HarnessSessionHandle? _activeHandle;
@@ -212,8 +223,24 @@ class HarnessHub extends ChangeNotifier {
     if (hostById(id) == null) return;
     unawaited(closeActiveSession());
     _currentHostId = id;
+    ensureListening(id);
     notifyListeners();
   }
+
+  /// 订阅某台主机的会话列表；重复调用无副作用。
+  ///
+  /// hub 在构造、切换主机、打开或启动会话时自己会调。界面若要一次显示多台
+  /// 主机的会话（例如“全部会话”），也得先对每台调一次，否则读到的是空表。
+  void ensureListening(String hostId) {
+    if (_disposed || _listening.contains(hostId)) return;
+    final host = hostById(hostId);
+    if (host == null) return;
+    _listening.add(hostId);
+    _listen(host);
+  }
+
+  /// 是否已订阅该主机的会话列表。
+  bool isListening(String hostId) => _listening.contains(hostId);
 
   /// 主机状态；没有该主机时按 unsupported 处理，界面不会因为缺一项就崩。
   HarnessHostState stateOf(String hostId) =>
@@ -254,7 +281,10 @@ class HarnessHub extends ChangeNotifier {
     return host == null ? const <HarnessSessionInfo>[] : sessionsOf(host.id);
   }
 
-  /// 所有主机的会话合并，带主机 id，界面据此区分来源。
+  /// 已订阅主机的会话合并，带主机 id，界面据此区分来源。
+  ///
+  /// 只包含订阅过的主机（当前主机与被访问过的主机）；要让某台主机进入
+  /// 列表，先对它调一次 [ensureListening]。
   List<HarnessSessionInfo> get allSessions => <HarnessSessionInfo>[
     for (final host in _hosts) ...sessionsOf(host.id),
   ];
@@ -333,6 +363,7 @@ class HarnessHub extends ChangeNotifier {
     if (host == null) {
       throw HarnessHubException('找不到主机 ${info.hostId}，请刷新后重试');
     }
+    ensureListening(targetHostId);
     final existing = _activeHandle;
     if (_activeSession?.id == info.id &&
         _activeSession?.hostId == info.hostId &&
@@ -369,6 +400,7 @@ class HarnessHub extends ChangeNotifier {
     if (host == null) {
       throw const HarnessHubException('当前没有可用的主机');
     }
+    ensureListening(host.id);
     if (_opening) {
       throw const HarnessHubException('上一个会话还没打开，请稍后再试');
     }
@@ -406,13 +438,17 @@ class HarnessHub extends ChangeNotifier {
     }
   }
 
-  /// 重新订阅所有主机的会话列表，并丢弃 provider 缓存。
+  /// 重新订阅已订阅主机的会话列表，并丢弃 provider 缓存。
   ///
-  /// 主机离线时订阅可能只是空表，用户点「刷新」就再要一次。
+  /// 主机离线时订阅可能只是空表，用户点「刷新」就再要一次。刷新只动已经
+  /// 订阅过的主机：点一次刷新不该把没在看的主机全唤醒。
   Future<void> refresh() async {
     if (_disposed) return;
+    final current = _currentHostId;
+    if (current != null) ensureListening(current);
     _providers.clear();
     for (final host in _hosts) {
+      if (!_listening.contains(host.id)) continue;
       await _subs.remove(host.id)?.cancel();
       _listen(host);
       unawaited(
@@ -478,6 +514,8 @@ class HarnessHub extends ChangeNotifier {
     }
     _attachHost(host);
     _currentHostId ??= _pickInitialHost(null);
+    final current = _currentHostId;
+    if (current != null) ensureListening(current);
     notifyListeners();
   }
 
@@ -488,7 +526,7 @@ class HarnessHub extends ChangeNotifier {
     void onState() => _onHostState(host);
     _stateListeners[host.id] = onState;
     host.state.addListener(onState);
-    _listen(host);
+    // 会话订阅不在这里建立：状态点要立刻显示，会话列表等切过去再拉。
   }
 
   String? _pickInitialHost(String? initialHostId) {
@@ -518,6 +556,7 @@ class HarnessHub extends ChangeNotifier {
       unawaited(entry.value.cancel());
     }
     _subs.clear();
+    _listening.clear();
     for (final host in _hosts) {
       final listener = _stateListeners.remove(host.id);
       if (listener != null) host.state.removeListener(listener);

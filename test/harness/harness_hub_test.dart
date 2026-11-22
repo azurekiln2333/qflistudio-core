@@ -135,20 +135,61 @@ void main() {
     hub.dispose();
   });
 
-  test('merged sessions come from every host with their host id', () async {
+  test('only the current host is subscribed until the user switches', () async {
     final hub = buildHub();
     await pumpEventQueue();
 
-    expect(hub.allSessions.map((session) => session.id), [
-      'l1',
-      'l2',
-      'h1',
-      'r1',
-    ]);
-    expect(hub.currentSessions.map((session) => session.id), ['l1', 'l2']);
-    expect(hub.sessionsOf('remote-pc').single.hostId, 'remote-pc');
+    // 打开面板只需要内置 Agent 的列表：其余主机不该跟着起后台轮询。
+    expect(hub.isListening('studio'), isTrue);
+    expect(hub.isListening('local'), isFalse);
+    expect(hub.isListening('herdr'), isFalse);
+    expect(hub.isListening('remote-pc'), isFalse);
+    expect(hub.sessionsOf('local'), isEmpty);
+
+    await openHost(hub, 'local');
+
+    expect(hub.isListening('local'), isTrue);
+    expect(hub.sessionsOf('local').map((session) => session.id), ['l1', 'l2']);
+    // 已经订阅的不取消：来回切不该反复重拉历史。
+    expect(hub.isListening('studio'), isTrue);
     hub.dispose();
   });
+
+  test('refresh does not wake hosts that were never visited', () async {
+    final hub = buildHub();
+    await pumpEventQueue();
+
+    await hub.refresh();
+    await pumpEventQueue();
+
+    expect(hub.isListening('studio'), isTrue);
+    expect(hub.isListening('herdr'), isFalse);
+    expect(hub.isListening('remote-pc'), isFalse);
+    hub.dispose();
+  });
+
+  test(
+    'merged sessions come from every visited host with their host id',
+    () async {
+      final hub = buildHub();
+      await pumpEventQueue();
+
+      // 订阅按需建立：切一台拉一台。
+      for (final id in ['local', 'herdr', 'remote-pc']) {
+        await openHost(hub, id);
+      }
+
+      expect(hub.allSessions.map((session) => session.id), [
+        'l1',
+        'l2',
+        'h1',
+        'r1',
+      ]);
+      expect(hub.currentSessions.map((session) => session.id), ['r1']);
+      expect(hub.sessionsOf('remote-pc').single.hostId, 'remote-pc');
+      hub.dispose();
+    },
+  );
 
   test(
     'current groups label providers and sort sessions by update time',
@@ -170,6 +211,7 @@ void main() {
       ]);
       final hub = buildHub();
       await pumpEventQueue();
+      await openHost(hub, 'local');
       await hub.providersOf('local');
       await pumpEventQueue();
 
@@ -187,6 +229,8 @@ void main() {
   test('launch menu comes from the current host providers', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    // 内置 Agent 没有可启动的外部 harness：启动菜单看的是外部主机。
+    await openHost(hub, 'local');
 
     final menu = await hub.launchMenu();
     expect(menu.map((provider) => provider.id), ['claude', 'codex']);
@@ -231,6 +275,7 @@ void main() {
     () async {
       final hub = buildHub();
       await pumpEventQueue();
+      await openHost(hub, 'local');
       final session = hub.sessionsOf('local').first;
       final handle = await hub.openSession(session);
       expect(hub.activeSession?.id, 'l1');
@@ -248,6 +293,7 @@ void main() {
   test('opening the same session twice reuses one handle', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
     final session = hub.sessionsOf('local').first;
 
     final first = await hub.openSession(session);
@@ -261,6 +307,7 @@ void main() {
   test('closing the view detaches without stopping the session', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
     final handle = await hub.openSession(hub.sessionsOf('local').first);
 
     await hub.closeActiveSession();
@@ -275,6 +322,7 @@ void main() {
   test('a session removed by the host closes its view', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
     final handle = await hub.openSession(hub.sessionsOf('local').first);
 
     local.emitSessions([
@@ -290,6 +338,7 @@ void main() {
   test('launch adds the new session and selects it', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
 
     final handle = await hub.launch(
       const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp/project'),
@@ -342,6 +391,7 @@ void main() {
   test('refresh re-subscribes and picks up new sessions', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
     expect(hub.currentSessions, hasLength(2));
 
     local.emitSessions([
@@ -357,6 +407,7 @@ void main() {
   test('dispose detaches the view and disposes every host once', () async {
     final hub = buildHub();
     await pumpEventQueue();
+    await openHost(hub, 'local');
     final handle = await hub.openSession(hub.sessionsOf('local').first);
 
     hub.dispose();
@@ -399,6 +450,14 @@ void main() {
 
     expect(groups.map((group) => group.label), ['Claude Code', 'mystery']);
   });
+}
+
+/// 切到某台主机并等一次事件队列。
+///
+/// 会话订阅是按需建立的：切过去才会拉那台主机的列表。
+Future<void> openHost(HarnessHub hub, String id) async {
+  hub.selectHost(id);
+  await pumpEventQueue();
 }
 
 /// 主机自定义的结构化安装说明（对应 Pi-B 的 `HerdrInstallHint`）。

@@ -314,6 +314,112 @@ void main() {
     },
   );
 
+  testWidgets('the paired computer is only opened when the user asks for it', (
+    tester,
+  ) async {
+    final studio = FakeHarnessHost(
+      id: 'studio',
+      label: '内置 Agent',
+      kind: HarnessHostKind.studio,
+    );
+    final paired = FakeHarnessHost(
+      id: 'remote-pc2',
+      label: '书房的电脑',
+      kind: HarnessHostKind.remote,
+      initialSessions: [
+        fakeSession(hostId: 'remote-pc2', id: 'r9', title: '远程会话'),
+      ],
+    );
+    final hub = HarnessHub(
+      hosts: [studio],
+      desktop: true,
+      initialHostId: 'studio',
+      ownsHosts: false,
+    );
+    final gate = Completer<HarnessHost?>();
+    var opened = 0;
+    await tester.pumpWidget(
+      _wrap(
+        HubAgentsSurface(
+          hub: hub,
+          studioPane: const Center(child: Text('STUDIO-PANE')),
+          projectRoot: 'D:/proj/alpha',
+          openRemoteHost: () {
+            opened++;
+            return gate.future;
+          },
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // 挂载不等于连接：面板在编辑器页里是常挂的，这时不该去开远程。
+    expect(opened, 0);
+    expect(
+      find.byKey(const ValueKey('hub-host-pending-remote')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('hub-host-pending-remote')));
+    await tester.pump();
+
+    // 第一次点击：进入连接中，占位芯片不能重复点。
+    expect(opened, 1);
+    expect(find.byKey(const ValueKey('hub-remote-connecting')), findsOneWidget);
+
+    gate.complete(paired);
+    await tester.pumpAndSettle();
+
+    // 连上之后主机入列、切过去，占位芯片让位给真正的主机芯片。
+    expect(hub.currentHostId, 'remote-pc2');
+    expect(hub.isListening('remote-pc2'), isTrue);
+    expect(find.byKey(const ValueKey('hub-host-remote-pc2')), findsOneWidget);
+    expect(find.byKey(const ValueKey('hub-host-pending-remote')), findsNothing);
+
+    hub.dispose();
+    await studio.dispose();
+    await paired.dispose();
+  });
+
+  testWidgets('a failed remote open sends the user to pairing', (tester) async {
+    final studio = FakeHarnessHost(
+      id: 'studio',
+      label: '内置 Agent',
+      kind: HarnessHostKind.studio,
+    );
+    final hub = HarnessHub(
+      hosts: [studio],
+      desktop: true,
+      initialHostId: 'studio',
+      ownsHosts: false,
+    );
+    var pairingTaps = 0;
+    await tester.pumpWidget(
+      _wrap(
+        HubAgentsSurface(
+          hub: hub,
+          studioPane: const Center(child: Text('STUDIO-PANE')),
+          projectRoot: 'D:/proj/alpha',
+          openRemoteHost: () async => null,
+          onAddComputer: () => pairingTaps++,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('hub-host-pending-remote')));
+    await tester.pumpAndSettle();
+
+    // 没配对：主机数不变，入口还在，再点时带去配对而不是又空转一次。
+    expect(hub.hosts, hasLength(1));
+    await tester.tap(find.byKey(const ValueKey('hub-host-pending-remote')));
+    await tester.pump();
+    expect(pairingTaps, 1);
+
+    hub.dispose();
+    await studio.dispose();
+  });
+
   testWidgets('the composer stop button asks for confirmation too', (
     tester,
   ) async {
@@ -409,36 +515,40 @@ void main() {
     await tester.pump();
 
     // 内置会话由编辑器原有的列表画，这里不能再列一遍。
-    expect(find.byKey(const ValueKey('hub-session-section-title')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('hub-session-section-title')),
+      findsNothing,
+    );
     expect(find.byKey(const ValueKey('hub-session-studio-s1')), findsNothing);
 
     hub.dispose();
     await studio.dispose();
   });
 
-  testWidgets('terminal view joins a multi-byte character split in two chunks', (
-    tester,
-  ) async {
-    final channel = FakeTerminalChannel();
-    await tester.pumpWidget(_wrap(HubTerminalView(channel: channel)));
-    await tester.pump();
+  testWidgets(
+    'terminal view joins a multi-byte character split in two chunks',
+    (tester) async {
+      final channel = FakeTerminalChannel();
+      await tester.pumpWidget(_wrap(HubTerminalView(channel: channel)));
+      await tester.pump();
 
-    // 「你」的 UTF-8 是 E4 BD A0，故意拆成两块送进来。
-    channel.emitBytes(const [0xE4, 0xBD]);
-    await tester.pump();
-    channel.emitBytes(const [0xA0]);
-    await tester.pump();
+      // 「你」的 UTF-8 是 E4 BD A0，故意拆成两块送进来。
+      channel.emitBytes(const [0xE4, 0xBD]);
+      await tester.pump();
+      channel.emitBytes(const [0xA0]);
+      await tester.pump();
 
-    final terminal = tester
-        .widget<TerminalView>(find.byType(TerminalView))
-        .terminal;
-    expect(terminal.buffer.getText(), contains('你'));
-    // 拆包不能变成替换字符。
-    expect(terminal.buffer.getText(), isNot(contains('\uFFFD')));
+      final terminal = tester
+          .widget<TerminalView>(find.byType(TerminalView))
+          .terminal;
+      expect(terminal.buffer.getText(), contains('你'));
+      // 拆包不能变成替换字符。
+      expect(terminal.buffer.getText(), isNot(contains('\uFFFD')));
 
-    await channel.close();
-    await tester.pumpAndSettle();
-  });
+      await channel.close();
+      await tester.pumpAndSettle();
+    },
+  );
 
   testWidgets('terminal key bar sends control keys with modifiers', (
     tester,
