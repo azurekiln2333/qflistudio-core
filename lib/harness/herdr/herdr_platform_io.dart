@@ -104,7 +104,7 @@ bool executableOnPath(
     listDirectory: lister,
   )) {
     for (final candidate in _executableNames(name, windows)) {
-      if (probe(_join(directory, candidate))) return true;
+      if (probe(_join(directory, candidate, windows))) return true;
     }
   }
   return false;
@@ -127,27 +127,27 @@ List<String> _commonHerdrLocations({
       env['ProgramFiles(x86)'],
       env['LOCALAPPDATA'] == null
           ? null
-          : _join(env['LOCALAPPDATA']!, 'Programs'),
+          : _join(env['LOCALAPPDATA']!, 'Programs', windows),
     ]) {
       if (base == null || base.isEmpty) continue;
       for (final entry in listDirectory(base)) {
         final leaf = entry.split(RegExp(r'[/\\]')).last;
         if (leaf.toLowerCase().startsWith('herdr-')) {
-          locations.add(_join(entry, 'herdr.exe'));
+          locations.add(_join(entry, 'herdr.exe', windows));
         }
       }
     }
     for (final directory in <String?>[
       env['LOCALAPPDATA'] == null
           ? null
-          : _join(env['LOCALAPPDATA']!, 'Programs'),
+          : _join(env['LOCALAPPDATA']!, 'Programs', windows),
       env['USERPROFILE'] == null
           ? null
-          : _join(env['USERPROFILE']!, 'scoop', 'shims'),
-      home == null ? null : _join(home, '.cargo', 'bin'),
+          : _join(env['USERPROFILE']!, 'scoop', windows, 'shims'),
+      home == null ? null : _join(home, '.cargo', windows, 'bin'),
     ]) {
       if (directory != null && directory.isNotEmpty) {
-        locations.add(_join(directory, 'herdr.exe'));
+        locations.add(_join(directory, 'herdr.exe', windows));
       }
     }
     return locations;
@@ -157,8 +157,8 @@ List<String> _commonHerdrLocations({
     '/usr/local/bin/herdr',
     '/usr/bin/herdr',
     if (!macos) '/bin/herdr',
-    if (home != null) _join(home, '.local/bin/herdr'),
-    if (home != null) _join(home, '.cargo/bin/herdr'),
+    if (home != null) _join(home, '.local/bin/herdr', windows),
+    if (home != null) _join(home, '.cargo/bin/herdr', windows),
   ];
 }
 
@@ -170,13 +170,14 @@ List<String> _agentBinDirectories({
 }) {
   final home = _home(env, windows);
   return <String>[
-    if (windows && env['APPDATA'] != null) _join(env['APPDATA']!, 'npm'),
+    if (windows && env['APPDATA'] != null)
+      _join(env['APPDATA']!, 'npm', windows),
     if (windows && env['LOCALAPPDATA'] != null)
-      _join(env['LOCALAPPDATA']!, 'Programs'),
-    if (home != null) _join(home, '.local', 'bin'),
-    if (home != null) _join(home, '.bun', 'bin'),
-    if (home != null) _join(home, '.cargo', 'bin'),
-    if (home != null) _join(home, '.volta', 'bin'),
+      _join(env['LOCALAPPDATA']!, 'Programs', windows),
+    if (home != null) _join(home, '.local', windows, 'bin'),
+    if (home != null) _join(home, '.bun', windows, 'bin'),
+    if (home != null) _join(home, '.cargo', windows, 'bin'),
+    if (home != null) _join(home, '.volta', windows, 'bin'),
     if (macos) '/opt/homebrew/bin',
   ];
 }
@@ -199,7 +200,7 @@ String? _findOnPath(
       directory = directory.substring(1, directory.length - 1);
     }
     for (final candidate in _executableNames(name, windows)) {
-      final full = _join(directory, candidate);
+      final full = _join(directory, candidate, windows);
       if (probe(full)) return full;
     }
   }
@@ -220,8 +221,14 @@ String? _home(Map<String, String> env, bool windows) {
   return value == null || value.isEmpty ? null : value;
 }
 
-String _join(String base, String leaf, [String? more]) {
-  final separator = Platform.pathSeparator;
+/// Joins path fragments with the separator of the platform under test.
+///
+/// The separator follows [windows], not `Platform.pathSeparator`: every caller
+/// states which platform it is describing, and a probe that mixes separators
+/// would never match. That also lets the Windows rules be checked on a Linux
+/// runner.
+String _join(String base, String leaf, bool windows, [String? more]) {
+  final separator = windows ? r'\' : '/';
   final prefix = base.endsWith('/') || base.endsWith(r'\')
       ? base
       : '$base$separator';
