@@ -496,6 +496,11 @@ class HarnessHub extends ChangeNotifier {
       return initialHostId;
     }
     if (_hosts.isEmpty) return null;
+    // 内置 Agent 是面板默认内容：它的会话历史、审批和输入框就是这一栏本来的
+    // 样子，其他主机都是加进来的。没有内置 Agent 时才退到本机/已绑定电脑。
+    for (final host in _hosts) {
+      if (host.kind == HarnessHostKind.studio) return host.id;
+    }
     // 桌面版默认停在「本机」，手机端默认停在第一台已绑定电脑。
     for (final host in _hosts) {
       if (host.kind == HarnessHostKind.local && _desktop) return host.id;

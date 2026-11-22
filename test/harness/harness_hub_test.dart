@@ -92,7 +92,7 @@ void main() {
         initialHostId: initialHostId,
       );
 
-  test('desktop keeps every host and defaults to the local one', () async {
+  test('desktop keeps every host and opens on the studio one', () async {
     final hub = buildHub();
     await pumpEventQueue();
 
@@ -102,8 +102,27 @@ void main() {
       'herdr',
       'remote-pc',
     ]);
-    expect(hub.currentHostId, 'local');
+    // 面板默认展示内置 Agent 的对话，外部主机是加在旁边的。
+    expect(hub.currentHostId, 'studio');
     expect(hub.isDesktop, isTrue);
+    hub.dispose();
+  });
+
+  test('a hub without a studio host falls back to the local one', () async {
+    final hub = HarnessHub(
+      hosts: [
+        FakeHarnessHost(id: 'local', label: '本机', kind: HarnessHostKind.local),
+        FakeHarnessHost(
+          id: 'herdr',
+          label: 'Herdr',
+          kind: HarnessHostKind.local,
+        ),
+      ],
+      desktop: true,
+    );
+    await pumpEventQueue();
+
+    expect(hub.currentHostId, 'local');
     hub.dispose();
   });
 
@@ -193,10 +212,7 @@ void main() {
     expect(harnessHintText('未检测到 Herdr'), '未检测到 Herdr');
     expect(harnessHintText('   '), isNull);
     expect(harnessHintText(null), isNull);
-    expect(
-      harnessHintText({'title': 'Herdr', 'message': '服务未运行'}),
-      '服务未运行',
-    );
+    expect(harnessHintText({'title': 'Herdr', 'message': '服务未运行'}), '服务未运行');
     expect(harnessHintText(const _StructuredHint('需要安装 Herdr')), '需要安装 Herdr');
     // 拿不到文字的默认 toString 不算说明。
     expect(harnessHintText(const _OpaqueHint()), isNull);
@@ -292,7 +308,7 @@ void main() {
   test('launching on another host switches to that host', () async {
     final hub = buildHub();
     await pumpEventQueue();
-    expect(hub.currentHostId, 'local');
+    expect(hub.currentHostId, 'studio');
 
     final handle = await hub.launch(
       const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp/project'),
