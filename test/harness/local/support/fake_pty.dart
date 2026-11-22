@@ -5,10 +5,17 @@ import 'package:qfli_studio_core/harness/local/pty_process.dart';
 
 /// 测试用的 PTY 进程：由测试手动喂输出和退出码。
 class FakePtyProcess implements PtyProcess {
-  FakePtyProcess({this.pidValue = 4242, this.resizeSupported = false});
+  FakePtyProcess({
+    this.pidValue = 4242,
+    this.resizeSupported = false,
+    this.neverExits = false,
+  });
 
   final int pidValue;
   final bool resizeSupported;
+
+  /// 进程不响应 TERM、退出码永不完成。用来验证 teardown 有上限。
+  final bool neverExits;
   final StreamController<Uint8List> _output =
       StreamController<Uint8List>.broadcast();
   final Completer<int> _exit = Completer<int>();
@@ -45,7 +52,7 @@ class FakePtyProcess implements PtyProcess {
   @override
   Future<void> terminate() async {
     terminateCount++;
-    if (!_exit.isCompleted) _exit.complete(0);
+    if (!neverExits && !_exit.isCompleted) _exit.complete(0);
     // 让退出码先到达监听者，再关闭输出，与真实进程的先后顺序一致。
     await Future<void>.delayed(Duration.zero);
     if (!_output.isClosed) await _output.close();

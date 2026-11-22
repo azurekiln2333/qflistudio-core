@@ -41,11 +41,13 @@ class MuxSession implements HarnessTerminalChannel {
     required this.rows,
     required int scrollbackBytes,
     required Duration idleAfter,
+    required Duration stopTimeout,
     required PtyProcess process,
     required void Function(MuxEventKind kind) onEvent,
   }) : scrollback = TerminalScrollback(maxBytes: scrollbackBytes),
        _process = process,
        _idleAfter = idleAfter,
+       _stopTimeout = stopTimeout,
        _onEvent = onEvent;
 
   final String id;
@@ -63,6 +65,7 @@ class MuxSession implements HarnessTerminalChannel {
 
   final PtyProcess _process;
   final Duration _idleAfter;
+  final Duration _stopTimeout;
   final void Function(MuxEventKind kind) _onEvent;
   final StreamController<Uint8List> _output =
       StreamController<Uint8List>.broadcast();
@@ -206,8 +209,6 @@ class MuxSession implements HarnessTerminalChannel {
     _finish(_exitCode);
   }
 
-  static const Duration _stopTimeout = Duration(seconds: 5);
-
   /// 释放本视图持有的资源。进程由 [StudioMux] 管理。
   Future<void> dispose() async {
     _idleTimer?.cancel();
@@ -226,10 +227,12 @@ class StudioMux {
     ProcessSupervisor? supervisor,
     int scrollbackBytes = kDefaultScrollbackBytes,
     Duration idleAfter = const Duration(milliseconds: 900),
+    Duration stopTimeout = defaultStopTimeout,
     String Function()? idFactory,
     this.maxExitedSessions = 8,
   }) : _scrollbackBytes = scrollbackBytes,
        _idleAfter = idleAfter,
+       _stopTimeout = stopTimeout,
        _idFactory =
            idFactory ??
            (() =>
@@ -246,8 +249,16 @@ class StudioMux {
   /// 用于“刚结束还能回看”，超过这个数量按退出顺序淘汰。
   final int maxExitedSessions;
 
+  /// 等待进程退出的上限。
+  ///
+  /// 释放时逐个会话串行等待，所以这个值同时也是“释放 N 个会话最多多久”的
+  /// 一份量。进程不响应 TERM 时它决定 teardown 的上限，测试可以注入更短的
+  /// 值来断言这一点。
+  static const Duration defaultStopTimeout = Duration(seconds: 5);
+
   final int _scrollbackBytes;
   final Duration _idleAfter;
+  final Duration _stopTimeout;
   final String Function() _idFactory;
   final bool _ownsSupervisor;
   final bool _ownsLauncher;
@@ -313,6 +324,7 @@ class StudioMux {
       rows: rows,
       scrollbackBytes: _scrollbackBytes,
       idleAfter: _idleAfter,
+      stopTimeout: _stopTimeout,
       process: process,
       onEvent: (MuxEventKind kind) => _emitEvent(session, kind),
     );

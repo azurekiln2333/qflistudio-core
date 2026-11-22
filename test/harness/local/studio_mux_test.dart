@@ -253,6 +253,25 @@ void main() {
       expect(launcher.spawned.single.terminateCount, 1);
     });
 
+    test('进程不响应终止时，dispose 受 stopTimeout 限制', () async {
+      // 释放会逐个会话串行等退出码。进程卡死时每次等待必须有上限，否则
+      // 一个卡住的会话就能把 teardown 拖到平台的默认超时。
+      final launcher = _NeverExitLauncher();
+      final mux = StudioMux(
+        launcher: launcher,
+        stopTimeout: const Duration(milliseconds: 50),
+      );
+      await mux.start(providerId: 'shell', executable: '/bin/sh');
+
+      final stopwatch = Stopwatch()..start();
+      await mux.dispose();
+      stopwatch.stop();
+
+      // 默认上限是 5 秒；注入 50 毫秒后必须明显短于默认值。
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(mux.sessions, isEmpty);
+    });
+
     test('无后端时 isSupported 为 false 且 start 抛出 UnsupportedError', () async {
       final mux = StudioMux(launcher: const UnsupportedPtyLauncher());
       addTearDown(mux.dispose);
@@ -397,4 +416,29 @@ void main() {
       expect(launcher.strategy, 'unsupported');
     });
   });
+}
+
+/// 永不退出的 launcher：把 terminate 当作没回应。
+class _NeverExitLauncher implements PtyLauncher {
+  @override
+  String get strategy => 'fake';
+
+  @override
+  bool get allocatesTerminal => true;
+
+  @override
+  bool get supportsResize => false;
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  Future<PtyProcess> spawn({
+    required String executable,
+    required List<String> arguments,
+    String? workingDirectory,
+    Map<String, String>? environment,
+    int columns = 80,
+    int rows = 24,
+  }) async => FakePtyProcess(neverExits: true);
 }
