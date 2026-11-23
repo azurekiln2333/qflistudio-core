@@ -59,6 +59,11 @@ identifier without changing existing scope order or the initial history page.
 Repeated selection leaves Agents selected. Create its content and connect
 hosts only when the controller first selects Agents, not when the pager
 prebuilds an adjacent page. Retain visited content when selecting other tabs.
+Use a Home-owned key to preserve the retained Agents element across reordered
+page slots: a child ValueKey does not cross index-keyed framework wrappers.
+Session navigation callbacks use Home's persistent context because project
+search temporarily removes the pager. Swipe tests await bounded scroll-end
+readiness before asserting selection; spring settling differs from tab taps.
 Studio sessions come from `agent_sessions/index.json`, not transcript scans.
 Host `studio` selects the built-in session without calling `hub.openSession`.
 Other hosts use the supplied host and session IDs. Session waits must release

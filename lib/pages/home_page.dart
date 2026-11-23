@@ -357,6 +357,10 @@ class _HomeTabState extends State<HomeTab>
   /// 首次打开 Agents 时建，之后保活：订阅与快照不用每次重建。
   Widget? _agentsTab;
 
+  // TabBarView can wrap pages in index-keyed semantics nodes. Reparent the
+  // retained Agents state when drag sorting moves it to another page slot.
+  final _agentsPageKey = GlobalKey();
+
   /// 首页持有的 hub。跳转时交给编辑器，避免同一台电脑开两条连接。
   HarnessHub? _agentsHub;
 
@@ -770,21 +774,26 @@ class _HomeTabState extends State<HomeTab>
   Widget _buildScopePage(BuildContext context, ProjectScope scope) {
     final key = ValueKey('home-scope-page-${scope.name}');
     return switch (scope) {
-      ProjectScope.agents => RetainedPage(
+      ProjectScope.agents => KeyedSubtree(
         key: key,
-        child: ListenableBuilder(
-          listenable: _projectTabs,
-          builder: (context, _) {
-            // TabBarView may mount an adjacent page before it is selected.
-            // Do not connect hosts until the user actually opens Agents.
-            if (_agentsTab == null &&
-                _orderedScopes[_projectTabs.index] != ProjectScope.agents) {
-              return const SizedBox.shrink();
-            }
-            return _agentsTab ??=
-                widget.agentsTabBuilder?.call(context) ??
-                _buildAgentsTab(context);
-          },
+        child: RetainedPage(
+          key: _agentsPageKey,
+          child: ListenableBuilder(
+            listenable: _projectTabs,
+            builder: (context, _) {
+              // TabBarView may mount an adjacent page before it is selected.
+              // Do not connect hosts until the user actually opens Agents.
+              if (_agentsTab == null &&
+                  _orderedScopes[_projectTabs.index] != ProjectScope.agents) {
+                return const SizedBox.shrink();
+              }
+              // Search temporarily removes the pager. Session callbacks must
+              // retain Home's context, which survives that replacement.
+              return _agentsTab ??=
+                  widget.agentsTabBuilder?.call(this.context) ??
+                  _buildAgentsTab(this.context);
+            },
+          ),
         ),
       ),
       ProjectScope.workspace => SavedWorkspacesTab(

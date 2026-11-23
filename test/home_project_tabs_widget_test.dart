@@ -141,16 +141,14 @@ void main() {
     final controller = tester.widget<TabBar>(find.byType(TabBar)).controller!;
     expect(builds, 0, reason: 'An adjacent Agents page must not start hosts.');
 
-    await tester.drag(find.byType(TabBarView), const Offset(-600, 0));
-    await _settle(tester);
+    await _swipeScope(tester, const Offset(-600, 0));
     expect(controller.index, 1);
     expect(builds, 1);
     expect(find.text('Session 0').hitTestable(), findsOneWidget);
     await tester.tap(find.text('Advance session'));
     await tester.pump();
 
-    await tester.drag(find.byType(TabBarView), const Offset(-600, 0));
-    await _settle(tester);
+    await _swipeScope(tester, const Offset(-600, 0));
     expect(controller.index, 2);
     expect(
       find.byKey(const ValueKey('home-scope-page-all')).hitTestable(),
@@ -158,12 +156,10 @@ void main() {
     );
     expect(find.text('Session 1').hitTestable(), findsNothing);
 
-    await tester.drag(find.byType(TabBarView), const Offset(600, 0));
-    await _settle(tester);
+    await _swipeScope(tester, const Offset(600, 0));
     expect(controller.index, 1);
     expect(find.text('Session 1').hitTestable(), findsOneWidget);
-    await tester.drag(find.byType(TabBarView), const Offset(600, 0));
-    await _settle(tester);
+    await _swipeScope(tester, const Offset(600, 0));
     expect(controller.index, 0);
     expect(builds, 1);
     expect(tester.takeException(), isNull);
@@ -237,6 +233,36 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Session 0').hitTestable(), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Agents callbacks still navigate after closing project search', (
+    tester,
+  ) async {
+    await _mount(
+      tester,
+      _Fixture.create(root),
+      agentsTabBuilder: (homeContext) => Center(
+        child: TextButton(
+          onPressed: () => Navigator.of(homeContext).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => const Scaffold(body: Text('Session destination')),
+            ),
+          ),
+          child: const Text('Open session'),
+        ),
+      ),
+    );
+    await tester.tap(_tabFinder('Agents'));
+    await _settle(tester);
+    await tester.tap(find.byIcon(Icons.search));
+    await _settle(tester);
+    expect(find.byType(TabBarView), findsNothing);
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    await _settle(tester);
+    await tester.tap(find.text('Open session'));
+    await _settle(tester);
+    expect(find.text('Session destination'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -557,6 +583,24 @@ Future<void> _settle(WidgetTester tester) async {
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 400));
   await tester.pump();
+}
+
+Future<void> _swipeScope(WidgetTester tester, Offset offset) async {
+  final pager = find.byType(TabBarView);
+  final pageView = tester.widget<PageView>(
+    find.descendant(of: pager, matching: find.byType(PageView)),
+  );
+  await tester.drag(pager, offset);
+  // A swipe uses a spring simulation, not the fixed-duration tab-tap
+  // animation. TabController publishes the final index at scroll end.
+  for (var frame = 0; frame < 40; frame++) {
+    await tester.pump(const Duration(milliseconds: 40));
+    if (!pageView.controller!.position.isScrollingNotifier.value) {
+      await tester.pump();
+      return;
+    }
+  }
+  fail('Home scope pager did not finish the swipe within 1600ms.');
 }
 
 class _Fixture {
