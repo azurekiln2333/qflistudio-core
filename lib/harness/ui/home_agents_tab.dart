@@ -108,6 +108,9 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   /// 已经挂上监听的运行时，避免重复挂。
   AgentRuntime? _watchedRuntime;
 
+  /// 正在补接已绑定的电脑，避免打开与下拉刷新同时开两条连接。
+  bool _attachingRemote = false;
+
   /// 当前渲染的行，测试用来断言排序与合并。
   @visibleForTesting
   List<AgentsIndexRow> get rows => _rows;
@@ -160,9 +163,19 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   /// hub 的构造是同步的，远程主机要先异步打开存储，所以走 [HarnessHub.addHost]。
   /// 已经有远程主机时不重复开：一个 hub 一条连接。
   Future<void> _attachRemoteHost() async {
+    if (_attachingRemote) return;
     if (_hub.hosts.any((host) => host.kind == HarnessHostKind.remote)) return;
-    final opener = widget.remoteHostOpener ?? openRemoteHarnessHost;
-    final host = await opener();
+    _attachingRemote = true;
+    HarnessHost? host;
+    try {
+      final opener = widget.remoteHostOpener ?? openRemoteHarnessHost;
+      host = await opener();
+    } on Object {
+      // 打不开远程存储只影响已绑定电脑那一栏，不拦内置会话与本机。
+      host = null;
+    } finally {
+      _attachingRemote = false;
+    }
     if (host == null) return;
     if (_disposed) {
       await host.dispose();
