@@ -9,6 +9,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../services/project_file_access.dart';
+
 /// 工具失败原因；[code] 供控制器映射为工具错误或冲突。
 class VibeToolException implements Exception {
   const VibeToolException(this.message, {this.code = 'error'});
@@ -477,17 +479,28 @@ class VibeProjectFiles {
   Future<String> read(String path) async {
     final absolute = _readablePath(path);
     final file = File(absolute);
-    if (!await file.exists()) {
-      throw const VibeToolException('文件不存在', code: 'not_found');
+    final external = ProjectFileAccess.isExternal(absolute);
+    if (!external) {
+      if (!await file.exists()) {
+        throw const VibeToolException('文件不存在', code: 'not_found');
+      }
+      final length = await file.length();
+      if (length > maxReadBytes) {
+        throw VibeToolException(
+          '文件超过 ${maxReadBytes ~/ 1024} KiB，无法读取',
+          code: 'too_large',
+        );
+      }
     }
-    final length = await file.length();
-    if (length > maxReadBytes) {
+    // 外部根走协调读取：iCloud 占位先下载，`exists` 在下载前会报假。
+    final bytes = await ProjectFileAccess.readBytes(absolute);
+    if (bytes.length > maxReadBytes) {
       throw VibeToolException(
         '文件超过 ${maxReadBytes ~/ 1024} KiB，无法读取',
         code: 'too_large',
       );
     }
-    final text = _decodeText(await file.readAsBytes());
+    final text = _decodeText(bytes);
     _knownContent[absolute] = text;
     return text;
   }
@@ -571,7 +584,7 @@ class VibeProjectFiles {
       } on FileSystemException {
         throw const VibeToolException('文件已存在，未覆盖', code: 'exists');
       }
-      await file.writeAsString(content, flush: true);
+      await ProjectFileAccess.writeBytes(absolute, utf8.encode(content));
       _knownContent[absolute] = content;
       return VibeWriteResult(
         relativePath: relativePath,
@@ -587,13 +600,16 @@ class VibeProjectFiles {
         throw const VibeToolException('写入已有文件前请先 read_file', code: 'not_read');
       }
       // 锁内、真正写盘前复查磁盘内容。
-      final current = _decodeText(await file.readAsBytes());
+      final current = _decodeText(await ProjectFileAccess.readBytes(absolute));
       if (current != known) {
         throw const VibeToolException('文件已在会话外被修改，已拒绝覆盖', code: 'conflict');
       }
-      backup = await _backup(absolute);
-      if (backup == null) {
-        throw const VibeToolException('备份失败，已取消写入', code: 'backup');
+      // 外部根不建 `.qfli` 备份；应用级历史备份仍然跑。
+      if (!ProjectFileAccess.isExternal(absolute)) {
+        backup = await _backup(absolute);
+        if (backup == null) {
+          throw const VibeToolException('备份失败，已取消写入', code: 'backup');
+        }
       }
       // 应用级版本历史与用户手动保存同一条路径。备份的是覆盖前的磁盘内容，
       // 所以必须在真正写盘之前调用；失败不阻塞写入。
@@ -603,7 +619,7 @@ class VibeProjectFiles {
         // 历史备份失败不影响本次写入。
       }
       // 备份也是 await：写盘前再对一次磁盘版本。
-      final latest = _decodeText(await file.readAsBytes());
+      final latest = _decodeText(await ProjectFileAccess.readBytes(absolute));
       if (latest != known) {
         throw const VibeToolException('文件在备份期间被修改，已拒绝覆盖', code: 'conflict');
       }
@@ -612,7 +628,7 @@ class VibeProjectFiles {
     if (shouldWrite?.call(absolute) == false) {
       throw const VibeToolException('编辑器中有未保存的修改，已拒绝覆盖', code: 'conflict');
     }
-    await file.writeAsString(content, flush: true);
+    await ProjectFileAccess.writeBytes(absolute, utf8.encode(content));
     _knownContent[absolute] = content;
     return VibeWriteResult(
       relativePath: relativePath,
@@ -634,7 +650,7 @@ class VibeProjectFiles {
     final file = File(absolute);
     try {
       await file.parent.create(recursive: true);
-      await file.writeAsString(content, flush: true);
+      await ProjectFileAccess.writeBytes(absolute, utf8.encode(content));
     } on FileSystemException {
       return null;
     }
@@ -701,7 +717,10 @@ class VibeProjectFiles {
   }
 
   /// 覆盖前把当前磁盘内容复制到项目内备份目录。
+  ///
+  /// 外部根不写 `.qfli`，所以不在这里建备份；调用方已跳过该分支。
   Future<String?> _backup(String absolute) async {
+    if (ProjectFileAccess.isExternal(absolute)) return null;
     try {
       final stamp = DateTime.now();
       String two(int value) => value.toString().padLeft(2, '0');

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../models/project.dart';
 import '../i18n/studio_localizations.dart';
 import '../services/app_paths.dart';
+import '../services/external_folder_service.dart';
 import '../services/file_service.dart';
 import '../services/project_templates.dart';
 import '../services/studio_profile.dart';
@@ -428,6 +429,7 @@ class _AddExistingDialog extends StatefulWidget {
 
 class _AddExistingDialogState extends State<_AddExistingDialog> {
   final _pathController = TextEditingController();
+  ExternalFolder? _external;
   String? _error;
   bool _adding = false;
 
@@ -438,6 +440,17 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
   }
 
   Future<void> _pickFolder() async {
+    // iOS 与 Mac 先走系统文件夹选择器。选中即持有安全作用域书签，
+    // 重启后仍能读写；桌面平台退回 file_selector。
+    final external = await ExternalFolderService.pick();
+    if (external != null) {
+      if (!mounted) return;
+      setState(() {
+        _external = external;
+        _pathController.text = external.path;
+      });
+      return;
+    }
     String? dir;
     try {
       dir = await getDirectoryPath();
@@ -446,7 +459,10 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
     }
     if (dir == null || !mounted) return;
     final picked = dir;
-    setState(() => _pathController.text = picked);
+    setState(() {
+      _external = null;
+      _pathController.text = picked;
+    });
   }
 
   Future<void> _submit() async {
@@ -455,7 +471,12 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
       _adding = true;
       _error = null;
     });
-    final result = await widget.store.addExisting(_pathController.text);
+    final result = _external == null
+        ? await widget.store.addExisting(_pathController.text)
+        : await widget.store.addExistingExternal(
+            _pathController.text,
+            folderId: _external!.id,
+          );
     if (!mounted) return;
     if (result.error != null) {
       setState(() {
@@ -481,7 +502,7 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
             TextField(
               controller: _pathController,
               autofocus: true,
-              onChanged: (_) => setState(() {}),
+              onChanged: (_) => setState(() => _external = null),
               onSubmitted: (_) => _submit(),
               decoration: InputDecoration(
                 labelText: '项目文件夹路径',

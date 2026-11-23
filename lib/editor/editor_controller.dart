@@ -7,6 +7,7 @@ import 'package:re_editor/re_editor.dart';
 
 import '../services/file_encoding.dart';
 import '../services/file_backup.dart';
+import '../services/project_file_access.dart';
 
 import '../models/project.dart';
 import 'open_file.dart';
@@ -213,7 +214,7 @@ class EditorController extends ChangeNotifier {
           );
           if (shouldSave?.call() == false) return '保存已取消';
         }
-        await file.writeAsBytes(snapshot, flush: true);
+        await ProjectFileAccess.writeBytes(file.path, snapshot);
         open.modifiedAt = (await file.stat()).modified;
         final wasDirty = open.dirty;
         open.dirty = open.revision != revision;
