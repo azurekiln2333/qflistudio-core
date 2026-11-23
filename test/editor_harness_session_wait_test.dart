@@ -19,6 +19,7 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 
 import 'support/fake_agent.dart';
 import 'support/fake_harness_host.dart';
+import 'support/memory_composer_defaults.dart';
 
 /// 首帧选会话若在等待中被打断，不能把定时器留在页面之外。
 ///
@@ -108,6 +109,7 @@ void main() {
           agentEnabled: true,
           harnessHub: hub,
           ownsHarnessHub: false,
+          composerDefaults: MemoryComposerDefaults(),
           // 会话永远不会出现在这个空主机上：页面停在等待里。
           initialHarnessSession: const HarnessSessionTarget(
             hostId: 'remote:1',
@@ -152,6 +154,7 @@ void main() {
           agentEnabled: true,
           harnessHub: hub,
           ownsHarnessHub: false,
+          composerDefaults: MemoryComposerDefaults(),
           initialHarnessSession: const HarnessSessionTarget(
             hostId: 'remote:1',
             sessionId: 's-late',

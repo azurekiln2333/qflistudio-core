@@ -19,6 +19,7 @@ import 'package:qfli_studio_core/store/settings_store.dart';
 
 import 'support/fake_agent.dart';
 import 'support/fake_harness_host.dart';
+import 'support/memory_composer_defaults.dart';
 
 /// 首帧选中会话：目标值本身、外来 hub 的接线与两条打开路径。
 void main() {
@@ -110,6 +111,11 @@ void main() {
   });
 
   /// 挂载编辑器，注入首页那一份 hub。
+  ///
+  /// 输入卡片的选择记忆换成内存实现：文件实现要问存储目录（`AppPaths`），
+  /// 而路径探测会挂一个 2 秒的可写性定时器。widget 测试里这些平台通道不会
+  /// 回应，定时器就留到用例结束，整条用例以「A Timer is still pending」失败。
+  /// 同目录下几份编辑器用例一直这么写，这里补上。
   Future<void> mount(
     WidgetTester tester, {
     required HarnessHub hub,
@@ -134,6 +140,7 @@ void main() {
           agentEnabled: true,
           harnessHub: hub,
           ownsHarnessHub: false,
+          composerDefaults: MemoryComposerDefaults(),
           initialHarnessSession: target,
         ),
       ),
