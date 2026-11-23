@@ -12,6 +12,8 @@ and the app repository's native receivers.
 - `HarnessSessionTarget({required String hostId, required String sessionId})`
   is the single session address. `openEditorPage(harnessSession: ...)` passes
   it to `EditorPage(initialHarnessSession: ...)`.
+- `HarnessHub.hasLoadedSessionsFor(String hostId)` distinguishes a received
+  session list, including an empty list, from an established subscription.
 - `ExternalFolderService.pick()` returns `Future<ExternalFolder?>`.
   `restore()` returns `Future<List<ExternalFolder>>` and registers resolved
   roots. `adopt(ExternalFolder)` registers a root in the current process.
@@ -53,6 +55,10 @@ Studio sessions come from `agent_sessions/index.json`, not transcript scans.
 Host `studio` selects the built-in session without calling `hub.openSession`.
 Other hosts use the supplied host and session IDs. Session waits must release
 timers and listeners when the editor closes.
+
+Keep snapshot rows until that host supplies its first valid session list.
+An empty list clears that host's old rows. `isListening` alone cannot decide
+this: a subscription may still be waiting for its first event.
 
 Status colors are semantic: blocked orange, working green, idle gray, done
 blue, exited red, and unknown an outline. Provide text semantics too.
@@ -104,6 +110,14 @@ placeholders. `RemoteSessionCache` keeps at most 2 MiB and 400 events.
 ## 6. Tests Required
 
 Run tests in cloud CI only. Local format and static analysis are permitted.
+This restriction also covers temporary scripts that execute product functions.
+
+Widget tests that start real filesystem work must start and await that work
+through `tester.runAsync`. Use bounded readiness checks with frame pumps.
+Do not await a fake-zone queued continuation entirely inside `runAsync`.
+`runDeviceSync` waits for dismissal of its result dialog: assert the result
+message, tap its acknowledgement, then await the returned future. File-content
+assertions still need real async IO. Keep failure-preserves-old-file assertions.
 
 - `external_project_root_test.dart`, `external_explorer_menu_test.dart`, and
   `external_agent_files_test.dart`: registration, native dispatch, visible
