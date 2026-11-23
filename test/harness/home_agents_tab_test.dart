@@ -49,6 +49,38 @@ void main() {
     ).writeAsStringSync(jsonEncode({'version': 2, 'sessions': sessions}));
   }
 
+  /// 真实 IO 的总等待上限。
+  const readyDeadline = Duration(seconds: 10);
+
+  HomeAgentsTabState tabState(WidgetTester tester) =>
+      tester.state<HomeAgentsTabState>(find.byType(HomeAgentsTab));
+
+  int studioRowCount(WidgetTester tester) => tabState(
+    tester,
+  ).rows.where((row) => row.hostKind == HarnessHostKind.studio).length;
+
+  /// 在 `runAsync` 活动期间有界地等真实 IO 就位。
+  Future<void> waitStudioRows(WidgetTester tester, int expected) async {
+    final stopwatch = Stopwatch()..start();
+    while (studioRowCount(tester) < expected &&
+        stopwatch.elapsed < readyDeadline) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await tester.pump();
+    }
+  }
+
+  /// 刷新动作自己也要等在 runAsync 里：假时钟下磁盘读写不会完成。
+  Future<void> refreshTab(WidgetTester tester, {int expectedRows = 0}) async {
+    final state = tabState(tester);
+    await tester.runAsync(() async {
+      await state.refresh();
+      await waitStudioRows(tester, expectedRows);
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 20));
+    await tester.pump(const Duration(seconds: 3));
+  }
+
   Future<HarnessHub> mount(
     WidgetTester tester, {
     required List<HarnessHost> hosts,
@@ -57,6 +89,7 @@ void main() {
     void Function(AgentsIndexRow row)? onOpenDetails,
     HarnessDeviceInfo? deviceInfo,
     Future<HarnessHost?> Function()? remoteHostOpener,
+    int expectedRows = 0,
   }) async {
     final hub = HarnessHub(hosts: hosts, desktop: true, ownsHosts: false);
     addTearDown(hub.dispose);
@@ -64,37 +97,42 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     });
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: HomeAgentsTab(
-            auth: auth,
-            store: store,
-            settings: settings,
-            harnessHub: hub,
-            remoteHostOpener: remoteHostOpener,
-            snapshotStore: snapshotStore,
-            sessionRoot: sessionRoot,
-            deviceInfo:
-                deviceInfo ??
-                const HarnessDeviceInfo(
-                  hostName: '测试手机',
-                  os: HarnessDeviceOs.android,
-                  osVersion: '14',
-                ),
-            onOpenSession: onOpenSession,
-            onOpenDetails: onOpenDetails,
+    // 启动本身包在 runAsync 里：它在首帧就开读磁盘上的内置会话索引，
+    // 真实的文件回调只在 runAsync 活动期间才会完成。在假时钟里启动，
+    // 后面再补 sleep 也等不到那些回调。
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: HomeAgentsTab(
+              auth: auth,
+              store: store,
+              settings: settings,
+              harnessHub: hub,
+              // 默认给内存快照：真实快照要问存储目录，会挂一个 2 秒探测。
+              remoteHostOpener: remoteHostOpener ?? () async => null,
+              snapshotStore:
+                  snapshotStore ??
+                  AgentsSnapshotStore(backend: LocalMemoryBackend()),
+              sessionRoot: sessionRoot,
+              deviceInfo:
+                  deviceInfo ??
+                  const HarnessDeviceInfo(
+                    hostName: '测试手机',
+                    os: HarnessDeviceOs.android,
+                    osVersion: '14',
+                  ),
+              onOpenSession: onOpenSession,
+              onOpenDetails: onOpenDetails,
+            ),
           ),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 20));
-    // 让真实文件读写跑完：内置会话索引是磁盘上的 index.json。
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 30)),
-    );
-    await tester.pump();
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+      // 等内置会话的行真的出现，不猜时长。
+      await waitStudioRows(tester, expectedRows);
+    });
     // 走完快照的防抖窗口，免得测试结束时还挂着定时器。
     await tester.pump(const Duration(seconds: 3));
     return hub;
@@ -114,6 +152,10 @@ void main() {
   });
 
   testWidgets('首屏先画快照，主机报上新列表后替换', (tester) async {
+    // 主机设成「订阅时不报初始帧」：真实主机刚连上、还没说话的那段时间。
+    //
+    // 不能用「主机报一个空表」来制造这段窗口：空表是一份有效报告，
+    // 按契约快照行必须当场让位（xcheck 记录的行为），那样快照永远画不出来。
     final snapshot = AgentsSnapshotStore(
       backend: LocalMemoryBackend(
         jsonEncode({
@@ -136,6 +178,7 @@ void main() {
       label: 'MacBook',
       kind: HarnessHostKind.remote,
       initialSessions: const [],
+      emitInitialSessions: false,
     );
     addTearDown(remote.dispose);
     await mount(tester, hosts: [remote], snapshotStore: snapshot);
@@ -168,7 +211,7 @@ void main() {
       kind: HarnessHostKind.remote,
     );
     addTearDown(remote.dispose);
-    await mount(tester, hosts: [remote]);
+    await mount(tester, hosts: [remote], expectedRows: 1);
 
     expect(find.text('内置改登录'), findsOneWidget);
     expect(find.textContaining('内置 Agent'), findsWidgets);
@@ -290,6 +333,7 @@ void main() {
 
     final semantics = tester.ensureSemantics();
     addTearDown(semantics.dispose);
+    await tester.pump();
 
     expect(find.bySemanticsLabel('待确认'), findsWidgets);
   });
@@ -312,16 +356,46 @@ void main() {
         'updatedAt': '2026-11-23T12:00:00.000Z',
       },
     ]);
-    final state = tester.state<HomeAgentsTabState>(find.byType(HomeAgentsTab));
-    await state.refresh();
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 30)),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 20));
-    await tester.pump(const Duration(seconds: 3));
+    await refreshTab(tester, expectedRows: 1);
 
     expect(find.text('刷新后出现'), findsOneWidget);
+  });
+
+  testWidgets('主机报来有效空表时，快照里的旧行让位', (tester) async {
+    // 首个有效空列表也必须替换快照。
+    final snapshot = AgentsSnapshotStore(
+      backend: LocalMemoryBackend(
+        jsonEncode({
+          'version': AgentsSnapshotStore.schemaVersion,
+          'rows': [
+            {
+              'hostId': 'remote:1',
+              'sessionId': 'old',
+              'hostLabel': 'MacBook',
+              'hostKind': 'remote',
+              'title': '上次的会话',
+              'status': 'idle',
+            },
+          ],
+        }),
+      ),
+    );
+    final remote = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+      initialSessions: const [],
+      emitInitialSessions: false,
+    );
+    addTearDown(remote.dispose);
+    await mount(tester, hosts: [remote], snapshotStore: snapshot);
+
+    expect(find.text('上次的会话'), findsOneWidget);
+    remote.emitSessions(const []);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    expect(find.text('上次的会话'), findsNothing, reason: '空表把快照行清掉');
+    expect(find.byKey(const ValueKey('agents-empty')), findsOneWidget);
   });
 
   testWidgets('快照在防抖后写回', (tester) async {
@@ -345,6 +419,13 @@ void main() {
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
 
+    await tester.runAsync(() async {
+      final watch = Stopwatch()..start();
+      while (!backend.hasWrite && watch.elapsed < readyDeadline) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
     expect(backend.hasWrite, isTrue);
     expect(backend.payload, contains('写进快照'));
   });

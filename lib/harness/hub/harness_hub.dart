@@ -257,7 +257,17 @@ class HarnessHub extends ChangeNotifier {
   }
 
   /// 是否已订阅该主机的会话列表。
+  ///
+  /// 订阅不等于拿到数据：刚订阅时 [sessionsOf] 仍然是空的。需要区分
+  /// 「还没开口」与「报了空列表」时用 [hasLoadedSessionsFor]。
   bool isListening(String hostId) => _listening.contains(hostId);
+
+  /// 该主机是否已报过一次列表（空列表也算）。
+  ///
+  /// 首页靠这个判断能否让快照里的旧行让位：主机真正报过之后，
+  /// 快照就只是旧数据。还没报过时不能拿空列表当作「真的没有会话」，
+  /// 否则首屏会把快照抹掉。
+  bool hasLoadedSessionsFor(String hostId) => _sessions.containsKey(hostId);
 
   /// 订阅全部主机。重复调用无副作用。
   ///

@@ -7,8 +7,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/harness/harness_host.dart';
+import 'package:qfli_studio_core/harness/hub/agents_snapshot.dart';
 import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
 import 'package:qfli_studio_core/harness/ui/home_agents_tab.dart';
+import 'package:qfli_studio_core/services/local_store_backend.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
@@ -61,6 +63,30 @@ void main() {
     );
   }
 
+  /// 真实 IO 的总等待上限：读盘回调要在这个窗口内完成。
+  const readyDeadline = Duration(seconds: 10);
+
+  HomeAgentsTabState tabState(WidgetTester tester) =>
+      tester.state<HomeAgentsTabState>(find.byType(HomeAgentsTab));
+
+  int studioRowCount(WidgetTester tester) => tabState(
+    tester,
+  ).rows.where((row) => row.hostKind == HarnessHostKind.studio).length;
+
+  /// 等内置会话行真的出现，而不是猜一个时长。
+  ///
+  /// 索引是磁盘上的 `index.json`，widget 测试跑在假时钟里，真实文件读写只在
+  /// `runAsync` 活动期间完成。这里在 `runAsync` 里有界轮询，等到行数够了或
+  /// 超过 [readyDeadline] 就收手，最后交给断言带出失败现场。
+  Future<void> awaitStudioRows(WidgetTester tester, int expected) async {
+    final stopwatch = Stopwatch()..start();
+    while (studioRowCount(tester) < expected &&
+        stopwatch.elapsed < readyDeadline) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await tester.pump();
+    }
+  }
+
   Future<List<HarnessSessionStatus>> mountStatuses(
     WidgetTester tester, {
     required List<String> ids,
@@ -72,35 +98,38 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     });
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: HomeAgentsTab(
-            auth: auth,
-            store: store,
-            settings: settings,
-            harnessHub: hub,
-            sessionRoot: sessionRoot,
-            runtime: runtime,
-            deviceInfo: const HarnessDeviceInfo(
-              hostName: '测试手机',
-              os: HarnessDeviceOs.android,
-              osVersion: '14',
+    // 启动包在 runAsync 里：首帧就开读磁盘上的索引文件。
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: HomeAgentsTab(
+              auth: auth,
+              store: store,
+              settings: settings,
+              harnessHub: hub,
+              // 默认打开的内存快照：真实快照要问存储目录，会挂一个 2 秒探测。
+              remoteHostOpener: () async => null,
+              snapshotStore: AgentsSnapshotStore(backend: LocalMemoryBackend()),
+              sessionRoot: sessionRoot,
+              runtime: runtime,
+              deviceInfo: const HarnessDeviceInfo(
+                hostName: '测试手机',
+                os: HarnessDeviceOs.android,
+                osVersion: '14',
+              ),
+              onOpenSession: (_) {},
+              onOpenDetails: (_) {},
             ),
-            onOpenSession: (_) {},
-            onOpenDetails: (_) {},
           ),
         ),
-      ),
-    );
-    await tester.pump();
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 30)),
-    );
-    await tester.pump();
+      );
+      await tester.pump();
+      await awaitStudioRows(tester, ids.length);
+    });
     await tester.pump(const Duration(seconds: 3));
 
-    final state = tester.state<HomeAgentsTabState>(find.byType(HomeAgentsTab));
+    final state = tabState(tester);
     return [
       for (final row in state.rows)
         if (row.hostKind == HarnessHostKind.studio) row.session.status,
@@ -152,7 +181,7 @@ void main() {
     runtime.notifyLive();
     await tester.pump();
 
-    final state = tester.state<HomeAgentsTabState>(find.byType(HomeAgentsTab));
+    final state = tabState(tester);
     expect(
       state.rows.single.session.status,
       HarnessSessionStatus.done,

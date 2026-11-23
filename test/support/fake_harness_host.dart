@@ -104,6 +104,7 @@ class FakeHarnessHost implements HarnessHost, HarnessHostHint {
     this.hint,
     this.openHandler,
     this.launchHandler,
+    this.emitInitialSessions = true,
   }) : _current = initialSessions {
     state = ValueNotifier<HarnessHostState>(initialState);
   }
@@ -133,6 +134,13 @@ class FakeHarnessHost implements HarnessHost, HarnessHostHint {
   final Future<HarnessSessionHandle> Function(HarnessLaunchRequest request)?
   launchHandler;
 
+  /// 订阅时是否先把当前列表发一帧。
+  ///
+  /// 默认发。真实主机一连上就会报一次当前列表，所以空表也是一份有效的
+  /// 报告，首页据此把快照里的旧行让位。要验证「主机还没说话时先画快照」
+  /// 的用例把它设为 false：此时主机尚未开口，快照行才能上图。
+  final bool emitInitialSessions;
+
   final List<StreamController<List<HarnessSessionInfo>>> _controllers =
       <StreamController<List<HarnessSessionInfo>>>[];
   List<HarnessSessionInfo> _current;
@@ -142,6 +150,9 @@ class FakeHarnessHost implements HarnessHost, HarnessHostHint {
   List<HarnessSessionInfo> get sessions => _current;
 
   /// 推进会话列表（测试用）。
+  ///
+  /// 这也是主机「开口」的时机：即便订阅时没发初始帧（[emitInitialSessions]
+  /// 为 false），这里发出的列表仍然会送到所有订阅者。
   void emitSessions(List<HarnessSessionInfo> sessions) {
     _current = sessions;
     for (final controller in _controllers) {
@@ -157,7 +168,9 @@ class FakeHarnessHost implements HarnessHost, HarnessHostHint {
     // 没有监听者时不会缓存上一帧，重新订阅时要先把当前列表发一次。
     late final StreamController<List<HarnessSessionInfo>> controller;
     controller = StreamController<List<HarnessSessionInfo>>.broadcast(
-      onListen: () => controller.add(_current),
+      onListen: () {
+        if (emitInitialSessions) controller.add(_current);
+      },
     );
     _controllers.add(controller);
     controller.onCancel = () => _controllers.remove(controller);

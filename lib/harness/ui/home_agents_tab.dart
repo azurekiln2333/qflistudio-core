@@ -300,9 +300,13 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
           device: _device,
         ),
     ];
+    // 主机真的报过一次列表才算「听到」：只订阅、还没开口时，
+    // 快照里的行要继续顶首屏，否则列表会先闪一下空白。
+    // 空列表也是有效报告，此时快照必须让位。
     final heard = <String>{
       for (final host in _hub.hosts)
-        if (_hub.isListening(host.id) && _hub.sessionErrorOf(host.id) == null)
+        if (_hub.hasLoadedSessionsFor(host.id) &&
+            _hub.sessionErrorOf(host.id) == null)
           host.id,
     };
     final staleRows = <AgentsIndexRow>[
@@ -506,9 +510,11 @@ class _StatusDot extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Semantics(
+      container: true,
       label: label,
       child: Tooltip(
         message: label,
+        excludeFromSemantics: true,
         child: Container(
           key: ValueKey('agents-status-$rowKey'),
           width: 10,
