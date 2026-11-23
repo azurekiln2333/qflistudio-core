@@ -436,6 +436,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   bool _pasteToolbarVisible = false;
   Timer? _longPressTimer;
 
+  /// 首帧选会话时正在等 hub 的那几处等待。
+  ///
+  /// 等待里有 15 秒定时器与 hub 监听，页面先关掉时必须就地收尾：
+  /// 定时器留着越过 `dispose`，在测试里会变成「定时器仍未结束」。
+  final Set<VoidCallback> _sessionWaits = {};
+
   // 云端同步（仅云端项目）。
   CloudSyncService? _cloud;
   StreamSubscription<SyncState>? _cloudSub;
@@ -634,7 +640,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       return;
     }
     _revealAgentPane();
-    final session = await _awaitHubSession(hub, target);
+    final session = await _awaitHubSession(
+      hub,
+      target,
+      bind: _sessionWaits.add,
+    );
     if (!mounted) return;
     if (session == null) {
       _showSnack('打不开这个会话：等待超时');
@@ -650,9 +660,14 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 等目标会话出现在 hub 的列表里。超时返回 null。
   ///
   /// 只监听通知，不依赖 hub 的新方法，接口提交因此不扩大 hub 的接口面。
+  ///
+  /// 监听与定时器都通过 [bind] 绑到页面生命周期：页面先被销毁时立刻收尾，
+  /// 否则那个 15 秒定时器会越过 `dispose` 留在测试的假时钟里
+  /// （「A Timer is still pending even after the widget tree was disposed」）。
   Future<HarnessSessionInfo?> _awaitHubSession(
     HarnessHub hub,
     HarnessSessionTarget target, {
+    void Function(VoidCallback cancel)? bind,
     Duration timeout = const Duration(seconds: 15),
   }) async {
     HarnessSessionInfo? find() {
@@ -677,6 +692,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
     hub.addListener(onHubChanged);
     final timer = Timer(timeout, () => settle(null));
+    void cancel() {
+      timer.cancel();
+      settle(null);
+      hub.removeListener(onHubChanged);
+    }
+
+    bind?.call(cancel);
     try {
       onHubChanged();
       return await completer.future;
@@ -1051,6 +1073,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    // 首帧选会话的等待先收尾：它们握着 15 秒定时器与 hub 监听，
+    // 放在这里最靠前，保证后面的拆除不会再把它们拉到。
+    for (final cancel in _sessionWaits.toList()) {
+      cancel();
+    }
+    _sessionWaits.clear();
     widget.retainedVisibility?.removeListener(_onRetainedVisibilityChanged);
     _agentFileSub?.cancel();
     _agentFileSub = null;
