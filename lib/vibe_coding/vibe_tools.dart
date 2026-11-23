@@ -9,6 +9,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../services/file_service.dart';
 import '../services/project_file_access.dart';
 
 /// 工具失败原因；[code] 供控制器映射为工具错误或冲突。
@@ -312,6 +313,15 @@ class VibeProjectFiles {
     }
   }
 
+  /// 文件字节数。占位文件尚未下载，`length` 不可用，按 0 计。
+  static Future<int> _fileLength(String path) async {
+    try {
+      return await File(path).length();
+    } on FileSystemException {
+      return 0;
+    }
+  }
+
   /// 列目录；默认只列一层，跳过隐藏项和依赖/构建目录。
   Future<List<Map<String, Object?>>> list({
     String? path,
@@ -329,7 +339,11 @@ class VibeProjectFiles {
     }
     final entries = <Map<String, Object?>>[];
     Future<void> walk(Directory directory) async {
-      final children = await directory.list(followLinks: false).toList();
+      // 外部根走协调列目录：iCloud 占位文件在盘上是 `.名字.icloud`，
+      // 直接 `list` 会把它当成隐藏项跳过，用户看到的是空目录。
+      final children = ProjectFileAccess.isExternal(directory.path)
+          ? await FileService.listSorted(directory.path)
+          : await directory.list(followLinks: false).toList();
       children.sort((a, b) {
         final rank = (a is Directory ? 0 : 1) - (b is Directory ? 0 : 1);
         return rank != 0
@@ -354,7 +368,7 @@ class VibeProjectFiles {
           entries.add({
             'path': relative(entity.path),
             'type': 'file',
-            'bytes': await entity.length(),
+            'bytes': await _fileLength(entity.path),
           });
           if (entries.length > maxListEntries) {
             throw const VibeToolException('目录条目过多，请缩小路径范围', code: 'too_large');
