@@ -203,6 +203,28 @@ class StudioLocalizations {
       ? tw
       : cn;
 
+  /// 首页 Agents 标签。
+  String get agentsTab => _pick('Agents', 'Agents', 'Agents');
+  String get agentsTitle => _pick('全部会话', '全部工作階段', 'All sessions');
+  String get agentsEmpty => _pick('还没有会话', '還沒有工作階段', 'No sessions yet');
+  String get agentsEmptyHint => _pick(
+    '在编辑器里让 Agent 跑起来，会话会出现在这里',
+    '在編輯器裡讓 Agent 跑起來，工作階段會出現在這裡',
+    'Start an agent in the editor and its sessions show up here',
+  );
+  String get agentsRefreshFailed => _pick(
+    '刷新失败，下面是上次的列表',
+    '重新整理失敗，下面是上次的清單',
+    'Refresh failed; showing the previous list',
+  );
+  String get agentsDetails => _pick('会话详情', '工作階段詳情', 'Session details');
+  String get agentsUnknown => _pick('未知', '未知', 'Unknown');
+  String get agentsDeviceName => _pick('设备名', '裝置名稱', 'Device name');
+  String get agentsDeviceOs => _pick('系统', '系統', 'System');
+  String get agentsDeviceOsVersion => _pick('系统版本', '系統版本', 'System version');
+  String get agentsHostKind => _pick('主机类型', '主機類型', 'Host type');
+  String get agentsSessionPath => _pick('会话路径', '工作階段路徑', 'Session path');
+
   String get home => _text('home');
   String get functions => _text('functions');
   String get tools => _text('tools');

@@ -29,6 +29,25 @@ Color harnessStatusColor(ColorScheme scheme, HarnessSessionStatus status) =>
       HarnessSessionStatus.unknown => scheme.onSurfaceVariant,
     };
 
+/// 状态圆点配色。
+///
+/// 固定语义色，不取主题色（裁定 R3）：浅色与深色主题下都能区分。返回 null
+/// 表示 [HarnessSessionStatus.unknown]，界面改画空心圈。
+Color? harnessStatusDotColor(HarnessSessionStatus status) => switch (status) {
+  HarnessSessionStatus.blocked => const Color(0xFFF59E0B),
+  HarnessSessionStatus.working => const Color(0xFF22C55E),
+  HarnessSessionStatus.idle => const Color(0xFF9CA3AF),
+  HarnessSessionStatus.done => const Color(0xFF3B82F6),
+  HarnessSessionStatus.exited => const Color(0xFFEF4444),
+  HarnessSessionStatus.unknown => null,
+};
+
+/// 圆点的描边色。未知状态用主题前景色画空心圈。
+Color harnessStatusDotBorderColor(
+  ColorScheme scheme,
+  HarnessSessionStatus status,
+) => harnessStatusDotColor(status) ?? scheme.onSurface;
+
 /// 一行状态标签：运行中转圈，其余用文字胶囊。
 class HarnessStatusChip extends StatelessWidget {
   const HarnessStatusChip({

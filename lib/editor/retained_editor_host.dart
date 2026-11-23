@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
+import '../harness/harness_session_target.dart';
+import '../harness/hub/harness_hub.dart';
 import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
@@ -19,6 +21,10 @@ import 'retained_editor_restore_control.dart';
 ///
 /// Passing [workspace] opens a saved workspace session; it is keyed separately
 /// from a standalone open of the same project so the two never share tabs.
+///
+/// [harnessSession] names one session to select on the editor's first frame;
+/// [harnessHub] lets a caller that already owns a hub (the Home Agents tab)
+/// hand it over instead of building a second one.
 Future<void> openEditorPage(
   BuildContext context, {
   required Project project,
@@ -30,6 +36,8 @@ Future<void> openEditorPage(
   List<Project>? workspaceProjects,
   WorkspaceStore? workspaceStore,
   bool revealAgentPane = false,
+  HarnessSessionTarget? harnessSession,
+  HarnessHub? harnessHub,
 }) async {
   final controller = RetainedEditorScope.maybeOf(context);
   if (controller != null) {
@@ -43,6 +51,8 @@ Future<void> openEditorPage(
       workspaceProjects: workspaceProjects,
       workspaceStore: workspaceStore,
       revealAgentPane: revealAgentPane,
+      harnessSession: harnessSession,
+      harnessHub: harnessHub,
     );
     return;
   }
@@ -58,6 +68,9 @@ Future<void> openEditorPage(
         workspaceMembers: workspaceProjects ?? const [],
         workspaceStore: workspaceStore,
         agentPaneRequest: revealAgentPane ? 1 : 0,
+        initialHarnessSession: harnessSession,
+        harnessHub: harnessHub,
+        ownsHarnessHub: false,
         // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
         agentEnabled: StudioProfile.current?.offlineOnly != true,
       ),
@@ -157,6 +170,8 @@ class RetainedEditorController extends ChangeNotifier {
     List<Project>? workspaceProjects,
     WorkspaceStore? workspaceStore,
     bool revealAgentPane = false,
+    HarnessSessionTarget? harnessSession,
+    HarnessHub? harnessHub,
   }) {
     final key = _resolveOpenKey(project, workspace);
     final session = _sessions.putIfAbsent(
@@ -172,6 +187,11 @@ class RetainedEditorController extends ChangeNotifier {
       ),
     );
     if (revealAgentPane) session.agentPaneRequest++;
+    if (harnessSession != null) {
+      session.harnessTarget = harnessSession;
+      session.harnessRequest++;
+    }
+    if (harnessHub != null) session.harnessHub = harnessHub;
     if (workspace != null) {
       // Re-opening a saved workspace re-resolves its members. The effective
       // primary may have changed (missing primary → survivor); keep the live
@@ -354,6 +374,15 @@ class _EditorSession {
 
   /// 递增即让页面把 Agent 面板切到前台。与 [openRequest] 同一套追增语义。
   int agentPaneRequest = 0;
+
+  /// 首帧要选中的会话。每次打开带上新的 target 都会重新选中。
+  HarnessSessionTarget? harnessTarget;
+
+  /// 与 [harnessTarget] 配对递增，页面据此重新执行选中。
+  int harnessRequest = 0;
+
+  /// 调用方提供的 hub。为空时页面自建并自己释放。
+  HarnessHub? harnessHub;
 
   String get label => workspace?.name ?? project.name;
 }
@@ -680,6 +709,10 @@ class _SessionEditor extends StatelessWidget {
       initialOpenPath: session.initialOpenPath,
       openRequest: session.openRequest,
       agentPaneRequest: session.agentPaneRequest,
+      initialHarnessSession: session.harnessTarget,
+      harnessHub: session.harnessHub,
+      // 外来 hub 归调用方释放；自己建的由页面释放。
+      ownsHarnessHub: session.harnessHub == null,
       retainedVisibility: session.visible,
       workspace: session.workspace,
       workspaceMembers: session.workspaceProjects,
