@@ -42,11 +42,13 @@ Color? harnessStatusDotColor(HarnessSessionStatus status) => switch (status) {
   HarnessSessionStatus.unknown => null,
 };
 
-/// 圆点的描边色。未知状态用主题前景色画空心圈。
+/// 圆点描边色。未知状态画空心圈，描边也用固定语义灰。
+///
+/// 固定语义色，不取主题色（裁定 R3）：深浅主题下同一个状态看不出区别。
 Color harnessStatusDotBorderColor(
   ColorScheme scheme,
   HarnessSessionStatus status,
-) => harnessStatusDotColor(status) ?? scheme.onSurface;
+) => harnessStatusDotColor(status) ?? const Color(0xFF6B7280);
 
 /// 一行状态标签：运行中转圈，其余用文字胶囊。
 class HarnessStatusChip extends StatelessWidget {

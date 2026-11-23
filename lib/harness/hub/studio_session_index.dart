@@ -54,7 +54,9 @@ class StudioSessionIndex {
     for (final raw in rawSessions) {
       if (raw is! Map) continue;
       final id = _string(raw['id']);
-      if (id == null) continue;
+      // 空 id 也算坏条目：`_string` 会把 "" 原样返回，
+      // 只判 null 会把无 id 的条目带进列表。
+      if (id == null || id.isEmpty) continue;
       final updatedAt = DateTime.tryParse(_string(raw['updatedAt']) ?? '');
       if (updatedAt == null) continue;
       final projectId = _string(raw['projectId']) ?? '';

@@ -44,11 +44,13 @@ void main() {
     expect(harnessStatusDotColor(HarnessSessionStatus.unknown), isNull);
   });
 
-  test('未知状态的描边用主题前景色', () {
+  test('未知状态的描边用固定语义灰', () {
+    // 裁定 R3：圆点颜色不跟主题变，未知状态也不能回落主题前景色，
+    // 否则深浅主题下同一状态颜色不同（见下一条用例）。
     final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF123456));
     expect(
       harnessStatusDotBorderColor(scheme, HarnessSessionStatus.unknown),
-      scheme.onSurface,
+      const Color(0xFF6B7280),
     );
   });
 
