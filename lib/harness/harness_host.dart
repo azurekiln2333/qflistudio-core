@@ -100,7 +100,11 @@ class TranscriptEvent {
 
 @immutable
 class HarnessReply {
-  const HarnessReply({required this.requestId, required this.choice, this.text});
+  const HarnessReply({
+    required this.requestId,
+    required this.choice,
+    this.text,
+  });
 
   final String requestId;
   final String choice;
@@ -145,4 +149,59 @@ abstract class HarnessHost {
   Future<HarnessSessionHandle> open(String sessionId);
   Future<HarnessSessionHandle> launch(HarnessLaunchRequest request);
   Future<void> dispose();
+}
+
+/// The operating system of the device a host runs on.
+///
+/// `unknown` means the host could not tell. The details view prints
+/// `unknown` instead of guessing.
+enum HarnessDeviceOs { android, ios, ohos, macos, windows, linux, unknown }
+
+/// Where a host runs: its device name, system and system version.
+///
+/// Field names match the wire fields `hostName`, `os` and `osVersion`, so a
+/// host that forwards a frame never renames a field. Every field may be
+/// missing; the details view prints `unknown` for a missing one.
+@immutable
+class HarnessDeviceInfo {
+  const HarnessDeviceInfo({
+    this.hostName,
+    this.os = HarnessDeviceOs.unknown,
+    this.osVersion,
+  });
+
+  /// Display name of the device: the user's device name on a phone, the
+  /// hostname on a computer.
+  final String? hostName;
+
+  /// Operating system. [HarnessDeviceOs.unknown] when the host cannot tell.
+  final HarnessDeviceOs os;
+
+  /// Human-readable version, kept verbatim. Never parsed or rewritten.
+  final String? osVersion;
+
+  /// Whether every field is absent. An empty value carries no information.
+  bool get isEmpty =>
+      (hostName?.trim().isEmpty ?? true) &&
+      os == HarnessDeviceOs.unknown &&
+      (osVersion?.trim().isEmpty ?? true);
+}
+
+/// Optional capability: a host that can report its device information.
+///
+/// [HarnessHost] deliberately gains no required member: four host
+/// implementations and every test fake already implement it. A host that can
+/// tell its device information implements this interface instead.
+abstract class HarnessDeviceHost {
+  ValueListenable<HarnessDeviceInfo> get device;
+}
+
+/// Device information of [host], or null when it does not report any.
+HarnessDeviceInfo? harnessDeviceOf(HarnessHost host) {
+  // The two types are unrelated, so Dart does not promote the variable;
+  // a pattern binds a non-null copy.
+  if (host case final HarnessDeviceHost deviceHost) {
+    return deviceHost.device.value;
+  }
+  return null;
 }

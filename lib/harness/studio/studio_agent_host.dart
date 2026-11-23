@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../session/agent_session.dart';
 import '../../vibe_coding/vibe_agent_facade.dart';
+import '../device_info.dart';
 import '../harness_host.dart';
 
 /// 主机与 provider 的固定标识。
@@ -27,7 +28,7 @@ const int kStudioTranscriptBacklog = 200;
 /// 只有 [watchSessions]、[open] 与 [launch] 会读会话存储；[dispose] 只释放
 /// 本主机的监听与流，不会停止任何会话。一个主机只属于一个项目，一个 Hub
 /// 一个实例——[dispose] 之后不可复用。
-class StudioAgentHost implements HarnessHost {
+class StudioAgentHost implements HarnessHost, HarnessDeviceHost {
   StudioAgentHost({
     required AgentRuntime runtime,
     required this.projectId,
@@ -74,6 +75,13 @@ class StudioAgentHost implements HarnessHost {
 
   @override
   HarnessHostKind get kind => HarnessHostKind.studio;
+
+  /// 内置 Agent 跑在手机本机，所以设备信息就是当前设备。
+  @override
+  ValueListenable<HarnessDeviceInfo> get device => _device;
+
+  final ValueNotifier<HarnessDeviceInfo> _device =
+      ValueNotifier<HarnessDeviceInfo>(currentDeviceInfo());
 
   @override
   ValueListenable<HarnessHostState> get state => _state;
@@ -192,6 +200,7 @@ class StudioAgentHost implements HarnessHost {
       controller.close();
     }
     _watchers.clear();
+    _device.dispose();
     _state.dispose();
   }
 
