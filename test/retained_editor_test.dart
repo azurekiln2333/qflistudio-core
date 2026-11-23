@@ -98,6 +98,11 @@ void main() {
       );
       await tester.enterText(inputFinder, 'unfinished local command');
       final input = tester.widget<TextField>(inputFinder);
+      // Mobile re_editor collapses a selection when the terminal takes focus.
+      // Seed the navigation snapshot after that existing focus transition.
+      open.controller.selection = selection;
+      await tester.pump();
+      expect(open.controller.selection, selection);
 
       Future<void> select(WorkbenchActivity activity) async {
         await tester.tap(
