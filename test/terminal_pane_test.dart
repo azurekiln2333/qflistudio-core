@@ -3,10 +3,12 @@ import 'dart:io';
 import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/editor/terminal_pane.dart';
+import 'package:qfli_studio_core/interop/ohos_runtime_guide.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/services/process_supervisor.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
@@ -16,6 +18,67 @@ void main() {
 
   setUp(() => fixture = _TerminalFixture());
   tearDown(() => fixture.dispose());
+
+  testWidgets('runtime guide entry is absent on non-OHOS terminals', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await fixture.mount(tester);
+      expect(
+        find.byKey(const ValueKey('terminal-ohos-runtime-guide')),
+        findsNothing,
+      );
+      await tester.tap(find.byTooltip('终端操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('安装运行工具'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('OHOS guide return preserves terminal sessions and draft', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.values.byName('ohos');
+    try {
+      await fixture.mount(
+        tester,
+        size: const Size(320, 300),
+        onlineEnabled: true,
+        projectLanguage: 'python',
+      );
+      fixture.pane.addSession();
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'unfinished command');
+      final pane = fixture.pane;
+      final input = tester.widget<TextField>(find.byType(TextField)).controller;
+      final entry = find.byKey(const ValueKey('terminal-ohos-runtime-guide'));
+      expect(tester.getSize(entry).shortestSide, greaterThanOrEqualTo(44));
+      await tester.tap(entry);
+      await tester.pumpAndSettle();
+      expect(tester.widget<OhosRuntimeGuide>(find.byType(OhosRuntimeGuide)).language, 'python');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(fixture.pane, same(pane));
+      expect(pane.sessionCount, 2);
+      expect(tester.widget<TextField>(find.byType(TextField)).controller, same(input));
+      expect(input!.text, 'unfinished command');
+      await tester.tap(find.byTooltip('终端操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('安装运行工具'));
+      await tester.pumpAndSettle();
+      expect(find.byType(OhosRuntimeGuide), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await pane.showOnline(initialize: false);
+      await tester.pump();
+      expect(entry, findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('empty prompt begins at the top of the terminal scrollback', (
     tester,
@@ -1667,6 +1730,7 @@ class _TerminalFixture {
     bool executionBlocked = false,
     bool Function()? isExecutionBlocked,
     bool onlineEnabled = false,
+    String? projectLanguage,
     ValueChanged<bool>? onRunningWorkChanged,
   }) async {
     addTearDown(() async {
@@ -1687,6 +1751,7 @@ class _TerminalFixture {
                 workingDirectory: directory.path,
                 auth: auth,
                 onlineEnabled: onlineEnabled,
+                projectLanguage: projectLanguage,
                 executionBlocked: executionBlocked,
                 isExecutionBlocked: isExecutionBlocked,
                 onRunningWorkChanged: onRunningWorkChanged,

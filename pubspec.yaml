@@ -61,6 +61,7 @@ flutter:
     - assets/tutorials/
     - assets/content/
     - assets/skills/
+    - assets/product_icons/
     - assets/fonts/roboto_mono/OFL.txt
 
   fonts:

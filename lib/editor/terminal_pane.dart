@@ -12,6 +12,8 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../i18n/studio_localizations.dart';
+import '../config/ohos_platform.dart';
+import '../interop/ohos_runtime_guide.dart';
 import '../services/process_supervisor.dart';
 import '../services/api_client.dart';
 import '../services/cloud_sql.dart';
@@ -84,6 +86,7 @@ class TerminalPane extends StatefulWidget {
     this.onRunningWorkChanged,
     this.collapsed = false,
     this.compact = false,
+    this.projectLanguage,
   });
 
   final String workingDirectory;
@@ -133,6 +136,11 @@ class TerminalPane extends StatefulWidget {
 
   /// Shows only the panel header while the editor viewport is too short.
   final bool compact;
+
+  /// 项目主语言，用于鸿蒙工具安装指引的语言优先级。
+  ///
+  /// 只影响指引页的排序与高亮，不参与终端执行与命令解析。
+  final String? projectLanguage;
 
   @override
   State<TerminalPane> createState() => TerminalPaneState();
@@ -1526,6 +1534,12 @@ class TerminalPaneState extends State<TerminalPane> {
     StudioLocalizations l10n,
     ColorScheme scheme,
   ) {
+    final showRuntimeGuide = isOhosPlatform && !_session.online;
+    final runtimeGuideLabel = l10n.isEnglish
+        ? 'Install runtime tools'
+        : l10n.isTraditionalChinese
+        ? '安裝執行工具'
+        : '安装运行工具';
     return GestureDetector(
       // The header paints an opaque colour, but a coloured `Container` does not
       // absorb pointer events on its empty areas: a tap in the gap beside the
@@ -1552,7 +1566,7 @@ class TerminalPaneState extends State<TerminalPane> {
           );
         },
         child: Container(
-          height: TerminalPanelMetrics.collapsedHeight,
+          height: showRuntimeGuide ? 44 : TerminalPanelMetrics.collapsedHeight,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           color: scheme.surfaceContainerHigh,
           child: Row(
@@ -1596,6 +1610,24 @@ class TerminalPaneState extends State<TerminalPane> {
                   onPressed: () => unawaited(_interruptFromUi()),
                   icon: const Icon(Icons.stop, size: 18),
                 ),
+              if (showRuntimeGuide)
+                IconButton(
+                  key: const ValueKey('terminal-ohos-runtime-guide'),
+                  tooltip: runtimeGuideLabel,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 44,
+                    height: 44,
+                  ),
+                  padding: EdgeInsets.zero,
+                  onPressed: () => unawaited(
+                    showOhosRuntimeGuide(
+                      context,
+                      language: widget.projectLanguage,
+                    ),
+                  ),
+                  icon: const Icon(Icons.system_update_alt, size: 18),
+                ),
               SizedBox(
                 width: 36,
                 height: 36,
@@ -1617,6 +1649,13 @@ class TerminalPaneState extends State<TerminalPane> {
                         _newSession();
                       case 'reset':
                         unawaited(_resetOnline());
+                      case 'runtimeGuide':
+                        unawaited(
+                          showOhosRuntimeGuide(
+                            context,
+                            language: widget.projectLanguage,
+                          ),
+                        );
                     }
                   },
                   itemBuilder: (context) => [
@@ -1639,6 +1678,17 @@ class TerminalPaneState extends State<TerminalPane> {
                             const Icon(Icons.add, size: 18),
                             const SizedBox(width: 8),
                             Text(l10n.newTerminal),
+                          ],
+                        ),
+                      ),
+                    if (showRuntimeGuide)
+                      PopupMenuItem(
+                        value: 'runtimeGuide',
+                        child: Row(
+                          children: [
+                            const Icon(Icons.system_update_alt, size: 18),
+                            const SizedBox(width: 8),
+                            Text(runtimeGuideLabel),
                           ],
                         ),
                       ),

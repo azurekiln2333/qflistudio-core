@@ -89,6 +89,16 @@ void main() {
       await tester.pump();
       expect(open.dirty, isTrue);
 
+      await _menu(tester, 'terminal');
+      final terminalFinder = find.byType(TerminalPane);
+      final terminal = tester.state<TerminalPaneState>(terminalFinder);
+      final inputFinder = find.descendant(
+        of: terminalFinder,
+        matching: find.byType(TextField),
+      );
+      await tester.enterText(inputFinder, 'unfinished local command');
+      final input = tester.widget<TextField>(inputFinder);
+
       Future<void> select(WorkbenchActivity activity) async {
         await tester.tap(
           find.byKey(WorkbenchActivityRail.activityKey(activity)),
@@ -126,6 +136,12 @@ void main() {
       expect(open.controller.selection, selection);
       expect(open.controller.text, '// kept edit\nclass Main {}');
       expect(open.dirty, isTrue);
+      expect(tester.state<TerminalPaneState>(terminalFinder), same(terminal));
+      expect(
+        tester.widget<TextField>(inputFinder).controller,
+        same(input.controller),
+      );
+      expect(input.controller!.text, 'unfinished local command');
 
       await select(WorkbenchActivity.files);
       expect(tester.state(find.byType(FileExplorer)), same(tree));
@@ -144,6 +160,8 @@ void main() {
       expect(tester.state(find.byType(FileExplorer)), same(tree));
       expect(shell.editors.sessionInfos, hasLength(2));
       expect(open.controller.selection, selection);
+      expect(tester.state<TerminalPaneState>(terminalFinder), same(terminal));
+      expect(input.controller!.text, 'unfinished local command');
       final avatar = tester.getRect(
         find.byKey(WorkbenchActivityRail.avatarKey),
       );
@@ -1005,12 +1023,13 @@ class _Fixture {
 
   Future<void> open(WidgetTester tester, String name) async {
     await tester.tap(find.text(name));
+    final editors = find.byType(EditorPage);
     await _pumpIoUntil(
       tester,
       () =>
-          find.byType(EditorPage).evaluate().isNotEmpty &&
-          tester.widget<EditorPage>(find.byType(EditorPage)).project.name ==
-              name &&
+          // Both outgoing and incoming editors remain onstage during the fade.
+          editors.evaluate().length == 1 &&
+          tester.widget<EditorPage>(editors).project.name == name &&
           _editor(tester).files.length >= 2,
     );
     await tester.pump(const Duration(milliseconds: 250));

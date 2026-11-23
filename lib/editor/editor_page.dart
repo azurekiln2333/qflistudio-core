@@ -4158,6 +4158,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       key: _terminalKey,
       workingDirectory: widget.project.path,
       auth: widget.auth,
+      projectLanguage: widget.project.language,
       onlineEnabled: StudioProfile.current?.offlineOnly != true,
       executionBlocked: _debugger.busy || _runningFileTool,
       isExecutionBlocked: () => _debugger.busy || _runningFileTool,
