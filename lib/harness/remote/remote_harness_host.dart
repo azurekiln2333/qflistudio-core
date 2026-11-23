@@ -46,6 +46,7 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
     _herdr?.changes.addListener(_onHerdrChanged);
     _state.value = _stateFor(_remote.phase);
     _wasOnline = remote.isOnline;
+    _refreshDevice();
     if (_wasOnline) unawaited(_loadRemote());
   }
 
@@ -83,6 +84,13 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
   bool _loadingCodex = false;
   String? _lastError;
   Timer? _codexTimer;
+
+  /// 最近一帧设备信息。
+  ///
+  /// [device] 是同步读的：构造完就要能回答。构造函数里先取一次，之后每次
+  /// 主机变化再取。只有真正连接到电脑、主机报出信息时它才变。
+  final ValueNotifier<HarnessDeviceInfo> _device =
+      ValueNotifier<HarnessDeviceInfo>(const HarnessDeviceInfo());
 
   @override
   String get id => _id;
@@ -141,9 +149,6 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
   /// a field the agent did not send stays unknown.
   @override
   ValueListenable<HarnessDeviceInfo> get device => _device;
-
-  final ValueNotifier<HarnessDeviceInfo> _device =
-      ValueNotifier<HarnessDeviceInfo>(const HarnessDeviceInfo());
 
   /// Recompute [device] from the latest info frame.
   void _refreshDevice() {
