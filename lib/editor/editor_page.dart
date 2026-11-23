@@ -2089,6 +2089,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 runtime: runtime,
                 state: host.state,
                 projectId: widget.project.id,
+                // 删会话时一并清掉它的占位项目（需求 12）。
+                store: widget.store,
                 onSelect: _selectAgentSession,
                 onCreate: _createAgentSession,
                 embedded: true,

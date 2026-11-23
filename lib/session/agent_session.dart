@@ -115,6 +115,12 @@ abstract class AgentSessionStore extends ChangeNotifier {
 
   Future<void> delete(String sessionId);
 
+  /// 会话是否还在。
+  ///
+  /// 占位项目按会话存在与否决定去留。索引可能比会话文件旧，实现要把两者
+  /// 都看上。
+  Future<bool> exists(String sessionId);
+
   /// 读取会话全文；不存在时返回 [AgentTranscript.empty]。
   Future<AgentTranscript> read(String sessionId);
 
@@ -351,6 +357,18 @@ class FileAgentSessionStore extends AgentSessionStore {
     }
     await _writeIndexNow();
     notifyListeners();
+  }
+
+  @override
+  Future<bool> exists(String sessionId) async {
+    if (_metas.containsKey(sessionId)) return true;
+    // 索引可能比会话文件旧：目录里还有正文就当作会话还在。
+    try {
+      if (await _jsonlFor(sessionId).exists()) return true;
+      return await _legacyFor(sessionId).exists();
+    } on FileSystemException {
+      return false;
+    }
   }
 
   @override

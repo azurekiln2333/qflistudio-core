@@ -9,6 +9,7 @@ import 'package:qfli_studio_core/remote_control/models/protocol.dart';
 import 'package:qfli_studio_core/sync/device_file_port.dart';
 import 'package:qfli_studio_core/sync/placeholder_project.dart';
 import 'package:qfli_studio_core/sync/sync_ignore.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
 
 class FakePort implements DeviceFilePort {
   FakePort(this.files);
@@ -62,13 +63,16 @@ void main() {
     if (await root.exists()) await root.delete(recursive: true);
   });
 
-  Project deviceProject({bool placeholder = true, bool filesPulled = false}) =>
-      Project.create(name: '会话', path: p.join(root.path, 'proj'))
-        ..deviceHostId = 'agent-42'
-        ..deviceSessionId = 'sess-1'
-        ..deviceRoot = r'C:\work\proj'
-        ..placeholder = placeholder
-        ..filesPulled = filesPulled;
+  Project deviceProject({
+    bool placeholder = true,
+    bool filesPulled = false,
+    String sessionId = 'sess-1',
+  }) => Project.create(name: '会话', path: p.join(root.path, 'proj-$sessionId'))
+    ..deviceHostId = 'agent-42'
+    ..deviceSessionId = sessionId
+    ..deviceRoot = r'C:\work\proj'
+    ..placeholder = placeholder
+    ..filesPulled = filesPulled;
 
   group('hostKey', () {
     test('is stable and short', () {
@@ -125,6 +129,98 @@ void main() {
       final dir = Directory(project.path)..createSync(recursive: true);
       expect(await placeholders.discardIfUnused(project), isFalse);
       expect(await dir.exists(), isTrue);
+    });
+  });
+
+  group('sweep', () {
+    late ProjectStore store;
+
+    setUp(() {
+      store = ProjectStore(storageFile: File(p.join(root.path, 'p.json')));
+    });
+
+    tearDown(() => store.dispose());
+
+    test('会话已不在时删目录并从项目列表移除', () async {
+      final project = deviceProject(sessionId: 'gone');
+      Directory(project.path).createSync(recursive: true);
+      await store.registerDeviceProject(project);
+      expect(store.projects.length, 1);
+
+      final removed = await placeholders.sweep(
+        store: store,
+        sessionExists: (_) async => false,
+      );
+
+      expect(removed, 1);
+      expect(await Directory(project.path).exists(), isFalse);
+      expect(store.projects, isEmpty);
+    });
+
+    test('会话还在时占位项目不动', () async {
+      final project = deviceProject();
+      Directory(project.path).createSync(recursive: true);
+      await store.registerDeviceProject(project);
+
+      final removed = await placeholders.sweep(
+        store: store,
+        sessionExists: (_) async => true,
+      );
+
+      expect(removed, 0);
+      expect(await Directory(project.path).exists(), isTrue);
+      expect(store.projects.length, 1);
+    });
+
+    test('拉过文件的项目不是占位项目，扫不到', () async {
+      final project = deviceProject(placeholder: false, filesPulled: true);
+      Directory(project.path).createSync(recursive: true);
+      await store.registerDeviceProject(project);
+      var asked = 0;
+
+      final removed = await placeholders.sweep(
+        store: store,
+        sessionExists: (_) async {
+          asked += 1;
+          return false;
+        },
+      );
+
+      expect(asked, 0);
+      expect(removed, 0);
+      expect(await Directory(project.path).exists(), isTrue);
+      expect(store.projects.length, 1);
+    });
+
+    test('普通本地项目不参与清扫', () async {
+      final local = Project.create(
+        name: 'mine',
+        path: p.join(root.path, 'mine'),
+      );
+      Directory(local.path).createSync(recursive: true);
+      await store.addExisting(local.path);
+
+      final removed = await placeholders.sweep(
+        store: store,
+        sessionExists: (_) async => false,
+      );
+
+      expect(removed, 0);
+      expect(await Directory(local.path).exists(), isTrue);
+    });
+
+    test('问不出会话时留着，不删错', () async {
+      final project = deviceProject();
+      Directory(project.path).createSync(recursive: true);
+      await store.registerDeviceProject(project);
+
+      final removed = await placeholders.sweep(
+        store: store,
+        sessionExists: (_) async => throw const FileSystemException('读不了'),
+      );
+
+      expect(removed, 0);
+      expect(await Directory(project.path).exists(), isTrue);
     });
   });
 

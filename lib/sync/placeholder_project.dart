@@ -6,6 +6,8 @@ import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/services/project_config.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/services/app_paths.dart';
+import 'package:qfli_studio_core/session/agent_session.dart';
+import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/sync/device_file_port.dart';
 import 'package:qfli_studio_core/sync/device_sync.dart';
 import 'package:qfli_studio_core/sync/sync_cache.dart';
@@ -149,6 +151,68 @@ class PlaceholderProjects {
     } on FileSystemException {
       return false;
     }
+  }
+
+  /// 会话已经不在时清掉它的占位项目。
+  ///
+  /// 启动时调一次，交给后台：扫目录不该拦首帧。会话被删、电脑上删了会话、
+  /// 或用户重新配对换了主机 id，占位项目就再也没人认领。它们只在手机上占
+  /// 空间：目录里只有一个 `.qfli` 与一个会话流缓存，真文件还在电脑上。
+  ///
+  /// 拉过文件的项目不是占位项目，扫描不会动它。
+  static Future<int> sweepPlaceholders({
+    required ProjectStore store,
+    required AgentSessionStore sessions,
+  }) => const PlaceholderProjects().sweep(
+    store: store,
+    sessionExists: (project) async {
+      final sessionId = project.deviceSessionId;
+      if (sessionId == null) return true;
+      return sessions.exists(sessionId);
+    },
+  );
+
+  /// 删掉目录之后把记录也从项目列表里拿掉。
+  ///
+  /// 设备字段都对不上的项目不属于这个会话，直接跳过。
+  Future<void> removeProject(ProjectStore store, Project project) async {
+    final hostId = project.deviceHostId;
+    final sessionId = project.deviceSessionId;
+    if (hostId == null || sessionId == null) return;
+    final listed = store.deviceProjectFor(hostId: hostId, sessionId: sessionId);
+    if (listed == null) return;
+    await store.discardDevicePlaceholder(hostId: hostId, sessionId: sessionId);
+  }
+
+  /// 会话已经不在时清掉它的占位项目。
+  ///
+  /// 启动时调一次。会话被删、电脑上删了会话、或用户重新配对换了主机 id，
+  /// 占位项目就再也没人认领。它们只在手机上占空间：目录里只有一个
+  /// `.qfli` 与一个会话流缓存，真文件还在电脑上。
+  ///
+  /// [sessionExists] 回答会话还在不在。[store] 是项目列表，删完目录后记录也
+  /// 从那里拿掉。返回处理了几个。
+  Future<int> sweep({
+    required ProjectStore store,
+    required Future<bool> Function(Project project) sessionExists,
+  }) async {
+    var removed = 0;
+    for (final project in List<Project>.of(store.projects)) {
+      if (!project.isDevice || project.deviceSessionId == null) continue;
+      if (!project.placeholder || project.filesPulled) continue;
+      bool exists;
+      try {
+        exists = await sessionExists(project);
+      } on Object {
+        // 读不到会话列表时留着：删错了就是删掉用户正在用的会话界面。
+        continue;
+      }
+      if (exists) continue;
+      await discardIfUnused(project);
+      await removeProject(store, project);
+      removed += 1;
+    }
+    return removed;
   }
 
   /// Session ids and project ids become path segments, so keep them plain.

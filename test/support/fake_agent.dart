@@ -235,8 +235,7 @@ class FakeAgentRuntime implements AgentRuntime {
   final Map<String, FakeAgentFacade> facades = <String, FakeAgentFacade>{};
 
   /// 打开某个会话前先等这里放行，用来制造快速切换的竞态。
-  final Map<String, Completer<void>> openBlockers =
-      <String, Completer<void>>{};
+  final Map<String, Completer<void>> openBlockers = <String, Completer<void>>{};
 
   /// 非空时 `models` 先等它完成，用来观察模型选择的加载态。
   Completer<void>? modelsGate;
@@ -389,6 +388,9 @@ class MemoryAgentSessionStore extends AgentSessionStore {
     _transcripts.remove(sessionId);
     notifyListeners();
   }
+
+  @override
+  Future<bool> exists(String sessionId) async => _metas.containsKey(sessionId);
 
   @override
   Future<AgentTranscript> read(String sessionId) async =>

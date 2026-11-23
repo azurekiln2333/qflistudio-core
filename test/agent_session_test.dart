@@ -759,4 +759,20 @@ void main() {
           ..sort();
     expect(names, ['${meta.id}.jsonl', 'index.json']);
   });
+
+  test('exists() 认索引里的会话，也认只剩正文的会话', () async {
+    final meta = await store.create('p1');
+    await store.write(meta.id, AgentTranscript(messages: [message('m0')]));
+    await store.flush();
+
+    expect(await store.exists(meta.id), isTrue);
+    expect(await store.exists('missing'), isFalse);
+
+    // 索引丢了但正文还在：会话仍在，只是列不出来。占位项目不能因此被删。
+    File(p.join(root.path, 'index.json')).deleteSync();
+    final reloaded = fresh();
+    await reloaded.load();
+    expect(reloaded.metaOf(meta.id), isNull);
+    expect(await reloaded.exists(meta.id), isTrue);
+  });
 }

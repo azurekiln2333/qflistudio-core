@@ -2,7 +2,38 @@ import 'package:flutter/material.dart';
 
 import '../../session/agent_session.dart';
 import '../../shell/workbench_state.dart';
+import '../../store/project_store.dart';
+import '../../sync/placeholder_project.dart';
 import '../../vibe_coding/vibe_agent_facade.dart';
+
+/// 会话被删后清掉它的占位项目。
+///
+/// 会话在配对电脑或内置 Agent 上时，手机上往往只有一个占位项目（需求 12）。
+/// 没拉过文件的占位项目随会话一起消失：留着它，项目列表里就是一堆点开
+/// 却打不开的条目。拉过文件的项目是用户自己的副本，不在这里处理。
+///
+/// [store] 为空（例如骨架页）时什么也不做：删目录而留下记录，或者反过来，
+/// 都会让项目列表与磁盘对不上。
+Future<void> discardSessionPlaceholders(
+  ProjectStore? store,
+  String sessionId,
+) async {
+  if (store == null) return;
+  final listed = store.projects
+      .where(
+        (project) =>
+            project.deviceSessionId == sessionId &&
+            project.placeholder &&
+            !project.filesPulled,
+      )
+      .toList();
+  if (listed.isEmpty) return;
+  const placeholders = PlaceholderProjects();
+  for (final project in listed) {
+    await placeholders.discardIfUnused(project);
+    await placeholders.removeProject(store, project);
+  }
+}
 
 /// 侧边栏「会话」分段：会话列表加状态标记。
 ///
@@ -18,11 +49,17 @@ class SessionListView extends StatelessWidget {
     this.onCreate,
     this.embedded = false,
     this.extra,
+    this.store,
   });
 
   final AgentRuntime runtime;
   final WorkbenchState state;
   final String projectId;
+
+  /// 项目列表。删会话时用它找到那个会话的占位项目。
+  ///
+  /// 为空时只删会话本身，不动项目列表。
+  final ProjectStore? store;
 
   /// 点选会话。为空时只显示列表。
   final ValueChanged<String>? onSelect;
@@ -189,6 +226,10 @@ class SessionListView extends StatelessWidget {
   }
 
   /// 删除会话。运行中的会话先停止，避免删掉正在写的文件。
+  ///
+  /// 会话在配对电脑或内置 Agent 上时，手机上往往只有一个占位项目（需求 12）。
+  /// 没拉过文件的占位项目随会话一起消失：留着它，项目列表里就是一堆点开
+  /// 却打不开的条目。
   Future<void> _delete(AgentSessionMeta meta) async {
     final status = runtime.statusOf(meta.id);
     if (status == AgentLiveStatus.running ||
@@ -197,6 +238,7 @@ class SessionListView extends StatelessWidget {
       await runtime.liveFacade(meta.id)?.cancel();
     }
     await runtime.sessions.delete(meta.id);
+    await discardSessionPlaceholders(store, meta.id);
     if (state.sessionId == meta.id) state.selectSession(null);
   }
 }
