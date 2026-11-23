@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
@@ -200,11 +199,10 @@ class DeviceSyncService {
       await staging.create(recursive: true);
 
       for (final entry in plan.downloads) {
-        final bytes = await _fetch(entry);
         _ensureSafe(entry.path);
-        await _writeVerified(plan.localRoot, entry, bytes);
+        await _writeVerified(plan.localRoot, entry);
         written += 1;
-        writtenBytes += bytes.length;
+        writtenBytes += entry.size;
         onProgress?.call(
           SyncProgress(
             doneFiles: written,
@@ -271,37 +269,13 @@ class DeviceSyncService {
     return removed;
   }
 
-  Future<List<int>> _fetch(FsEntry entry) async {
-    final builder = BytesBuilder(copy: false);
-    var offset = 0;
-    while (true) {
-      final chunk = await _port.read(
-        entry.path,
-        offset: offset,
-        length: kSyncChunkBytes,
-      );
-      if (chunk.bytes.isEmpty && !chunk.eof) {
-        throw DeviceSyncException('电脑返回了空分片：${entry.path}');
-      }
-      builder.add(chunk.bytes);
-      offset += chunk.bytes.length;
-      if (chunk.eof) break;
-      if (offset > entry.size + kSyncChunkBytes) {
-        throw DeviceSyncException('传输长度超出清单记录：${entry.path}');
-      }
-    }
-    return builder.takeBytes();
-  }
-
-  Future<void> _writeVerified(
-    String localRoot,
-    FsEntry entry,
-    List<int> bytes,
-  ) async {
-    final digest = sha256.convert(bytes).toString();
-    if (digest != entry.hash) {
-      throw DeviceSyncException('文件校验不通过：${entry.path}', kind: 'hash');
-    }
+  /// Read one file into the staging area while hashing it.
+  ///
+  /// Each chunk goes straight to the `.part` file and into the digest: a 200 MB
+  /// asset never sits in memory, only one [kSyncChunkBytes] slice at a time. The
+  /// file is renamed to its real name only after the digest matches, so a
+  /// half-written copy never appears under a real name.
+  Future<void> _writeVerified(String localRoot, FsEntry entry) async {
     final target = p.join(localRoot, 'files', p.joinAll(entry.path.split('/')));
     final temp = File(
       p.join(
@@ -311,8 +285,43 @@ class DeviceSyncService {
       ),
     );
     await temp.parent.create(recursive: true);
-    await temp.writeAsBytes(bytes, flush: true);
-    await File(target).parent.create(recursive: true);
+    final sink = temp.openWrite();
+    final collector = _DigestSink();
+    final output = sha256.startChunkedConversion(collector);
+    var received = 0;
+    var offset = 0;
+    try {
+      while (true) {
+        final chunk = await _port.read(
+          entry.path,
+          offset: offset,
+          length: kSyncChunkBytes,
+        );
+        if (chunk.bytes.isEmpty && !chunk.eof) {
+          throw DeviceSyncException('电脑返回了空分片：${entry.path}');
+        }
+        if (received + chunk.bytes.length > entry.size) {
+          throw DeviceSyncException('传输长度超出清单记录：${entry.path}');
+        }
+        sink.add(chunk.bytes);
+        output.add(chunk.bytes);
+        received += chunk.bytes.length;
+        offset += chunk.bytes.length;
+        if (chunk.eof) break;
+      }
+      if (received != entry.size) {
+        throw DeviceSyncException('传输长度与清单不符：${entry.path}');
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    output.close();
+    final digest = collector.value.toString();
+    if (digest != entry.hash) {
+      await temp.delete().catchError((Object _) => temp);
+      throw DeviceSyncException('文件校验不通过：${entry.path}', kind: 'hash');
+    }    await File(target).parent.create(recursive: true);
     if (await File(target).exists()) await File(target).delete();
     await temp.rename(target);
   }
@@ -419,6 +428,23 @@ class _LocalFile {
 
   final int size;
   final String hash;
+}
+
+/// 接住分块哈希的结果。
+///
+/// `sha256.startChunkedConversion` 要一个输出 sink：边收边算时不会把整个
+/// 文件留在内存里，最后只交出摘要。
+class _DigestSink implements Sink<Digest> {
+  Digest? _digest;
+
+  /// 算完的摘要；还没收到时为 null。
+  Digest? get value => _digest;
+
+  @override
+  void add(Digest data) => _digest = data;
+
+  @override
+  void close() {}
 }
 
 class _LocalListing {

@@ -292,6 +292,102 @@ void main() {
       );
     });
 
+    test(
+      'a bad hash leaves no half-written file in the staging area',
+      () async {
+        final port = FakeDevicePort(
+          files: <String, String>{'a.txt': 'changed'},
+          corrupt: <String>{'a.txt'},
+        );
+        final service = DeviceSyncService(port: port);
+        final report = await service.apply(
+          await service.plan(remoteRoot: r'C:\work\proj', localRoot: localRoot),
+        );
+
+        expect(report.completed, isFalse);
+        final staging = Directory(p.join(localRoot, '.incoming'));
+        expect(await staging.exists(), isTrue);
+        expect(await staging.list().isEmpty, isTrue, reason: '校验失败的分片不能留在暂存区');
+        expect(
+          await File(p.join(localRoot, 'files', 'a.txt')).exists(),
+          isFalse,
+        );
+      },
+    );
+
+    test('streams a large file chunk by chunk while hashing it', () async {
+      // 三块：分块写入与一次性写入在磁盘上必须是同一个文件。
+      final big = 'y' * (kSyncChunkBytes * 2 + 7);
+      final port = FakeDevicePort(
+        files: <String, String>{'big.bin': big},
+        chunkBytes: kSyncChunkBytes,
+      );
+      final service = DeviceSyncService(port: port);
+      final report = await service.apply(
+        await service.plan(remoteRoot: r'C:\work\proj', localRoot: localRoot),
+      );
+
+      expect(report.completed, isTrue);
+      expect(report.writtenFiles, 1);
+      expect(report.bytes, utf8.encode(big).length);
+      expect(port.reads.length, 3);
+      expect(
+        await File(p.join(localRoot, 'files', 'big.bin')).readAsString(),
+        big,
+      );
+    });
+
+    test(
+      'a file shorter than its manifest entry fails without a rename',
+      () async {
+        final port = FakeDevicePort(
+          files: <String, String>{'short.txt': 'abc'},
+        );
+        final service = DeviceSyncService(port: port);
+        final plan = await service.plan(
+          remoteRoot: r'C:\work\proj',
+          localRoot: localRoot,
+        );
+        // 清单说 10 字节，电脑只交了 3 字节又宣布结束。
+        final tampered = SyncPlan(
+          remoteRoot: plan.remoteRoot,
+          localRoot: plan.localRoot,
+          manifest: FsManifest(
+            root: plan.manifest.root,
+            ignoreVersion: plan.manifest.ignoreVersion,
+            truncated: false,
+            entries: <FsEntry>[
+              FsEntry(
+                path: 'short.txt',
+                kind: 'file',
+                size: 10,
+                hash: plan.manifest.entries.single.hash,
+              ),
+            ],
+          ),
+          downloads: <FsEntry>[
+            FsEntry(
+              path: 'short.txt',
+              kind: 'file',
+              size: 10,
+              hash: plan.manifest.entries.single.hash,
+            ),
+          ],
+          deletes: const <String>[],
+          bytes: 10,
+        );
+
+        final report = await service.apply(tampered);
+
+        expect(report.completed, isFalse);
+        expect(report.failure, contains('长度'));
+        expect(
+          await File(p.join(localRoot, 'files', 'short.txt')).exists(),
+          isFalse,
+        );
+      },
+    );
+
     test('deletes stale files and prunes empty directories', () async {
       final first = DeviceSyncService(
         port: FakeDevicePort(
