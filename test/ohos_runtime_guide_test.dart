@@ -40,8 +40,7 @@ const _expectedBundles = <String>[
 ];
 
 /// AppGallery 链接的固定前缀。
-const String _storePrefix =
-    'https://appgallery.huawei.com/app/detail?id=';
+const String _storePrefix = 'https://appgallery.huawei.com/app/detail?id=';
 
 /// 卡片按钮的三种界面文案，随本地化变化。
 const List<String> _downloadLabels = <String>['下载', '下載', 'Download'];
@@ -141,10 +140,7 @@ void main() {
       await _pumpGuide(tester, language: 'python');
 
       expect(find.text('本地运行工具'), findsOneWidget);
-      expect(
-        find.textContaining(StudioProductCatalog.pyFlow),
-        findsWidgets,
-      );
+      expect(find.textContaining(StudioProductCatalog.pyFlow), findsWidgets);
       // 提示语点名首选工具，同时不隐藏其它工具。
       expect(find.textContaining('这个项目使用'), findsOneWidget);
 
@@ -197,7 +193,9 @@ void main() {
       await _pumpGuide(tester);
 
       for (final app in ohosRuntimeApps) {
-        final bytes = await rootBundle.load('packages/qfli_studio_core/${app.iconAsset}');
+        final bytes = await rootBundle.load(
+          'packages/qfli_studio_core/${app.iconAsset}',
+        );
         expect(bytes.lengthInBytes, greaterThan(0));
         await _bringIntoView(tester, app.name);
         final image = tester.widget<Image>(
@@ -419,9 +417,9 @@ Future<void> _pumpGuide(
         GlobalCupertinoLocalizations.delegate,
       ],
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: TextScaler.linear(textScale),
-        ),
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(textScale)),
         child: child!,
       ),
       home: OhosRuntimeGuide(language: language, openStore: opener),

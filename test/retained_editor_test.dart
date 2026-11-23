@@ -117,12 +117,7 @@ void main() {
       expect(rootNavigator.canPop(), isFalse);
       expect(shell.editors.sessionInfos, hasLength(2));
       expect(_editor(tester), isNot(same(alpha)));
-      await tester.tap(
-        find
-            .descendant(of: find.byType(HomeTab), matching: find.text('Alpha'))
-            .first,
-      );
-      await _pumpFrames(tester);
+      await fixture.open(tester, 'Alpha');
       expect(tester.state(find.byType(EditorPage)), same(alphaState));
       expect(_editor(tester), same(alpha));
 

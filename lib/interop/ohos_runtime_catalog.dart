@@ -49,9 +49,8 @@ class OhosRuntimeApp {
   final String iconAsset;
 
   /// AppGallery 详情页。
-  Uri get storeUri => Uri.parse(
-    _storeUrlTemplate.replaceFirst('<bundleName>', bundleName),
-  );
+  Uri get storeUri =>
+      Uri.parse(_storeUrlTemplate.replaceFirst('<bundleName>', bundleName));
 
   /// [language] 是否与该条目相关（忽略大小写与两端空白）。
   bool supports(String? language) {

@@ -30,10 +30,7 @@ Future<void> _defaultOpenStore(Uri uri) async {
 ///
 /// 只推入一个普通 [MaterialPageRoute]。页面跟随根主题与本地化。
 /// [language] 是当前项目语言，用于把对应工具排到最前并高亮。
-Future<void> showOhosRuntimeGuide(
-  BuildContext context, {
-  String? language,
-}) {
+Future<void> showOhosRuntimeGuide(BuildContext context, {String? language}) {
   return Navigator.of(context).push<void>(
     MaterialPageRoute<void>(
       builder: (_) => OhosRuntimeGuide(language: language),
@@ -80,9 +77,9 @@ class _OhosRuntimeGuideState extends State<OhosRuntimeGuide> {
             // 720 是侧栏展开后仍能放下两列卡片的宽度。
             final wide = constraints.maxWidth >= 720;
             // 固定高度的网格单元要随文字缩放一起长，否则大字号会溢出。
-            final scaled = MediaQuery.textScalerOf(context)
-                .scale(1.0)
-                .clamp(1.0, 2.0);
+            final scaled = MediaQuery.textScalerOf(
+              context,
+            ).scale(1.0).clamp(1.0, 2.0);
             final extent = (wide ? 168.0 : 152.0) * scaled;
             return CustomScrollView(
               slivers: <Widget>[
@@ -157,10 +154,7 @@ class _OhosRuntimeGuideState extends State<OhosRuntimeGuide> {
   /// Studio 用固定 id 识别，避免运行时被当成本语言工具。
   static bool _isStudio(OhosRuntimeApp app) => app.id.toLowerCase() == 'studio';
 
-  Future<void> _install(
-    OhosRuntimeApp app,
-    StudioLocalizations l,
-  ) async {
+  Future<void> _install(OhosRuntimeApp app, StudioLocalizations l) async {
     if (_opening != null) return;
     setState(() {
       _opening = app.id;
@@ -212,9 +206,9 @@ class _OhosRuntimeGuideState extends State<OhosRuntimeGuide> {
               await Clipboard.setData(ClipboardData(text: link));
               if (dialogContext.mounted) Navigator.of(dialogContext).pop();
               if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(_copied(l))),
-                );
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text(_copied(l))));
               }
             },
             child: Text(_copyLink(l)),
@@ -340,7 +334,9 @@ class _AppCard extends StatelessWidget {
                         app.id == 'studio'
                             ? (StudioLocalizations.of(context).isEnglish
                                   ? 'Multi-language editor'
-                                  : StudioLocalizations.of(context).isTraditionalChinese
+                                  : StudioLocalizations.of(
+                                      context,
+                                    ).isTraditionalChinese
                                   ? '多語言編輯器'
                                   : '多语言编辑器')
                             : app.id == 'web'

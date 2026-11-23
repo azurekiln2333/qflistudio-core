@@ -1614,7 +1614,7 @@ class TerminalPaneState extends State<TerminalPane> {
                 IconButton(
                   key: const ValueKey('terminal-ohos-runtime-guide'),
                   tooltip: runtimeGuideLabel,
-                  visualDensity: VisualDensity.compact,
+                  visualDensity: VisualDensity.standard,
                   constraints: const BoxConstraints.tightFor(
                     width: 44,
                     height: 44,

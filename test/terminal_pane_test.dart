@@ -57,12 +57,18 @@ void main() {
       expect(tester.getSize(entry).shortestSide, greaterThanOrEqualTo(44));
       await tester.tap(entry);
       await tester.pumpAndSettle();
-      expect(tester.widget<OhosRuntimeGuide>(find.byType(OhosRuntimeGuide)).language, 'python');
+      expect(
+        tester.widget<OhosRuntimeGuide>(find.byType(OhosRuntimeGuide)).language,
+        'python',
+      );
       await tester.pageBack();
       await tester.pumpAndSettle();
       expect(fixture.pane, same(pane));
       expect(pane.sessionCount, 2);
-      expect(tester.widget<TextField>(find.byType(TextField)).controller, same(input));
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller,
+        same(input),
+      );
       expect(input!.text, 'unfinished command');
       await tester.tap(find.byTooltip('终端操作'));
       await tester.pumpAndSettle();
