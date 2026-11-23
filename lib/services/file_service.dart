@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+import 'external_folder_service.dart';
+
 /// 文件系统相关工具方法。
 abstract final class FileService {
   static final RegExp _illegalChars = RegExp(r'[\\/:*?"<>|]');
@@ -25,7 +27,17 @@ abstract final class FileService {
   /// 异步版本。目录很大时（版本库、构建产物）`listSync` 会卡住当前帧，
   /// 文件树的首屏加载走这一条。
   static Future<List<FileSystemEntity>> listSorted(String dirPath) async =>
-      _sorted(await Directory(dirPath).list(followLinks: false).toList());
+      ExternalFolderService.isExternal(dirPath)
+      ? _sortedExternal(await ExternalFolderService.list(dirPath))
+      : _sorted(await Directory(dirPath).list(followLinks: false).toList());
+
+  /// 外部根：占位文件也要列出来，否则用户看不到未下载的文件。
+  static List<FileSystemEntity> _sortedExternal(
+    List<ExternalFolderEntry> entries,
+  ) => _sorted([
+    for (final entry in entries)
+      entry.isDirectory ? Directory(entry.path) : File(entry.path),
+  ]);
 
   static List<FileSystemEntity> _sorted(List<FileSystemEntity> entities) {
     int rank(FileSystemEntity e) => e is Directory ? 0 : 1;
