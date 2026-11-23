@@ -8,6 +8,10 @@ import 'package:path/path.dart' as p;
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
 import '../editor/retained_editor_host.dart';
+import '../github/github_auth_controller.dart';
+import '../github/github_models.dart';
+import '../github/github_scope.dart';
+import '../github/github_project_links.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/hub/harness_hosts.dart';
 import '../harness/ui/agent_session_details_page.dart';
@@ -33,7 +37,7 @@ import '../store/project_store.dart';
 import '../store/settings_store.dart';
 import '../widgets/collapsed_search_field.dart';
 import 'git/git_clone_dialog.dart';
-import 'git/github_repository_picker.dart';
+import 'git/github_repository_list.dart';
 import 'home_project_tabs.dart';
 import 'local_content_pages.dart';
 import 'quick_tools_page.dart';
@@ -240,6 +244,7 @@ class _HomePageState extends State<HomePage> {
         store: widget.store,
         auth: widget.auth,
         settings: widget.settings,
+        onOpenProfile: () => _selectPage(3),
       ),
       1 => FunctionsTab(
         store: widget.store,
@@ -298,11 +303,17 @@ class HomeTab extends StatefulWidget {
     required this.settings,
     this.tabOrderStore,
     this.agentsTabBuilder,
+    this.embedded = false,
+    this.showAgentsScope = true,
+    this.onOpenProfile,
   });
 
   final ProjectStore store;
   final AuthStore auth;
   final SettingsStore settings;
+  final bool embedded;
+  final bool showAgentsScope;
+  final VoidCallback? onOpenProfile;
 
   /// Where the dragged tab order is saved. The app leaves this null and uses
   /// the file-backed store; tests inject an in-memory backend.
@@ -360,6 +371,32 @@ class _HomeTabState extends State<HomeTab>
   // TabBarView can wrap pages in index-keyed semantics nodes. Reparent the
   // retained Agents state when drag sorting moves it to another page slot.
   final _agentsPageKey = GlobalKey();
+  final _githubPageKey = GlobalKey();
+  GitHubAuthController? _github;
+  bool _githubVisited = false;
+  bool _githubLinksLoaded = false;
+  final _githubLinks = GitHubProjectLinks();
+  final _openingRepositories = <int>{};
+  List<ProjectScope> _completeOrder = [];
+
+  bool get _githubConnected =>
+      _github != null &&
+      (_github!.hasConnection ||
+          _github!.status == GitHubAuthStatus.authenticated);
+
+  List<ProjectScope> get _availableScopes => defaultProjectScopes(
+    StudioProfile.current,
+    githubConnected: _githubConnected,
+    showAgents: widget.showAgentsScope,
+  );
+
+  List<ProjectScope> get _allScopes => defaultProjectScopes(
+    StudioProfile.current,
+    githubConnected:
+        _githubConnected ||
+        _completeOrder.contains(ProjectScope.github) ||
+        _tabOrderStore.order.contains(ProjectScope.github),
+  );
 
   /// 首页持有的 hub。跳转时交给编辑器，避免同一台电脑开两条连接。
   HarnessHub? _agentsHub;
@@ -373,9 +410,7 @@ class _HomeTabState extends State<HomeTab>
       widget.tabOrderStore ?? HomeTabOrderStore();
 
   /// Scopes this product offers, in default order.
-  late List<ProjectScope> _orderedScopes = defaultProjectScopes(
-    StudioProfile.current,
-  );
+  late List<ProjectScope> _orderedScopes = _availableScopes;
   late TabController _projectTabs = TabController(
     length: _orderedScopes.length,
     vsync: this,
@@ -419,6 +454,12 @@ class _HomeTabState extends State<HomeTab>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final github = GitHubScope.maybeOf(context);
+    if (!identical(github, _github)) {
+      _github = github;
+      _githubVisited = false;
+    }
+    _applyTabOrder(_completeOrder.isEmpty ? _orderedScopes : _completeOrder);
     final retainedEditor = RetainedEditorScope.maybeOf(context);
     if (!identical(_retainedEditor, retainedEditor)) {
       _retainedEditor?.removeListener(_onRetainedEditorChanged);
@@ -469,10 +510,8 @@ class _HomeTabState extends State<HomeTab>
   /// Re-derives the rendered order from [saved] and the scopes the product
   /// offers right now. Keeps the selected scope selected when it still exists.
   void _applyTabOrder(List<ProjectScope> saved) {
-    final ordered = resolveProjectScopes(
-      saved,
-      defaultProjectScopes(StudioProfile.current),
-    );
+    _completeOrder = resolveProjectScopes(saved, _allScopes);
+    final ordered = resolveProjectScopes(_completeOrder, _availableScopes);
     final selected = _orderedScopes.isEmpty
         ? ProjectScope.all
         : _orderedScopes[_projectTabs.index.clamp(
@@ -493,7 +532,9 @@ class _HomeTabState extends State<HomeTab>
       // against the previous order before the rebuilt children arrive.
       _projectTabs = TabController(
         length: ordered.length,
-        initialIndex: nextIndex < 0 ? 0 : nextIndex,
+        initialIndex: nextIndex < 0
+            ? ordered.indexOf(ProjectScope.history)
+            : nextIndex,
         vsync: this,
       );
     });
@@ -503,6 +544,9 @@ class _HomeTabState extends State<HomeTab>
   @override
   void didUpdateWidget(covariant HomeTab oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.showAgentsScope != widget.showAgentsScope) {
+      _applyTabOrder(_completeOrder);
+    }
     if (oldWidget.auth != widget.auth || oldWidget.store != widget.store) {
       oldWidget.auth.removeListener(_onAuthChanged);
       _cloudActions.removeListener(_onCloudChanged);
@@ -607,7 +651,9 @@ class _HomeTabState extends State<HomeTab>
         title: _searchOpen
             ? _buildSearchField()
             : Text(
-                StudioProfile.current?.appTitle ?? 'QFLIStudioN',
+                widget.embedded
+                    ? l10n.allProjects
+                    : StudioProfile.current?.appTitle ?? 'QFLIStudioN',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
                   color: Theme.of(context).colorScheme.primary,
                 ),
@@ -625,18 +671,23 @@ class _HomeTabState extends State<HomeTab>
                   onSelected: (value) {
                     switch (value) {
                       case 'add_existing':
-                        showAddExistingDialog(context, widget.store);
+                        unawaited(_addExistingProject());
                       case 'remove_missing':
                         _removeMissingProjects(context);
                       case 'import_project':
                         unawaited(_importProjectArchive());
                       case 'clone_repository':
                         unawaited(_cloneRepository());
-                      case 'github_repositories':
-                        unawaited(_cloneGitHubRepositories());
+                      case 'create_project':
+                        unawaited(_createFromCurrentScope(context));
                     }
                   },
                   itemBuilder: (context) => [
+                    if (widget.embedded)
+                      PopupMenuItem(
+                        value: 'create_project',
+                        child: Text(l10n.createProject),
+                      ),
                     PopupMenuItem(
                       value: 'import_project',
                       enabled: _archiveBusyLabel == null,
@@ -657,18 +708,6 @@ class _HomeTabState extends State<HomeTab>
                             Icon(Icons.cloud_download_outlined, size: 20),
                             SizedBox(width: 12),
                             Flexible(child: Text('克隆 Git 仓库')),
-                          ],
-                        ),
-                      ),
-                    if (StudioProfile.current?.offlineOnly != true)
-                      PopupMenuItem(
-                        value: 'github_repositories',
-                        enabled: _archiveBusyLabel == null,
-                        child: Row(
-                          children: [
-                            const Icon(Icons.source_outlined, size: 20),
-                            const SizedBox(width: 12),
-                            Flexible(child: Text(l10n.githubRepositories)),
                           ],
                         ),
                       ),
@@ -700,7 +739,7 @@ class _HomeTabState extends State<HomeTab>
                 const SizedBox(width: 8),
               ],
       ),
-      floatingActionButton: _searchOpen
+      floatingActionButton: _searchOpen || widget.embedded
           ? null
           : FloatingActionButton.extended(
               onPressed: () => _createFromCurrentScope(context),
@@ -787,6 +826,41 @@ class _HomeTabState extends State<HomeTab>
   Widget _buildScopePage(BuildContext context, ProjectScope scope) {
     final key = ValueKey('home-scope-page-${scope.name}');
     return switch (scope) {
+      ProjectScope.github => KeyedSubtree(
+        key: key,
+        child: RetainedPage(
+          key: _githubPageKey,
+          child: ListenableBuilder(
+            listenable: _projectTabs,
+            builder: (context, _) {
+              if (!_githubVisited &&
+                  _orderedScopes[_projectTabs.index] != ProjectScope.github) {
+                return const SizedBox.shrink();
+              }
+              _githubVisited = true;
+              if (!_githubLinksLoaded) {
+                _githubLinksLoaded = true;
+                unawaited(
+                  _githubLinks.load().then((_) {
+                    if (mounted) setState(() {});
+                  }),
+                );
+              }
+              final github = _github;
+              if (github == null) return const SizedBox.shrink();
+              return GitHubRepositoryList(
+                controller: github,
+                onOpenRepository: _openGitHubRepository,
+                onConnect: _openGitHubProfile,
+                actionLabel: (repo) =>
+                    _githubLinks.projectFor(repo, widget.store.projects) == null
+                    ? '克隆'
+                    : '打开',
+              );
+            },
+          ),
+        ),
+      ),
       ProjectScope.agents => KeyedSubtree(
         key: key,
         child: RetainedPage(
@@ -876,6 +950,7 @@ class _HomeTabState extends State<HomeTab>
       ProjectScope.workspace => '工作区',
       ProjectScope.cloud => l10n.cloudProjects,
       ProjectScope.agents => l10n.agentsTab,
+      ProjectScope.github => 'GitHub',
     };
     Widget content(ProjectScope scope) => Tab(
       key: ValueKey('home-scope-tab-${scope.name}'),
@@ -960,11 +1035,14 @@ class _HomeTabState extends State<HomeTab>
     if (!mounted) return;
     final merged = mergeProjectScopeOrder(
       previous: previous,
-      applied: _tabOrderStore.order,
+      applied: _tabOrderStore.order.isEmpty
+          ? _completeOrder
+          : _tabOrderStore.order,
       next: ordered,
-      available: defaultProjectScopes(StudioProfile.current),
+      available: _allScopes,
       moved: previous[oldIndex],
     );
+    _completeOrder = merged;
     unawaited(_tabOrderStore.save(merged));
   }
 
@@ -1004,6 +1082,7 @@ class _HomeTabState extends State<HomeTab>
         return all.where((p) => p.favorite).toList();
       case ProjectScope.workspace:
       case ProjectScope.agents:
+      case ProjectScope.github:
         return const [];
       case ProjectScope.cloud:
         return all.where((p) => p.isCloud).toList();
@@ -1501,18 +1580,67 @@ class _HomeTabState extends State<HomeTab>
     await _runCloneRequest(request);
   }
 
-  // R1: reuse the exact Home clone pipeline for every selected repository.
-  Future<void> _cloneGitHubRepositories() async {
-    if (_archiveBusyLabel != null) return;
-    final requests = await showGitHubRepositoryPicker(context);
-    if (!mounted || requests == null) return;
-    for (final request in requests) {
-      unawaited(_runCloneRequest(request));
+  Future<void> _addExistingProject() async {
+    final project = await showAddExistingDialog(context, widget.store);
+    if (project != null && mounted && widget.embedded) {
+      await _openProject(context, project);
     }
   }
 
-  Future<void> _runCloneRequest(GitCloneRequest request) async {
-    if (!mounted) return;
+  void _openGitHubProfile() {
+    if (widget.onOpenProfile case final open?) {
+      open();
+      return;
+    }
+    unawaited(
+      Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => ProfileTab(
+            auth: widget.auth,
+            settings: widget.settings,
+            store: widget.store,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openGitHubRepository(GitHubRepository repository) async {
+    if (!_openingRepositories.add(repository.id)) return;
+    final github = _github;
+    try {
+      final existing = await _githubLinks.findExisting(
+        repository,
+        widget.store.projects,
+      );
+      if (!mounted) return;
+      if (existing != null) {
+        await _openProject(context, existing);
+        return;
+      }
+      if (!identical(github, _github)) return;
+      final request = github?.buildCloneRequest(repository);
+      if (request == null) {
+        _openGitHubProfile();
+        return;
+      }
+      final project = await _runCloneRequest(request, keepScope: true);
+      if (project != null) {
+        await _githubLinks.link(repository, project);
+        if (mounted) setState(() {});
+      }
+    } on Object {
+      if (mounted) _showArchiveMessage('无法打开 GitHub 项目，请重试。');
+    } finally {
+      _openingRepositories.remove(repository.id);
+    }
+  }
+
+  Future<Project?> _runCloneRequest(
+    GitCloneRequest request, {
+    bool keepScope = false,
+  }) async {
+    if (!mounted) return null;
     final id = _nextCloneTaskId++;
     final cancellation = GitCloneCancellation();
     final task = _HomeCloneTaskState(
@@ -1534,10 +1662,10 @@ class _HomeTabState extends State<HomeTab>
           setState(() => task.progress = progress);
         },
       );
-      if (!mounted) return;
+      if (!mounted) return null;
       if (outcome.cancelled) {
         _showArchiveMessage('已取消克隆「${task.name}」');
-        return;
+        return null;
       }
       final project = outcome.project;
       if (outcome.error != null || project == null) {
@@ -1547,7 +1675,7 @@ class _HomeTabState extends State<HomeTab>
               ? '「${task.name}」克隆失败：${outcome.error ?? '未知错误'}'
               : '「${task.name}」克隆已下载，但注册失败：${outcome.error}。文件保留在 $preserved',
         );
-        return;
+        return null;
       }
       setState(() {
         _languageFilter = '';
@@ -1555,8 +1683,11 @@ class _HomeTabState extends State<HomeTab>
         _searchController.clear();
         _searchOpen = false;
       });
-      _projectTabs.animateTo(_orderedScopes.indexOf(ProjectScope.all));
+      if (!keepScope) {
+        _projectTabs.animateTo(_orderedScopes.indexOf(ProjectScope.all));
+      }
       _showArchiveMessage('已克隆项目「${project.name}」');
+      return project;
     } on Object catch (error) {
       if (mounted) _showArchiveMessage('「${task.name}」克隆失败：$error');
     } finally {
@@ -1565,6 +1696,7 @@ class _HomeTabState extends State<HomeTab>
         setState(() => _cloneTasks.remove(id));
       }
     }
+    return null;
   }
 
   void _cancelClone(int id) {

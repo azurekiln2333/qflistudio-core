@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../community/community_widgets.dart';
 import '../config/compliance_config.dart';
+import '../github/github_scope.dart';
 import '../i18n/studio_localizations.dart';
 import '../services/api_client.dart';
 import '../services/recovery_service.dart';
@@ -21,6 +22,7 @@ import 'points_page.dart';
 import 'task_config_page.dart';
 import 'checkin_calendar_page.dart';
 import 'activity_stats_page.dart';
+import 'git/github_connection_panel.dart';
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({
@@ -28,11 +30,16 @@ class ProfileTab extends StatefulWidget {
     required this.auth,
     required this.settings,
     required this.store,
+    this.isActive = true,
   });
 
   final AuthStore auth;
   final SettingsStore settings;
   final ProjectStore store;
+
+  /// Retained hosts set this false when Profile is hidden. TickerMode and
+  /// covering routes also pause the connection panel's owned device flow.
+  final bool isActive;
 
   @override
   State<ProfileTab> createState() => _ProfileTabState();
@@ -84,6 +91,7 @@ class _ProfileTabState extends State<ProfileTab> {
     // section is omitted: the login entry, the account header/stats and the
     // sign-out button. The local-only sections (recovery, settings, about) stay.
     final offlineOnly = StudioProfile.current?.offlineOnly == true;
+    final github = offlineOnly ? null : GitHubScope.maybeOf(context);
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -113,6 +121,17 @@ class _ProfileTabState extends State<ProfileTab> {
                       _statistics(context),
                       const SizedBox(height: 24),
                     ],
+                    if (github != null)
+                      SettingsSection(
+                        title: 'GitHub',
+                        cardShape: _cardShape,
+                        children: [
+                          GitHubConnectionPanel(
+                            controller: github,
+                            isActive: widget.isActive,
+                          ),
+                        ],
+                      ),
                     if (!offlineOnly)
                       SettingsSection(
                         title: '签到与积分',
@@ -366,31 +385,50 @@ class _ProfileTabState extends State<ProfileTab> {
         padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 8),
         child: Row(
           children: [
-            _stat(context, '${user.points}', '积分', onTap: () =>
-                _openAccountPage(() => PointsPage(auth: widget.auth))),
-            _stat(context, '${user.checkinStreak}', '连续签到', onTap: () =>
-                _openAccountPage(() => CheckinCalendarPage(auth: widget.auth))),
+            _stat(
+              context,
+              '${user.points}',
+              '积分',
+              onTap: () =>
+                  _openAccountPage(() => PointsPage(auth: widget.auth)),
+            ),
+            _stat(
+              context,
+              '${user.checkinStreak}',
+              '连续签到',
+              onTap: () => _openAccountPage(
+                () => CheckinCalendarPage(auth: widget.auth),
+              ),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _stat(BuildContext context, String value, String label, {VoidCallback? onTap}) {
+  Widget _stat(
+    BuildContext context,
+    String value,
+    String label, {
+    VoidCallback? onTap,
+  }) {
     final theme = Theme.of(context);
     return Expanded(
-      child: InkWell(onTap: onTap, child: Column(
-        children: [
-          Text(value, style: theme.textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          children: [
+            Text(value, style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
-          ),
-        ],
-      )),
+          ],
+        ),
+      ),
     );
   }
 

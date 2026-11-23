@@ -111,7 +111,24 @@ class RetainedEditorController extends ChangeNotifier {
   bool _disposed = false;
 
   bool get isVisible => _active != null;
+  bool _rootBackHandling = true;
+
+  /// Workbench editors are embedded in the root route, so they must not
+  /// intercept Back on a root settings page or popup.
+  void setRootBackHandling(bool enabled) {
+    if (_disposed) return;
+    _rootBackHandling = enabled;
+    _rootObserver.setEditorVisible(isVisible);
+  }
+
   Project? get activeProject => _sessions[_active]?.project;
+  String? get activeSessionKey => _active;
+
+  /// Restores the exact retained session, including workspace promotions.
+  void resumeSession(String key) {
+    if (_sessions.containsKey(key)) _activate(key);
+  }
+
   List<Project> get projects =>
       List.unmodifiable(_sessions.values.map((session) => session.project));
 
@@ -330,6 +347,9 @@ class RetainedEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The workbench's root route delegates platform Back to the live editor.
+  Future<void> handleBack() => _back();
+
   Future<void> _back() async {
     if (_handlingBack || !isVisible) return;
     _handlingBack = true;
@@ -403,10 +423,12 @@ class RetainedEditorHost extends StatefulWidget {
     super.key,
     required this.controller,
     required this.child,
+    this.showRestoreControl = true,
   });
 
   final RetainedEditorController controller;
   final Widget child;
+  final bool showRestoreControl;
 
   @override
   State<RetainedEditorHost> createState() => _RetainedEditorHostState();
@@ -560,6 +582,7 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
               child: RetainedEditorRestoreControl(
                 key: const ValueKey('retained-editor-restore-control'),
                 visible:
+                    widget.showRestoreControl &&
                     !controller.isVisible &&
                     !_motions.values.any((motion) => motion.isAnimating) &&
                     !controller._rootObserver.hasPopupRoute &&
@@ -753,7 +776,9 @@ class _EditorPopEntry extends PopEntry<Object?> {
 
   @override
   void onPopInvokedWithResult(bool didPop, Object? result) {
-    if (!didPop && controller.isVisible) unawaited(controller._back());
+    if (!didPop && controller.isVisible && controller._rootBackHandling) {
+      unawaited(controller._back());
+    }
   }
 }
 
@@ -774,7 +799,7 @@ class _RootEditorObserver extends NavigatorObserver {
   bool get hasPopupRoute => _popupRoutes.isNotEmpty;
 
   void setEditorVisible(bool visible) {
-    _entry.canPopNotifier.value = !visible;
+    _entry.canPopNotifier.value = !visible || !_controller._rootBackHandling;
   }
 
   @override

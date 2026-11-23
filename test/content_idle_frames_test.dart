@@ -1,3 +1,4 @@
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -178,6 +179,7 @@ Future<void> _mountHome(
   );
   await tester.pumpWidget(
     QfliApp(
+      formFactor: AppFormFactor.phone,
       store: stores.projects,
       auth: stores.auth,
       settings: stores.settings,

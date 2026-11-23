@@ -1,3 +1,4 @@
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -171,7 +172,12 @@ void main() {
     final auth = AuthStore();
     final settings = SettingsStore();
     await tester.pumpWidget(
-      QfliApp(store: store, auth: auth, settings: settings),
+      QfliApp(
+        formFactor: AppFormFactor.phone,
+        store: store,
+        auth: auth,
+        settings: settings,
+      ),
     );
     await tester.pumpAndSettle();
     expect(find.byType(PostListPage, skipOffstage: false), findsNothing);
@@ -194,7 +200,9 @@ void main() {
   testWidgets('空项目列表也能拉出原生刷新球并执行刷新', (tester) async {
     final store = _RefreshStore()..completion = Completer<void>();
     final auth = AuthStore();
-    await tester.pumpWidget(QfliApp(store: store, auth: auth));
+    await tester.pumpWidget(
+      QfliApp(formFactor: AppFormFactor.phone, store: store, auth: auth),
+    );
     await tester.pumpAndSettle();
     await tester.drag(
       find.byType(CustomScrollView).first,
@@ -221,7 +229,9 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     final store = ProjectStore();
     final auth = AuthStore();
-    await tester.pumpWidget(QfliApp(store: store, auth: auth));
+    await tester.pumpWidget(
+      QfliApp(formFactor: AppFormFactor.phone, store: store, auth: auth),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.person_outline));
     await tester.pumpAndSettle();

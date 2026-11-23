@@ -1,3 +1,4 @@
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/app.dart';
@@ -23,7 +24,13 @@ void main() {
       addTearDown(settings.dispose);
 
       await tester.pumpWidget(
-        QfliApp(store: store, auth: auth, settings: settings, ready: ready),
+        QfliApp(
+          formFactor: AppFormFactor.phone,
+          store: store,
+          auth: auth,
+          settings: settings,
+          ready: ready,
+        ),
       );
       if (status == AppRestoreStatus.completed) {
         AppRestoreGate.requireRestart();
@@ -62,7 +69,12 @@ void main() {
       AppRestoreGate.status.value = status;
 
       await tester.pumpWidget(
-        QfliApp(store: store, auth: auth, settings: settings),
+        QfliApp(
+          formFactor: AppFormFactor.phone,
+          store: store,
+          auth: auth,
+          settings: settings,
+        ),
       );
       await tester.pumpAndSettle();
 

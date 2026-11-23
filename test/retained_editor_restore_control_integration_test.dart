@@ -1,3 +1,4 @@
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -307,7 +308,12 @@ class _Fixture {
       contentRepositoryFactory: () => const _Content(),
     );
     await tester.pumpWidget(
-      QfliApp(store: store, auth: auth, settings: settings),
+      QfliApp(
+        formFactor: AppFormFactor.phone,
+        store: store,
+        auth: auth,
+        settings: settings,
+      ),
     );
     await _pumpFrames(tester);
   }

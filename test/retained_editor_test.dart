@@ -14,6 +14,9 @@ import 'package:qfli_studio_core/editor/editor_selection_toolbar.dart';
 import 'package:qfli_studio_core/editor/retained_editor_host.dart';
 import 'package:qfli_studio_core/editor/terminal_pane.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
+import 'package:qfli_studio_core/pages/home_page.dart';
+import 'package:qfli_studio_core/pages/profile_page.dart';
 import 'package:qfli_studio_core/pages/content_tools_pages.dart';
 import 'package:qfli_studio_core/pages/local_content_pages.dart';
 import 'package:qfli_studio_core/pages/settings_page.dart';
@@ -24,6 +27,9 @@ import 'package:qfli_studio_core/services/task_activity_service.dart';
 import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
+import 'package:qfli_studio_core/shell/large_screen_workbench.dart';
+import 'package:qfli_studio_core/shell/workbench_chrome.dart';
+import 'package:qfli_studio_core/editor/file_explorer.dart';
 import 'package:re_editor/re_editor.dart';
 
 const _sample =
@@ -50,6 +56,110 @@ void main() {
     PathProviderPlatform.instance = previousPaths;
     await root.delete(recursive: true);
   });
+
+  for (final family in [AppFormFactor.desktop, AppFormFactor.tablet]) {
+    testWidgets('$family uses one workbench and preserves live project state', (
+      tester,
+    ) async {
+      final fixture = _Fixture(root);
+      await fixture.mount(tester, formFactor: family);
+      expect(find.byType(LargeScreenWorkbench), findsOneWidget);
+      expect(find.byType(HomePage), findsNothing);
+      expect(find.byType(WorkbenchWelcome), findsOneWidget);
+      expect(find.byType(FileExplorer, skipOffstage: false), findsNothing);
+      final shell = tester.widget<LargeScreenWorkbench>(
+        find.byType(LargeScreenWorkbench),
+      );
+      final rail = find.byType(WorkbenchActivityRail);
+      final rootNavigator = Navigator.of(tester.element(rail));
+      await fixture.open(tester, 'Alpha');
+      expect(rootNavigator.canPop(), isFalse);
+      expect(rail, findsOneWidget);
+      final alphaState = tester.state(find.byType(EditorPage));
+      final alpha = _editor(tester);
+      final open = alpha.current!;
+      open.controller.text = '// kept edit\nclass Main {}';
+      const selection = CodeLineSelection(
+        baseIndex: 0,
+        baseOffset: 3,
+        extentIndex: 0,
+        extentOffset: 7,
+      );
+      open.controller.selection = selection;
+      await tester.pump();
+      expect(open.dirty, isTrue);
+
+      Future<void> select(WorkbenchActivity activity) async {
+        await tester.tap(
+          find.byKey(WorkbenchActivityRail.activityKey(activity)),
+        );
+        await _pumpFrames(tester);
+      }
+
+      await select(WorkbenchActivity.files);
+      expect(find.byType(FileExplorer), findsOneWidget);
+      final tree = tester.state(find.byType(FileExplorer));
+      await select(WorkbenchActivity.agents);
+      expect(find.byType(FileExplorer), findsNothing);
+      expect(_editor(tester), same(alpha));
+      await select(WorkbenchActivity.projects);
+      await fixture.open(tester, 'Beta');
+      expect(rootNavigator.canPop(), isFalse);
+      expect(shell.editors.sessionInfos, hasLength(2));
+      expect(_editor(tester), isNot(same(alpha)));
+      await tester.tap(
+        find
+            .descendant(of: find.byType(HomeTab), matching: find.text('Alpha'))
+            .first,
+      );
+      await _pumpFrames(tester);
+      expect(tester.state(find.byType(EditorPage)), same(alphaState));
+      expect(_editor(tester), same(alpha));
+
+      await tester.tap(find.byKey(WorkbenchActivityRail.avatarKey));
+      await _pumpFrames(tester);
+      expect(find.byType(ProfileTab), findsOneWidget);
+      expect(find.byType(EditorPage), findsNothing);
+      expect(alphaState.mounted, isTrue);
+      await _back(tester);
+      expect(_editor(tester), same(alpha));
+      expect(open.controller.selection, selection);
+      expect(open.controller.text, '// kept edit\nclass Main {}');
+      expect(open.dirty, isTrue);
+
+      await select(WorkbenchActivity.files);
+      expect(tester.state(find.byType(FileExplorer)), same(tree));
+      tester.view.physicalSize = const Size(500, 800);
+      await _pumpFrames(tester);
+      expect(find.byType(LargeScreenWorkbench), findsOneWidget);
+      expect(find.byType(HomePage), findsNothing);
+      expect(tester.state(find.byType(FileExplorer)), same(tree));
+      // Toggle the same sidebar away to interact with the narrow center.
+      await select(WorkbenchActivity.files);
+      expect(find.byType(FileExplorer), findsNothing);
+      expect(_editor(tester), same(alpha));
+      tester.view.physicalSize = const Size(1200, 850);
+      await _pumpFrames(tester);
+      await select(WorkbenchActivity.files);
+      expect(tester.state(find.byType(FileExplorer)), same(tree));
+      expect(shell.editors.sessionInfos, hasLength(2));
+      expect(open.controller.selection, selection);
+      final avatar = tester.getRect(
+        find.byKey(WorkbenchActivityRail.avatarKey),
+      );
+      expect(avatar.left, lessThan(WorkbenchActivityRail.width));
+      expect(avatar.bottom, greaterThan(800));
+      await _menu(tester, 'close_editor');
+      expect(find.text('有未保存的更改'), findsOneWidget);
+      await tester.tap(find.text('丢弃'));
+      await _pumpIoUntil(tester, () => !alphaState.mounted);
+      await _pumpFrames(tester);
+      expect(find.byType(FileExplorer), findsNothing);
+      expect(find.byType(WorkbenchWelcome), findsOneWidget);
+      expect(shell.editors.sessionInfos, hasLength(1));
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   for (final layout in [
     (
@@ -797,6 +907,7 @@ class _Fixture {
   Future<void> mount(
     WidgetTester tester, {
     bool standalone = false,
+    AppFormFactor formFactor = AppFormFactor.phone,
     Size size = const Size(1100, 850),
     FakeViewPadding padding = const FakeViewPadding(),
     double textScale = 1,
@@ -881,7 +992,12 @@ class _Fixture {
       );
     } else {
       await tester.pumpWidget(
-        QfliApp(store: store, auth: auth, settings: settings),
+        QfliApp(
+          formFactor: formFactor,
+          store: store,
+          auth: auth,
+          settings: settings,
+        ),
       );
     }
     await _pumpFrames(tester);

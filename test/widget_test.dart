@@ -1,3 +1,4 @@
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -85,7 +86,9 @@ void main() {
       store.dispose();
       await _disposeFixtureTree(tester, directory);
     });
-    await tester.pumpWidget(QfliApp(store: store, auth: auth));
+    await tester.pumpWidget(
+      QfliApp(formFactor: AppFormFactor.phone, store: store, auth: auth),
+    );
   }
 
   test('项目创建并持久化到磁盘', () async {
@@ -217,9 +220,7 @@ void main() {
     expect(find.text('src'), findsOneWidget);
   });
 
-  testWidgets('底部导航：主页/工具/教程/我的 四个 Tab 切换，教程页内切示例代码', (
-    tester,
-  ) async {
+  testWidgets('底部导航：主页/工具/教程/我的 四个 Tab 切换，教程页内切示例代码', (tester) async {
     final store = ProjectStore(storageFile: storage);
     await tester.runAsync(() => store.load());
     await mountApp(tester, store);
@@ -258,9 +259,9 @@ void main() {
     expect(find.text(l10n.tutorial), findsWidgets);
 
     // The example-code section lives on that same page.
-    await tester.tap(find
-        .byKey(TutorialCenterPage.examplesSectionKey)
-        .hitTestable());
+    await tester.tap(
+      find.byKey(TutorialCenterPage.examplesSectionKey).hitTestable(),
+    );
     // The bundled repository is in memory, but ExampleCodeStore still checks
     // its persisted file. Give real IO time to finish before settling frames.
     await _pumpIoUntil(

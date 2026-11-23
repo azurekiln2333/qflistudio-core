@@ -79,6 +79,8 @@ import 'agent/agent_dock.dart';
 import 'agent/agent_pane_switcher.dart';
 import 'agent/editor_agent_host.dart';
 import 'agent/editor_sidebar_tabs.dart';
+import '../shell/large_screen_controller.dart';
+import '../shell/workbench_chrome.dart';
 import 'agent/session_list_view.dart';
 import '../harness/harness_host.dart';
 import '../harness/harness_session_target.dart';
@@ -448,6 +450,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   SyncState _syncState = SyncState.idle;
   String? _syncError;
 
+  LargeScreenController? _largeScreen;
+  Widget _workbenchFiles(BuildContext _) =>
+      _buildExplorerCard(context, onFileOpened: _onTreeFileOpened);
+
   @override
   void initState() {
     super.initState();
@@ -540,6 +546,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   @override
   void didUpdateWidget(covariant EditorPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _largeScreen?.refreshFiles();
     if (oldWidget.retainedVisibility != widget.retainedVisibility) {
       oldWidget.retainedVisibility?.removeListener(
         _onRetainedVisibilityChanged,
@@ -741,6 +748,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _onRetainedVisibilityChanged() {
+    if (widget.retainedVisibility?.value == true) {
+      _largeScreen?.activateFiles(this);
+    }
     final generation = ++_visibilityGeneration;
     if (widget.retainedVisibility?.value != true) {
       if (_hiddenViews.isNotEmpty) return;
@@ -1005,6 +1015,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       widget.onWorkspaceSaved?.call(attached, state.members);
     }
     _reconcileWorkspaceMembers();
+    _largeScreen?.refreshFiles();
     unawaited(_saveHistory());
   }
 
@@ -1073,6 +1084,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _largeScreen?.unregisterFiles(this);
     // 首帧选会话的等待先收尾：它们握着 15 秒定时器与 hub 监听，
     // 放在这里最靠前，保证后面的拆除不会再把它们拉到。
     for (final cancel in _sessionWaits.toList()) {
@@ -1219,6 +1231,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final largeScreen = LargeScreenScope.maybeOf(context);
+    if (!identical(largeScreen, _largeScreen)) {
+      _largeScreen?.unregisterFiles(this);
+      _largeScreen = largeScreen;
+      largeScreen?.registerFiles(this, _workbenchFiles);
+      if (widget.retainedVisibility?.value ?? true) {
+        largeScreen?.activateFiles(this);
+      }
+    }
     _codeViews.clear();
   }
 
@@ -1725,6 +1746,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _toggleExplorer() {
+    if (_largeScreen case final largeScreen?) {
+      largeScreen.select(WorkbenchActivity.files);
+      return;
+    }
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
     if (wide) {
       // 侧栏默认隐藏，第一次点击为展开。
@@ -1910,6 +1935,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 文件树里点开文件后：关抽屉并把内容区切回编辑器。
   void _onTreeFileOpened() {
     _showEditorPane(recheckDisk: false);
+    _largeScreen?.closeCompactSidebar();
   }
 
   /// 展开 Agent 面板：宽屏展开右栏，中屏与窄屏切到 Agent 分段。
@@ -3796,7 +3822,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                       },
                     ),
                   ),
-            drawer: wide || focusMode
+            drawer: wide || focusMode || _largeScreen != null
                 ? null
                 : Drawer(
                     width: _sidebarWidth + _cardMargin * 2,
@@ -3911,7 +3937,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                       key: const ValueKey('editor-body-wide'),
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (wide && !focusMode)
+                        if (wide && !focusMode && _largeScreen == null)
                           ClipRect(
                             child: AnimatedAlign(
                               duration: const Duration(milliseconds: 200),

@@ -62,9 +62,14 @@ class GitHubAuthController extends ChangeNotifier {
   int _generation = 0;
   int _repositoryGeneration = 0;
   bool _disposed = false;
+  bool _hasConnection = false;
   Future<void>? _restoreFuture;
 
   GitHubAuthStatus get status => _status;
+
+  /// Keep the repository tab available after an expired credential. Only an
+  /// explicit disconnect removes the connection from the application's UI.
+  bool get hasConnection => _hasConnection;
   GitHubAuthMethod? get authMethod => _authMethod;
   GitHubAccount? get account => _account;
   GitHubDeviceAuthorization? get deviceAuthorization => _deviceAuthorization;
@@ -117,6 +122,7 @@ class GitHubAuthController extends ChangeNotifier {
         _notify();
         return;
       }
+      _hasConnection = true;
       await _finishAuthentication(
         token: token,
         method: GitHubAuthMethod.personalAccessToken,
@@ -230,6 +236,7 @@ class GitHubAuthController extends ChangeNotifier {
   }
 
   Future<void> cancelDeviceOAuth() async {
+    if (_disposed) return;
     if (_status != GitHubAuthStatus.awaitingDeviceAuthorization &&
         _status != GitHubAuthStatus.loading) {
       return;
@@ -319,6 +326,7 @@ class GitHubAuthController extends ChangeNotifier {
         ? user.login
         : 'x-access-token';
     _account = user;
+    _hasConnection = true;
     _authMethod = method;
     _status = GitHubAuthStatus.authenticated;
     _errorMessage = null;
@@ -333,6 +341,7 @@ class GitHubAuthController extends ChangeNotifier {
   /// Disconnects and invalidates all pending identity-bound requests.
   Future<void> disconnect() async {
     final generation = _invalidateIntent();
+    _hasConnection = false;
     _isBusy = false;
     _isLoadingRepositories = false;
     _accessToken = null;

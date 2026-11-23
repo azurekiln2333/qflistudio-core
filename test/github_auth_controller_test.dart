@@ -89,6 +89,32 @@ void main() {
   });
 
   test(
+    'expired stored connection keeps reconnect entry until explicit disconnect',
+    () async {
+      final vault = _DelayedVault()..token = 'expired-test-token';
+      final api = GitHubApi(
+        client: MockClient(
+          (_) async => http.Response(
+            '{"message":"Bad credentials"}',
+            401,
+            headers: const {'content-type': 'application/json'},
+          ),
+        ),
+      );
+      final controller = GitHubAuthController(credentialStore: vault, api: api);
+      addTearDown(controller.dispose);
+      addTearDown(api.close);
+      await controller.restore();
+      expect(controller.status, GitHubAuthStatus.error);
+      expect(controller.hasConnection, isTrue);
+      expect(controller.cloneCredential, isNull);
+      await controller.disconnect();
+      expect(controller.hasConnection, isFalse);
+      expect(vault.token, isNull);
+    },
+  );
+
+  test(
     'disconnect waits behind delayed write and returns after stale token deletion',
     () async {
       final vault = _DelayedVault()

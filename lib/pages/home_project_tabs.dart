@@ -10,7 +10,7 @@ import '../services/studio_profile.dart';
 /// [name] is the stable identifier persisted in `home_project_tabs.json`. Never
 /// rename a value: saved orders are read back by identifier and an unknown one
 /// is dropped.
-enum ProjectScope { all, history, favorite, workspace, cloud, agents }
+enum ProjectScope { all, history, favorite, workspace, cloud, agents, github }
 
 /// The scopes a product offers, in the order Home sorts them by default.
 ///
@@ -19,7 +19,11 @@ enum ProjectScope { all, history, favorite, workspace, cloud, agents }
 /// The cloud scope is a server feature, so it follows the same switch that hides
 /// the server surfaces in general; workspaces are purely local and follow their
 /// own opt-out.
-List<ProjectScope> defaultProjectScopes(StudioProfile? profile) => [
+List<ProjectScope> defaultProjectScopes(
+  StudioProfile? profile, {
+  bool githubConnected = false,
+  bool showAgents = true,
+}) => [
   ProjectScope.history,
   if (profile?.supportsSavedWorkspaces ?? true) ProjectScope.workspace,
   ProjectScope.all,
@@ -27,7 +31,8 @@ List<ProjectScope> defaultProjectScopes(StudioProfile? profile) => [
   // The scope only appears for networked products, matching the old rule that
   // kept it out of offline-only builds.
   if (profile?.offlineOnly != true) ProjectScope.cloud,
-  ProjectScope.agents,
+  if (showAgents) ProjectScope.agents,
+  if (githubConnected && profile?.offlineOnly != true) ProjectScope.github,
 ];
 
 /// Folds a saved order and the scopes a product currently offers into the order
