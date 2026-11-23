@@ -121,6 +121,6 @@ void main() {
 
     expect(find.text('打开'), findsOneWidget);
     expect(find.text('删除'), findsNothing);
-    expect(Directory(p.join(vault, 'note.md')).existsSync(), isFalse);
+    expect(File(p.join(vault, 'note.md')).existsSync(), isTrue);
   });
 }
