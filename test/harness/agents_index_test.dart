@@ -40,10 +40,20 @@ void main() {
   });
 
   group('agentsHostLabel', () {
-    test('本机与内置 Agent 用固定说法', () {
+    test('本机与 Herdr 用主机自己的名字，内置 Agent 用固定说法', () {
       expect(
-        agentsHostLabel(kind: HarnessHostKind.local, hostLabel: '随便'),
+        agentsHostLabel(kind: HarnessHostKind.local, hostLabel: '本机'),
         '本机',
+      );
+      expect(
+        agentsHostLabel(kind: HarnessHostKind.local, hostLabel: 'Herdr'),
+        'Herdr',
+        reason: '需求 10.5 要求 Herdr 与本机分开标',
+      );
+      expect(
+        agentsHostLabel(kind: HarnessHostKind.local, hostLabel: '  '),
+        '本机',
+        reason: '主机没给名字时退回默认说法',
       );
       expect(
         agentsHostLabel(kind: HarnessHostKind.studio, hostLabel: '随便'),

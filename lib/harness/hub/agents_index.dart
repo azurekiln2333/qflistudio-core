@@ -76,7 +76,8 @@ int harnessStatusRank(HarnessSessionStatus status) {
 
 /// 端标注。
 ///
-/// 本机与 Herdr 用固定写法；已绑定电脑优先用设备名，取不到时退回主机名。
+/// 本机与 Herdr 用主机给的名字（需求 10.5 要求把 Herdr 与本机分开写）；
+/// 已绑定电脑优先用设备名，取不到时退回主机名。
 String agentsHostLabel({
   required HarnessHostKind kind,
   required String hostLabel,
@@ -84,7 +85,8 @@ String agentsHostLabel({
 }) {
   switch (kind) {
     case HarnessHostKind.local:
-      return '本机';
+      final label = hostLabel.trim();
+      return label.isEmpty ? '本机' : label;
     case HarnessHostKind.studio:
       return '内置 Agent';
     case HarnessHostKind.remote:

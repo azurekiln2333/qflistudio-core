@@ -56,6 +56,7 @@ void main() {
     void Function(AgentsIndexRow row)? onOpenSession,
     void Function(AgentsIndexRow row)? onOpenDetails,
     HarnessDeviceInfo? deviceInfo,
+    Future<HarnessHost?> Function()? remoteHostOpener,
   }) async {
     final hub = HarnessHub(hosts: hosts, desktop: true, ownsHosts: false);
     addTearDown(hub.dispose);
@@ -71,6 +72,7 @@ void main() {
             store: store,
             settings: settings,
             harnessHub: hub,
+            remoteHostOpener: remoteHostOpener,
             snapshotStore: snapshotStore,
             sessionRoot: sessionRoot,
             deviceInfo:
@@ -345,5 +347,87 @@ void main() {
 
     expect(backend.hasWrite, isTrue);
     expect(backend.payload, contains('写进快照'));
+  });
+
+  testWidgets('主机报了会话后不留快照里的旧行', (tester) async {
+    final snapshot = AgentsSnapshotStore(
+      backend: LocalMemoryBackend(
+        jsonEncode({
+          'version': AgentsSnapshotStore.schemaVersion,
+          'rows': [
+            {
+              'hostId': 'remote:1',
+              'sessionId': 'gone',
+              'hostLabel': 'MacBook',
+              'hostKind': 'remote',
+              'title': '已经结束的会话',
+              'status': 'idle',
+            },
+          ],
+        }),
+      ),
+    );
+    final remote = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+      initialSessions: const [],
+    );
+    addTearDown(remote.dispose);
+    await mount(tester, hosts: [remote], snapshotStore: snapshot);
+
+    expect(find.text('已经结束的会话'), findsNothing, reason: '主机报过列表就等于没这条');
+    expect(find.byKey(const ValueKey('agents-empty')), findsOneWidget);
+  });
+
+  testWidgets('打开标签时接上已绑定的电脑', (tester) async {
+    final remote = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+      initialSessions: [
+        fakeSession(hostId: 'remote:1', id: 's-1', title: '电脑上的会话'),
+      ],
+    );
+    addTearDown(remote.dispose);
+    var opened = 0;
+    final hub = await mount(
+      tester,
+      hosts: const [],
+      onOpenSession: (_) {},
+      remoteHostOpener: () async {
+        opened++;
+        return remote;
+      },
+    );
+
+    expect(opened, 1);
+    expect(hub.hostById('remote:1'), isNotNull);
+    expect(find.text('电脑上的会话'), findsOneWidget);
+    expect(find.byKey(const ValueKey('agents-empty')), findsNothing);
+  });
+
+  testWidgets('已经接了远程主机就不再开第二条连接', (tester) async {
+    final existing = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+    );
+    addTearDown(existing.dispose);
+    var opened = 0;
+    await mount(
+      tester,
+      hosts: [existing],
+      remoteHostOpener: () async {
+        opened++;
+        return FakeHarnessHost(
+          id: 'remote:2',
+          label: '另一台',
+          kind: HarnessHostKind.remote,
+        );
+      },
+    );
+
+    expect(opened, 0);
   });
 }

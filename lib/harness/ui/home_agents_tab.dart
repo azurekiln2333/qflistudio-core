@@ -2,6 +2,8 @@
 //
 // 只做索引，不做管理：点一行跳到编辑器并选中那个会话（见 agents_entry.dart）。
 // 首屏先画快照，网络或磁盘回来再替换。数据流见 design.md §3。
+//
+// 已绑定电脑的主机要异步打开存储，所以由本页在打开时补接（`addHost`）。
 
 import 'dart:async';
 import 'dart:io';
@@ -20,6 +22,7 @@ import '../device_info.dart';
 import '../harness_host.dart';
 import '../hub/agents_index.dart';
 import '../hub/agents_snapshot.dart';
+import '../hub/default_harness_hosts.dart';
 import '../hub/harness_hub.dart';
 import '../hub/harness_hosts.dart';
 import '../hub/studio_session_index.dart';
@@ -36,6 +39,7 @@ class HomeAgentsTab extends StatefulWidget {
     required this.store,
     required this.settings,
     this.harnessHub,
+    this.remoteHostOpener,
     this.snapshotStore,
     this.sessionRoot,
     this.deviceInfo,
@@ -56,6 +60,11 @@ class HomeAgentsTab extends StatefulWidget {
 
   /// 测试注入的 hub；为空时按产品策略装配。
   final HarnessHub? harnessHub;
+
+  /// 测试注入的已绑定电脑主机；为空时调 [openRemoteHarnessHost]。
+  ///
+  /// 真的实现会打开远程存储并连上电脑，测试里给一台假主机。
+  final Future<HarnessHost?> Function()? remoteHostOpener;
 
   /// 测试注入的快照存储。
   final AgentsSnapshotStore? snapshotStore;
@@ -86,6 +95,11 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
 
   StreamSubscription<List<HarnessSessionInfo>>? _sub;
   List<AgentsIndexRow> _rows = const [];
+
+  /// 快照带来的行。主机的新行与它同键时顶掉它。
+  ///
+  /// 只留着几秒没意义：主机没报的会话不能永远留在列表里。
+  List<AgentsIndexRow> _stale = const [];
   List<HarnessSessionInfo> _studioSessions = const [];
   bool _loading = true;
   Object? _error;
@@ -130,11 +144,34 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     final cached = await _snapshot.load();
     if (_disposed) return;
     if (cached.isNotEmpty) {
-      setState(() => _rows = cached);
+      setState(() {
+        _stale = cached;
+        _rows = cached;
+      });
     }
     _hub.listenAll();
     _sub = _hub.watchSessions().listen(_onHubSessions);
+    unawaited(_attachRemoteHost());
     await _loadStudioSessions();
+  }
+
+  /// 接上已绑定的电脑。
+  ///
+  /// hub 的构造是同步的，远程主机要先异步打开存储，所以走 [HarnessHub.addHost]。
+  /// 已经有远程主机时不重复开：一个 hub 一条连接。
+  Future<void> _attachRemoteHost() async {
+    if (_hub.hosts.any((host) => host.kind == HarnessHostKind.remote)) return;
+    final opener = widget.remoteHostOpener ?? openRemoteHarnessHost;
+    final host = await opener();
+    if (host == null) return;
+    if (_disposed) {
+      await host.dispose();
+      return;
+    }
+    _hub.addHost(host);
+    if (_disposed) return;
+    _hub.listenAll();
+    _rebuild();
   }
 
   void _onHubSessions(List<HarnessSessionInfo> _) => _rebuild();
@@ -226,6 +263,10 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     return '';
   }
 
+  /// 合并 hub 的行、内置会话与还在顶用的快照行。
+  ///
+  /// 主机已经报了的主机不再用快照兜底：快照里的旧会话不能永远留在列表里。
+  /// 还没接上的主机（比如电脑刚要连）继续显示快照，首屏不闪空白。
   void _rebuild() {
     if (_disposed) return;
     final hubRows = buildAgentsIndex(
@@ -246,8 +287,21 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
           device: _device,
         ),
     ];
+    final heard = <String>{
+      for (final host in _hub.hosts)
+        if (_hub.isListening(host.id) && _hub.sessionErrorOf(host.id) == null)
+          host.id,
+    };
+    final staleRows = <AgentsIndexRow>[
+      for (final row in _stale)
+        if (!heard.contains(row.session.hostId)) row,
+    ];
     final rows = sortAgentsRows(
-      dedupeAgentsRows(<AgentsIndexRow>[...hubRows, ...studioRows]),
+      dedupeAgentsRows(<AgentsIndexRow>[
+        ...hubRows,
+        ...studioRows,
+        ...staleRows,
+      ]),
     );
     setState(() {
       _rows = rows;
@@ -256,9 +310,11 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     _writer.schedule(rows);
   }
 
-  /// 下拉刷新：重订阅主机并重读内置索引。
+  /// 下拉刷新：重订阅主机、补开电脑连接并重读内置索引。
   Future<void> refresh() async {
     _hub.listenAll();
+    await _attachRemoteHost();
+    await _hub.refresh();
     await _loadStudioSessions();
   }
 

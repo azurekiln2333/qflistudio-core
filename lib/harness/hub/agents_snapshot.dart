@@ -39,7 +39,13 @@ class AgentsSnapshotStore {
 
   /// 读快照。没有、坏了或版本不对都返回空表。
   Future<List<AgentsIndexRow>> load() async {
-    final payload = await _backend.read();
+    String? payload;
+    try {
+      payload = await _backend.read();
+    } on Object {
+      // 读不出来与没有快照一样：首屏慢一点，不是错误。
+      return const [];
+    }
     if (payload == null || payload.trim().isEmpty) return const [];
     Object? decoded;
     try {
