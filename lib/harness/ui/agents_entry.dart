@@ -12,6 +12,8 @@ import '../../store/auth_store.dart';
 import '../../store/project_store.dart';
 import '../../store/settings_store.dart';
 import '../../models/project.dart';
+import '../../sync/placeholder_project.dart';
+import '../harness_host.dart';
 import '../harness_session_target.dart';
 import '../hub/agents_index.dart';
 import '../hub/harness_hub.dart';
@@ -67,8 +69,10 @@ Project? _pickLocalProject(ProjectStore store) {
 
 /// 打开首页列表里的一行：跳到编辑器并首帧选中该会话。
 ///
-/// 优先用会话自己的目录找项目；找不到时用最近的本地项目。一个本地项目
-/// 都没有时不推空页面，只说明原因。
+/// 找项目的顺序：会话目录对应的本地项目 → 该会话已建的占位项目 →
+/// 新建一个占位项目。只有全都不成时才用最近的本地项目。
+/// 配对电脑上的会话不拿别的项目当工作目录：那样编辑器显示的目录、
+/// 文件树与保存位置都不是用户以为的那个项目。
 Future<void> openAgentSession(
   BuildContext context, {
   required AgentsIndexRow row,
@@ -77,8 +81,7 @@ Future<void> openAgentSession(
   required SettingsStore settings,
   HarnessHub? harnessHub,
 }) async {
-  final target =
-      _projectForSession(store, row.session.cwd) ?? _pickLocalProject(store);
+  final target = await resolveSessionProject(store, row);
   if (target == null) {
     if (!context.mounted) return;
     await showDialog<void>(
@@ -99,6 +102,7 @@ Future<void> openAgentSession(
     );
     return;
   }
+  if (!context.mounted) return;
   await openEditorPage(
     context,
     project: target,
@@ -112,6 +116,41 @@ Future<void> openAgentSession(
     ),
     harnessHub: harnessHub,
   );
+}
+
+/// 一行的会话应该落在哪个项目上。
+///
+/// 配对电脑的会话没有本地目录可比，于是走占位项目（需求 12）：
+/// 已经有就复用，没有就建一个，并登记到项目列表。占位项目只承载会话，
+/// 项目文件要用户确认后才拉，见 [PlaceholderProjects.pullFiles]。
+Future<Project?> resolveSessionProject(
+  ProjectStore store,
+  AgentsIndexRow row,
+) async {
+  final local = _projectForSession(store, row.session.cwd);
+  if (local != null) return local;
+
+  if (row.hostKind == HarnessHostKind.remote) {
+    final existing = store.deviceProjectFor(
+      hostId: row.session.hostId,
+      sessionId: row.session.id,
+    );
+    if (existing != null) return existing;
+
+    const placeholders = PlaceholderProjects();
+    final created = await placeholders.ensure(
+      hostId: row.session.hostId,
+      sessionId: row.session.id,
+      title: row.session.title,
+      deviceRoot: row.session.cwd,
+    );
+    if (created == null) return null;
+    final result = await store.registerDeviceProject(created);
+    if (result.error != null) return created;
+    return result.project ?? created;
+  }
+
+  return _pickLocalProject(store);
 }
 
 /// 会话目录对应的本地项目。路径规范化后再比，云端项目不参与。
