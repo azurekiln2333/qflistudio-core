@@ -347,6 +347,20 @@ class ProjectStore extends ChangeNotifier {
         project: null,
       );
     }
+    // 只在真正落盘成功后才登记内存里的外部根。
+    // 放在 `_persist` 之后，回滚分支就不需要任何撤销逻辑。
+    // 只写映射，不碰通道，不会每次文件操作都多一次握手。
+    // `pick()` 已经登记过选中的根，这里兼顾直接调 add 的调用方。
+    final externalFolderId = project.externalFolderId;
+    if (externalFolderId != null) {
+      ExternalFolderService.adopt(
+        ExternalFolder(
+          id: externalFolderId,
+          name: project.name,
+          path: project.path,
+        ),
+      );
+    }
     notifyListeners();
     return (error: null, project: project);
   }

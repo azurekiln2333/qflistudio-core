@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
@@ -193,6 +194,12 @@ class _FileExplorerState extends State<FileExplorer> {
   late FileNode _root;
   int _treeGeneration = 0;
   Future<void>? _restoring;
+
+  /// 本条失败只提示一次，避免刷新时重复弹条。
+  bool _listingFailureShown = false;
+
+  /// 上一次报过错的目录；它读成功后才重新允许提示。
+  String? _listingFailurePath;
   List<Project> _workspaceProjects = [];
   SavedWorkspace? _savedWorkspace;
   Map<String, List<String>> _workspaceExpandedDirs = {};
@@ -385,6 +392,9 @@ class _FileExplorerState extends State<FileExplorer> {
 
   void _rebuildRoot() {
     _treeGeneration++;
+    // 换了根目录，提示额度重置。
+    _listingFailureShown = false;
+    _listingFailurePath = null;
     _root = FileNode(path: _browsing.path, name: _browsing.name, isDir: true);
     _children.clear();
     _expanded
@@ -850,6 +860,23 @@ class _FileExplorerState extends State<FileExplorer> {
 
   List<FileNode> _childrenOf(FileNode dir) => _children[dir.path] ?? const [];
 
+  /// 外部根的目录读不到时提示一次，不把失败藏成空目录。
+  void _showListingFailure(String path) {
+    if (_listingFailureShown) return;
+    _listingFailureShown = true;
+    _listingFailurePath = path;
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text('外部文件夹暂时读不到：${p.basename(path)}')));
+  }
+
+  /// 报过错的那一层恢复成功后，重新允许下一次提示。
+  void _clearListingFailure(String path) {
+    if (!_listingFailureShown || _listingFailurePath != path) return;
+    _listingFailureShown = false;
+    _listingFailurePath = null;
+  }
+
   /// 打开搜索命中的文件（成功后收起侧栏/抽屉，与树内打开一致）。
   Future<void> _openSearchResult(String path) async {
     final owner = _ownerOf(path);
@@ -872,6 +899,7 @@ class _FileExplorerState extends State<FileExplorer> {
   Future<void> _loadChildren(FileNode dir, {int? generation}) async {
     final expectedGeneration = generation ?? _treeGeneration;
     List<FileNode> nodes = const [];
+    var listed = false;
     try {
       // Async listing: a project directory can hold thousands of entries, and
       // the sync form blocks the isolate that is also driving the page
@@ -885,20 +913,56 @@ class _FileExplorerState extends State<FileExplorer> {
             isDir: entity is Directory,
           ),
       ];
+      listed = true;
     } on FileSystemException {
       nodes = const [];
+    } on PlatformException {
+      // 原生返回错误（权限被收回、书签失效）。保留旧节点并报一次。
+      nodes = _children[dir.path] ?? const [];
+      if (mounted && expectedGeneration == _treeGeneration) {
+        _showListingFailure(dir.path);
+      }
     } on StateError {
-      // 外部根的列表由原生提供：通道没就绪或没返回列表时，
-      // 只让这一层目录空着，不让整棵树报错。
-      nodes = const [];
+      // 外部根的列表由原生提供。原生没就绪时不能把空列表当成
+      // 「这层目录什么都没有」——那样读取、新建都看不出真实的权限失败。
+      // 保留上一次的节点，并把失败告诉用户。
+      nodes = _children[dir.path] ?? const [];
+      if (mounted && expectedGeneration == _treeGeneration) {
+        _showListingFailure(dir.path);
+      }
     }
     if (!mounted || expectedGeneration != _treeGeneration) return;
+    // 只有真正读到才重置提示额度。放在 catch 之后无条件执行，
+    // 会让失败当场就把额度重新武装，提示永远不只一次。
+    if (listed) {
+      _clearListingFailure(dir.path);
+      // 列表读成功才能判定哪些子项已经不在了。失败时不能动缓存，
+      // 否则下一层会拿着旧路径去读已经不存在的目录。
+      _pruneStaleDescendants(dir.path, nodes);
+    }
     setState(() => _children[dir.path] = nodes);
+  }
+
+  /// 目录读成功后，丢掉已经不存在的下一层缓存。
+  ///
+  /// 只在父层拿到可信列表时调用。失败路径不碰缓存，
+  /// 保证「读不到」时旧节点还能继续显示。
+  void _pruneStaleDescendants(String dirPath, List<FileNode> children) {
+    final alive = <String>{
+      for (final child in children)
+        if (child.isDir) child.path,
+    };
+    final removed = _children.keys
+        .where((path) => p.dirname(path) == dirPath && !alive.contains(path))
+        .toList();
+    bool isRemoved(String path) =>
+        removed.any((root) => p.equals(root, path) || p.isWithin(root, path));
+    _children.removeWhere((path, _) => isRemoved(path));
+    _expanded.removeWhere(isRemoved);
   }
 
   Future<void> _refresh() async {
     final generation = _treeGeneration;
-    _children.clear();
     for (final root in _roots) {
       await _loadChildren(root, generation: generation);
       if (!mounted || generation != _treeGeneration) return;
