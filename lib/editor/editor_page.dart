@@ -71,6 +71,7 @@ import '../interop/interop_targets.dart';
 import '../layout/breakpoints.dart';
 import '../shell/login_gate.dart';
 import '../shell/workbench_state.dart';
+import '../sync/device_sync_launcher.dart';
 import '../chat/composer_state.dart';
 import '../vibe_coding/agent_file_change.dart';
 import '../vibe_coding/vibe_agent_facade.dart';
@@ -596,8 +597,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     host.state.showMainPane(MainPane.agent);
   }
 
-  /// 首帧选中会话。
+  /// 「从电脑同步」按钮的动作。
   ///
+  /// 只在项目来自配对电脑时被挂上（见 `AiPanel.onDeviceSync` 的调用点），
+  /// 因此这里不必再判断一次；真正的连接与失败说明都在 [DeviceSyncLauncher]。
+  void _syncFromComputer() {
+    unawaited(
+      const DeviceSyncLauncher().run(
+        context,
+        project: widget.project,
+        store: widget.store,
+        settings: widget.settings,
+        auth: widget.auth,
+      ),
+    );
+  }
+
+  /// 首帧选中会话。  ///
   /// 内置 Agent 的会话由本页自己画，因此不走 Hub：直接选中会话 id 就落在
   /// 内置面板里（裁定 R1）。其它主机要先等会话出现在列表里，再交给 Hub 打开。
   Future<void> _openInitialHarnessSession(HarnessSessionTarget target) async {
@@ -3983,6 +3999,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         onFileCreated: (path) {
                                           _editor.openPath(path);
                                         },
+                                        // 只有来自配对电脑的项目才给同步入口：普通
+                                        // 本地项目与云端项目都不该看到指向电脑的按钮。
+                                        // 产品开关（deviceSyncEnabled）由 AiPanel 自己再把一道。
+                                        onDeviceSync:
+                                            DeviceSyncLauncher.canSync(
+                                              widget.project,
+                                            )
+                                            ? _syncFromComputer
+                                            : null,
                                       ),
                                     ),
                                 ],
