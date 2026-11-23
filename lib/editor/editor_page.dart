@@ -85,6 +85,7 @@ import '../harness/harness_session_target.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/hub/harness_hosts.dart';
 import '../harness/hub/default_harness_hosts.dart';
+import '../harness/studio/studio_agent_host.dart';
 import '../harness/ui/hub_agents_surface.dart';
 import '../harness/ui/hub_session_list.dart';
 import '../pages/devices_remote_page.dart';
@@ -616,19 +617,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 首帧选中会话。  ///
   /// 内置 Agent 的会话由本页自己画，因此不走 Hub：直接选中会话 id 就落在
   /// 内置面板里（裁定 R1）。其它主机要先等会话出现在列表里，再交给 Hub 打开。
+  ///
+  /// 内置会话不看 hub 里有没有内置主机：首页那份 hub 不绑项目，本来就不装
+  /// 内置主机，靠 hub 判定会让首页点内置会话只弹一句错误。
   Future<void> _openInitialHarnessSession(HarnessSessionTarget target) async {
     final hub = _harnessHub;
     if (hub == null) return;
+    if (target.hostId == kStudioHostId) {
+      _revealAgentPane();
+      _agentHost?.selectSession(target.sessionId);
+      return;
+    }
     final host = hub.hostById(target.hostId);
     if (host == null) {
       _showSnack('打不开这个会话：主机不在线');
       return;
     }
     _revealAgentPane();
-    if (host.kind == HarnessHostKind.studio) {
-      _agentHost?.selectSession(target.sessionId);
-      return;
-    }
     final session = await _awaitHubSession(hub, target);
     if (!mounted) return;
     if (session == null) {

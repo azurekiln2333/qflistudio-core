@@ -17,6 +17,7 @@ import '../harness_host.dart';
 import '../harness_session_target.dart';
 import '../hub/agents_index.dart';
 import '../hub/harness_hub.dart';
+import '../studio/studio_agent_host.dart';
 
 /// 打开 Agents 面板。
 ///
@@ -70,7 +71,7 @@ Project? _pickLocalProject(ProjectStore store) {
 /// 打开首页列表里的一行：跳到编辑器并首帧选中该会话。
 ///
 /// 找项目的顺序：会话目录对应的本地项目 → 该会话已建的占位项目 →
-/// 新建一个占位项目。只有全都不成时才用最近的本地项目。
+/// 新建一个占位项目。只有全都不成时才用最近的本地项目（需求 9.7）。
 /// 配对电脑上的会话不拿别的项目当工作目录：那样编辑器显示的目录、
 /// 文件树与保存位置都不是用户以为的那个项目。
 Future<void> openAgentSession(
@@ -120,9 +121,12 @@ Future<void> openAgentSession(
 
 /// 一行的会话应该落在哪个项目上。
 ///
-/// 配对电脑的会话没有本地目录可比，于是走占位项目（需求 12）：
-/// 已经有就复用，没有就建一个，并登记到项目列表。占位项目只承载会话，
-/// 项目文件要用户确认后才拉，见 [PlaceholderProjects.pullFiles]。
+/// 配对本机之外的会话（已绑定电脑、内置 Agent）没有本地目录可比，于是走
+/// 占位项目（需求 12）：已经有就复用，没有就建一个，并登记到项目列表。
+/// 占位项目只承载会话，项目文件要用户确认后才拉，见
+/// [PlaceholderProjects.pullFiles]。这样的会话不发到别的项目上：编辑器显示
+/// 的目录、文件树与保存位置都会变成另一个项目（需求 9.7 只允许本机会话
+/// 退回最近的项目）。
 Future<Project?> resolveSessionProject(
   ProjectStore store,
   AgentsIndexRow row,
@@ -130,27 +134,28 @@ Future<Project?> resolveSessionProject(
   final local = _projectForSession(store, row.session.cwd);
   if (local != null) return local;
 
-  if (row.hostKind == HarnessHostKind.remote) {
-    final existing = store.deviceProjectFor(
-      hostId: row.session.hostId,
-      sessionId: row.session.id,
-    );
-    if (existing != null) return existing;
-
-    const placeholders = PlaceholderProjects();
-    final created = await placeholders.ensure(
-      hostId: row.session.hostId,
-      sessionId: row.session.id,
-      title: row.session.title,
-      deviceRoot: row.session.cwd,
-    );
-    if (created == null) return null;
-    final result = await store.registerDeviceProject(created);
-    if (result.error != null) return created;
-    return result.project ?? created;
+  if (row.session.hostId != kStudioHostId &&
+      row.hostKind != HarnessHostKind.remote) {
+    return _pickLocalProject(store);
   }
 
-  return _pickLocalProject(store);
+  final existing = store.deviceProjectFor(
+    hostId: row.session.hostId,
+    sessionId: row.session.id,
+  );
+  if (existing != null) return existing;
+
+  const placeholders = PlaceholderProjects();
+  final created = await placeholders.ensure(
+    hostId: row.session.hostId,
+    sessionId: row.session.id,
+    title: row.session.title,
+    deviceRoot: row.session.cwd,
+  );
+  if (created == null) return null;
+  final result = await store.registerDeviceProject(created);
+  if (result.error != null) return created;
+  return result.project ?? created;
 }
 
 /// 会话目录对应的本地项目。路径规范化后再比，云端项目不参与。
