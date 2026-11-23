@@ -58,20 +58,31 @@ class EditorController extends ChangeNotifier {
     }
 
     final file = File(path);
+    final external = ProjectFileAccess.isExternal(path);
     try {
-      final stat = await file.stat();
+      // 外部根（含 iCloud 占位）看不到真实文件：`stat` 在下载前会报不存在，
+      // 所以外部路径先走协调读取，由原生触发下载再判断大小。
+      final stat = external ? null : await file.stat();
       if (_disposed) return 'Editor closed';
       if (shouldOpen?.call() == false) return null;
-      if (stat.type != FileSystemEntityType.file) return '文件不存在';
-      if (stat.size > maxFileSize) {
+      if (stat != null && stat.type != FileSystemEntityType.file) {
+        return '文件不存在';
+      }
+      if (stat != null && stat.size > maxFileSize) {
         return '文件超过 2 MB，暂不支持在编辑器中打开';
       }
-      final bytes = await file.readAsBytes();
+      final bytes = external
+          ? await ProjectFileAccess.readBytes(path)
+          : await file.readAsBytes();
       if (_disposed) return 'Editor closed';
       if (shouldOpen?.call() == false) return null;
+      if (bytes.length > maxFileSize) {
+        return '文件超过 2 MB，暂不支持在编辑器中打开';
+      }
       if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
       final encoding = TextCodec.detect(bytes);
       final content = TextCodec.byName(encoding).decode(bytes);
+      final modifiedAt = stat?.modified ?? (await file.stat()).modified;
       final open = OpenFile(
         path: path,
         content: content,
@@ -82,7 +93,7 @@ class EditorController extends ChangeNotifier {
         readOnly: readOnly,
         timeLabel: timeLabel,
         encoding: encoding,
-        modifiedAt: stat.modified,
+        modifiedAt: modifiedAt,
       );
       // 历史快照只读：不标记脏、不走保存/云同步。
       if (!readOnly) {
@@ -236,7 +247,7 @@ class EditorController extends ChangeNotifier {
     final open = files[index];
     if (open.readOnly) return '历史快照只读';
     try {
-      final bytes = await File(open.path).readAsBytes();
+      final bytes = await ProjectFileAccess.readBytes(open.path);
       open.modifiedAt = (await File(open.path).stat()).modified;
       final text = TextCodec.byName(encoding).decode(bytes);
       open.encoding = encoding;
@@ -278,28 +289,37 @@ class EditorController extends ChangeNotifier {
     if (open.readOnly) return '历史快照只读';
     if (open.dirty && !force) return '文件有未保存的修改，未自动重新加载';
     final file = File(open.path);
+    final external = ProjectFileAccess.isExternal(open.path);
     try {
-      final stat = await file.stat();
+      final stat = external ? null : await file.stat();
       if (_disposed || !files.contains(open)) return null;
-      if (stat.type != FileSystemEntityType.file) return '文件不存在';
-      if (stat.size > maxFileSize) {
+      if (stat != null && stat.type != FileSystemEntityType.file) {
+        return '文件不存在';
+      }
+      if (stat != null && stat.size > maxFileSize) {
         return '文件超过 2 MB，暂不支持在编辑器中打开';
       }
-      final bytes = await file.readAsBytes();
+      final bytes = external
+          ? await ProjectFileAccess.readBytes(open.path)
+          : await file.readAsBytes();
       if (_disposed || !files.contains(open)) return null;
       // 读盘期间用户可能刚好敲了字：再判一次脏，不把新内容盖掉。
       if (open.dirty && !force) return '文件有未保存的修改，未自动重新加载';
+      if (bytes.length > maxFileSize) {
+        return '文件超过 2 MB，暂不支持在编辑器中打开';
+      }
       if (_looksBinary(bytes)) return '暂不支持打开二进制文件';
       final encoding = TextCodec.detect(bytes);
       final content = TextCodec.byName(encoding).decode(bytes);
+      final modifiedAt = stat?.modified ?? (await file.stat()).modified;
       // 磁盘上的内容与当前一致：保持同一个 codeLines 引用，
       // re_editor 就不会重建行模型，光标也不动。
       if (content == open.controller.text) {
-        open.modifiedAt = stat.modified;
+        open.modifiedAt = modifiedAt;
         return null;
       }
       open.encoding = encoding;
-      open.modifiedAt = stat.modified;
+      open.modifiedAt = modifiedAt;
       open.controller.text = content;
       open.lastChangedText = content;
       open.dirty = false;
@@ -325,7 +345,7 @@ class EditorController extends ChangeNotifier {
   /// 用户，绝不改写缓冲。
   Future<bool> differsFromDisk(OpenFile open) async {
     try {
-      final bytes = await File(open.path).readAsBytes();
+      final bytes = await ProjectFileAccess.readBytes(open.path);
       if (_looksBinary(bytes)) return true;
       final encoding = TextCodec.detect(bytes);
       return TextCodec.byName(encoding).decode(bytes) != open.controller.text;
