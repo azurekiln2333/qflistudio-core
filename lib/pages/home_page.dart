@@ -297,6 +297,7 @@ class HomeTab extends StatefulWidget {
     required this.auth,
     required this.settings,
     this.tabOrderStore,
+    this.agentsTabBuilder,
   });
 
   final ProjectStore store;
@@ -306,6 +307,10 @@ class HomeTab extends StatefulWidget {
   /// Where the dragged tab order is saved. The app leaves this null and uses
   /// the file-backed store; tests inject an in-memory backend.
   final HomeTabOrderStore? tabOrderStore;
+
+  /// Overrides session content without replacing Home's navigation. Called
+  /// only on first selection, so navigation tests need no host or disk access.
+  final WidgetBuilder? agentsTabBuilder;
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -348,9 +353,6 @@ class _HomeTabState extends State<HomeTab>
   String? _accountToken;
   int _authSessionGeneration = 0;
   int _homeGeneration = 0;
-
-  /// 首页 Agents 标签是否在前台。
-  bool _agentsOpen = false;
 
   /// 首次打开 Agents 时建，之后保活：订阅与快照不用每次重建。
   Widget? _agentsTab;
@@ -743,40 +745,13 @@ class _HomeTabState extends State<HomeTab>
                     }
                     return Column(
                       children: [
-                        _buildAgentsScopeBar(context, l10n),
+                        _buildScopeTabBar(context, l10n),
                         Expanded(
-                          child: Stack(
+                          child: TabBarView(
+                            controller: _projectTabs,
                             children: [
-                              // 项目页不销毁：切回时页签与滚动位置都还在。
-                              Offstage(
-                                offstage: _agentsOpen,
-                                child: TabBarView(
-                                  controller: _projectTabs,
-                                  children: [
-                                    for (final scope in _orderedScopes)
-                                      scope == ProjectScope.workspace
-                                          ? SavedWorkspacesTab(
-                                              key: const ValueKey(
-                                                'home-scope-page-workspace',
-                                              ),
-                                              store: widget.store,
-                                              auth: widget.auth,
-                                              settings: widget.settings,
-                                            )
-                                          : KeyedSubtree(
-                                              key: ValueKey(
-                                                'home-scope-page-${scope.name}',
-                                              ),
-                                              child: _buildProjectList(
-                                                context,
-                                                scope: scope,
-                                              ),
-                                            ),
-                                  ],
-                                ),
-                              ),
-                              if (_agentsTab case final tab?)
-                                Offstage(offstage: !_agentsOpen, child: tab),
+                              for (final scope in _orderedScopes)
+                                _buildScopePage(context, scope),
                             ],
                           ),
                         ),
@@ -792,43 +767,37 @@ class _HomeTabState extends State<HomeTab>
     );
   }
 
-  /// 项目条：最左边是 Agents 入口，右边是原有的页签条。
-  ///
-  /// 入口放在 [TabBar] 外：页签条只装项目分类，Agents 不是第四个分类，
-  /// 也不参与拖动排序。
-  Widget _buildAgentsScopeBar(BuildContext context, StudioLocalizations l10n) {
-    final theme = Theme.of(context);
-    final selected = _agentsOpen;
-    return Row(
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4),
-          child: TextButton.icon(
-            key: const ValueKey('home-agents-tab'),
-            onPressed: _toggleAgents,
-            icon: const Icon(Icons.hub_outlined, size: 18),
-            label: Text(l10n.agentsTab),
-            style: TextButton.styleFrom(
-              foregroundColor: selected
-                  ? theme.colorScheme.primary
-                  : theme.colorScheme.onSurfaceVariant,
-              textStyle: theme.textTheme.labelLarge,
-              minimumSize: const Size(0, 36),
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-            ),
-          ),
+  Widget _buildScopePage(BuildContext context, ProjectScope scope) {
+    final key = ValueKey('home-scope-page-${scope.name}');
+    return switch (scope) {
+      ProjectScope.agents => RetainedPage(
+        key: key,
+        child: ListenableBuilder(
+          listenable: _projectTabs,
+          builder: (context, _) {
+            // TabBarView may mount an adjacent page before it is selected.
+            // Do not connect hosts until the user actually opens Agents.
+            if (_agentsTab == null &&
+                _orderedScopes[_projectTabs.index] != ProjectScope.agents) {
+              return const SizedBox.shrink();
+            }
+            return _agentsTab ??=
+                widget.agentsTabBuilder?.call(context) ??
+                _buildAgentsTab(context);
+          },
         ),
-        Expanded(child: _buildScopeTabBar(context, l10n)),
-      ],
-    );
-  }
-
-  /// 切到 Agents 标签，或切回项目列表。
-  void _toggleAgents() {
-    setState(() {
-      _agentsOpen = !_agentsOpen;
-      if (_agentsOpen) _agentsTab ??= _buildAgentsTab(context);
-    });
+      ),
+      ProjectScope.workspace => SavedWorkspacesTab(
+        key: key,
+        store: widget.store,
+        auth: widget.auth,
+        settings: widget.settings,
+      ),
+      _ => KeyedSubtree(
+        key: key,
+        child: _buildProjectList(context, scope: scope),
+      ),
+    };
   }
 
   /// 建首页 Agents 标签。
@@ -884,6 +853,7 @@ class _HomeTabState extends State<HomeTab>
       ProjectScope.favorite => l10n.favoriteProjects,
       ProjectScope.workspace => '工作区',
       ProjectScope.cloud => l10n.cloudProjects,
+      ProjectScope.agents => l10n.agentsTab,
     };
     Widget content(ProjectScope scope) => Tab(
       key: ValueKey('home-scope-tab-${scope.name}'),
@@ -1015,6 +985,7 @@ class _HomeTabState extends State<HomeTab>
       case ProjectScope.favorite:
         return all.where((p) => p.favorite).toList();
       case ProjectScope.workspace:
+      case ProjectScope.agents:
         return const [];
       case ProjectScope.cloud:
         return all.where((p) => p.isCloud).toList();

@@ -54,7 +54,7 @@ void main() {
       StudioProfile.current = _profile(offlineOnly: true, showHomeTabs: false);
       final fixture = await _mount(tester, root);
 
-      _expectScopeLabels(tester, ['历史项目', '工作区', '全部项目', '收藏项目']);
+      _expectScopeLabels(tester, ['历史项目', '工作区', '全部项目', '收藏项目', 'Agents']);
       expect(find.text('云端项目'), findsNothing);
       // Launch opens the first tab of the default order. The registry is
       // deliberately not in name or recency order, and history must keep
@@ -98,7 +98,14 @@ void main() {
         );
         await _mount(tester, root);
 
-        _expectScopeLabels(tester, ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+        _expectScopeLabels(tester, [
+          '历史项目',
+          '工作区',
+          '全部项目',
+          '收藏项目',
+          '云端项目',
+          'Agents',
+        ]);
         // R3/R7: legacy unscoped cloud rows remain registered but are not
         // attributed to a signed-out user or a different account.
         expect(_visibleProjectNames(tester), ['Zulu', 'Middle', 'Alpha']);
@@ -133,6 +140,7 @@ void main() {
           '全部项目',
           '收藏项目',
           if (!offlineOnly) '云端项目',
+          'Agents',
         ]);
         expect(find.text('工作区'), findsNothing);
         expect(find.byType(FilterChip), findsNothing);

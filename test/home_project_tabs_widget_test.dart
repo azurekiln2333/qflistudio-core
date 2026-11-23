@@ -51,11 +51,18 @@ void main() {
     if (root.existsSync()) root.deleteSync(recursive: true);
   });
 
-  testWidgets('the default tab order is history first and cloud last', (
+  testWidgets('the default tab order keeps history first and appends Agents', (
     tester,
   ) async {
     await _mount(tester, _Fixture.create(root));
-    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '历史项目',
+      '工作区',
+      '全部项目',
+      '收藏项目',
+      '云端项目',
+      'Agents',
+    ]);
   });
 
   testWidgets('launch opens the first tab of that order', (tester) async {
@@ -67,12 +74,178 @@ void main() {
     );
   });
 
+  testWidgets('Agents uses the shared pager and repeated taps keep it open', (
+    tester,
+  ) async {
+    var builds = 0;
+    await _mount(
+      tester,
+      _Fixture.create(root),
+      agentsTabBuilder: (_) {
+        builds++;
+        return const _AgentsNavigationProbe();
+      },
+    );
+    final bar = tester.widget<TabBar>(find.byType(TabBar));
+    final pager = tester.widget<TabBarView>(find.byType(TabBarView));
+    expect(pager.controller, same(bar.controller));
+    expect(builds, 0);
+
+    await tester.tap(_tabFinder('Agents'));
+    await _settle(tester);
+    expect(bar.controller!.index, 5);
+    expect(find.text('Session 0').hitTestable(), findsOneWidget);
+    await tester.tap(find.text('Advance session'));
+    await tester.pump();
+
+    await tester.tap(_tabFinder('Agents'));
+    await _settle(tester);
+    expect(bar.controller!.index, 5);
+    expect(find.text('Session 1').hitTestable(), findsOneWidget);
+
+    await tester.tap(_tabFinder('历史项目'));
+    await _settle(tester);
+    expect(bar.controller!.index, 0);
+    expect(find.text('Session 1').hitTestable(), findsNothing);
+    expect(
+      find.byKey(const ValueKey('home-scope-page-history')).hitTestable(),
+      findsOneWidget,
+    );
+
+    await tester.tap(_tabFinder('Agents'));
+    await _settle(tester);
+    expect(find.text('Session 1').hitTestable(), findsOneWidget);
+    expect(builds, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('swiping selects Agents lazily and updates the same tab bar', (
+    tester,
+  ) async {
+    var builds = 0;
+    final backend = LocalMemoryBackend(
+      jsonEncode({
+        'version': 1,
+        'order': ['history', 'agents', 'all', 'workspace', 'favorite', 'cloud'],
+      }),
+    );
+    await _mount(
+      tester,
+      _Fixture.create(root),
+      backend: backend,
+      agentsTabBuilder: (_) {
+        builds++;
+        return const _AgentsNavigationProbe();
+      },
+    );
+    final controller = tester.widget<TabBar>(find.byType(TabBar)).controller!;
+    expect(builds, 0, reason: 'An adjacent Agents page must not start hosts.');
+
+    await tester.drag(find.byType(TabBarView), const Offset(-600, 0));
+    await _settle(tester);
+    expect(controller.index, 1);
+    expect(builds, 1);
+    expect(find.text('Session 0').hitTestable(), findsOneWidget);
+    await tester.tap(find.text('Advance session'));
+    await tester.pump();
+
+    await tester.drag(find.byType(TabBarView), const Offset(-600, 0));
+    await _settle(tester);
+    expect(controller.index, 2);
+    expect(
+      find.byKey(const ValueKey('home-scope-page-all')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.text('Session 1').hitTestable(), findsNothing);
+
+    await tester.drag(find.byType(TabBarView), const Offset(600, 0));
+    await _settle(tester);
+    expect(controller.index, 1);
+    expect(find.text('Session 1').hitTestable(), findsOneWidget);
+    await tester.drag(find.byType(TabBarView), const Offset(600, 0));
+    await _settle(tester);
+    expect(controller.index, 0);
+    expect(builds, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'dragging selected Agents keeps its state and persists its order',
+    (tester) async {
+      final fixture = _Fixture.create(root);
+      final backend = LocalMemoryBackend();
+      await _mount(
+        tester,
+        fixture,
+        backend: backend,
+        agentsTabBuilder: (_) => const _AgentsNavigationProbe(),
+      );
+      await tester.tap(_tabFinder('Agents'));
+      await _settle(tester);
+      await tester.tap(find.text('Advance session'));
+      await tester.pump();
+
+      await _dragTab(tester, from: 'Agents', to: '历史项目');
+      expect(_tabLabels(tester).first, 'Agents');
+      expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 0);
+      expect(find.text('Session 1').hitTestable(), findsOneWidget);
+      final payload = jsonDecode(backend.payload!) as Map<String, dynamic>;
+      expect(payload['order'], [
+        'agents',
+        'history',
+        'workspace',
+        'all',
+        'favorite',
+        'cloud',
+      ]);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _settle(tester);
+      await _mount(
+        tester,
+        fixture,
+        backend: backend,
+        agentsTabBuilder: (_) => const _AgentsNavigationProbe(),
+      );
+      expect(_tabLabels(tester).first, 'Agents');
+      await tester.tap(_tabFinder('Agents'));
+      await _settle(tester);
+      expect(find.text('Session 0').hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Agents and project tabs remain selectable on a narrow screen', (
+    tester,
+  ) async {
+    await _mount(
+      tester,
+      _Fixture.create(root),
+      agentsTabBuilder: (_) => const _AgentsNavigationProbe(),
+    );
+    tester.view.physicalSize = const Size(320, 700);
+    await tester.pump();
+    await tester.ensureVisible(_tabFinder('Agents'));
+    await tester.tap(_tabFinder('Agents'));
+    await _settle(tester);
+    expect(find.text('Session 0').hitTestable(), findsOneWidget);
+    await tester.ensureVisible(_tabFinder('全部项目'));
+    await tester.tap(_tabFinder('全部项目'));
+    await _settle(tester);
+    expect(
+      find.byKey(const ValueKey('home-scope-page-all')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.text('Session 0').hitTestable(), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('the cloud scope can be missing without breaking the order', (
     tester,
   ) async {
     StudioProfile.current = _profile(offlineOnly: true);
     await _mount(tester, _Fixture.create(root));
-    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目']);
+    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', 'Agents']);
   });
 
   testWidgets('a saved order is applied on the next build', (tester) async {
@@ -83,7 +256,14 @@ void main() {
       }),
     );
     await _mount(tester, _Fixture.create(root), backend: backend);
-    expect(_tabLabels(tester), ['云端项目', '收藏项目', '历史项目', '工作区', '全部项目']);
+    expect(_tabLabels(tester), [
+      '云端项目',
+      '收藏项目',
+      '历史项目',
+      '工作区',
+      '全部项目',
+      'Agents',
+    ]);
   });
 
   testWidgets(
@@ -98,7 +278,14 @@ void main() {
       await _mount(tester, _Fixture.create(root), backend: backend);
       // Unknown and duplicate entries are dropped; the rest is appended in
       // default order.
-      expect(_tabLabels(tester), ['云端项目', '工作区', '历史项目', '全部项目', '收藏项目']);
+      expect(_tabLabels(tester), [
+        '云端项目',
+        '工作区',
+        '历史项目',
+        '全部项目',
+        '收藏项目',
+        'Agents',
+      ]);
       expect(tester.takeException(), isNull);
     },
   );
@@ -109,19 +296,47 @@ void main() {
     final fixture = _Fixture.create(root);
     final backend = LocalMemoryBackend();
     await _mount(tester, fixture, backend: backend);
-    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '历史项目',
+      '工作区',
+      '全部项目',
+      '收藏项目',
+      '云端项目',
+      'Agents',
+    ]);
 
     await _dragTab(tester, from: '全部项目', to: '收藏项目');
-    expect(_tabLabels(tester), ['历史项目', '工作区', '收藏项目', '全部项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '历史项目',
+      '工作区',
+      '收藏项目',
+      '全部项目',
+      '云端项目',
+      'Agents',
+    ]);
 
     final payload = jsonDecode(backend.payload!) as Map<String, dynamic>;
-    expect(payload['order'], ['history', 'workspace', 'favorite', 'all', 'cloud']);
+    expect(payload['order'], [
+      'history',
+      'workspace',
+      'favorite',
+      'all',
+      'cloud',
+      'agents',
+    ]);
 
     // Rebuilding the page against the same storage keeps the new order.
     await tester.pumpWidget(const SizedBox.shrink());
     await _settle(tester);
     await _mount(tester, fixture, backend: backend);
-    expect(_tabLabels(tester), ['历史项目', '工作区', '收藏项目', '全部项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '历史项目',
+      '工作区',
+      '收藏项目',
+      '全部项目',
+      '云端项目',
+      'Agents',
+    ]);
   });
 
   testWidgets('dragging a tab in front of the selected one keeps it selected', (
@@ -135,7 +350,14 @@ void main() {
     // 收藏项目 moves in front of the selected tab, so the selected scope stays
     // selected at the index it moved to rather than at the old index.
     await _dragTab(tester, from: '收藏项目', to: '历史项目');
-    expect(_tabLabels(tester), ['收藏项目', '历史项目', '工作区', '全部项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '收藏项目',
+      '历史项目',
+      '工作区',
+      '全部项目',
+      '云端项目',
+      'Agents',
+    ]);
     expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 2);
     expect(
       find.byKey(const ValueKey('home-scope-page-workspace')).hitTestable(),
@@ -157,7 +379,14 @@ void main() {
     );
     await _mount(tester, _Fixture.create(root), backend: backend);
     // The store could not read yet, so the default order is what is shown.
-    expect(_tabLabels(tester), ['历史项目', '工作区', '全部项目', '收藏项目', '云端项目']);
+    expect(_tabLabels(tester), [
+      '历史项目',
+      '工作区',
+      '全部项目',
+      '收藏项目',
+      '云端项目',
+      'Agents',
+    ]);
 
     backend.release();
     await _dragTab(tester, from: '全部项目', to: '收藏项目');
@@ -171,11 +400,19 @@ void main() {
       'all',
       'history',
       'workspace',
+      'agents',
     ]);
     await tester.pumpWidget(const SizedBox.shrink());
     await _settle(tester);
     await _mount(tester, _Fixture.create(root), backend: backend);
-    expect(_tabLabels(tester), ['云端项目', '收藏项目', '全部项目', '历史项目', '工作区']);
+    expect(_tabLabels(tester), [
+      '云端项目',
+      '收藏项目',
+      '全部项目',
+      '历史项目',
+      '工作区',
+      'Agents',
+    ]);
   });
 
   testWidgets('the overflow menu no longer offers a new cloud project', (
@@ -225,16 +462,15 @@ List<String> _tabLabels(WidgetTester tester) {
   return [for (final entry in entries) entry.$2];
 }
 
-Finder _tabFinder(String label) => find.descendant(
-  of: find.byType(TabBar),
-  matching: find.text(label),
-);
+Finder _tabFinder(String label) =>
+    find.descendant(of: find.byType(TabBar), matching: find.text(label));
 
 Future<void> _mount(
   WidgetTester tester,
   _Fixture fixture, {
   LocalStoreBackend? backend,
   bool loggedIn = false,
+  WidgetBuilder? agentsTabBuilder,
 }) async {
   tester.view.physicalSize = const Size(700, 900);
   tester.view.devicePixelRatio = 1;
@@ -275,6 +511,7 @@ Future<void> _mount(
         store: fixture.projects,
         auth: fixture.auth,
         settings: fixture.settings,
+        agentsTabBuilder: agentsTabBuilder,
         tabOrderStore: HomeTabOrderStore(
           backend: backend ?? LocalMemoryBackend(),
         ),
@@ -312,6 +549,7 @@ String _scopeKeyOf(String label) => switch (label) {
   '收藏项目' => 'favorite',
   '工作区' => 'workspace',
   '云端项目' => 'cloud',
+  'Agents' => 'agents',
   _ => label,
 };
 
@@ -368,6 +606,32 @@ class _TemporaryPaths extends PathProviderPlatform {
   Future<String?> getApplicationDocumentsPath() async => root;
   @override
   Future<String?> getTemporaryPath() async => p.join(root, 'tmp');
+}
+
+/// Stateful session content isolates pager behavior from host and disk work.
+class _AgentsNavigationProbe extends StatefulWidget {
+  const _AgentsNavigationProbe();
+
+  @override
+  State<_AgentsNavigationProbe> createState() => _AgentsNavigationProbeState();
+}
+
+class _AgentsNavigationProbeState extends State<_AgentsNavigationProbe> {
+  int revision = 0;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Session $revision'),
+        TextButton(
+          onPressed: () => setState(() => revision++),
+          child: const Text('Advance session'),
+        ),
+      ],
+    ),
+  );
 }
 
 /// A stored payload that can only be read after [release].

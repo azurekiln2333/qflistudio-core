@@ -5,17 +5,17 @@ import 'package:flutter/foundation.dart';
 import '../services/local_store_backend.dart';
 import '../services/studio_profile.dart';
 
-/// The project scopes Home can list.
+/// The project and session scopes Home can list.
 ///
 /// [name] is the stable identifier persisted in `home_project_tabs.json`. Never
 /// rename a value: saved orders are read back by identifier and an unknown one
 /// is dropped.
-enum ProjectScope { all, history, favorite, workspace, cloud }
+enum ProjectScope { all, history, favorite, workspace, cloud, agents }
 
 /// The scopes a product offers, in the order Home sorts them by default.
 ///
 /// This is the order the user asked for: history, workspace, all, favorite,
-/// cloud. The order is also what launch shows, so 历史项目 is the first page.
+/// cloud, followed by Agents. History remains the first page at launch.
 /// The cloud scope is a server feature, so it follows the same switch that hides
 /// the server surfaces in general; workspaces are purely local and follow their
 /// own opt-out.
@@ -27,6 +27,7 @@ List<ProjectScope> defaultProjectScopes(StudioProfile? profile) => [
   // The scope only appears for networked products, matching the old rule that
   // kept it out of offline-only builds.
   if (profile?.offlineOnly != true) ProjectScope.cloud,
+  ProjectScope.agents,
 ];
 
 /// Folds a saved order and the scopes a product currently offers into the order

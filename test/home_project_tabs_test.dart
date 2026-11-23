@@ -35,13 +35,19 @@ void main() {
   ];
 
   group('default order', () {
-    test('a networked product lists history first and cloud last', () {
-      expect(defaultProjectScopes(profile()), localOrder);
+    test('a networked product keeps project order and appends Agents', () {
+      expect(defaultProjectScopes(profile()), [
+        ...localOrder,
+        ProjectScope.agents,
+      ]);
     });
 
     test('history is the first tab, so it is the page shown at launch', () {
       expect(defaultProjectScopes(profile()).first, ProjectScope.history);
-      expect(defaultProjectScopes(profile(offlineOnly: true)).first, ProjectScope.history);
+      expect(
+        defaultProjectScopes(profile(offlineOnly: true)).first,
+        ProjectScope.history,
+      );
       expect(
         defaultProjectScopes(profile(supportsSavedWorkspaces: false)).first,
         ProjectScope.history,
@@ -58,6 +64,7 @@ void main() {
         ProjectScope.workspace,
         ProjectScope.all,
         ProjectScope.favorite,
+        ProjectScope.agents,
       ]);
     });
 
@@ -67,11 +74,29 @@ void main() {
         ProjectScope.all,
         ProjectScope.favorite,
         ProjectScope.cloud,
+        ProjectScope.agents,
       ]);
     });
   });
 
   group('saved order', () {
+    test('an older saved order retains its order and gains Agents once', () {
+      expect(
+        resolveProjectScopes([
+          ProjectScope.favorite,
+          ...localOrder,
+        ], defaultProjectScopes(profile())),
+        const [
+          ProjectScope.favorite,
+          ProjectScope.history,
+          ProjectScope.workspace,
+          ProjectScope.all,
+          ProjectScope.cloud,
+          ProjectScope.agents,
+        ],
+      );
+    });
+
     test('is honoured when it names every available scope', () {
       const saved = [
         ProjectScope.cloud,
@@ -116,10 +141,11 @@ void main() {
 
     test('ignores duplicates', () {
       expect(
-        resolveProjectScopes(
-          const [ProjectScope.history, ProjectScope.history, ProjectScope.all],
-          localOrder,
-        ),
+        resolveProjectScopes(const [
+          ProjectScope.history,
+          ProjectScope.history,
+          ProjectScope.all,
+        ], localOrder),
         const [
           ProjectScope.history,
           ProjectScope.all,
@@ -131,10 +157,11 @@ void main() {
     });
 
     test('always returns every available scope exactly once', () {
-      final resolved = resolveProjectScopes(
-        const [ProjectScope.cloud, ProjectScope.all, ProjectScope.cloud],
-        localOrder,
-      );
+      final resolved = resolveProjectScopes(const [
+        ProjectScope.cloud,
+        ProjectScope.all,
+        ProjectScope.cloud,
+      ], localOrder);
       expect(resolved.toSet(), localOrder.toSet());
       expect(resolved, hasLength(localOrder.length));
     });
@@ -273,6 +300,18 @@ void main() {
   });
 
   group('HomeTabOrderStore', () {
+    test('Agents order uses its stable identifier across restarts', () async {
+      final backend = LocalMemoryBackend();
+      final first = HomeTabOrderStore(backend: backend);
+      await first.save(const [ProjectScope.agents, ...localOrder]);
+      final payload = jsonDecode(backend.payload!) as Map<String, dynamic>;
+      expect((payload['order'] as List).first, 'agents');
+
+      final second = HomeTabOrderStore(backend: backend);
+      await second.load();
+      expect(second.order, const [ProjectScope.agents, ...localOrder]);
+    });
+
     test('starts empty and reports no saved order', () async {
       final store = HomeTabOrderStore(backend: LocalMemoryBackend());
       await store.load();

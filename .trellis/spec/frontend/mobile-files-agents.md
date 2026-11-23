@@ -51,6 +51,14 @@ prefills the composer with `autoSend: false`. Cancellation or partial import
 keeps the batch available.
 
 Home lists session metadata and opens the existing editor Agent panel.
+Agents is a `ProjectScope.agents` entry in Home's existing `TabBar` and
+`TabBarView`, sharing their `TabController`, selection indicator, swipe
+navigation, and persisted drag order. It must not use a separate toggle or
+overlay above project pages. Older saved orders append the new `agents`
+identifier without changing existing scope order or the initial history page.
+Repeated selection leaves Agents selected. Create its content and connect
+hosts only when the controller first selects Agents, not when the pager
+prebuilds an adjacent page. Retain visited content when selecting other tabs.
 Studio sessions come from `agent_sessions/index.json`, not transcript scans.
 Host `studio` selects the built-in session without calling `hub.openSession`.
 Other hosts use the supplied host and session IDs. Session waits must release
@@ -126,6 +134,9 @@ assertions still need real async IO. Keep failure-preserves-old-file assertions.
   `editor_harness_session_wait_test.dart`: selected host/session and disposal.
 - `harness_remote_device_test.dart`: synchronous initial metadata, updates,
   missing fields, and OS fallback.
+- `home_project_tabs_widget_test.dart`: Agents tap/repeat tap, switching back
+  to projects, bidirectional swipes, lazy content, retained state, and drag
+  order restoration. Test the Home wrapper as well as `HomeAgentsTab` content.
 - `test/share/`: cold start, cancellation, partial imports, and composer intent.
 - `test/sync/`: changed files, failed downloads, deferred deletion, cache
   bounds, placeholder cleanup, and explicit download confirmation.
