@@ -441,10 +441,14 @@ class _AddExistingDialogState extends State<_AddExistingDialog> {
 
   Future<void> _pickFolder() async {
     // iOS 与 Mac 先走系统文件夹选择器。选中即持有安全作用域书签，
-    // 重启后仍能读写；桌面平台退回 file_selector。
-    final external = await ExternalFolderService.pick();
-    if (external != null) {
+    // 重启后仍能读写。
+    //
+    // 取消时不能退回 file_selector：两个平台都支持目录选择，再弹一次
+    // 只会让用户看到第二个选择器。
+    if (ExternalFolderService.supported) {
+      final external = await ExternalFolderService.pick();
       if (!mounted) return;
+      if (external == null) return;
       setState(() {
         _external = external;
         _pathController.text = external.path;
