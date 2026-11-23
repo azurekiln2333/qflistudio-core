@@ -103,6 +103,9 @@ Future<bool> runDeviceSync(
       totalBytes: plan.bytes,
     ),
   );
+  if (!context.mounted) return false;
+  final navigator = Navigator.of(context, rootNavigator: true);
+  var showingProgress = false;
   try {
     if (context.mounted) {
       unawaited(
@@ -112,15 +115,41 @@ Future<bool> runDeviceSync(
           builder: (context) => _SyncProgressDialog(progress: progress),
         ),
       );
+      showingProgress = true;
     }
-    final report = await service.apply(
-      plan,
-      onProgress: (value) {
-        progress.value = value;
-      },
-    );
+    final SyncReport report;
+    try {
+      report = await service.apply(
+        plan,
+        onProgress: (value) {
+          progress.value = value;
+        },
+      );
+    } on Object catch (error) {
+      // 断网、超时、电脑端报错都可能从端口直接抛出来。不接住的话进度框
+      // 是 `barrierDismissible: false`，用户只能杀掉应用。
+      navigator.popUntil((route) => route is! DialogRoute<void>);
+      showingProgress = false;
+      if (context.mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('同步未完成'),
+            content: Text('$error。已经写入的文件是完整的，下次同步会接着来。'),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('知道了'),
+              ),
+            ],
+          ),
+        );
+      }
+      return false;
+    }
+    navigator.popUntil((route) => route is! DialogRoute<void>);
+    showingProgress = false;
     if (context.mounted) {
-      Navigator.of(context, rootNavigator: true).maybePop();
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
@@ -142,6 +171,9 @@ Future<bool> runDeviceSync(
     }
     return report.completed;
   } finally {
+    if (showingProgress) {
+      navigator.popUntil((route) => route is! DialogRoute<void>);
+    }
     progress.dispose();
   }
 }

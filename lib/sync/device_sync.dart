@@ -174,13 +174,26 @@ class DeviceSyncService {
   }
 
   /// Run [plan]: download, verify, rename, then delete.
+  ///
+  /// [keep] holds the cache keys that must survive the eviction this run may
+  /// need (the project being synced is added automatically). [evictBefore] asks
+  /// for room for the incoming bytes before the first write, so a sync that
+  /// needs space does not leave the cache over budget until the next run.
   Future<SyncReport> apply(
     SyncPlan plan, {
     void Function(SyncProgress)? onProgress,
+    Set<String> keep = const <String>{},
+    bool evictBefore = true,
   }) async {
     var written = 0;
     var writtenBytes = 0;
     try {
+      if (evictBefore && plan.bytes > 0) {
+        await evict(
+          needBytes: plan.bytes,
+          keep: <String>{...keep, if (plan.cacheKey.isNotEmpty) plan.cacheKey},
+        );
+      }
       await Directory(p.join(plan.localRoot, 'files')).create(recursive: true);
       final staging = Directory(p.join(plan.localRoot, '.incoming'));
       if (await staging.exists()) await staging.delete(recursive: true);
@@ -211,6 +224,14 @@ class DeviceSyncService {
         bytes: await _directoryBytes(p.join(plan.localRoot, 'files')),
       );
       await _cache?.save();
+      // The copy just written is complete, so trimming the cache now cannot
+      // lose anything this run produced.
+      if (!evictBefore) {
+        await evict(
+          needBytes: 0,
+          keep: <String>{...keep, if (plan.cacheKey.isNotEmpty) plan.cacheKey},
+        );
+      }
       return SyncReport(
         writtenFiles: written,
         deletedEntries: deleted,

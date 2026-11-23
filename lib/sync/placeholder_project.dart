@@ -124,7 +124,11 @@ class PlaceholderProjects {
     if (report.completed) {
       project
         ..filesPulled = true
-        ..placeholder = false;
+        ..placeholder = false
+        // 拉下来的副本就是项目本身：编辑器、文件树与保存位置都跟着它走。
+        // 不指过去的话，项目目录仍是一个只装了 `.qfli` 的占位夹，用户拉完
+        // 文件却看不到任何东西。
+        ..path = localFiles;
     }
     return report;
   }
