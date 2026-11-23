@@ -59,6 +59,37 @@ class _DroppingPort implements DeviceFilePort {
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
+/// Pump until [finder] matches, letting real disk IO run.
+///
+/// `runDeviceSync` reads and writes through `dart:io`. Those futures never
+/// complete inside the fake async zone `testWidgets` installs, so the work
+/// must be *started* inside [WidgetTester.runAsync] too: a future created in
+/// the fake zone keeps waiting on a clock that never lets real IO finish.
+///
+/// The wait is bounded by a real [Stopwatch] so a broken flow fails the test
+/// instead of hanging CI. Each round yields to the event loop for real and
+/// pumps 50 ms of frame time.
+Future<void> pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  Duration limit = const Duration(seconds: 10),
+}) async {
+  final watch = Stopwatch()..start();
+  await tester.runAsync(() async {
+    while (finder.evaluate().isEmpty) {
+      if (watch.elapsed > limit) {
+        throw TestFailure(
+          '等待超时（${limit.inSeconds} 秒）：${finder.describeMatch(Plurality.one)}',
+        );
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+  });
+  // 弹框已经在树里，把入场动画推完再点，避免点到动画途中的位置。
+  await tester.pumpAndSettle();
+}
+
 /// 同步中断时不能把用户留在进度框里。
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -96,20 +127,37 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('go'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('开始同步'));
-    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('go'));
+      await tester.pump();
+    });
+    // `plan()` reads the local tree through `dart:io`; the confirmation dialog
+    // appears once that real read finishes.
+    await pumpUntilFound(tester, find.text('开始同步'));
 
-    expect(await pending, isFalse);
+    await tester.runAsync(() async {
+      await tester.tap(find.text('开始同步'));
+      await tester.pump();
+    });
+    // The port throws, so `runDeviceSync` replaces the progress dialog with its
+    // failure dialog. It returns only after that dialog closes.
+    await pumpUntilFound(tester, find.text('同步未完成'));
+
     // 进度框已经关掉，换成一句能读的说明。
     expect(find.text('正在同步'), findsNothing);
     expect(find.text('同步未完成'), findsOneWidget);
     expect(find.textContaining('连接已断开'), findsOneWidget);
 
-    await tester.tap(find.text('知道了'));
+    await tester.runAsync(() async {
+      await tester.tap(find.text('知道了'));
+      await tester.pump();
+    });
+    // 关闭动画在假时钟里推，`runAsync` 之外才能稳定断言消失。
     await tester.pumpAndSettle();
     expect(find.text('同步未完成'), findsNothing);
+
+    // Safe now: the failure dialog closed, so the future can finish.
+    expect(await pending, isFalse);
   });
 
   testWidgets('传输失败后旧文件仍然可用', (tester) async {
@@ -124,10 +172,13 @@ void main() {
       );
       await service.apply(plan);
     });
-    expect(
-      await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
-      'one',
-    );
+    // The copy was just written through `dart:io`; read it in the real zone.
+    await tester.runAsync(() async {
+      expect(
+        await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
+        'one',
+      );
+    });
 
     final failing = _DroppingPort(<String, String>{'a.txt': 'two'});
     late Future<bool> pending;
@@ -148,16 +199,35 @@ void main() {
         ),
       ),
     );
-    await tester.tap(find.text('go'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('开始同步'));
+    await tester.runAsync(() async {
+      await tester.tap(find.text('go'));
+      await tester.pump();
+    });
+    await pumpUntilFound(tester, find.text('开始同步'));
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('开始同步'));
+      await tester.pump();
+    });
+    // The second transfer throws mid-stream; the failure dialog replaces the
+    // progress one, and `runDeviceSync` only returns once it closes.
+    await pumpUntilFound(tester, find.text('同步未完成'));
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('知道了'));
+      await tester.pump();
+    });
     await tester.pumpAndSettle();
 
+    // Safe now: the failure dialog closed, so the future can finish.
     expect(await pending, isFalse);
-    expect(
-      await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
-      'one',
-    );
+    // The old copy survives: a half-written file never takes its place.
+    await tester.runAsync(() async {
+      expect(
+        await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
+        'one',
+      );
+    });
   });
 
   group('git 决策', () {

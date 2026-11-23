@@ -452,7 +452,11 @@ void main() {
 
       final cache = SyncCache(
         indexFile: p.join(root.path, 'index.json'),
-        budgetBytes: 150,
+        // Two 100-byte copies need 100 more bytes of room in a 250-byte
+        // budget: evicting the oldest leaves 200, which fits. With 150 the
+        // request could not be satisfied by removing one copy, so the
+        // documented policy would have to remove both.
+        budgetBytes: 250,
       );
       await cache.touch(
         'h/one',

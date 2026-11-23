@@ -54,6 +54,37 @@ class FakePort implements DeviceFilePort {
 
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
+/// Pump until [finder] matches, letting real disk IO run.
+///
+/// `runDeviceSync` reads and writes through `dart:io`. Those futures never
+/// complete inside the fake async zone `testWidgets` installs, so the work
+/// must be *started* inside [WidgetTester.runAsync] too: a future created in
+/// the fake zone keeps waiting on a clock that never lets real IO finish.
+///
+/// The wait is bounded by a real [Stopwatch] so a broken flow fails the test
+/// instead of hanging CI. Each round yields to the event loop for real and
+/// pumps 50 ms of frame time.
+Future<void> pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  Duration limit = const Duration(seconds: 10),
+}) async {
+  final watch = Stopwatch()..start();
+  await tester.runAsync(() async {
+    while (finder.evaluate().isEmpty) {
+      if (watch.elapsed > limit) {
+        throw TestFailure(
+          '等待超时（${limit.inSeconds} 秒）：${finder.describeMatch(Plurality.one)}',
+        );
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+  });
+  // 弹框已经在树里，把入场动画推完再点，避免点到动画途中的位置。
+  await tester.pumpAndSettle();
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -143,24 +174,49 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('go'));
-    await tester.pumpAndSettle();
+    // The button press starts `runDeviceSync`, so it must happen in the real
+    // zone: a future created inside the fake zone would wait on a clock that
+    // never lets `dart:io` complete.
+    await tester.runAsync(() async {
+      await tester.tap(find.text('go'));
+      await tester.pump();
+    });
+    // `plan()` reads the local tree through `dart:io`; the confirmation dialog
+    // appears once that real read finishes.
+    await pumpUntilFound(tester, find.text('从电脑同步这个项目'));
     expect(find.text('从电脑同步这个项目'), findsOneWidget);
 
-    await tester.tap(find.text('开始同步'));
-    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('开始同步'));
+      await tester.pump();
+    });
+    // `apply()` writes and renames real files. `runDeviceSync` then opens its
+    // own result dialog and only returns after that dialog closes, so wait for
+    // the dialog instead of the future.
+    await pumpUntilFound(tester, find.text('同步完成'));
     expect(find.text('同步完成'), findsOneWidget);
 
-    final report = await pending;
-    expect(report, isTrue);
-    expect(
-      await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
-      'one',
-    );
-    expect(
-      await File(p.join(localRoot, 'files', 'lib', 'b.txt')).readAsString(),
-      'two',
-    );
+    await tester.runAsync(() async {
+      await tester.tap(find.text('知道了'));
+      await tester.pump();
+    });
+    // 关闭动画在假时钟里推，`runAsync` 之外才能稳定断言消失。
+    await tester.pumpAndSettle();
+    expect(find.text('同步完成'), findsNothing);
+
+    // Safe now: the result dialog closed, so the future can finish.
+    expect(await pending, isTrue);
+    // The copied files are real disk reads, so read them in the real zone too.
+    await tester.runAsync(() async {
+      expect(
+        await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
+        'one',
+      );
+      expect(
+        await File(p.join(localRoot, 'files', 'lib', 'b.txt')).readAsString(),
+        'two',
+      );
+    });
   });
 
   testWidgets('cancelling the prompt transfers nothing', (tester) async {
@@ -186,13 +242,22 @@ void main() {
       ),
     );
 
-    await tester.tap(find.text('go'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('go'));
+      await tester.pump();
+    });
+    await pumpUntilFound(tester, find.text('取消'));
 
+    await tester.runAsync(() async {
+      await tester.tap(find.text('取消'));
+      await tester.pump();
+    });
+    // Cancelling returns false straight away; there is no result dialog.
     expect(await pending, isFalse);
-    expect(await Directory(p.join(localRoot, 'files')).exists(), isFalse);
+    // Existence is a real disk question, so ask it in the real zone.
+    await tester.runAsync(() async {
+      expect(await Directory(p.join(localRoot, 'files')).exists(), isFalse);
+    });
   });
 }
 
