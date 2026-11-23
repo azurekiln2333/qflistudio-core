@@ -61,3 +61,10 @@ Future<AgentRuntime> studioAgentRuntime({
 
 /// 测试与重新登录后重置缓存。
 void resetStudioAgentRuntime() => _cached = null;
+
+/// 已经装配好的运行时；没跑过时为 null。
+///
+/// 给「只读现在状态」的场景用：首页 Agents 要显示内置会话的真实状态，
+/// 但不能为了这一个列表就把运行时起来。[studioAgentRuntime] 会建运行时，
+/// 本函数不会。
+AgentRuntime? currentStudioAgentRuntime() => _cached;

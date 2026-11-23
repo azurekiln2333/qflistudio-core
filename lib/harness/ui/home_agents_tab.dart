@@ -11,9 +11,11 @@ import 'package:path/path.dart' as p;
 
 import '../../i18n/studio_localizations.dart';
 import '../../services/app_paths.dart';
+import '../../shell/agent_runtime_factory.dart';
 import '../../store/auth_store.dart';
 import '../../store/project_store.dart';
 import '../../store/settings_store.dart';
+import '../../vibe_coding/vibe_agent_facade.dart';
 import '../device_info.dart';
 import '../harness_host.dart';
 import '../hub/agents_index.dart';
@@ -21,6 +23,7 @@ import '../hub/agents_snapshot.dart';
 import '../hub/harness_hub.dart';
 import '../hub/harness_hosts.dart';
 import '../hub/studio_session_index.dart';
+import '../studio/studio_agent_host.dart';
 import 'hub_status.dart';
 
 /// 首页 Agents 标签的主体。
@@ -36,6 +39,7 @@ class HomeAgentsTab extends StatefulWidget {
     this.snapshotStore,
     this.sessionRoot,
     this.deviceInfo,
+    this.runtime,
     this.onOpenSession,
     this.onOpenDetails,
   });
@@ -62,6 +66,12 @@ class HomeAgentsTab extends StatefulWidget {
   /// 手机本机的设备信息；为空时读平台常量。
   final HarnessDeviceInfo? deviceInfo;
 
+  /// 内置 Agent 的运行时。
+  ///
+  /// 为空时只读已装配好的那一个（[currentStudioAgentRuntime]），不会为了
+  /// 列表去新建运行时。测试用它注入假运行时。
+  final AgentRuntime? runtime;
+
   @override
   State<HomeAgentsTab> createState() => HomeAgentsTabState();
 }
@@ -80,6 +90,9 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   bool _loading = true;
   Object? _error;
   bool _disposed = false;
+
+  /// 已经挂上监听的运行时，避免重复挂。
+  AgentRuntime? _watchedRuntime;
 
   /// 当前渲染的行，测试用来断言排序与合并。
   @visibleForTesting
@@ -131,11 +144,14 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     try {
       final root = widget.sessionRoot ?? await _defaultSessionRoot();
       if (_disposed) return;
+      _watchRuntime();
       final sessions = root == null
           ? const <HarnessSessionInfo>[]
-          : await StudioSessionIndex(
-              root: root,
-            ).read(hostId: _studioHostId, cwdOf: _cwdOf);
+          : await StudioSessionIndex(root: root).read(
+              hostId: _studioHostId,
+              cwdOf: _cwdOf,
+              statusOf: _statusOfStudioSession,
+            );
       if (_disposed) return;
       setState(() {
         _studioSessions = sessions;
@@ -150,6 +166,49 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
         _error = error;
       });
     }
+  }
+
+  /// 已装配好的内置 Agent 运行时；没跑过时为 null。
+  ///
+  /// 不调 [studioAgentRuntime]：那个会为了拿一个运行时把整条流水线起来。
+  AgentRuntime? get _liveRuntime =>
+      widget.runtime ?? currentStudioAgentRuntime();
+
+  /// 内置会话的真状态。没有运行时就是 idle。
+  HarnessSessionStatus _statusOfStudioSession(String sessionId) {
+    final runtime = _liveRuntime;
+    if (runtime == null) return HarnessSessionStatus.idle;
+    return mapStudioLiveStatus(runtime.statusOf(sessionId));
+  }
+
+  /// 运行时活动状态变了就跟着改列表里的状态，不重读磁盘。
+  void _watchRuntime() {
+    final runtime = _liveRuntime;
+    if (runtime == null || identical(runtime, _watchedRuntime)) return;
+    _unwatchRuntime();
+    _watchedRuntime = runtime;
+    runtime.liveChanges.addListener(_onRuntimeChanged);
+  }
+
+  void _unwatchRuntime() {
+    final runtime = _watchedRuntime;
+    if (runtime == null) return;
+    runtime.liveChanges.removeListener(_onRuntimeChanged);
+    _watchedRuntime = null;
+  }
+
+  void _onRuntimeChanged() {
+    if (_disposed) return;
+    final runtime = _liveRuntime;
+    if (runtime == null) return;
+    _studioSessions = <HarnessSessionInfo>[
+      for (final session in _studioSessions)
+        studioSessionWithStatus(
+          session,
+          mapStudioLiveStatus(runtime.statusOf(session.id)),
+        ),
+    ];
+    _rebuild();
   }
 
   /// 应用数据目录下的会话目录。
@@ -207,6 +266,7 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   void dispose() {
     _disposed = true;
     _sub?.cancel();
+    _unwatchRuntime();
     _writer.dispose();
     if (_ownsHub) _hub.dispose();
     super.dispose();

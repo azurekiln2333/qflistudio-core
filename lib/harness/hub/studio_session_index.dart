@@ -13,8 +13,8 @@ import '../harness_host.dart';
 
 /// 读 `agent_sessions/index.json`，映射成主机会话。
 ///
-/// 状态一律给 [HarnessSessionStatus.idle]：磁盘上的会话没有正在运行的进程，
-/// 真状态要运行时才知道，本任务不引入第二个运行时。
+/// 默认状态是 [HarnessSessionStatus.idle]：磁盘上的会话没有正在运行的进程。
+/// 调用方传了 [read] 的 `statusOf` 时用运行时给的真状态，不传就保持 idle。
 class StudioSessionIndex {
   StudioSessionIndex({required this.root});
 
@@ -28,9 +28,13 @@ class StudioSessionIndex {
   ///
   /// 文件缺失、格式不对、条目缺字段都按空处理，不抛错：首页不该因为一个坏
   /// 索引就整页打不开。
+  ///
+  /// [statusOf] 可选：已经有运行时在跑时，用它把磁盘上的 idle 换成真状态。
+  /// 本函数自己不会去建运行时。
   Future<List<HarnessSessionInfo>> read({
     required String hostId,
     required String Function(String projectId) cwdOf,
+    HarnessSessionStatus Function(String sessionId)? statusOf,
   }) async {
     final file = indexFile;
     if (!await file.exists()) return const <HarnessSessionInfo>[];
@@ -60,7 +64,7 @@ class StudioSessionIndex {
           hostId: hostId,
           providerId: _providerId,
           title: _string(raw['title']) ?? _defaultTitle,
-          status: HarnessSessionStatus.idle,
+          status: statusOf?.call(id) ?? HarnessSessionStatus.idle,
           capabilities: _capabilities,
           cwd: projectId.isEmpty ? '' : cwdOf(projectId),
           updatedAt: updatedAt,
@@ -90,3 +94,21 @@ class StudioSessionIndex {
     return value.toString();
   }
 }
+
+/// 把一条索引会话换成另一个状态。
+///
+/// 运行时的活动状态会变，索引不必重读磁盘：只改状态字段，其余原样搬过去。
+HarnessSessionInfo studioSessionWithStatus(
+  HarnessSessionInfo session,
+  HarnessSessionStatus status,
+) => HarnessSessionInfo(
+  id: session.id,
+  hostId: session.hostId,
+  providerId: session.providerId,
+  title: session.title,
+  status: status,
+  capabilities: session.capabilities,
+  cwd: session.cwd,
+  updatedAt: session.updatedAt,
+  sourceRef: session.sourceRef,
+);
