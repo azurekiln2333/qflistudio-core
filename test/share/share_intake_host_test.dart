@@ -113,6 +113,36 @@ void main() {
     expect(app.inbox.sweepCalls, greaterThanOrEqualTo(2));
   });
 
+  testWidgets('部分文件被跳过时保留批次', (tester) async {
+    final app = await pumpApp(tester);
+    final host = ShareIntakeHost(
+      inbox: app.inbox,
+      navigatorKey: app.key,
+      projects: () => <Project>[project],
+      sessionsOf: (_) => const [],
+      ready: app.ready,
+      onCopy: (batch, project, subdirectory) async => ShareIntakeResult(
+        project: project,
+        relativePaths: const <String>['inbox/a.txt'],
+        skipped: const <String>['b.bin：超过单文件上限'],
+      ),
+      onAttach: (batch, project, sessionId) async {},
+    );
+    addTearDown(host.dispose);
+    await host.start();
+    app.inbox.controller.add(batch('b4'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('share-intake-into-project')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('share-intake-project-p1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('share-intake-subdir-inbox')));
+    await tester.pumpAndSettle();
+
+    expect(app.inbox.discarded, isEmpty);
+  });
+
   testWidgets('未就绪时先排队，就绪后再弹', (tester) async {
     final app = await pumpApp(tester);
     app.ready.value = false;

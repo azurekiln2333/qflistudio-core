@@ -61,6 +61,10 @@ class ShareIntakeHost {
   bool _started = false;
   bool _disposed = false;
   bool _retryScheduled = false;
+  int _retries = 0;
+
+  /// 导航器迟迟不出现时最多重试这么多帧，避免空转掉帧。
+  static const int _maxRetries = 30;
 
   /// 订阅收件箱，取回冷启动批次，并清理超期批次。
   Future<void> start() async {
@@ -95,6 +99,8 @@ class ShareIntakeHost {
 
   void _scheduleRetry() {
     if (_retryScheduled || _disposed) return;
+    if (_retries >= _maxRetries) return;
+    _retries++;
     _retryScheduled = true;
     SchedulerBinding.instance.addPostFrameCallback((_) {
       _retryScheduled = false;
@@ -112,14 +118,21 @@ class ShareIntakeHost {
         sessionsOf: sessionsOf,
       );
       if (choice == null) return;
+      // 面板已经出现，下一批重新计次数。
+      _retries = 0;
       switch (choice) {
         case ShareIntakeIntoProject(:final project, :final subdirectory):
           final result = await onCopy(batch, project, subdirectory);
-          if (result.isEmpty && result.skipped.isNotEmpty) {
+          if (result.isEmpty) {
+            // 一个都没放进去：批次留在收件箱，用户还能在 7 天内再处理。
             _report('没有文件放进项目');
             return;
           }
-          _report(null);
+          // 有文件被跳过的批次不删：删了用户就再也拿不到那几个文件。
+          if (result.skipped.isNotEmpty) {
+            _report('${result.skipped.length} 个文件没放进项目，已留在收件箱');
+            return;
+          }
           await inbox.discard(batch.id);
         case ShareIntakeIntoSession(:final project, :final sessionId):
           await onAttach(batch, project, sessionId);
