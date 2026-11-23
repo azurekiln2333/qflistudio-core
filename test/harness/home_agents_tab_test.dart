@@ -243,6 +243,29 @@ void main() {
     );
   });
 
+  testWidgets('圆点不只靠颜色：带状态的文字标签', (tester) async {
+    final remote = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+      initialSessions: [
+        fakeSession(
+          hostId: 'remote:1',
+          id: 's-1',
+          title: '待确认的会话',
+          status: HarnessSessionStatus.blocked,
+        ),
+      ],
+    );
+    addTearDown(remote.dispose);
+    await mount(tester, hosts: [remote], onOpenSession: (_) {});
+
+    final semantics = tester.ensureSemantics();
+    addTearDown(semantics.dispose);
+
+    expect(find.bySemanticsLabel('待确认'), findsWidgets);
+  });
+
   testWidgets('刷新后读到新增的内置会话', (tester) async {
     final remote = FakeHarnessHost(
       id: 'remote:1',

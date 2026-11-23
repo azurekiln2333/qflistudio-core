@@ -293,7 +293,11 @@ class AgentsRowTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
-            _StatusDot(status: status, rowKey: row.rowKey),
+            _StatusDot(
+              status: status,
+              label: harnessStatusLabel(status),
+              rowKey: row.rowKey,
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -332,11 +336,21 @@ class AgentsRowTile extends StatelessWidget {
   }
 }
 
-/// 状态圆点。颜色沿用 Agents 面板的状态色。
+/// 状态圆点。
+///
+/// 颜色固定，不取主题色（裁定 R3）。未知画空心圈。文字语义标签同时给
+/// 读屏与长按提示，不只靠颜色区分。
 class _StatusDot extends StatelessWidget {
-  const _StatusDot({required this.status, required this.rowKey});
+  const _StatusDot({
+    required this.status,
+    required this.label,
+    required this.rowKey,
+  });
 
   final HarnessSessionStatus status;
+
+  /// 状态的文字说法，读屏与长按都能读到。
+  final String label;
 
   /// 所属行的键，圆点的键带上它才不会跟别的行重复。
   final String rowKey;
@@ -344,13 +358,23 @@ class _StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      key: ValueKey('agents-status-$rowKey'),
-      width: 10,
-      height: 10,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: harnessStatusColor(scheme, status),
+    return Semantics(
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: Container(
+          key: ValueKey('agents-status-$rowKey'),
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: harnessStatusDotColor(status),
+            border: Border.all(
+              color: harnessStatusDotBorderColor(scheme, status),
+              width: 1.5,
+            ),
+          ),
+        ),
       ),
     );
   }
