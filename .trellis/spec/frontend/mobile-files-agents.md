@@ -61,6 +61,9 @@ hosts only when the controller first selects Agents, not when the pager
 prebuilds an adjacent page. Retain visited content when selecting other tabs.
 Use a Home-owned key to preserve the retained Agents element across reordered
 page slots: a child ValueKey does not cross index-keyed framework wrappers.
+Apply reordered scopes with a replacement controller whose initial index
+selects the same scope. Mutating the old controller first can animate the
+previous page order while the replacement children are still pending.
 Session navigation callbacks use Home's persistent context because project
 search temporarily removes the pager. Swipe tests await bounded scroll-end
 readiness before asserting selection; spring settling differs from tab taps.

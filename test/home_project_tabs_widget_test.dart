@@ -204,8 +204,14 @@ void main() {
         agentsTabBuilder: (_) => const _AgentsNavigationProbe(),
       );
       expect(_tabLabels(tester).first, 'Agents');
+      expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 1);
+      expect(
+        find.byKey(const ValueKey('home-scope-page-history')).hitTestable(),
+        findsOneWidget,
+      );
       await tester.tap(_tabFinder('Agents'));
       await _settle(tester);
+      expect(tester.widget<TabBar>(find.byType(TabBar)).controller!.index, 0);
       expect(find.text('Session 0').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
     },

@@ -376,7 +376,7 @@ class _HomeTabState extends State<HomeTab>
   late List<ProjectScope> _orderedScopes = defaultProjectScopes(
     StudioProfile.current,
   );
-  late final TabController _projectTabs = TabController(
+  late TabController _projectTabs = TabController(
     length: _orderedScopes.length,
     vsync: this,
   );
@@ -479,12 +479,25 @@ class _HomeTabState extends State<HomeTab>
             0,
             _orderedScopes.length - 1,
           )];
-    final nextIndex = ordered.indexOf(selected);
+    _setTabOrder(ordered, selected);
+  }
+
+  void _setTabOrder(List<ProjectScope> ordered, ProjectScope selected) {
     if (listEquals(ordered, _orderedScopes)) return;
-    setState(() => _orderedScopes = ordered);
-    if (nextIndex >= 0 && nextIndex != _projectTabs.index) {
-      _projectTabs.index = nextIndex;
-    }
+    final previousController = _projectTabs;
+    final nextIndex = ordered.indexOf(selected);
+    setState(() {
+      _orderedScopes = ordered;
+      // A new controller lets TabBarView apply the new pages and selection
+      // together. Changing the old controller's index starts a page animation
+      // against the previous order before the rebuilt children arrive.
+      _projectTabs = TabController(
+        length: ordered.length,
+        initialIndex: nextIndex < 0 ? 0 : nextIndex,
+        vsync: this,
+      );
+    });
+    previousController.dispose();
   }
 
   @override
@@ -940,11 +953,7 @@ class _HomeTabState extends State<HomeTab>
     // what dropping on the target's slot means for both drag directions.
     final moved = ordered.removeAt(oldIndex);
     ordered.insert(newIndex, moved);
-    final nextIndex = ordered.indexOf(selected);
-    setState(() => _orderedScopes = ordered);
-    if (nextIndex >= 0 && nextIndex != _projectTabs.index) {
-      _projectTabs.index = nextIndex;
-    }
+    _setTabOrder(ordered, selected);
     // The saved order may not have been read yet: the first frame must not wait
     // on a file read, so it is fetched here, where it is actually needed.
     await _tabOrderStore.load();
