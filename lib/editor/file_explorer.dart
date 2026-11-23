@@ -14,6 +14,7 @@ import '../editor/project_history.dart';
 import '../pages/file_history_page.dart';
 import '../services/recycle_bin.dart';
 import '../services/picker_service.dart';
+import '../services/project_file_access.dart';
 import '../services/resource_import_service.dart';
 import '../i18n/studio_localizations.dart';
 import '../widgets/project_dialogs.dart';
@@ -1015,7 +1016,9 @@ class _FileExplorerState extends State<FileExplorer> {
     }
     if (name == null || !mounted) return;
     final path = p.join(dirPath, name);
-    if (Directory(path).existsSync() || File(path).existsSync()) {
+    final external = ProjectFileAccess.isExternal(path);
+    if (!external &&
+        (Directory(path).existsSync() || File(path).existsSync())) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('“$name”已存在')));
@@ -1024,6 +1027,9 @@ class _FileExplorerState extends State<FileExplorer> {
     try {
       if (isDir) {
         await Directory(path).create();
+      } else if (external) {
+        // 外部根新建文件走协调写入：占位目录要靠原生触发下载。
+        await ProjectFileAccess.writeBytes(path, const <int>[]);
       } else {
         await File(path).writeAsString('');
       }
@@ -1096,6 +1102,8 @@ class _FileExplorerState extends State<FileExplorer> {
   void _showMenu(FileNode node, Offset position) {
     final isRoot = _roots.any((root) => p.equals(node.path, root.path));
     final owner = _ownerOf(node.path);
+    // 外部根是用户自己的目录：不提供删除，用户要删就回系统文件管理器。
+    final external = ProjectFileAccess.isExternal(node.path);
     final l = StudioLocalizations.of(context);
     final items = <PopupMenuEntry<String>>[
       if (!node.isDir)
@@ -1183,7 +1191,7 @@ class _FileExplorerState extends State<FileExplorer> {
             ],
           ),
         ),
-      if (!isRoot)
+      if (!isRoot && !external)
         const PopupMenuItem(
           value: 'delete',
           child: Row(
