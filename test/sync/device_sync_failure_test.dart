@@ -157,8 +157,10 @@ void main() {
     expect(find.text('同步未完成'), findsNothing);
 
     // Safe now: the failure dialog closed, so the future can finish.
-    expect(await pending, isFalse);
-  });
+    await tester.runAsync(() async {
+      expect(await pending.timeout(const Duration(seconds: 10)), isFalse);
+    });
+  }, timeout: const Timeout(Duration(seconds: 60)));
 
   testWidgets('传输失败后旧文件仍然可用', (tester) async {
     final localRoot = p.join(root.path, 'copy2');
@@ -220,15 +222,15 @@ void main() {
     await tester.pumpAndSettle();
 
     // Safe now: the failure dialog closed, so the future can finish.
-    expect(await pending, isFalse);
     // The old copy survives: a half-written file never takes its place.
     await tester.runAsync(() async {
+      expect(await pending.timeout(const Duration(seconds: 10)), isFalse);
       expect(
         await File(p.join(localRoot, 'files', 'a.txt')).readAsString(),
         'one',
       );
     });
-  });
+  }, timeout: const Timeout(Duration(seconds: 60)));
 
   group('git 决策', () {
     test('可克隆的仓库直接走 git', () {
