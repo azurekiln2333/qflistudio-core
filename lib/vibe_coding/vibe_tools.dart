@@ -231,12 +231,33 @@ class VibeProjectFiles {
 
   String? _realRoot;
 
+  /// 已登记的外部根（文件夹授权打开的项目）。
+  ///
+  /// 外部根的目录确实不在 [projectRoot] 之下，但它就是这次会话的工作根：
+  /// 列表、读取、写入都应落在它里面。没有这一条时，外部项目下的
+  /// `src/main.dart` 会被拼成项目内的路径，读取走到普通文件分支，
+  /// 协调读取永远不触发（iCloud 占位文件因此读不到）。
+  ///
+  /// 只有字符串相等或是它的子路径才放行，`..` 段在前面已经拒掉。
+  String? _externalRoot(String normalized) {
+    if (!ProjectFileAccess.isExternal(projectRoot)) return null;
+    final root = projectRoot.replaceAll('\\', '/');
+    if (normalized == root) return projectRoot;
+    if (!normalized.startsWith('$root/')) return null;
+    return p.normalize(
+      p.join(projectRoot, normalized.substring(root.length + 1)),
+    );
+  }
+
   String get realRoot =>
       _realRoot ??= Directory(projectRoot).resolveSymbolicLinksSync();
 
   /// 把工具参数里的相对路径转换成受约束的绝对路径。
   ///
   /// 拒绝绝对路径、盘符、`..`、NUL、受保护目录和符号链接逃逸。
+  /// 项目根之外还有两个允许的落点：已登记的外部根（文件夹授权打开的项目）
+  /// 与只读附件。两个都按绝对路径拼，后续的 `isExternal` 与写入拦截
+  /// 才能在同一个口径上认出它们。
   String resolve(String rawPath) {
     if (rawPath.contains('\u0000')) {
       throw const VibeToolException('路径包含非法字符', code: 'escape');
@@ -247,6 +268,8 @@ class VibeProjectFiles {
     if (normalized.isEmpty) {
       throw const VibeToolException('路径不能为空');
     }
+    final external = _externalRoot(normalized);
+    if (external != null) return external;
     if (normalized.startsWith('/') ||
         RegExp(r'^[A-Za-z]:').hasMatch(normalized)) {
       throw const VibeToolException('只允许项目内的相对路径', code: 'escape');
