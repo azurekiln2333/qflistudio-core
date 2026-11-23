@@ -332,10 +332,12 @@ void main() {
     await mount(tester, hosts: [remote], onOpenSession: (_) {});
 
     final semantics = tester.ensureSemantics();
-    addTearDown(semantics.dispose);
-    await tester.pump();
-
-    expect(find.bySemanticsLabel('待确认'), findsWidgets);
+    try {
+      await tester.pump();
+      expect(find.bySemanticsLabel('待确认'), findsWidgets);
+    } finally {
+      semantics.dispose();
+    }
   });
 
   testWidgets('刷新后读到新增的内置会话', (tester) async {
