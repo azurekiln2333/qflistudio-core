@@ -321,7 +321,8 @@ class DeviceSyncService {
     if (digest != entry.hash) {
       await temp.delete().catchError((Object _) => temp);
       throw DeviceSyncException('文件校验不通过：${entry.path}', kind: 'hash');
-    }    await File(target).parent.create(recursive: true);
+    }
+    await File(target).parent.create(recursive: true);
     if (await File(target).exists()) await File(target).delete();
     await temp.rename(target);
   }
@@ -406,10 +407,25 @@ class DeviceSyncService {
       final info = await entity.stat();
       files[relative] = _LocalFile(
         size: info.size,
-        hash: sha256.convert(await entity.readAsBytes()).toString(),
+        hash: await _hashFile(entity),
       );
     }
     return _LocalListing(files);
+  }
+
+  /// 边读边算本地文件的 SHA-256。
+  ///
+  /// 再同步一个早就下载好的大文件时，这里也要算一遍。一次读进内存会让
+  /// 内存随文件大小线性涨，改成分块喂给同一个摘要器。
+  /// 摘要结果与一次算完完全相同；读失败照旧往外抛，由调用方记成失败。
+  static Future<String> _hashFile(File file) async {
+    final collector = _DigestSink();
+    final output = sha256.startChunkedConversion(collector);
+    await for (final chunk in file.openRead()) {
+      output.add(chunk);
+    }
+    output.close();
+    return collector.value.toString();
   }
 
   Future<int> _directoryBytes(String path) async {
