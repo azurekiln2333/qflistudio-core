@@ -887,6 +887,10 @@ class _FileExplorerState extends State<FileExplorer> {
       ];
     } on FileSystemException {
       nodes = const [];
+    } on StateError {
+      // 外部根的列表由原生提供：通道没就绪或没返回列表时，
+      // 只让这一层目录空着，不让整棵树报错。
+      nodes = const [];
     }
     if (!mounted || expectedGeneration != _treeGeneration) return;
     setState(() => _children[dir.path] = nodes);

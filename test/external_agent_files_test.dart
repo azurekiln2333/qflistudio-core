@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -86,7 +87,8 @@ void main() {
     mockChannel((call) {
       calls.add(call.method);
       if (call.method == 'coordinatedRead') {
-        return Uint8List.fromList('远程正文'.codeUnits);
+        // 原生送来的是 UTF-8 字节，不是 UTF-16 码元。
+        return Uint8List.fromList(utf8.encode('远程正文'));
       }
       return null;
     });
