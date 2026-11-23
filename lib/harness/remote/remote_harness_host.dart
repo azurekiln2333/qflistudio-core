@@ -10,12 +10,15 @@
 // Agents surface shows "what runs on that computer", not "which sub-module".
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
 import '../../remote_control/models/herdr.dart' as herdr;
 import '../../remote_control/models/protocol.dart' as protocol;
 import '../../remote_control/state/remote_controller.dart' show ConnectionPhase;
+import '../../services/app_paths.dart';
+import '../../sync/remote_session_cache.dart';
 import '../harness_host.dart';
 import 'remote_mapping.dart';
 import 'remote_ports.dart';
@@ -28,9 +31,11 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
     RemoteCodexPort? codex,
     this.refreshInterval = const Duration(seconds: 20),
     String? hostId,
+    bool cacheTranscripts = true,
   }) : _remote = remote,
        _herdr = herdr,
        _codex = codex,
+       _cacheTranscripts = cacheTranscripts,
        // Resolved once: `id` is a map key in the hub and is stamped into every
        // `HarnessSessionInfo`, so it must not drift when pairing arrives later.
        // Pass [hostId] when the pairing is not loaded yet.
@@ -69,6 +74,8 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
       <String, RemoteCodexThreadHandle>{};
   final List<protocol.CodexThread> _codexThreads = <protocol.CodexThread>[];
 
+  late final bool _cacheTranscripts;
+
   List<HarnessSessionInfo> _latest = const <HarnessSessionInfo>[];
   bool _wasOnline = false;
   bool _disposed = false;
@@ -78,6 +85,32 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
 
   @override
   String get id => _id;
+
+  /// Bounded transcript cache for one session, under `deviceSessions/`.
+  ///
+  /// Created on demand and returned without one when the app data directory is
+  /// not writable: a missing cache only costs history after a reconnect, and a
+  /// session must still open without it.
+  Future<RemoteSessionCache?> _streamCacheFor(String sessionId) async {
+    if (!_cacheTranscripts) return null;
+    final raw = sessionId.startsWith('session:')
+        ? sessionId.substring('session:'.length)
+        : sessionId;
+    final root = await AppPaths.deviceSessionsRoot(create: true);
+    if (root == null) return null;
+    final dir = '$root/${_safeSessionSegment(raw)}';
+    try {
+      await Directory(dir).create(recursive: true);
+    } on FileSystemException {
+      return null;
+    }
+    return RemoteSessionCache(directory: dir);
+  }
+
+  static String _safeSessionSegment(String value) {
+    final cleaned = value.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    return cleaned.isEmpty ? 'session' : cleaned;
+  }
 
   @override
   String get label {
@@ -251,6 +284,7 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
         port: _remote,
         session: session,
         hostId: id,
+        streamCache: await _streamCacheFor(sessionId),
         onDetached: (detached) async {
           if (identical(_sessionHandles[sessionId], detached)) {
             _sessionHandles.remove(sessionId);

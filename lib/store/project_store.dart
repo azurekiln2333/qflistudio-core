@@ -859,4 +859,55 @@ class ProjectStore extends ChangeNotifier {
     unawaited(_persist());
     notifyListeners();
   }
+
+  // -------------------------------------------------------------------------
+  // 设备项目（追加块，不改动上面的既有方法）
+  //
+  // 占位项目只为一个配对电脑上的会话而存在。它们和其他项目一样进列表、
+  // 一样持久化，差别只在删除时的判定：没拉过文件的占位项目可以随会话一起
+  // 消失，拉过文件的就当成用户自己的项目。
+  // -------------------------------------------------------------------------
+
+  /// 已在列表里的同一个会话占位项目，没有则返回 null。
+  Project? deviceProjectFor({
+    required String hostId,
+    required String sessionId,
+  }) {
+    for (final project in _projects) {
+      if (project.deviceHostId == hostId &&
+          project.deviceSessionId == sessionId) {
+        return project;
+      }
+    }
+    return null;
+  }
+
+  /// 登记一个设备占位项目；同会话已存在时直接复用。
+  Future<ProjectResult> registerDeviceProject(Project project) async {
+    final existing = deviceProjectFor(
+      hostId: project.deviceHostId ?? '',
+      sessionId: project.deviceSessionId ?? '',
+    );
+    if (existing != null) {
+      existing.placeholder = project.placeholder;
+      existing.deviceRoot = project.deviceRoot;
+      existing.lastOpenedAt = DateTime.now();
+      unawaited(_persist());
+      notifyListeners();
+      return (error: null, project: existing);
+    }
+    return _registerLocalProject(project);
+  }
+
+  /// 会话结束后清理占位项目：没拉过文件就移除记录，拉过文件的保留。
+  Future<bool> discardDevicePlaceholder({
+    required String hostId,
+    required String sessionId,
+  }) async {
+    final project = deviceProjectFor(hostId: hostId, sessionId: sessionId);
+    if (project == null) return false;
+    if (project.filesPulled || !project.placeholder) return false;
+    remove(project);
+    return true;
+  }
 }

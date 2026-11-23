@@ -10,6 +10,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../sync/remote_session_cache.dart';
+
 import '../../remote_control/models/protocol.dart' as protocol;
 import '../../remote_control/state/session_view.dart';
 import '../harness_host.dart';
@@ -104,10 +106,15 @@ class RemoteTranscriptFeed {
     required RemoteSessionPort port,
     required String sessionId,
     required Object owner,
+    this.cache,
   }) : _view = view,
        _port = port,
        _sessionId = sessionId,
        _owner = owner;
+
+  /// Optional bounded copy of the transcript, so a dropped connection does not
+  /// take the visible history with it.
+  final RemoteSessionCache? cache;
 
   final SessionView _view;
   final RemoteSessionPort _port;
@@ -160,9 +167,21 @@ class RemoteTranscriptFeed {
       if (event.seq <= _lastSeq) continue;
       _lastSeq = event.seq;
       final entry = transcriptFromSessionEvent(event, _sessionId);
-      if (entry != null) _controller.add(entry);
+      if (entry != null) {
+        _controller.add(entry);
+        unawaited(cache?.append(_cacheLine(entry)) ?? Future<void>.value());
+      }
     }
   }
+
+  /// The fields the transcript view needs, in a stable shape.
+  Map<String, dynamic> _cacheLine(TranscriptEvent entry) => <String, dynamic>{
+    'id': entry.id,
+    'role': entry.role.name,
+    'text': entry.text,
+    'at': ?entry.at?.toIso8601String(),
+    'requestId': ?entry.requestId,
+  };
 
   Future<void> close() async {
     if (_closed) return;

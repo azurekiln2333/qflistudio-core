@@ -251,4 +251,62 @@ abstract final class AppPaths {
   /// 是否为桌面平台（可访问任意磁盘路径）。
   static bool get isDesktop =>
       !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+
+  // ---------------------------------------------------------------------
+  // 设备同步目录
+  //
+  // 从配对电脑拉下来的项目副本与会话目录都放在应用数据目录下，不进用户
+  // 自己的项目根：它们是缓存，删掉之后下一次同步会重新拉。
+  // iOS 跟 `projectsRoot` 一样改用文档目录。
+  // ---------------------------------------------------------------------
+
+  /// App 数据目录下某个子目录的路径；[create] 为 true 时建好。
+  static Future<String?> appDataSubdirectory(
+    String name, {
+    bool create = false,
+  }) async {
+    final base = isIos
+        ? await _iosDocumentsDirectory()
+        : await storageDirectory();
+    if (base == null) return null;
+    final dir = Directory(p.join(base, name));
+    if (create) {
+      try {
+        await dir.create(recursive: true);
+      } on FileSystemException {
+        return null;
+      }
+    }
+    return dir.path;
+  }
+
+  /// 设备项目副本的根目录：`<app data>/projects/deviceProjects`。
+  static Future<String?> deviceProjectsRoot({bool create = false}) async {
+    final projects = await projectsRoot(create: create);
+    if (projects == null) return null;
+    final dir = Directory(p.join(projects, 'deviceProjects'));
+    if (create) {
+      try {
+        await dir.create(recursive: true);
+      } on FileSystemException {
+        return null;
+      }
+    }
+    return dir.path;
+  }
+
+  /// 占位项目的根目录：`<app data>/projects/deviceSessions`。
+  static Future<String?> deviceSessionsRoot({bool create = false}) async {
+    final projects = await projectsRoot(create: create);
+    if (projects == null) return null;
+    final dir = Directory(p.join(projects, 'deviceSessions'));
+    if (create) {
+      try {
+        await dir.create(recursive: true);
+      } on FileSystemException {
+        return null;
+      }
+    }
+    return dir.path;
+  }
 }
