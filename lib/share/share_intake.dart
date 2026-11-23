@@ -54,11 +54,8 @@ Future<ShareIntakeResult> copyBatchIntoProject({
     throw const ShareIntakeException('项目目录不存在，无法放入文件');
   }
   final target = Directory(p.join(root, _cleanSubdirectory(subdirectory)));
-  try {
-    await target.create(recursive: true);
-  } on FileSystemException catch (error) {
-    throw ShareIntakeException('无法创建目标目录：${error.message}');
-  }
+  // 本次调用是否建过目录。只在确实要写文件那一刻建，整批跳过时不留空壳。
+  var createdTarget = false;
   final copied = <String>[];
   final skipped = <String>[];
   var count = 0;
@@ -77,15 +74,29 @@ Future<ShareIntakeResult> copyBatchIntoProject({
       continue;
     }
     final name = sanitizeSharedFileName(file.name);
-    final destination = await _uniqueTarget(target, name);
     try {
+      if (!createdTarget && !await target.exists()) {
+        await target.create(recursive: true);
+        createdTarget = true;
+      }
+      final destination = await _uniqueTarget(target, name);
       await _copyStreaming(source, destination);
+      copied.add(
+        p.relative(destination.path, from: root).replaceAll('\\', '/'),
+      );
+      count++;
     } on FileSystemException catch (error) {
       skipped.add('${file.name}：${error.message}');
       continue;
     }
-    copied.add(p.relative(destination.path, from: root).replaceAll('\\', '/'));
-    count++;
+  }
+  if (copied.isEmpty && createdTarget) {
+    // 非递归：只能删空目录，不会波及这个期间别人写进去的文件。
+    try {
+      await target.delete();
+    } on FileSystemException {
+      // 目录已不空或被占用：留着，下一批还能用。
+    }
   }
   return ShareIntakeResult(
     project: project,
@@ -94,10 +105,15 @@ Future<ShareIntakeResult> copyBatchIntoProject({
   );
 }
 
-/// 去掉路径分隔符与控制字符，保留可读名字。
+/// 把收件箱显示名换成安全文件名。
+///
+/// 先按 POSIX 取末段：`/` 是真实目录分隔，原生可能给 `../../etc/passwd`。
+/// 反斜杠不先转 `/`：它是名字里的普通字符，换成 `_` 而不是整段丢弃。
 String sanitizeSharedFileName(String raw) {
-  var name = raw.split(RegExp(r'[\\/]')).last.trim();
-  name = name.replaceAll(RegExp(r'[\u0000-\u001f<>:"|?*]'), '_');
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return 'shared-file';
+  var name = p.posix.basename(trimmed);
+  name = name.replaceAll(RegExp(r'[\\/:*?"<>|\u0000-\u001f]'), '_').trim();
   if (name.isEmpty || name == '.' || name == '..') return 'shared-file';
   if (name.length > 120) {
     final dot = name.lastIndexOf('.');
