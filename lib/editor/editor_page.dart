@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:re_editor/re_editor.dart';
 
 import '../config/ohos_platform.dart';
+import '../chat/composer_draft.dart';
 import '../git/git_backend.dart';
 import '../models/project.dart';
 import '../i18n/studio_localizations.dart';
@@ -186,6 +187,7 @@ class EditorPage extends StatefulWidget {
     this.composerDefaults,
     this.agentEnabled = false,
     this.initialHarnessSession,
+    this.composerPrefill,
     this.harnessHub,
     this.ownsHarnessHub = true,
     this.gitBackendFactory,
@@ -257,6 +259,11 @@ class EditorPage extends StatefulWidget {
   /// 目标主机是内置 Agent 时选中 [WorkbenchState.sessionId]；其它主机走 Hub
   /// 的 [HarnessHub.openSession]。见 design.md §2.3。
   final HarnessSessionTarget? initialHarnessSession;
+
+  /// 首帧就要填进 Agent 输入卡片的附件。
+  ///
+  /// 分享进来的文件用它：只预填，不自动发送。
+  final ComposerDraft? composerPrefill;
 
   /// 调用方已经持有的 hub。
   ///
@@ -2103,6 +2110,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       onOpenFile: _openAgentFile,
       fileExists: _agentFileExists,
       active: active,
+      draft: widget.composerPrefill ?? ComposerDraft.empty,
     );
     final hub = _harnessHub;
     return LoginGateScope(

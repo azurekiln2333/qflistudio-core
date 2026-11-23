@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+import '../chat/composer_draft.dart';
 import '../models/project.dart';
 import '../harness/harness_session_target.dart';
 import '../harness/hub/harness_hub.dart';
@@ -38,6 +39,7 @@ Future<void> openEditorPage(
   bool revealAgentPane = false,
   HarnessSessionTarget? harnessSession,
   HarnessHub? harnessHub,
+  ComposerDraft? composerPrefill,
 }) async {
   final controller = RetainedEditorScope.maybeOf(context);
   if (controller != null) {
@@ -53,6 +55,7 @@ Future<void> openEditorPage(
       revealAgentPane: revealAgentPane,
       harnessSession: harnessSession,
       harnessHub: harnessHub,
+      composerPrefill: composerPrefill,
     );
     return;
   }
@@ -70,6 +73,7 @@ Future<void> openEditorPage(
         agentPaneRequest: revealAgentPane ? 1 : 0,
         initialHarnessSession: harnessSession,
         harnessHub: harnessHub,
+        composerPrefill: composerPrefill,
         ownsHarnessHub: false,
         // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
         agentEnabled: StudioProfile.current?.offlineOnly != true,
@@ -172,6 +176,7 @@ class RetainedEditorController extends ChangeNotifier {
     bool revealAgentPane = false,
     HarnessSessionTarget? harnessSession,
     HarnessHub? harnessHub,
+    ComposerDraft? composerPrefill,
   }) {
     final key = _resolveOpenKey(project, workspace);
     final session = _sessions.putIfAbsent(
@@ -192,6 +197,7 @@ class RetainedEditorController extends ChangeNotifier {
       session.harnessRequest++;
     }
     if (harnessHub != null) session.harnessHub = harnessHub;
+    if (composerPrefill != null) session.composerPrefill = composerPrefill;
     if (workspace != null) {
       // Re-opening a saved workspace re-resolves its members. The effective
       // primary may have changed (missing primary → survivor); keep the live
@@ -383,6 +389,9 @@ class _EditorSession {
 
   /// 调用方提供的 hub。为空时页面自建并自己释放。
   HarnessHub? harnessHub;
+
+  /// 首帧要填进输入卡片的附件。
+  ComposerDraft? composerPrefill;
 
   String get label => workspace?.name ?? project.name;
 }
@@ -711,6 +720,7 @@ class _SessionEditor extends StatelessWidget {
       agentPaneRequest: session.agentPaneRequest,
       initialHarnessSession: session.harnessTarget,
       harnessHub: session.harnessHub,
+      composerPrefill: session.composerPrefill,
       // 外来 hub 归调用方释放；自己建的由页面释放。
       ownsHarnessHub: session.harnessHub == null,
       retainedVisibility: session.visible,

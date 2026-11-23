@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../shell/workbench_agent_pane.dart';
+import '../../chat/composer_draft.dart';
 import '../../chat/composer_state.dart';
 import '../../models/project.dart';
 import '../../shell/workbench_state.dart';
@@ -40,10 +41,7 @@ class AgentEntryButton extends StatelessWidget {
         final runtime = host.runtime;
         if (runtime == null) return _button(0);
         return AnimatedBuilder(
-          animation: Listenable.merge([
-            runtime.liveChanges,
-            runtime.sessions,
-          ]),
+          animation: Listenable.merge([runtime.liveChanges, runtime.sessions]),
           builder: (context, _) => _button(_badgeCount(runtime)),
         );
       },
@@ -129,7 +127,10 @@ class AgentDock extends StatelessWidget {
           SizedBox(
             height: 52,
             child: AnimatedBuilder(
-              animation: Listenable.merge([runtime.sessions, runtime.liveChanges]),
+              animation: Listenable.merge([
+                runtime.sessions,
+                runtime.liveChanges,
+              ]),
               builder: (context, _) {
                 final sessionId = state.sessionId;
                 final title = sessionId == null
@@ -180,11 +181,7 @@ class AgentDock extends StatelessWidget {
 
 /// 收起后的竖条：只剩一个展开按钮和角标。
 class AgentDockRail extends StatelessWidget {
-  const AgentDockRail({
-    super.key,
-    required this.onExpand,
-    this.badgeCount = 0,
-  });
+  const AgentDockRail({super.key, required this.onExpand, this.badgeCount = 0});
 
   final VoidCallback onExpand;
   final int badgeCount;
@@ -251,6 +248,7 @@ class EditorAgentPane extends StatelessWidget {
     this.onOpenFile,
     this.fileExists,
     this.active = true,
+    this.draft = ComposerDraft.empty,
   });
 
   final Project project;
@@ -275,6 +273,9 @@ class EditorAgentPane extends StatelessWidget {
 
   /// 当前会话面板是否处于可见状态。
   final bool active;
+
+  /// 打开面板时预填的附件。
+  final ComposerDraft draft;
 
   @override
   Widget build(BuildContext context) {
@@ -327,6 +328,7 @@ class EditorAgentPane extends StatelessWidget {
       fileExists: fileExists,
       composerDefaults: composerDefaults,
       active: active,
+      draft: draft,
     );
   }
 }

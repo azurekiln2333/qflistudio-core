@@ -1,0 +1,129 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+
+import '../models/project.dart';
+import '../session/agent_session.dart';
+import 'share_inbox.dart';
+import 'share_intake.dart';
+import 'share_intake_sheet.dart';
+
+/// 把一批文件放进项目。
+typedef ShareIntakeCopy =
+    Future<ShareIntakeResult> Function(ShareInboxBatch batch, Project project);
+
+/// 把一批文件附到会话。[sessionId] 为空表示新建会话。
+typedef ShareIntakeAttach =
+    Future<void> Function(
+      ShareInboxBatch batch,
+      Project project,
+      String? sessionId,
+    );
+
+/// 收件箱到达时弹选择面板。
+///
+/// 只做三件事：排队、等首帧就绪、把用户选择交给回调。
+class ShareIntakeHost {
+  ShareIntakeHost({
+    required this.inbox,
+    required this.navigatorKey,
+    required this.projects,
+    required this.sessionsOf,
+    required this.ready,
+    required this.onCopy,
+    required this.onAttach,
+    this.onError,
+  });
+
+  final ShareInbox inbox;
+  final GlobalKey<NavigatorState> navigatorKey;
+  final List<Project> Function() projects;
+  final List<AgentSessionMeta> Function(String projectId) sessionsOf;
+
+  /// 首页就绪信号。为假时只排队，不弹面板。
+  final ValueListenable<bool> ready;
+
+  final ShareIntakeCopy onCopy;
+  final ShareIntakeAttach onAttach;
+
+  /// 复制或打开编辑器失败时的提示。
+  final void Function(String message)? onError;
+
+  final List<ShareInboxBatch> _queue = [];
+  StreamSubscription<ShareInboxBatch>? _subscription;
+  bool _showing = false;
+  bool _started = false;
+  bool _disposed = false;
+
+  /// 订阅收件箱，取回冷启动批次，并清理超期批次。
+  Future<void> start() async {
+    if (_started || _disposed) return;
+    _started = true;
+    _subscription = inbox.incoming.listen(_enqueue);
+    ready.addListener(_drain);
+    await inbox.start();
+    unawaited(inbox.sweep());
+    _drain();
+  }
+
+  void _enqueue(ShareInboxBatch batch) {
+    if (_disposed || batch.isEmpty) return;
+    _queue.add(batch);
+    _drain();
+  }
+
+  void _drain() {
+    if (_disposed || _showing) return;
+    if (!ready.value) return;
+    if (_queue.isEmpty) return;
+    final context = navigatorKey.currentContext;
+    if (context == null) return;
+    _showing = true;
+    unawaited(_present(context, _queue.removeAt(0)));
+  }
+
+  Future<void> _present(BuildContext context, ShareInboxBatch batch) async {
+    try {
+      final choice = await showShareIntakeSheet(
+        context,
+        batch: batch,
+        projects: projects(),
+        sessionsOf: sessionsOf,
+      );
+      if (choice == null) return;
+      switch (choice) {
+        case ShareIntakeIntoProject(:final project):
+          final result = await onCopy(batch, project);
+          if (result.isEmpty && result.skipped.isNotEmpty) {
+            _report('没有文件放进项目');
+            return;
+          }
+          _report(null);
+          await inbox.discard(batch.id);
+        case ShareIntakeIntoSession(:final project, :final sessionId):
+          await onAttach(batch, project, sessionId);
+          await inbox.discard(batch.id);
+      }
+    } on Object catch (error) {
+      _report('处理分享文件失败：$error');
+    } finally {
+      _showing = false;
+      _drain();
+    }
+  }
+
+  void _report(String? message) {
+    if (message == null) return;
+    onError?.call(message);
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    ready.removeListener(_drain);
+    unawaited(_subscription?.cancel());
+    _subscription = null;
+    _queue.clear();
+  }
+}
