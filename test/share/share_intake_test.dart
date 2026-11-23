@@ -117,6 +117,17 @@ void main() {
     expect(sanitizeSharedFileName('   '), 'shared-file');
   });
 
+  test('沙目录传空时放到项目根', () async {
+    final result = await copyBatchIntoProject(
+      batch: batchOf(<SharedIncomingFile>[writeFile('b.txt', 'root')]),
+      project: project,
+      subdirectory: '',
+    );
+
+    expect(result.relativePaths, <String>['b.txt']);
+    expect(File(p.join(projectRoot.path, 'b.txt')).readAsStringSync(), 'root');
+  });
+
   test('子目录参数不能跳出项目', () async {
     final result = await copyBatchIntoProject(
       batch: batchOf(<SharedIncomingFile>[writeFile('a.txt', 'hello')]),

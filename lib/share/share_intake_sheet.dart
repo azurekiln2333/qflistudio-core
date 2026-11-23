@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/project.dart';
 import '../session/agent_session.dart';
 import 'share_inbox.dart';
+import 'share_intake.dart';
 
 /// 用户在选择面板里做的决定。
 @immutable
@@ -10,11 +11,15 @@ sealed class ShareIntakeChoice {
   const ShareIntakeChoice();
 }
 
-/// 放进项目。
+/// 放进项目。[subdirectory] 为空表示项目根。
 class ShareIntakeIntoProject extends ShareIntakeChoice {
-  const ShareIntakeIntoProject(this.project);
+  const ShareIntakeIntoProject(
+    this.project, {
+    this.subdirectory = kShareInboxProjectFolder,
+  });
 
   final Project project;
+  final String subdirectory;
 }
 
 /// 附到会话。[sessionId] 为空表示新建会话。
@@ -44,7 +49,7 @@ Future<ShareIntakeChoice?> showShareIntakeSheet(
   );
 }
 
-/// 选择面板：先选去处，再选项目，附到会话时再选会话。
+/// 选择面板：先选去处，再选项目，放进项目时选子目录，附到会话时选会话。
 class ShareIntakeSheet extends StatefulWidget {
   const ShareIntakeSheet({
     super.key,
@@ -61,7 +66,7 @@ class ShareIntakeSheet extends StatefulWidget {
   State<ShareIntakeSheet> createState() => _ShareIntakeSheetState();
 }
 
-enum _Step { destination, project, session }
+enum _Step { destination, project, subdirectory, session }
 
 class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
   _Step _step = _Step.destination;
@@ -88,14 +93,7 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
                 style: theme.textTheme.titleMedium,
               ),
               const SizedBox(height: 4),
-              Text(
-                _summary(),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+              Flexible(child: _fileList(context, theme)),
               const SizedBox(height: 12),
               Flexible(child: _body(context)),
             ],
@@ -105,15 +103,54 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
     );
   }
 
-  String _summary() => [
-    for (final file in widget.batch.files.take(4)) file.name,
-    if (widget.batch.files.length > 4) '…',
-  ].join('、');
+  /// 逐项列出文件名与大小，最多 6 行，其余折成一行计数。
+  Widget _fileList(BuildContext context, ThemeData theme) {
+    final files = widget.batch.files;
+    final shown = files.take(6).toList(growable: false);
+    return Column(
+      key: const ValueKey('share-intake-files'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final file in shown)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 1),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    file.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  formatSharedBytes(file.bytes),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (files.length > shown.length)
+          Text(
+            '另有 ${files.length - shown.length} 个文件',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+      ],
+    );
+  }
 
   Widget _body(BuildContext context) {
     return switch (_step) {
       _Step.destination => _destinations(context),
       _Step.project => _projects(context),
+      _Step.subdirectory => _subdirectories(context),
       _Step.session => _sessions(context),
     };
   }
@@ -175,13 +212,40 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
             ),
             onTap: () {
               _project = project;
-              if (!_intoSession) {
-                Navigator.of(context).pop(ShareIntakeIntoProject(project));
+              if (_intoSession) {
+                setState(() => _step = _Step.session);
                 return;
               }
-              setState(() => _step = _Step.session);
+              setState(() => _step = _Step.subdirectory);
             },
           ),
+      ],
+    );
+  }
+
+  Widget _subdirectories(BuildContext context) {
+    final project = _project;
+    if (project == null) return const SizedBox.shrink();
+    return ListView(
+      shrinkWrap: true,
+      children: [
+        ListTile(
+          key: const ValueKey('share-intake-subdir-inbox'),
+          leading: const Icon(Icons.inbox_outlined),
+          title: const Text('inbox 目录'),
+          subtitle: const Text('推荐，项目里单独一处'),
+          onTap: () =>
+              Navigator.of(context).pop(ShareIntakeIntoProject(project)),
+        ),
+        ListTile(
+          key: const ValueKey('share-intake-subdir-root'),
+          leading: const Icon(Icons.folder_open_outlined),
+          title: const Text('项目根目录'),
+          subtitle: const Text('和现有文件放在一起'),
+          onTap: () => Navigator.of(
+            context,
+          ).pop(ShareIntakeIntoProject(project, subdirectory: '')),
+        ),
       ],
     );
   }

@@ -70,6 +70,7 @@ void main() {
     await pumpSheet(tester);
 
     expect(find.byKey(const ValueKey('share-intake-sheet')), findsOneWidget);
+    expect(find.byKey(const ValueKey('share-intake-files')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('share-intake-into-project')),
       findsOneWidget,
@@ -93,8 +94,22 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('share-intake-project-p1')));
     await tester.pumpAndSettle();
 
+    expect(
+      find.byKey(const ValueKey('share-intake-subdir-inbox')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('share-intake-subdir-root')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('share-intake-subdir-inbox')));
+    await tester.pumpAndSettle();
+
     expect(find.byKey(const ValueKey('share-intake-sheet')), findsNothing);
-    expect(choices.single, isA<ShareIntakeIntoProject>());
+    final choice = choices.single;
+    expect(choice, isA<ShareIntakeIntoProject>());
+    expect((choice as ShareIntakeIntoProject).subdirectory, 'inbox');
   });
 
   testWidgets('附到已有会话能选出会话', (tester) async {

@@ -110,15 +110,33 @@ String sanitizeSharedFileName(String raw) {
 }
 
 /// 子目录只接受相对路径，且不允许跳出项目根。
+///
+/// 空串表示项目根，包含 `..` 时回落到默认的 `inbox`。
 String _cleanSubdirectory(String raw) {
   final normalized = raw.replaceAll('\\', '/').trim();
+  if (normalized.isEmpty) return '';
   final parts = <String>[];
   for (final part in normalized.split('/')) {
     if (part.isEmpty || part == '.') continue;
-    if (part == '..') continue;
+    if (part == '..') return kShareInboxProjectFolder;
     parts.add(part);
   }
-  return parts.isEmpty ? kShareInboxProjectFolder : p.joinAll(parts);
+  if (parts.isEmpty) return '';
+  return p.joinAll(parts);
+}
+
+/// 人类可读的文件大小，如 `1.2 MiB`。
+String formatSharedBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  const units = <String>['KiB', 'MiB', 'GiB', 'TiB'];
+  var value = bytes / 1024;
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final digits = value >= 100 ? 0 : 1;
+  return '${value.toStringAsFixed(digits)} ${units[unit]}';
 }
 
 /// 重名时依次试 `name (1).ext`，到 99 次放弃。

@@ -9,9 +9,13 @@ import 'share_inbox.dart';
 import 'share_intake.dart';
 import 'share_intake_sheet.dart';
 
-/// 把一批文件放进项目。
+/// 把一批文件放进项目。[subdirectory] 为空表示项目根。
 typedef ShareIntakeCopy =
-    Future<ShareIntakeResult> Function(ShareInboxBatch batch, Project project);
+    Future<ShareIntakeResult> Function(
+      ShareInboxBatch batch,
+      Project project,
+      String subdirectory,
+    );
 
 /// 把一批文件附到会话。[sessionId] 为空表示新建会话。
 typedef ShareIntakeAttach =
@@ -93,8 +97,8 @@ class ShareIntakeHost {
       );
       if (choice == null) return;
       switch (choice) {
-        case ShareIntakeIntoProject(:final project):
-          final result = await onCopy(batch, project);
+        case ShareIntakeIntoProject(:final project, :final subdirectory):
+          final result = await onCopy(batch, project, subdirectory);
           if (result.isEmpty && result.skipped.isNotEmpty) {
             _report('没有文件放进项目');
             return;
