@@ -79,6 +79,7 @@ import 'agent/editor_agent_host.dart';
 import 'agent/editor_sidebar_tabs.dart';
 import 'agent/session_list_view.dart';
 import '../harness/harness_host.dart';
+import '../harness/harness_session_target.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/hub/harness_hosts.dart';
 import '../harness/hub/default_harness_hosts.dart';
@@ -184,6 +185,9 @@ class EditorPage extends StatefulWidget {
     this.agentRuntime,
     this.composerDefaults,
     this.agentEnabled = false,
+    this.initialHarnessSession,
+    this.harnessHub,
+    this.ownsHarnessHub = true,
     this.gitBackendFactory,
     this.cloudSyncOpener,
   });
@@ -247,6 +251,20 @@ class EditorPage extends StatefulWidget {
   /// 打开旧面板，没有 agent 入口、分段和右栏）。宿主 `retained_editor_host`
   /// 负责按产品策略打开，见 design.md §11.2。
   final bool agentEnabled;
+
+  /// 首帧后要选中的会话。
+  ///
+  /// 目标主机是内置 Agent 时选中 [WorkbenchState.sessionId]；其它主机走 Hub
+  /// 的 [HarnessHub.openSession]。见 design.md §2.3。
+  final HarnessSessionTarget? initialHarnessSession;
+
+  /// 调用方已经持有的 hub。
+  ///
+  /// 首页 Agents 标签跳进来时传这一份，避免同一台电脑开两条连接。
+  final HarnessHub? harnessHub;
+
+  /// 是否由本页释放 [harnessHub]（或自建的 hub）。
+  final bool ownsHarnessHub;
 
   /// Test seam for the local Git route.
   ///
@@ -452,21 +470,29 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       host.addListener(_onAgentHostChanged);
       _agentHost = host;
       _lastMainPane = host.state.mainPane;
-      _harnessHub = harnessHubFor(
-        auth: widget.auth,
-        store: widget.store,
-        settings: widget.settings,
-        projectRoot: widget.project.path,
-        runtime: widget.agentRuntime,
-        projectId: widget.project.id,
-        signedIn: () => widget.auth.isLoggedIn,
-      );
+      _harnessHub =
+          widget.harnessHub ??
+          harnessHubFor(
+            auth: widget.auth,
+            store: widget.store,
+            settings: widget.settings,
+            projectRoot: widget.project.path,
+            runtime: widget.agentRuntime,
+            projectId: widget.project.id,
+            signedIn: () => widget.auth.isLoggedIn,
+          );
       // 注入的运行时已就绪：现在就订阅它的文件变更事件。
       _syncAgentFileEvents();
       if (widget.agentPaneRequest > 0) {
         // 旧「远程电脑」入口跳进来：首帧之后直接落在 Agents 面板上。
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _revealAgentPane();
+        });
+      }
+      final initialTarget = widget.initialHarnessSession;
+      if (initialTarget != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_openInitialHarnessSession(initialTarget));
         });
       }
     }
@@ -546,6 +572,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     if (oldWidget.agentPaneRequest != widget.agentPaneRequest) {
       _revealAgentPane();
     }
+    final target = widget.initialHarnessSession;
+    if (target != null && target != oldWidget.initialHarnessSession) {
+      unawaited(_openInitialHarnessSession(target));
+    }
   }
 
   /// 把 Agent 面板切到前台，并把右栏展开。
@@ -557,6 +587,75 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     host.activate();
     host.state.setAgentPaneCollapsed(false);
     host.state.showMainPane(MainPane.agent);
+  }
+
+  /// 首帧选中会话。
+  ///
+  /// 内置 Agent 的会话由本页自己画，因此不走 Hub：直接选中会话 id 就落在
+  /// 内置面板里（裁定 R1）。其它主机要先等会话出现在列表里，再交给 Hub 打开。
+  Future<void> _openInitialHarnessSession(HarnessSessionTarget target) async {
+    final hub = _harnessHub;
+    if (hub == null) return;
+    final host = hub.hostById(target.hostId);
+    if (host == null) {
+      _showSnack('打不开这个会话：主机不在线');
+      return;
+    }
+    _revealAgentPane();
+    if (host.kind == HarnessHostKind.studio) {
+      _agentHost?.selectSession(target.sessionId);
+      return;
+    }
+    final session = await _awaitHubSession(hub, target);
+    if (!mounted) return;
+    if (session == null) {
+      _showSnack('打不开这个会话：等待超时');
+      return;
+    }
+    try {
+      await hub.openSession(session, hostId: target.hostId);
+    } on Object catch (error) {
+      if (mounted) _showSnack('打不开这个会话：$error');
+    }
+  }
+
+  /// 等目标会话出现在 hub 的列表里。超时返回 null。
+  ///
+  /// 只监听通知，不依赖 hub 的新方法，接口提交因此不扩大 hub 的接口面。
+  Future<HarnessSessionInfo?> _awaitHubSession(
+    HarnessHub hub,
+    HarnessSessionTarget target, {
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    HarnessSessionInfo? find() {
+      for (final session in hub.sessionsOf(target.hostId)) {
+        if (session.id == target.sessionId) return session;
+      }
+      return null;
+    }
+
+    final cached = find();
+    if (cached != null) return cached;
+    hub.ensureListening(target.hostId);
+    final completer = Completer<HarnessSessionInfo?>();
+    void settle(HarnessSessionInfo? info) {
+      if (!completer.isCompleted) completer.complete(info);
+    }
+
+    void onHubChanged() {
+      final found = find();
+      if (found != null) settle(found);
+    }
+
+    hub.addListener(onHubChanged);
+    final timer = Timer(timeout, () => settle(null));
+    try {
+      onHubChanged();
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      hub.removeListener(onHubChanged);
+    }
   }
 
   static bool _sameWorkspaceMembers(List<Project> a, List<Project> b) {
@@ -931,7 +1030,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _agentHost?.removeListener(_onAgentHostChanged);
     _agentHost?.dispose();
     _agentHost = null;
-    _harnessHub?.dispose();
+    if (widget.ownsHarnessHub) _harnessHub?.dispose();
     _harnessHub = null;
     _hiddenViews.clear();
     // TEMP-DIAG (remove after device verification).
