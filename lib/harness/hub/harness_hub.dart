@@ -259,6 +259,97 @@ class HarnessHub extends ChangeNotifier {
   /// 是否已订阅该主机的会话列表。
   bool isListening(String hostId) => _listening.contains(hostId);
 
+  /// 订阅全部主机。重复调用无副作用。
+  ///
+  /// 首页要一次显示多台主机的会话，先调它再读 [allSessions]。
+  void listenAll() {
+    if (_disposed) return;
+    for (final host in _hosts) {
+      ensureListening(host.id);
+    }
+  }
+
+  /// 全部会话的合并流。
+  ///
+  /// 订阅时先发一帧，之后每次 hub 通知再发一帧。取消订阅只移除监听，
+  /// 不停掉主机的订阅。
+  Stream<List<HarnessSessionInfo>> watchSessions({bool listenAll = true}) {
+    if (listenAll) this.listenAll();
+    late final StreamController<List<HarnessSessionInfo>> controller;
+    void emit() {
+      if (controller.isClosed) return;
+      controller.add(allSessions);
+    }
+
+    controller = StreamController<List<HarnessSessionInfo>>(
+      onListen: () {
+        addListener(emit);
+        emit();
+      },
+      onCancel: () => removeListener(emit),
+    );
+    return controller.stream;
+  }
+
+  /// 按主机 id 与会话 id 打开会话。
+  ///
+  /// 会话还没出现在列表里时先等一帧，超时抛 [HarnessHubException]。
+  Future<HarnessSessionHandle> openSessionById(
+    String hostId,
+    String sessionId, {
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final host = hostById(hostId);
+    if (host == null) {
+      throw HarnessHubException('找不到主机 $hostId，请刷新后重试');
+    }
+    HarnessSessionInfo? found;
+    for (final session in sessionsOf(hostId)) {
+      if (session.id == sessionId) {
+        found = session;
+        break;
+      }
+    }
+    found ??= await _awaitSession(hostId, sessionId, timeout: timeout);
+    if (found == null) {
+      throw HarnessHubException('会话 $sessionId 没有出现在主机 $hostId 的列表里');
+    }
+    return openSession(found, hostId: hostId);
+  }
+
+  /// 等目标会话出现在列表里。超时返回 null。
+  Future<HarnessSessionInfo?> _awaitSession(
+    String hostId,
+    String sessionId, {
+    required Duration timeout,
+  }) async {
+    if (_disposed) return null;
+    ensureListening(hostId);
+    final completer = Completer<HarnessSessionInfo?>();
+    void settle(HarnessSessionInfo? info) {
+      if (!completer.isCompleted) completer.complete(info);
+    }
+
+    void onChanged() {
+      for (final session in sessionsOf(hostId)) {
+        if (session.id == sessionId) {
+          settle(session);
+          return;
+        }
+      }
+    }
+
+    addListener(onChanged);
+    final timer = Timer(timeout, () => settle(null));
+    try {
+      onChanged();
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      removeListener(onChanged);
+    }
+  }
+
   /// 主机状态；没有该主机时按 unsupported 处理，界面不会因为缺一项就崩。
   HarnessHostState stateOf(String hostId) =>
       _states[hostId] ?? HarnessHostState.unsupported;

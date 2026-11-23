@@ -8,6 +8,10 @@ import 'package:path/path.dart' as p;
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
 import '../editor/retained_editor_host.dart';
+import '../harness/hub/harness_hub.dart';
+import '../harness/hub/harness_hosts.dart';
+import '../harness/ui/agents_entry.dart';
+import '../harness/ui/home_agents_tab.dart';
 import '../models/project.dart';
 import '../config/api_config.dart';
 import '../services/cloud_project_actions.dart';
@@ -344,6 +348,15 @@ class _HomeTabState extends State<HomeTab>
   int _authSessionGeneration = 0;
   int _homeGeneration = 0;
 
+  /// 首页 Agents 标签是否在前台。
+  bool _agentsOpen = false;
+
+  /// 首次打开 Agents 时建，之后保活：订阅与快照不用每次重建。
+  Widget? _agentsTab;
+
+  /// 首页持有的 hub。跳转时交给编辑器，避免同一台电脑开两条连接。
+  HarnessHub? _agentsHub;
+
   // Capture the live AuthStore revision, not only its delayed notification.
   // The pair also invalidates work when this Home swaps its auth/store objects.
   ({int home, int session}) get _accountGeneration =>
@@ -531,6 +544,8 @@ class _HomeTabState extends State<HomeTab>
     widget.auth.removeListener(_onAuthChanged);
     _searchController.dispose();
     _projectTabs.dispose();
+    _agentsHub?.dispose();
+    _agentsHub = null;
     super.dispose();
   }
 
@@ -727,30 +742,40 @@ class _HomeTabState extends State<HomeTab>
                     }
                     return Column(
                       children: [
-                        _buildScopeTabBar(context, l10n),
+                        _buildAgentsScopeBar(context, l10n),
                         Expanded(
-                          child: TabBarView(
-                            controller: _projectTabs,
+                          child: Stack(
                             children: [
-                              for (final scope in _orderedScopes)
-                                scope == ProjectScope.workspace
-                                    ? SavedWorkspacesTab(
-                                        key: const ValueKey(
-                                          'home-scope-page-workspace',
-                                        ),
-                                        store: widget.store,
-                                        auth: widget.auth,
-                                        settings: widget.settings,
-                                      )
-                                    : KeyedSubtree(
-                                        key: ValueKey(
-                                          'home-scope-page-${scope.name}',
-                                        ),
-                                        child: _buildProjectList(
-                                          context,
-                                          scope: scope,
-                                        ),
-                                      ),
+                              // 项目页不销毁：切回时页签与滚动位置都还在。
+                              Offstage(
+                                offstage: _agentsOpen,
+                                child: TabBarView(
+                                  controller: _projectTabs,
+                                  children: [
+                                    for (final scope in _orderedScopes)
+                                      scope == ProjectScope.workspace
+                                          ? SavedWorkspacesTab(
+                                              key: const ValueKey(
+                                                'home-scope-page-workspace',
+                                              ),
+                                              store: widget.store,
+                                              auth: widget.auth,
+                                              settings: widget.settings,
+                                            )
+                                          : KeyedSubtree(
+                                              key: ValueKey(
+                                                'home-scope-page-${scope.name}',
+                                              ),
+                                              child: _buildProjectList(
+                                                context,
+                                                scope: scope,
+                                              ),
+                                            ),
+                                  ],
+                                ),
+                              ),
+                              if (_agentsTab case final tab?)
+                                Offstage(offstage: !_agentsOpen, child: tab),
                             ],
                           ),
                         ),
@@ -762,6 +787,79 @@ class _HomeTabState extends State<HomeTab>
             ],
           );
         },
+      ),
+    );
+  }
+
+  /// 项目条：最左边是 Agents 入口，右边是原有的页签条。
+  ///
+  /// 入口放在 [TabBar] 外：页签条只装项目分类，Agents 不是第四个分类，
+  /// 也不参与拖动排序。
+  Widget _buildAgentsScopeBar(BuildContext context, StudioLocalizations l10n) {
+    final theme = Theme.of(context);
+    final selected = _agentsOpen;
+    return Row(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: TextButton.icon(
+            key: const ValueKey('home-agents-tab'),
+            onPressed: _toggleAgents,
+            icon: const Icon(Icons.hub_outlined, size: 18),
+            label: Text(l10n.agentsTab),
+            style: TextButton.styleFrom(
+              foregroundColor: selected
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.onSurfaceVariant,
+              textStyle: theme.textTheme.labelLarge,
+              minimumSize: const Size(0, 36),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+          ),
+        ),
+        Expanded(child: _buildScopeTabBar(context, l10n)),
+      ],
+    );
+  }
+
+  /// 切到 Agents 标签，或切回项目列表。
+  void _toggleAgents() {
+    setState(() {
+      _agentsOpen = !_agentsOpen;
+      if (_agentsOpen) _agentsTab ??= _buildAgentsTab(context);
+    });
+  }
+
+  /// 建首页 Agents 标签。
+  ///
+  /// hub 由首页持有：跳转时交给编辑器，同一台电脑只开一条连接。
+  Widget _buildAgentsTab(BuildContext context) {
+    final hub = _agentsHub ??= HarnessHub(
+      hosts: HarnessHosts.build(
+        HubHostContext(
+          auth: widget.auth,
+          projectStore: widget.store,
+          settings: widget.settings,
+          // 首页没有打开的项目：内置 Agent 主机不在这里装配。
+          projectRoot: '',
+          desktop: AppPaths.isDesktop,
+        ),
+      ),
+      desktop: AppPaths.isDesktop,
+      hostBuildError: HarnessHosts.lastBuildError,
+    );
+    return HomeAgentsTab(
+      auth: widget.auth,
+      store: widget.store,
+      settings: widget.settings,
+      harnessHub: hub,
+      onOpenSession: (row) => openAgentSession(
+        context,
+        row: row,
+        auth: widget.auth,
+        store: widget.store,
+        settings: widget.settings,
+        harnessHub: hub,
       ),
     );
   }
