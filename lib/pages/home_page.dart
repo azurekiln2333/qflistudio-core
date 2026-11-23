@@ -10,6 +10,7 @@ import '../content/content_repository.dart';
 import '../editor/retained_editor_host.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/hub/harness_hosts.dart';
+import '../harness/ui/agent_session_details_page.dart';
 import '../harness/ui/agents_entry.dart';
 import '../harness/ui/home_agents_tab.dart';
 import '../models/project.dart';
@@ -860,6 +861,11 @@ class _HomeTabState extends State<HomeTab>
         store: widget.store,
         settings: widget.settings,
         harnessHub: hub,
+      ),
+      onOpenDetails: (row) => Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => AgentSessionDetailsPage(row: row),
+        ),
       ),
     );
   }

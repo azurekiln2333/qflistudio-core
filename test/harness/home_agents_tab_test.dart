@@ -54,6 +54,7 @@ void main() {
     required List<HarnessHost> hosts,
     AgentsSnapshotStore? snapshotStore,
     void Function(AgentsIndexRow row)? onOpenSession,
+    void Function(AgentsIndexRow row)? onOpenDetails,
     HarnessDeviceInfo? deviceInfo,
   }) async {
     final hub = HarnessHub(hosts: hosts, desktop: true, ownsHosts: false);
@@ -80,6 +81,7 @@ void main() {
                   osVersion: '14',
                 ),
             onOpenSession: onOpenSession,
+            onOpenDetails: onOpenDetails,
           ),
         ),
       ),
@@ -241,6 +243,30 @@ void main() {
       find.byKey(const ValueKey('agents-status-remote:1:s-1')),
       findsOneWidget,
     );
+  });
+
+  testWidgets('点详情图标把行交给详情回调', (tester) async {
+    final remote = FakeHarnessHost(
+      id: 'remote:1',
+      label: 'MacBook',
+      kind: HarnessHostKind.remote,
+      initialSessions: [
+        fakeSession(hostId: 'remote:1', id: 's-1', title: '看详情'),
+      ],
+    );
+    addTearDown(remote.dispose);
+    AgentsIndexRow? detailed;
+    await mount(
+      tester,
+      hosts: [remote],
+      onOpenSession: (_) {},
+      onOpenDetails: (row) => detailed = row,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('agents-details-remote:1:s-1')));
+    await tester.pump();
+
+    expect(detailed?.session.id, 's-1');
   });
 
   testWidgets('圆点不只靠颜色：带状态的文字标签', (tester) async {

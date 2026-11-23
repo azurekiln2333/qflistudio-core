@@ -217,6 +217,13 @@ class StudioLocalizations {
     '重新整理失敗，下面是上次的清單',
     'Refresh failed; showing the previous list',
   );
+  String get agentsDetails => _pick('会话详情', '工作階段詳情', 'Session details');
+  String get agentsUnknown => _pick('未知', '未知', 'Unknown');
+  String get agentsDeviceName => _pick('设备名', '裝置名稱', 'Device name');
+  String get agentsDeviceOs => _pick('系统', '系統', 'System');
+  String get agentsDeviceOsVersion => _pick('系统版本', '系統版本', 'System version');
+  String get agentsHostKind => _pick('主机类型', '主機類型', 'Host type');
+  String get agentsSessionPath => _pick('会话路径', '工作階段路徑', 'Session path');
 
   String get home => _text('home');
   String get functions => _text('functions');

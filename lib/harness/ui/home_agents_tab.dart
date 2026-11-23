@@ -37,10 +37,14 @@ class HomeAgentsTab extends StatefulWidget {
     this.sessionRoot,
     this.deviceInfo,
     this.onOpenSession,
+    this.onOpenDetails,
   });
 
   /// 点一行时调用。由首页接到 `openAgentSession`，跳到编辑器并选中会话。
   final void Function(AgentsIndexRow row)? onOpenSession;
+
+  /// 点详情时调用。由首页接到详情页。
+  final void Function(AgentsIndexRow row)? onOpenDetails;
 
   final AuthStore auth;
   final ProjectStore store;
@@ -260,9 +264,11 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
                 }
                 final row = _rows[index - (_error == null ? 0 : 1)];
                 final open = widget.onOpenSession;
+                final details = widget.onOpenDetails;
                 return AgentsRowTile(
                   row: row,
                   onTap: open == null ? null : () => open(row),
+                  onDetails: details == null ? null : () => details(row),
                 );
               },
             ),
@@ -273,12 +279,18 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   static const String _studioHostId = 'studio';
 }
 
-/// 列表里的一行：状态圆点、标题、端标注与会话路径、相对时间。
+/// 列表里的一行：状态圆点、标题、端标注与会话路径、相对时间与详情入口。
 class AgentsRowTile extends StatelessWidget {
-  const AgentsRowTile({super.key, required this.row, this.onTap});
+  const AgentsRowTile({
+    super.key,
+    required this.row,
+    this.onTap,
+    this.onDetails,
+  });
 
   final AgentsIndexRow row;
   final VoidCallback? onTap;
+  final VoidCallback? onDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +341,12 @@ class AgentsRowTile extends StatelessWidget {
                 style: theme.textTheme.labelSmall,
               ),
             ],
+            IconButton(
+              key: ValueKey('agents-details-${row.rowKey}'),
+              tooltip: StudioLocalizations.of(context).agentsDetails,
+              icon: const Icon(Icons.info_outline, size: 20),
+              onPressed: onDetails,
+            ),
           ],
         ),
       ),
