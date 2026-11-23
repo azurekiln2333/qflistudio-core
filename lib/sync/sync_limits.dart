@@ -10,3 +10,6 @@ library;
 /// The count comes from `project_git_info.gitBytes`, so it signals the download
 /// size; it is not the exact number of bytes the phone will receive.
 const int kGitConfirmBytes = 200 * 1024 * 1024;
+
+/// Largest slice requested in one `fs_read`; mirrors the agent constant.
+const int kSyncChunkBytes = 512 * 1024;

@@ -731,6 +731,19 @@ class RemoteController extends ChangeNotifier {
     return GitProjectInfo.fromJson(reply);
   }
 
+  /// Manifest of [path] for the non-git sync path.
+  Future<Json> projectFsManifest(String path) =>
+      _request(<String, dynamic>{'type': 'fs_manifest', 'path': path});
+
+  /// One slice of a project file.
+  Future<Json> projectFsRead(String path, {required int offset, int? length}) =>
+      _request(<String, dynamic>{
+        'type': 'fs_read',
+        'path': path,
+        'offset': offset,
+        'length': ?length,
+      });
+
   Future<SessionInfo> createSession({
     required String cwd,
     String? prompt,

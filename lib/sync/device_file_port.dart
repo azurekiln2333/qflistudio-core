@@ -11,4 +11,10 @@ abstract interface class DeviceFilePort {
   /// Throws when the computer cannot answer, which makes the caller take the
   /// file transfer path.
   Future<GitProjectInfo> gitInfo(String root);
+
+  /// Every file and directory under [root] that the ignore table keeps.
+  Future<FsManifest> manifest(String root);
+
+  /// Bytes of [path] starting at [offset], at most one chunk per call.
+  Future<FsChunk> read(String path, {required int offset, int? length});
 }

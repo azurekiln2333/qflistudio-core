@@ -4,9 +4,8 @@ import 'package:qfli_studio_core/sync/device_file_port.dart';
 
 /// [DeviceFilePort] backed by the paired-computer channel.
 ///
-/// Thin by design: every call becomes one `project_git_info` request on the
-/// existing controller, so request ids, timeouts and the offline error message
-/// stay in one place.
+/// Thin by design: every call becomes one request on the existing controller,
+/// so request ids, timeouts and the offline error message stay in one place.
 class RemoteDeviceFilePort implements DeviceFilePort {
   RemoteDeviceFilePort(this.controller);
 
@@ -15,4 +14,14 @@ class RemoteDeviceFilePort implements DeviceFilePort {
   @override
   Future<GitProjectInfo> gitInfo(String root) =>
       controller.projectGitInfo(root);
+
+  @override
+  Future<FsManifest> manifest(String root) async =>
+      FsManifest.fromJson(await controller.projectFsManifest(root));
+
+  @override
+  Future<FsChunk> read(String path, {required int offset, int? length}) async =>
+      FsChunk.fromJson(
+        await controller.projectFsRead(path, offset: offset, length: length),
+      );
 }

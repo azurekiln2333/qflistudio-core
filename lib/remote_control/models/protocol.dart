@@ -6,8 +6,9 @@
 // HEAD 49b2aac). This file owns the wire contract for the remote-control module;
 // do not rename fields to suit local style — the desktop agent emits them.
 
-typedef Json = Map<String, dynamic>;
+import 'dart:convert';
 
+typedef Json = Map<String, dynamic>;
 String _str(Object? v) => v is String ? v : '';
 
 /// A trimmed string, or null when the value is missing or blank.
@@ -15,6 +16,101 @@ String? _nonEmpty(Object? v) {
   if (v is! String) return null;
   final text = v.trim();
   return text.isEmpty ? null : text;
+}
+
+/// One file or directory in a device project manifest.
+class FsEntry {
+  const FsEntry({
+    required this.path,
+    required this.kind,
+    required this.size,
+    required this.hash,
+  });
+
+  factory FsEntry.fromJson(Json json) => FsEntry(
+    path: _str(json['path']),
+    kind: _str(json['kind']),
+    size: _int(json['size']),
+    hash: _str(json['hash']),
+  );
+
+  /// Posix relative path, `/` separated, no leading slash.
+  final String path;
+
+  /// `file` or `dir`.
+  final String kind;
+  final int size;
+
+  /// Lowercase hex sha256 of the bytes; '' for a directory.
+  final String hash;
+
+  bool get isFile => kind == 'file';
+  bool get isDir => kind == 'dir';
+}
+
+/// What one device project directory contains, as reported by the computer.
+class FsManifest {
+  const FsManifest({
+    required this.root,
+    required this.ignoreVersion,
+    required this.entries,
+    required this.truncated,
+  });
+
+  factory FsManifest.fromJson(Json json) => FsManifest(
+    root: _str(json['root']),
+    ignoreVersion: _int(json['ignoreVersion']),
+    entries: <FsEntry>[
+      for (final value in (json['entries'] as List<dynamic>? ?? <dynamic>[]))
+        if (value is Json) FsEntry.fromJson(value),
+    ],
+    truncated: json['truncated'] == true,
+  );
+
+  final String root;
+
+  /// Version of the ignore table that produced [entries].
+  final int ignoreVersion;
+  final List<FsEntry> entries;
+
+  /// True when the walk stopped at the entry cap; the caller must narrow the
+  /// scope instead of treating the list as complete.
+  final bool truncated;
+
+  Map<String, FsEntry> get byPath => <String, FsEntry>{
+    for (final entry in entries) entry.path: entry,
+  };
+}
+
+/// One slice of a device project file.
+class FsChunk {
+  const FsChunk({
+    required this.path,
+    required this.offset,
+    required this.bytes,
+    required this.eof,
+  });
+
+  factory FsChunk.fromJson(Json json) => FsChunk(
+    path: _str(json['path']),
+    offset: _int(json['offset']),
+    bytes: _base64(json['base64']),
+    eof: json['eof'] == true,
+  );
+
+  final String path;
+  final int offset;
+  final List<int> bytes;
+  final bool eof;
+}
+
+List<int> _base64(Object? v) {
+  if (v is! String || v.isEmpty) return const <int>[];
+  try {
+    return base64Decode(v);
+  } on FormatException {
+    return const <int>[];
+  }
 }
 
 int _int(Object? v) => v is num ? v.toInt() : 0;
