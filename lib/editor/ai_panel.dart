@@ -154,6 +154,7 @@ class AiPanel extends StatefulWidget {
     this.onClose,
     this.onCollapseChanged,
     this.onFileCreated,
+    this.onDeviceSync,
     this.compact = false,
   });
 
@@ -194,6 +195,13 @@ class AiPanel extends StatefulWidget {
   final ValueChanged<String>? onFileCreated;
 
   final bool compact;
+
+  /// Runs the "sync from the paired computer" action.
+  ///
+  /// Null hides the entry even when the product enables it: the panel does not
+  /// own a [RemoteController], so whoever holds the paired connection supplies
+  /// the action.
+  final VoidCallback? onDeviceSync;
 
   @override
   State<AiPanel> createState() => AiPanelState();
@@ -237,6 +245,14 @@ class AiPanelState extends State<AiPanel> {
   /// 由 `StudioProfile.allowCustomAiEndpoint` 决定，页面不自己判断平台。
   bool get _customEndpointAllowed =>
       StudioProfile.current?.allowCustomAiEndpoint == true;
+
+  /// 是否显示「从电脑同步」入口。
+  ///
+  /// 需要产品开启 `deviceSyncEnabled`，并且宿主传入动作：面板本身不持有
+  /// 配对连接。两者齐全才显示，避免出现点了没反应的按钮。
+  bool get _deviceSyncAvailable =>
+      StudioProfile.current?.deviceSyncEnabled == true &&
+      widget.onDeviceSync != null;
 
   String get _systemPrompt =>
       '你是 QFLIStudioN 内置的 AI 编程助手，运行在移动端代码编辑器中。'
@@ -496,6 +512,18 @@ class AiPanelState extends State<AiPanel> {
                     padding: EdgeInsets.zero,
                     onPressed: () => editAiSettings(context, widget.settings),
                     icon: const Icon(Icons.settings_outlined, size: 18),
+                  ),
+                if (_deviceSyncAvailable)
+                  IconButton(
+                    tooltip: '从电脑同步',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 36,
+                      height: 36,
+                    ),
+                    padding: EdgeInsets.zero,
+                    onPressed: widget.onDeviceSync,
+                    icon: const Icon(Icons.cloud_download_outlined, size: 18),
                   ),
                 IconButton(
                   tooltip: '收起',

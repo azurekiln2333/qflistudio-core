@@ -6,9 +6,113 @@
 // HEAD 49b2aac). This file owns the wire contract for the remote-control module;
 // do not rename fields to suit local style — the desktop agent emits them.
 
-typedef Json = Map<String, dynamic>;
+import 'dart:convert';
 
+typedef Json = Map<String, dynamic>;
 String _str(Object? v) => v is String ? v : '';
+
+/// A trimmed string, or null when the value is missing or blank.
+String? _nonEmpty(Object? v) {
+  if (v is! String) return null;
+  final text = v.trim();
+  return text.isEmpty ? null : text;
+}
+
+/// One file or directory in a device project manifest.
+class FsEntry {
+  const FsEntry({
+    required this.path,
+    required this.kind,
+    required this.size,
+    required this.hash,
+  });
+
+  factory FsEntry.fromJson(Json json) => FsEntry(
+    path: _str(json['path']),
+    kind: _str(json['kind']),
+    size: _int(json['size']),
+    hash: _str(json['hash']),
+  );
+
+  /// Posix relative path, `/` separated, no leading slash.
+  final String path;
+
+  /// `file` or `dir`.
+  final String kind;
+  final int size;
+
+  /// Lowercase hex sha256 of the bytes; '' for a directory.
+  final String hash;
+
+  bool get isFile => kind == 'file';
+  bool get isDir => kind == 'dir';
+}
+
+/// What one device project directory contains, as reported by the computer.
+class FsManifest {
+  const FsManifest({
+    required this.root,
+    required this.ignoreVersion,
+    required this.entries,
+    required this.truncated,
+  });
+
+  factory FsManifest.fromJson(Json json) => FsManifest(
+    root: _str(json['root']),
+    ignoreVersion: _int(json['ignoreVersion']),
+    entries: <FsEntry>[
+      for (final value in (json['entries'] as List<dynamic>? ?? <dynamic>[]))
+        if (value is Json) FsEntry.fromJson(value),
+    ],
+    truncated: json['truncated'] == true,
+  );
+
+  final String root;
+
+  /// Version of the ignore table that produced [entries].
+  final int ignoreVersion;
+  final List<FsEntry> entries;
+
+  /// True when the walk stopped at the entry cap; the caller must narrow the
+  /// scope instead of treating the list as complete.
+  final bool truncated;
+
+  Map<String, FsEntry> get byPath => <String, FsEntry>{
+    for (final entry in entries) entry.path: entry,
+  };
+}
+
+/// One slice of a device project file.
+class FsChunk {
+  const FsChunk({
+    required this.path,
+    required this.offset,
+    required this.bytes,
+    required this.eof,
+  });
+
+  factory FsChunk.fromJson(Json json) => FsChunk(
+    path: _str(json['path']),
+    offset: _int(json['offset']),
+    bytes: _base64(json['base64']),
+    eof: json['eof'] == true,
+  );
+
+  final String path;
+  final int offset;
+  final List<int> bytes;
+  final bool eof;
+}
+
+List<int> _base64(Object? v) {
+  if (v is! String || v.isEmpty) return const <int>[];
+  try {
+    return base64Decode(v);
+  } on FormatException {
+    return const <int>[];
+  }
+}
+
 int _int(Object? v) => v is num ? v.toInt() : 0;
 double _double(Object? v) => v is num ? v.toDouble() : 0;
 DateTime _time(Object? v) =>
@@ -147,6 +251,10 @@ class AgentInfo {
     required this.allowBypass,
     this.capabilities = const <String>[],
     this.codex,
+    this.hostName,
+    this.os,
+    this.osVersion,
+    this.lanUrls = const <String>[],
   });
 
   factory AgentInfo.fromJson(Json json) => AgentInfo(
@@ -166,6 +274,10 @@ class AgentInfo {
           in (json['capabilities'] as List<dynamic>? ?? <dynamic>[]))
         if (value is String) value,
     ],
+    hostName: json['hostName'] is String ? json['hostName'] as String : null,
+    os: json['os'] is String ? json['os'] as String : null,
+    osVersion: json['osVersion'] is String ? json['osVersion'] as String : null,
+    lanUrls: _lanUrls(json),
   );
 
   final String host;
@@ -175,6 +287,37 @@ class AgentInfo {
   final bool allowBypass;
   final List<String> capabilities;
   final CodexAvailability? codex;
+
+  /// 显示用设备名。旧 agent 不发该字段时为 null。
+  final String? hostName;
+
+  /// 系统短名：`windows`、`macos`、`linux`、`other`。
+  ///
+  /// 不用 `platform` 那种运行时值（`win32`、`darwin`）。
+  final String? os;
+
+  /// 人类可读的系统版本，原样使用。
+  final String? osVersion;
+
+  /// 加密的局域网直连地址，形如 `wss://192.168.1.20:8787/ws`。
+  ///
+  /// 只有 agent 声明 `lan_tls` 能力并且地址是 `wss://` 时才有值；其余情况
+  /// 一律为空，手机不会拿到明文地址。本任务的传输仍走中继。
+  final List<String> lanUrls;
+}
+
+/// 只保留可信的局域网地址：先看能力，再看协议。
+List<String> _lanUrls(Json json) {
+  final capabilities = json['capabilities'];
+  if (capabilities is! List || !capabilities.contains('lan_tls')) {
+    return const <String>[];
+  }
+  final urls = json['lanUrls'];
+  if (urls is! List) return const <String>[];
+  return <String>[
+    for (final value in urls)
+      if (value is String && value.startsWith('wss://')) value,
+  ];
 }
 
 class HistoryItem {
@@ -229,6 +372,50 @@ class DirListing {
   final List<DirEntry> entries;
 
   bool get isRootList => path.isEmpty;
+}
+
+/// Git metadata of a project directory on the computer.
+///
+/// The agent reads `.git` directly instead of running git, so a project that
+/// uses a submodule or a linked worktree reports [supported] as false and the
+/// phone falls back to the file sync path.
+class GitProjectInfo {
+  const GitProjectInfo({
+    required this.root,
+    required this.supported,
+    this.gitBytes,
+    this.remote,
+    this.branch,
+    this.head,
+    this.dirty,
+  });
+
+  factory GitProjectInfo.fromJson(Json json) => GitProjectInfo(
+    root: _str(json['root']),
+    supported: json['supported'] == true,
+    gitBytes: json['gitBytes'] is num
+        ? (json['gitBytes'] as num).toInt()
+        : null,
+    remote: _nonEmpty(json['remote']),
+    branch: _nonEmpty(json['branch']),
+    head: _nonEmpty(json['head']),
+    dirty: json['dirty'] is bool ? json['dirty'] as bool : null,
+  );
+
+  final String root;
+  final bool supported;
+
+  /// Byte size of the `.git` directory on the computer.
+  final int? gitBytes;
+  final String? remote;
+  final String? branch;
+  final String? head;
+
+  /// null when the agent could not tell.
+  final bool? dirty;
+
+  /// The phone can clone from [remote] when it is set.
+  bool get canClone => supported && (remote ?? '').isNotEmpty;
 }
 
 class QuestionOption {

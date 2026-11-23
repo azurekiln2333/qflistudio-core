@@ -718,6 +718,32 @@ class RemoteController extends ChangeNotifier {
     return DirListing.fromJson(reply);
   }
 
+  /// Git metadata of [path] on the computer.
+  ///
+  /// Used by the device sync paths to decide between a clone and a file
+  /// transfer. An older agent answers with an unknown `kind`, which surfaces as
+  /// a [RemoteException] and makes the caller take the file transfer path.
+  Future<GitProjectInfo> projectGitInfo(String path) async {
+    final reply = await _request(<String, dynamic>{
+      'type': 'project_git_info',
+      'path': path,
+    });
+    return GitProjectInfo.fromJson(reply);
+  }
+
+  /// Manifest of [path] for the non-git sync path.
+  Future<Json> projectFsManifest(String path) =>
+      _request(<String, dynamic>{'type': 'fs_manifest', 'path': path});
+
+  /// One slice of a project file.
+  Future<Json> projectFsRead(String path, {required int offset, int? length}) =>
+      _request(<String, dynamic>{
+        'type': 'fs_read',
+        'path': path,
+        'offset': offset,
+        'length': ?length,
+      });
+
   Future<SessionInfo> createSession({
     required String cwd,
     String? prompt,

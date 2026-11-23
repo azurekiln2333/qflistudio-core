@@ -20,6 +20,11 @@ class Project {
     this.language = '',
     this.type = '',
     this.externalFolderId,
+    this.deviceHostId,
+    this.deviceSessionId,
+    this.deviceRoot,
+    this.placeholder = false,
+    this.filesPulled = false,
   });
 
   final String id;
@@ -59,6 +64,31 @@ class Project {
   bool get isExternalFolder => externalFolderId != null;
 
   bool get isCloud => cloudId != null;
+
+  // -------------------------------------------------------------------------
+  // 设备同步附加字段（追加块，不改动上面的既有字段与顺序）
+  //
+  // 这几个字段只为「从配对电脑拉下来的项目」服务。普通本地项目与云端项目
+  // 这些值全为 null / false，行为与之前一致。
+  // -------------------------------------------------------------------------
+
+  /// 来源电脑的 agent id。为 null 表示这不是设备项目。
+  String? deviceHostId;
+
+  /// 来源会话 id。占位项目由会话生成，换成真实项目后仍保留这个值。
+  String? deviceSessionId;
+
+  /// 电脑上该项目的绝对路径。同步时作为远端根目录。
+  String? deviceRoot;
+
+  /// 占位项目：只为承载一个会话而存在，用户尚未拉取文件。
+  bool placeholder;
+
+  /// 用户已确认并拉取过项目文件。占位项目删除时的判定依据。
+  bool filesPulled;
+
+  /// 是否为设备项目（来自配对电脑）。
+  bool get isDevice => deviceHostId != null;
 
   static String _newId() {
     final rnd = Random();
@@ -107,6 +137,12 @@ class Project {
     'language': language,
     'type': type,
     'externalFolderId': externalFolderId,
+    // 设备字段仅在有时写出，旧版读到未知键会忽略。
+    if (deviceHostId != null) 'deviceHostId': deviceHostId,
+    if (deviceSessionId != null) 'deviceSessionId': deviceSessionId,
+    if (deviceRoot != null) 'deviceRoot': deviceRoot,
+    if (placeholder) 'placeholder': true,
+    if (filesPulled) 'filesPulled': true,
   };
 
   static Project fromJson(Map<String, dynamic> json) {
@@ -131,6 +167,11 @@ class Project {
       language: json['language'] as String? ?? '',
       type: json['type'] as String? ?? '',
       externalFolderId: json['externalFolderId'] as String?,
+      deviceHostId: json['deviceHostId'] as String?,
+      deviceSessionId: json['deviceSessionId'] as String?,
+      deviceRoot: json['deviceRoot'] as String?,
+      placeholder: json['placeholder'] as bool? ?? false,
+      filesPulled: json['filesPulled'] as bool? ?? false,
     );
   }
 }

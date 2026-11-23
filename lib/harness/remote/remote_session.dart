@@ -21,6 +21,7 @@ import 'package:flutter/foundation.dart';
 import '../../remote_control/models/herdr.dart' as herdr;
 import '../../remote_control/models/protocol.dart' as protocol;
 import '../../remote_control/state/session_view.dart';
+import '../../sync/remote_session_cache.dart';
 import '../harness_host.dart';
 import '../herdr/herdr_terminal.dart';
 import 'remote_mapping.dart';
@@ -34,6 +35,7 @@ class RemoteSessionHandle implements HarnessSessionHandle {
     required protocol.SessionInfo session,
     required String hostId,
     required Future<void> Function(RemoteSessionHandle handle) onDetached,
+    RemoteSessionCache? streamCache,
   }) : _port = port,
        _session = session,
        _hostId = hostId,
@@ -53,6 +55,7 @@ class RemoteSessionHandle implements HarnessSessionHandle {
         port: port,
         sessionId: session.id,
         owner: _owner,
+        cache: streamCache,
       );
     }
   }

@@ -20,6 +20,7 @@ import '../../remote_control/models/herdr.dart'
         HerdrReadSource;
 import '../../remote_control/models/protocol.dart'
     show
+        AgentInfo,
         CodexPage,
         CodexPendingRequest,
         CodexProject,
@@ -78,8 +79,19 @@ abstract interface class RemoteSessionPort {
   Future<SessionInfo> createTerminal({required String cwd});
 }
 
+/// Optional capability: a port that can report the computer's device info.
+///
+/// Kept separate from [RemoteSessionPort] so existing fakes and other
+/// implementations keep compiling: a host that cannot tell its device simply
+/// does not implement this interface.
+abstract interface class RemoteDevicePort {
+  /// Latest `info` frame from the agent, or null before the first one.
+  AgentInfo? get agentInfo;
+}
+
 /// Delegates to the real [RemoteController]; no behaviour is added.
-class RemoteControllerSessionAdapter implements RemoteSessionPort {
+class RemoteControllerSessionAdapter
+    implements RemoteSessionPort, RemoteDevicePort {
   RemoteControllerSessionAdapter(this.controller);
 
   final RemoteController controller;
@@ -105,6 +117,9 @@ class RemoteControllerSessionAdapter implements RemoteSessionPort {
 
   @override
   List<SessionInfo> get sessions => controller.sessions;
+
+  @override
+  AgentInfo? get agentInfo => controller.agent;
 
   @override
   SessionView view(SessionInfo info) => controller.view(info);

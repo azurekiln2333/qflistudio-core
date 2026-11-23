@@ -10,27 +10,32 @@
 // Agents surface shows "what runs on that computer", not "which sub-module".
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
 import '../../remote_control/models/herdr.dart' as herdr;
 import '../../remote_control/models/protocol.dart' as protocol;
 import '../../remote_control/state/remote_controller.dart' show ConnectionPhase;
+import '../../services/app_paths.dart';
+import '../../sync/remote_session_cache.dart';
 import '../harness_host.dart';
 import 'remote_mapping.dart';
 import 'remote_ports.dart';
 import 'remote_session.dart';
 
-class RemoteHarnessHost implements HarnessHost {
+class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
   RemoteHarnessHost({
     required RemoteSessionPort remote,
     RemoteHerdrPort? herdr,
     RemoteCodexPort? codex,
     this.refreshInterval = const Duration(seconds: 20),
     String? hostId,
+    bool cacheTranscripts = true,
   }) : _remote = remote,
        _herdr = herdr,
        _codex = codex,
+       _cacheTranscripts = cacheTranscripts,
        // Resolved once: `id` is a map key in the hub and is stamped into every
        // `HarnessSessionInfo`, so it must not drift when pairing arrives later.
        // Pass [hostId] when the pairing is not loaded yet.
@@ -69,6 +74,8 @@ class RemoteHarnessHost implements HarnessHost {
       <String, RemoteCodexThreadHandle>{};
   final List<protocol.CodexThread> _codexThreads = <protocol.CodexThread>[];
 
+  late final bool _cacheTranscripts;
+
   List<HarnessSessionInfo> _latest = const <HarnessSessionInfo>[];
   bool _wasOnline = false;
   bool _disposed = false;
@@ -78,6 +85,32 @@ class RemoteHarnessHost implements HarnessHost {
 
   @override
   String get id => _id;
+
+  /// Bounded transcript cache for one session, under `deviceSessions/`.
+  ///
+  /// Created on demand and returned without one when the app data directory is
+  /// not writable: a missing cache only costs history after a reconnect, and a
+  /// session must still open without it.
+  Future<RemoteSessionCache?> _streamCacheFor(String sessionId) async {
+    if (!_cacheTranscripts) return null;
+    final raw = sessionId.startsWith('session:')
+        ? sessionId.substring('session:'.length)
+        : sessionId;
+    final root = await AppPaths.deviceSessionsRoot(create: true);
+    if (root == null) return null;
+    final dir = '$root/${_safeSessionSegment(raw)}';
+    try {
+      await Directory(dir).create(recursive: true);
+    } on FileSystemException {
+      return null;
+    }
+    return RemoteSessionCache(directory: dir);
+  }
+
+  static String _safeSessionSegment(String value) {
+    final cleaned = value.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    return cleaned.isEmpty ? 'session' : cleaned;
+  }
 
   @override
   String get label {
@@ -90,6 +123,69 @@ class RemoteHarnessHost implements HarnessHost {
 
   @override
   ValueListenable<HarnessHostState> get state => _state;
+
+  // -------------------------------------------------------------------------
+  // HarnessDeviceHost (R4)
+  // -------------------------------------------------------------------------
+
+  /// Device information forwarded from the agent's `info` frame.
+  ///
+  /// Field mapping follows ruling R4: `name` prefers `hostName` and falls back
+  /// to `host`; `os` prefers the reported short name and falls back to
+  /// `platform`; `osVersion` is passed through verbatim. Nothing is invented:
+  /// a field the agent did not send stays unknown.
+  @override
+  ValueListenable<HarnessDeviceInfo> get device => _device;
+
+  final ValueNotifier<HarnessDeviceInfo> _device =
+      ValueNotifier<HarnessDeviceInfo>(const HarnessDeviceInfo());
+
+  /// Recompute [device] from the latest info frame.
+  void _refreshDevice() {
+    final info = _remote is RemoteDevicePort
+        ? (_remote as RemoteDevicePort).agentInfo
+        : null;
+    _device.value = _deviceInfoFrom(info);
+  }
+
+  static HarnessDeviceInfo _deviceInfoFrom(protocol.AgentInfo? info) {
+    if (info == null) return const HarnessDeviceInfo();
+    final name = (info.hostName ?? info.host).trim();
+    final version = (info.osVersion ?? '').trim();
+    return HarnessDeviceInfo(
+      hostName: name.isEmpty ? null : name,
+      os: _deviceOsFrom(info),
+      osVersion: version.isEmpty ? null : info.osVersion,
+    );
+  }
+
+  /// Map the reported `os`, then fall back to the Node `platform` value.
+  static HarnessDeviceOs _deviceOsFrom(protocol.AgentInfo info) {
+    switch ((info.os ?? '').trim().toLowerCase()) {
+      case 'windows':
+        return HarnessDeviceOs.windows;
+      case 'macos':
+        return HarnessDeviceOs.macos;
+      case 'linux':
+        return HarnessDeviceOs.linux;
+      case 'android':
+        return HarnessDeviceOs.android;
+      case 'ios':
+        return HarnessDeviceOs.ios;
+      case 'ohos':
+        return HarnessDeviceOs.ohos;
+    }
+    // `other` or missing: the platform value is the only remaining signal.
+    switch (info.platform.trim().toLowerCase()) {
+      case 'win32':
+        return HarnessDeviceOs.windows;
+      case 'darwin':
+        return HarnessDeviceOs.macos;
+      case 'linux':
+        return HarnessDeviceOs.linux;
+    }
+    return HarnessDeviceOs.unknown;
+  }
 
   /// Last failure, already user-facing.
   String? get lastError => _lastError;
@@ -188,6 +284,7 @@ class RemoteHarnessHost implements HarnessHost {
         port: _remote,
         session: session,
         hostId: id,
+        streamCache: await _streamCacheFor(sessionId),
         onDetached: (detached) async {
           if (identical(_sessionHandles[sessionId], detached)) {
             _sessionHandles.remove(sessionId);
@@ -288,6 +385,7 @@ class RemoteHarnessHost implements HarnessHost {
     if (_disposed) return;
     _disposed = true;
     _stopCodexTimer();
+    _device.dispose();
     _remote.changes.removeListener(_onRemoteChanged);
     _herdr?.changes.removeListener(_onHerdrChanged);
     final sessionHandles = _sessionHandles.values.toList();
@@ -325,6 +423,7 @@ class RemoteHarnessHost implements HarnessHost {
     } else if (!online) {
       _wasOnline = false;
     }
+    _refreshDevice();
     _emit();
   }
 
