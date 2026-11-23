@@ -834,6 +834,7 @@ class _HomeTabState extends State<HomeTab>
   /// 建首页 Agents 标签。
   ///
   /// hub 由首页持有：跳转时交给编辑器，同一台电脑只开一条连接。
+  /// 已绑定电脑是异步打开存储的，由标签自己在打开时补接，这里只给个接线口。
   Widget _buildAgentsTab(BuildContext context) {
     final hub = _agentsHub ??= HarnessHub(
       hosts: HarnessHosts.build(
