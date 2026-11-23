@@ -210,10 +210,13 @@ class DesktopFolderDrop {
 
   String _compareKey(String path) {
     final normalized = _normalize(path) ?? path;
-    return p.windows.isAbsolute(normalized)
+    return _isWindowsAbsolute(normalized)
         ? normalized.toLowerCase()
         : normalized;
   }
+
+  bool _isWindowsAbsolute(String path) =>
+      p.windows.isAbsolute(path) && !p.windows.isRootRelative(path);
 
   /// Returns an absolute, normalized path or null when the input is unusable.
   ///
@@ -222,8 +225,10 @@ class DesktopFolderDrop {
   /// Do not trim a path supplied by the operating system.
   String? _normalize(String raw) {
     if (raw.isEmpty) return null;
-    final pathContext = p.windows.isAbsolute(raw) ? p.windows : p.context;
-    if (!pathContext.isAbsolute(raw)) return null;
+    final pathContext = _isWindowsAbsolute(raw) ? p.windows : p.context;
+    if (!pathContext.isAbsolute(raw) || pathContext.isRootRelative(raw)) {
+      return null;
+    }
     return pathContext.normalize(raw);
   }
 

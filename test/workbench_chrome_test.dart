@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
 import 'package:qfli_studio_core/shell/workbench_chrome.dart';
@@ -16,8 +17,9 @@ Widget _host(
     locale: locale,
     localizationsDelegates: const <LocalizationsDelegate<dynamic>>[
       StudioLocalizations.delegate,
-      DefaultMaterialLocalizations.delegate,
-      DefaultWidgetsLocalizations.delegate,
+      GlobalMaterialLocalizations.delegate,
+      GlobalWidgetsLocalizations.delegate,
+      GlobalCupertinoLocalizations.delegate,
     ],
     supportedLocales: StudioLocalizations.supportedLocales,
     home: Scaffold(
@@ -27,11 +29,21 @@ Widget _host(
         // 窄高场景就测不到溢出。
         child: Align(
           alignment: Alignment.centerLeft,
-          child: SizedBox(width: size.width, height: size.height, child: child),
+          child: SizedBox(
+            width: size.width,
+            height: size.height,
+            child: Align(alignment: Alignment.centerLeft, child: child),
+          ),
         ),
       ),
     ),
   );
+}
+
+Future<void> _pump(WidgetTester tester, Widget child) async {
+  await tester.pumpWidget(child);
+  // StudioLocalizations loads asynchronously before the route is built.
+  await tester.pumpAndSettle();
 }
 
 /// 记录回调的轻量宿主：把点击结果收进 [tapped]，不自己改选中态。
@@ -45,7 +57,8 @@ void main() {
   group('WorkbenchActivityRail', () {
     testWidgets('每个图标点击都回传自己的枚举值', (tester) async {
       final recorder = _Recorder();
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -71,7 +84,8 @@ void main() {
 
     testWidgets('底部头像回传 profile，设置回传 settings', (tester) async {
       final recorder = _Recorder();
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -100,7 +114,8 @@ void main() {
       final semantics = tester.ensureSemantics();
       addTearDown(semantics.dispose);
 
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.files,
@@ -141,7 +156,8 @@ void main() {
     });
 
     testWidgets('宽度固定 52px，达到 44px 触控目标', (tester) async {
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -176,7 +192,8 @@ void main() {
     });
 
     testWidgets('文字放大到 2.0 时导航条不变宽也不溢出', (tester) async {
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           MediaQuery(
             data: const MediaQueryData(
@@ -201,7 +218,8 @@ void main() {
 
     testWidgets('高度只有 240px 时不溢出，底部头像仍可点', (tester) async {
       final recorder = _Recorder();
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -220,7 +238,8 @@ void main() {
     });
 
     testWidgets('账号名首字作为头像回退', (tester) async {
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -234,7 +253,8 @@ void main() {
     });
 
     testWidgets('没有账号名时退回图标占位', (tester) async {
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.projects,
@@ -256,7 +276,8 @@ void main() {
       final semantics = tester.ensureSemantics();
       addTearDown(semantics.dispose);
 
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           WorkbenchActivityRail(
             selected: WorkbenchActivity.files,
@@ -285,18 +306,21 @@ void main() {
   group('WorkbenchWelcome', () {
     testWidgets('打开项目按钮回调一次', (tester) async {
       var opens = 0;
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(WorkbenchWelcome(onOpenProject: () => opens++)),
       );
 
-      await tester.tap(find.byType(FilledButton));
+      await tester.tap(
+        find.byWidgetPredicate((widget) => widget is FilledButton),
+      );
       await tester.pump();
 
       expect(opens, 1);
     });
 
     testWidgets('只说明空状态，不出现统计数字', (tester) async {
-      await tester.pumpWidget(_host(WorkbenchWelcome(onOpenProject: () {})));
+      await _pump(tester, _host(WorkbenchWelcome(onOpenProject: () {})));
 
       expect(find.text('No projects yet'), findsOneWidget);
       // 欢迎区不画指标卡：没有卡片与图表类组件。
@@ -305,7 +329,8 @@ void main() {
     });
 
     testWidgets('窄而矮的容器里不溢出', (tester) async {
-      await tester.pumpWidget(
+      await _pump(
+        tester,
         _host(
           SizedBox(
             width: 200,
@@ -317,7 +342,10 @@ void main() {
       );
 
       expect(tester.takeException(), isNull);
-      expect(find.byType(FilledButton), findsOneWidget);
+      expect(
+        find.byWidgetPredicate((widget) => widget is FilledButton),
+        findsOneWidget,
+      );
     });
   });
 }
