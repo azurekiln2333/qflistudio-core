@@ -94,7 +94,8 @@ void main() {
     );
 
     expect(result.isEmpty, isTrue);
-    expect(result.skipped, <String>['gone.txt']);
+    // `skipped` 带原因，便于面板与日志说明为什么没复制。
+    expect(result.skipped.single, startsWith('gone.txt'));
   });
 
   test('超过单文件上限的文件被跳过', () async {
@@ -107,7 +108,7 @@ void main() {
     );
 
     expect(result.isEmpty, isTrue);
-    expect(result.skipped, <String>['big.bin']);
+    expect(result.skipped.single, startsWith('big.bin'));
     expect(Directory(p.join(projectRoot.path, 'inbox')).existsSync(), isFalse);
   });
 

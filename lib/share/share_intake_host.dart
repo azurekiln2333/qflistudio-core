@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/project.dart';
 import '../session/agent_session.dart';
@@ -59,6 +60,7 @@ class ShareIntakeHost {
   bool _showing = false;
   bool _started = false;
   bool _disposed = false;
+  bool _retryScheduled = false;
 
   /// 订阅收件箱，取回冷启动批次，并清理超期批次。
   Future<void> start() async {
@@ -82,9 +84,23 @@ class ShareIntakeHost {
     if (!ready.value) return;
     if (_queue.isEmpty) return;
     final context = navigatorKey.currentContext;
-    if (context == null) return;
+    if (context == null) {
+      // 冷启动时批次可能早于导航器就绪：下一帧再试，不让批次卡死。
+      _scheduleRetry();
+      return;
+    }
     _showing = true;
     unawaited(_present(context, _queue.removeAt(0)));
+  }
+
+  void _scheduleRetry() {
+    if (_retryScheduled || _disposed) return;
+    _retryScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _retryScheduled = false;
+      _drain();
+    });
+    SchedulerBinding.instance.scheduleFrame();
   }
 
   Future<void> _present(BuildContext context, ShareInboxBatch batch) async {
@@ -113,6 +129,8 @@ class ShareIntakeHost {
       _report('处理分享文件失败：$error');
     } finally {
       _showing = false;
+      // 每处理完一批清一次超期与超额批次（设计 6）。
+      unawaited(inbox.sweep());
       _drain();
     }
   }
