@@ -147,6 +147,9 @@ class AgentInfo {
     required this.allowBypass,
     this.capabilities = const <String>[],
     this.codex,
+    this.hostName,
+    this.os,
+    this.osVersion,
   });
 
   factory AgentInfo.fromJson(Json json) => AgentInfo(
@@ -166,6 +169,9 @@ class AgentInfo {
           in (json['capabilities'] as List<dynamic>? ?? <dynamic>[]))
         if (value is String) value,
     ],
+    hostName: json['hostName'] is String ? json['hostName'] as String : null,
+    os: json['os'] is String ? json['os'] as String : null,
+    osVersion: json['osVersion'] is String ? json['osVersion'] as String : null,
   );
 
   final String host;
@@ -175,6 +181,17 @@ class AgentInfo {
   final bool allowBypass;
   final List<String> capabilities;
   final CodexAvailability? codex;
+
+  /// 显示用设备名。旧 agent 不发该字段时为 null。
+  final String? hostName;
+
+  /// 系统短名：`windows`、`macos`、`linux`、`other`。
+  ///
+  /// 不用 `platform` 那种运行时值（`win32`、`darwin`）。
+  final String? os;
+
+  /// 人类可读的系统版本，原样使用。
+  final String? osVersion;
 }
 
 class HistoryItem {

@@ -21,7 +21,7 @@ import 'remote_mapping.dart';
 import 'remote_ports.dart';
 import 'remote_session.dart';
 
-class RemoteHarnessHost implements HarnessHost {
+class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
   RemoteHarnessHost({
     required RemoteSessionPort remote,
     RemoteHerdrPort? herdr,
@@ -90,6 +90,69 @@ class RemoteHarnessHost implements HarnessHost {
 
   @override
   ValueListenable<HarnessHostState> get state => _state;
+
+  // -------------------------------------------------------------------------
+  // HarnessDeviceHost (R4)
+  // -------------------------------------------------------------------------
+
+  /// Device information forwarded from the agent's `info` frame.
+  ///
+  /// Field mapping follows ruling R4: `name` prefers `hostName` and falls back
+  /// to `host`; `os` prefers the reported short name and falls back to
+  /// `platform`; `osVersion` is passed through verbatim. Nothing is invented:
+  /// a field the agent did not send stays unknown.
+  @override
+  ValueListenable<HarnessDeviceInfo> get device => _device;
+
+  final ValueNotifier<HarnessDeviceInfo> _device =
+      ValueNotifier<HarnessDeviceInfo>(const HarnessDeviceInfo());
+
+  /// Recompute [device] from the latest info frame.
+  void _refreshDevice() {
+    final info = _remote is RemoteDevicePort
+        ? (_remote as RemoteDevicePort).agentInfo
+        : null;
+    _device.value = _deviceInfoFrom(info);
+  }
+
+  static HarnessDeviceInfo _deviceInfoFrom(protocol.AgentInfo? info) {
+    if (info == null) return const HarnessDeviceInfo();
+    final name = (info.hostName ?? info.host).trim();
+    final version = (info.osVersion ?? '').trim();
+    return HarnessDeviceInfo(
+      hostName: name.isEmpty ? null : name,
+      os: _deviceOsFrom(info),
+      osVersion: version.isEmpty ? null : info.osVersion,
+    );
+  }
+
+  /// Map the reported `os`, then fall back to the Node `platform` value.
+  static HarnessDeviceOs _deviceOsFrom(protocol.AgentInfo info) {
+    switch ((info.os ?? '').trim().toLowerCase()) {
+      case 'windows':
+        return HarnessDeviceOs.windows;
+      case 'macos':
+        return HarnessDeviceOs.macos;
+      case 'linux':
+        return HarnessDeviceOs.linux;
+      case 'android':
+        return HarnessDeviceOs.android;
+      case 'ios':
+        return HarnessDeviceOs.ios;
+      case 'ohos':
+        return HarnessDeviceOs.ohos;
+    }
+    // `other` or missing: the platform value is the only remaining signal.
+    switch (info.platform.trim().toLowerCase()) {
+      case 'win32':
+        return HarnessDeviceOs.windows;
+      case 'darwin':
+        return HarnessDeviceOs.macos;
+      case 'linux':
+        return HarnessDeviceOs.linux;
+    }
+    return HarnessDeviceOs.unknown;
+  }
 
   /// Last failure, already user-facing.
   String? get lastError => _lastError;
@@ -288,6 +351,7 @@ class RemoteHarnessHost implements HarnessHost {
     if (_disposed) return;
     _disposed = true;
     _stopCodexTimer();
+    _device.dispose();
     _remote.changes.removeListener(_onRemoteChanged);
     _herdr?.changes.removeListener(_onHerdrChanged);
     final sessionHandles = _sessionHandles.values.toList();
@@ -325,6 +389,7 @@ class RemoteHarnessHost implements HarnessHost {
     } else if (!online) {
       _wasOnline = false;
     }
+    _refreshDevice();
     _emit();
   }
 
