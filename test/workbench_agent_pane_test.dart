@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/chat/chat_transcript.dart';
 import 'package:qfli_studio_core/chat/composer_card.dart';
+import 'package:qfli_studio_core/chat/composer_draft.dart';
 import 'package:qfli_studio_core/community/models.dart';
 import 'package:qfli_studio_core/models/project.dart';
 import 'package:qfli_studio_core/shell/login_gate.dart';
@@ -1294,6 +1295,84 @@ void main() {
       facade.seedError(message: '超时', kind: AgentErrorKind.timeout);
       await tester.pump();
       expect(runtime.seenSessions, contains(meta.id));
+
+      await unmount(tester);
+    });
+  });
+
+  group('分享预填', () {
+    testWidgets('draft 默认自动发送', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      final facade = FakeAgentFacade(sessionId: meta.id);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LoginGateScope(
+            auth: auth,
+            child: Scaffold(
+              body: MediaQuery(
+                data: const MediaQueryData(size: Size(420, 800)),
+                child: WorkbenchAgentPane(
+                  project: _project(),
+                  runtime: runtime,
+                  auth: auth,
+                  settings: SettingsStore(),
+                  sessionId: meta.id,
+                  draft: const ComposerDraft(text: '跑一下测试'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await settle(tester);
+      await tester.pump();
+
+      expect(facade.sentTexts, contains('跑一下测试'));
+
+      await unmount(tester);
+    });
+
+    testWidgets('autoSend 为假时只预填附件，不替用户发送', (tester) async {
+      final auth = await loggedIn();
+      final store = MemoryAgentSessionStore();
+      final meta = await store.create('p1');
+      final runtime = runtimeFor(store);
+      final facade = FakeAgentFacade(sessionId: meta.id);
+      runtime.facades[meta.id] = facade;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LoginGateScope(
+            auth: auth,
+            child: Scaffold(
+              body: MediaQuery(
+                data: const MediaQueryData(size: Size(420, 800)),
+                child: WorkbenchAgentPane(
+                  project: _project(),
+                  runtime: runtime,
+                  auth: auth,
+                  settings: SettingsStore(),
+                  sessionId: meta.id,
+                  draft: const ComposerDraft(
+                    attachments: <String>['inbox/a.txt'],
+                    autoSend: false,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await settle(tester);
+      await tester.pump();
+
+      expect(facade.sentTexts, isEmpty);
+      expect(facade.sentAttachments, isEmpty);
 
       await unmount(tester);
     });

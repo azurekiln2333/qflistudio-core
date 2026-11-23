@@ -226,7 +226,8 @@ class _WorkbenchAgentPaneState extends State<WorkbenchAgentPane> {
     if (!draft.isEmpty && !_draftSent) {
       _draftSent = true;
       _composer.attachAll(draft.attachments);
-      await _send(draft.text, draft.attachments);
+      // 分享进来的批次只预填，不替用户发送。
+      if (draft.autoSend) await _send(draft.text, draft.attachments);
     }
   }
 
