@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/app.dart';
+import 'package:qfli_studio_core/github/github_auth_controller.dart';
 import 'package:qfli_studio_core/config/api_config.dart';
 import 'package:qfli_studio_core/models/cloud_project.dart';
 import 'package:qfli_studio_core/models/project.dart';
@@ -36,6 +37,11 @@ class _BrokenProjects extends ProjectStore {
 class _ReadyAuth extends AuthStore {
   @override
   Future<void> load() async {}
+}
+
+class _SignedOutGitHub extends GitHubAuthController {
+  @override
+  Future<void> restore() async {}
 }
 
 class _ReadySettings extends SettingsStore {
@@ -229,8 +235,15 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     final store = ProjectStore();
     final auth = AuthStore();
+    final github = _SignedOutGitHub();
+    addTearDown(github.dispose);
     await tester.pumpWidget(
-      QfliApp(formFactor: AppFormFactor.phone, store: store, auth: auth),
+      QfliApp(
+        formFactor: AppFormFactor.phone,
+        store: store,
+        auth: auth,
+        githubController: github,
+      ),
     );
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.person_outline));

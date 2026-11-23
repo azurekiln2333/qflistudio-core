@@ -112,7 +112,6 @@ void main() {
 
     testWidgets('选中项在语义树里报告 selected，其余不报告', (tester) async {
       final semantics = tester.ensureSemantics();
-      addTearDown(semantics.dispose);
 
       await _pump(
         tester,
@@ -153,6 +152,7 @@ void main() {
           label: 'All projects',
         ),
       );
+      semantics.dispose();
     });
 
     testWidgets('宽度固定 52px，达到 44px 触控目标', (tester) async {
@@ -274,7 +274,6 @@ void main() {
 
     testWidgets('中文界面使用中文标签', (tester) async {
       final semantics = tester.ensureSemantics();
-      addTearDown(semantics.dispose);
 
       await _pump(
         tester,
@@ -300,6 +299,7 @@ void main() {
           label: '文件',
         ),
       );
+      semantics.dispose();
     });
   });
 

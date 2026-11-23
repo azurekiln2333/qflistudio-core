@@ -77,6 +77,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(github.patReceived, 'ci-token');
     expect(github.status, GitHubAuthStatus.authenticated);
+    // Connecting shrinks the card above the scrolled submit button. Return to
+    // the profile header before checking the visible account summary.
+    await tester.drag(find.byType(ListView), const Offset(0, 600));
+    await tester.pumpAndSettle();
     expect(find.text('octocat'), findsOneWidget);
     expect(studio.isLoggedIn, isFalse);
     expect(find.text('ci-token'), findsNothing);

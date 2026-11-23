@@ -1009,6 +1009,8 @@ class _Fixture {
       tester,
       () =>
           find.byType(EditorPage).evaluate().isNotEmpty &&
+          tester.widget<EditorPage>(find.byType(EditorPage)).project.name ==
+              name &&
           _editor(tester).files.length >= 2,
     );
     await tester.pump(const Duration(milliseconds: 250));
