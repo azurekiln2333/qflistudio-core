@@ -18,6 +18,7 @@ import '../../remote_control/models/herdr.dart' as herdr;
 import '../../remote_control/models/protocol.dart' as protocol;
 import '../../remote_control/state/remote_controller.dart' show ConnectionPhase;
 import '../../services/app_paths.dart';
+import '../../sync/placeholder_project.dart';
 import '../../sync/remote_session_cache.dart';
 import '../harness_host.dart';
 import 'remote_mapping.dart';
@@ -86,11 +87,14 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
   @override
   String get id => _id;
 
-  /// Bounded transcript cache for one session, under `deviceSessions/`.
+  /// Bounded transcript cache for one session, inside its placeholder project.
   ///
-  /// Created on demand and returned without one when the app data directory is
-  /// not writable: a missing cache only costs history after a reconnect, and a
-  /// session must still open without it.
+  /// The directory matches [PlaceholderProjects.streamDirectory] so the cache is
+  /// one file inside `deviceSessions/<hostKey>/<sessionId>/.session`, and a
+  /// session that ran on the computer reads back what it showed before the
+  /// connection dropped. Created on demand and returned without one when the app
+  /// data directory is not writable: a missing cache only costs history after a
+  /// reconnect, and a session must still open without it.
   Future<RemoteSessionCache?> _streamCacheFor(String sessionId) async {
     if (!_cacheTranscripts) return null;
     final raw = sessionId.startsWith('session:')
@@ -98,7 +102,8 @@ class RemoteHarnessHost implements HarnessHost, HarnessDeviceHost {
         : sessionId;
     final root = await AppPaths.deviceSessionsRoot(create: true);
     if (root == null) return null;
-    final dir = '$root/${_safeSessionSegment(raw)}';
+    final dir =
+        '$root/${PlaceholderProjects.hostKey(_id)}/${_safeSessionSegment(raw)}/.session';
     try {
       await Directory(dir).create(recursive: true);
     } on FileSystemException {

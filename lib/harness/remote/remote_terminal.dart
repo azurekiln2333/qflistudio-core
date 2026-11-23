@@ -129,7 +129,11 @@ class RemoteTranscriptFeed {
 
   int _lastSeq = 0;
   int _seenRevision = -1;
+  int _cacheSeq = 0;
+  int _liveEvents = 0;
+  Timer? _historyTimer;
   bool _started = false;
+  bool _replayed = false;
   bool _closed = false;
 
   Stream<TranscriptEvent> get stream => _controller.stream;
@@ -141,12 +145,55 @@ class RemoteTranscriptFeed {
     unawaited(
       _port.subscribe(_sessionId, owner: _owner).catchError((Object _) {}),
     );
+    // The live view normally answers with the whole history, so the cache is a
+    // fallback for the reconnect that answers with nothing. Waiting a moment
+    // before using it keeps a healthy stream from showing every line twice.
+    _historyTimer?.cancel();
+    _historyTimer = Timer(const Duration(milliseconds: 700), () {
+      _historyTimer = null;
+      if (_liveEvents == 0) unawaited(_replayHistory());
+    });
     _pump();
+  }
+
+  /// Play the kept history when the live stream stayed empty.
+  Future<void> _replayHistory() async {
+    final cache = this.cache;
+    if (cache == null || _replayed || _closed || !_started) return;
+    _replayed = true;
+    final lines = await cache.read();
+    if (_closed || !_started || _liveEvents > 0) return;
+    for (final line in lines) {
+      final entry = _cachedTranscript(line);
+      if (entry != null && !_controller.isClosed) _controller.add(entry);
+    }
+  }
+
+  /// Rebuild one cached line, dropping anything this build no longer knows.
+  TranscriptEvent? _cachedTranscript(Map<String, dynamic> line) {
+    TranscriptRole? role;
+    for (final value in TranscriptRole.values) {
+      if (value.name == line['role']) role = value;
+    }
+    final text = line['text'];
+    if (role == null || text is! String) return null;
+    final id = line['id'];
+    final at = line['at'];
+    final requestId = line['requestId'];
+    return TranscriptEvent(
+      id: id is String && id.isNotEmpty ? id : 'cache-${_cacheSeq++}',
+      role: role,
+      text: text,
+      at: at is String ? DateTime.tryParse(at) : null,
+      requestId: requestId is String ? requestId : null,
+    );
   }
 
   void _stop() {
     if (!_started) return;
     _started = false;
+    _historyTimer?.cancel();
+    _historyTimer = null;
     _view.removeListener(_pump);
     _port.unsubscribe(_sessionId, owner: _owner);
   }
@@ -160,16 +207,30 @@ class RemoteTranscriptFeed {
     _seenRevision = revision;
     // A resubscribe restarts the view's sequence numbering; follow it, or every
     // later entry would look like a duplicate.
-    if (_view.lastSeq < _lastSeq) {
+    final rewound = _view.lastSeq < _lastSeq;
+    if (rewound) {
       _lastSeq = 0;
+      // The computer replayed the conversation for this view, so the kept copy
+      // is dropped instead of stacking a second history on top of it.
+      if (cache != null) _replayed = true;
     }
+    var first = rewound;
     for (final event in _view.events) {
       if (event.seq <= _lastSeq) continue;
       _lastSeq = event.seq;
       final entry = transcriptFromSessionEvent(event, _sessionId);
       if (entry != null) {
+        _liveEvents += 1;
         _controller.add(entry);
-        unawaited(cache?.append(_cacheLine(entry)) ?? Future<void>.value());
+        final cache = this.cache;
+        if (cache != null) {
+          unawaited(
+            first
+                ? cache.replaceWith(_cacheLine(entry))
+                : cache.append(_cacheLine(entry)),
+          );
+          first = false;
+        }
       }
     }
   }

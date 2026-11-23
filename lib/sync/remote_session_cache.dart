@@ -42,6 +42,20 @@ class RemoteSessionCache {
     return next;
   }
 
+  /// Replace the kept lines with one event.
+  ///
+  /// Used when a session is re-read from the computer: the transcript that just
+  /// arrived is the whole conversation as this app can show it, so lines kept
+  /// from the previous view would show up twice. Waiting for [_pending] keeps a
+  /// write that is still in flight from landing after the reset.
+  Future<void> replaceWith(Map<String, dynamic> event) {
+    final next = (_pending ?? Future<void>.value()).then(
+      (_) => _overwrite(<String>[jsonEncode(event)]),
+    );
+    _pending = next.catchError((Object _) {});
+    return next;
+  }
+
   Future<void> _append(Map<String, dynamic> event) async {
     try {
       await _file.parent.create(recursive: true);
@@ -101,12 +115,22 @@ class RemoteSessionCache {
     while (kept.isNotEmpty && _encodedBytes(kept) > maxBytes) {
       kept = kept.sublist(1);
     }
-    final temp = File('${_file.path}.tmp');
-    await temp.writeAsString(
-      kept.isEmpty ? '' : '${kept.join('\n')}\n',
-      flush: false,
-    );
-    await temp.rename(_file.path);
+    await _overwrite(kept);
+  }
+
+  /// Write [lines] as the whole file, atomically.
+  Future<void> _overwrite(List<String> lines) async {
+    try {
+      await _file.parent.create(recursive: true);
+      final temp = File('${_file.path}.tmp');
+      await temp.writeAsString(
+        lines.isEmpty ? '' : '${lines.join('\n')}\n',
+        flush: false,
+      );
+      await temp.rename(_file.path);
+    } on FileSystemException {
+      // Same rule as [_append]: a cache is a convenience, not a contract.
+    }
   }
 
   Future<int> _lineCount() async {
