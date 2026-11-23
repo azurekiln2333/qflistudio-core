@@ -10,6 +10,7 @@ import '../models/cloud_project.dart';
 import '../models/tutorial.dart';
 import '../services/app_paths.dart';
 import '../services/code_import_service.dart';
+import '../services/external_folder_service.dart';
 import '../services/file_service.dart';
 import '../services/ios_sandbox_paths.dart';
 import '../services/project_config.dart';
@@ -196,6 +197,31 @@ class ProjectStore extends ChangeNotifier {
       ..clear()
       ..addAll(result.projects.where((project) => !_isDeletedCloud(project)));
     lastBrowsedProjectId = result.browsedId;
+    await _resolveExternalPaths();
+  }
+
+  /// 按书签重新解析外部根路径。
+  ///
+  /// 书签解析出新的容器路径时改写 `project.path`（不是目录迁移），并落盘。
+  /// 原生通道缺失时安静返回，路径保持原值。
+  Future<void> _resolveExternalPaths() async {
+    if (!_projects.any((project) => project.isExternalFolder)) return;
+    final folders = await ExternalFolderService.restore();
+    if (folders.isEmpty) return;
+    final byId = <String, String>{
+      for (final folder in folders) folder.id: folder.path,
+    };
+    var changed = false;
+    for (final project in _projects) {
+      final id = project.externalFolderId;
+      if (id == null) continue;
+      final resolved = byId[id];
+      if (resolved == null || resolved.isEmpty) continue;
+      if (p.equals(p.normalize(project.path), p.normalize(resolved))) continue;
+      project.path = resolved;
+      changed = true;
+    }
+    if (changed) await _persist();
   }
 
   static Map<String, dynamic> _registryEntry(
@@ -541,7 +567,22 @@ class ProjectStore extends ChangeNotifier {
   }
 
   /// 注册一个磁盘上已存在的文件夹。
-  Future<ProjectResult> addExisting(String rawPath) async {
+  Future<ProjectResult> addExisting(String rawPath) =>
+      _registerExistingFolder(rawPath);
+
+  /// 注册一个用户选择的外部文件夹。
+  ///
+  /// [folderId] 是原生书签 id。外部目录不写 `.qfli`（裁定 R5），
+  /// 名称与语言只落在注册表。
+  Future<ProjectResult> addExistingExternal(
+    String rawPath, {
+    required String folderId,
+  }) => _registerExistingFolder(rawPath, externalFolderId: folderId);
+
+  Future<ProjectResult> _registerExistingFolder(
+    String rawPath, {
+    String? externalFolderId,
+  }) async {
     final path = rawPath.trim().replaceAll('"', '');
     if (path.isEmpty) return (error: '请输入项目路径', project: null);
     final dir = Directory(path);
@@ -562,17 +603,20 @@ class ProjectStore extends ChangeNotifier {
         : detectLanguage(normalized);
     final configType =
         metadata.type ?? ProjectTemplate.fromLanguage(language)?.type ?? '';
-    await ProjectConfig.write(
-      projectRoot: normalized,
-      name: name,
-      language: language,
-      type: configType,
-    );
+    if (externalFolderId == null) {
+      await ProjectConfig.write(
+        projectRoot: normalized,
+        name: name,
+        language: language,
+        type: configType,
+      );
+    }
     final project = Project.create(
       name: name,
       path: normalized,
       language: language,
       type: configType,
+      externalFolderId: externalFolderId,
     );
     return _registerLocalProject(project);
   }
@@ -756,8 +800,20 @@ class ProjectStore extends ChangeNotifier {
 
   /// 删除项目：先压缩整个文件夹备份到回收站 projects_bin，再从磁盘删除
   /// 并移出列表。返回错误信息，null 表示成功。
+  ///
+  /// 外部文件夹只移出列表并释放书签（裁定 R6）。用户目录保持不动。
   Future<String?> deleteProject(Project project) async {
     if (project.isCloud) return '云端项目请在云端管理中删除';
+    if (project.isExternalFolder) {
+      _projects.removeWhere((e) => e.id == project.id);
+      await _persist();
+      final folderId = project.externalFolderId;
+      if (folderId != null) {
+        await ExternalFolderService.release(folderId);
+      }
+      notifyListeners();
+      return null;
+    }
     final dir = Directory(project.path);
     if (dir.existsSync()) {
       final backupError = await RecycleBin.backupProject(

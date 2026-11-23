@@ -19,6 +19,7 @@ class Project {
     this.favorite = false,
     this.language = '',
     this.type = '',
+    this.externalFolderId,
   });
 
   final String id;
@@ -49,6 +50,14 @@ class Project {
   /// Stable source-language discriminator, for example `cpp` or `python`.
   String type;
 
+  /// 外部文件夹的书签 id；应用沙箱内的项目为 null。
+  ///
+  /// 书签由原生持有，重启后按这个 id 重新解析路径。
+  String? externalFolderId;
+
+  /// 项目位于用户选择的外部文件夹，随时可能被其它应用改动。
+  bool get isExternalFolder => externalFolderId != null;
+
   bool get isCloud => cloudId != null;
 
   static String _newId() {
@@ -66,6 +75,7 @@ class Project {
     bool favorite = false,
     String language = '',
     String type = '',
+    String? externalFolderId,
   }) {
     final now = DateTime.now();
     return Project(
@@ -80,6 +90,7 @@ class Project {
       favorite: favorite,
       language: language,
       type: type,
+      externalFolderId: externalFolderId,
     );
   }
 
@@ -95,6 +106,7 @@ class Project {
     'favorite': favorite,
     'language': language,
     'type': type,
+    'externalFolderId': externalFolderId,
   };
 
   static Project fromJson(Map<String, dynamic> json) {
@@ -118,6 +130,7 @@ class Project {
       favorite: json['favorite'] as bool? ?? false,
       language: json['language'] as String? ?? '',
       type: json['type'] as String? ?? '',
+      externalFolderId: json['externalFolderId'] as String?,
     );
   }
 }
