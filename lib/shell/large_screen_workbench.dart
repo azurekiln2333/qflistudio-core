@@ -309,11 +309,13 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                               child: Stack(
                                 children: [
                                   Positioned.fill(
+                                    key: const ValueKey('workbench-center'),
                                     left: !compact && sideShown ? sideWidth : 0,
                                     child: _center(workspace),
                                   ),
                                   if (compact && sideShown)
                                     Positioned.fill(
+                                      key: const ValueKey('workbench-scrim'),
                                       child: GestureDetector(
                                         onTap: _layout.closeCompactSidebar,
                                         child: ColoredBox(
@@ -325,6 +327,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                                       ),
                                     ),
                                   Positioned(
+                                    key: const ValueKey('workbench-sidebar-slot'),
                                     left: 0,
                                     top: 0,
                                     bottom: 0,
