@@ -220,8 +220,7 @@ Future<void> _pumpUntil(
   bool Function() done,
   String operation, {
   int attempts = 100,
-},
-) async {
+}) async {
   for (var attempt = 0; attempt < attempts && !done(); attempt++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 5)),
