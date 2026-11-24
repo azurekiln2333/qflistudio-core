@@ -12,12 +12,30 @@ class LargeScreenController extends ChangeNotifier {
   bool _scheduled = false;
   Object? _activeEditor;
   final Map<Object, WidgetBuilder> _files = {};
+  WidgetBuilder? _centerOverlay;
 
   WorkbenchActivity get activity => _activity;
   bool get sidebarVisible => _sidebarVisible;
   bool get compact => _compact;
   Object? get activeEditor => _activeEditor;
   Map<Object, WidgetBuilder> get filePanels => Map.unmodifiable(_files);
+
+  /// 中央区域临时显示的内容，例如没有项目可落的 Agent 会话。
+  ///
+  /// 不为空时中央显示它，编辑器宿主保留在后台。打开任何项目都会清掉它。
+  WidgetBuilder? get centerOverlay => _centerOverlay;
+
+  void showCenterOverlay(WidgetBuilder builder) {
+    _centerOverlay = builder;
+    notifyListeners();
+  }
+
+  void closeCenterOverlay() {
+    if (_centerOverlay == null) return;
+    _centerOverlay = null;
+    notifyListeners();
+  }
+
   bool get showsWorkspace => switch (_activity) {
     WorkbenchActivity.projects ||
     WorkbenchActivity.files ||
