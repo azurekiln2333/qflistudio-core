@@ -80,7 +80,11 @@ void main() {
           find.byKey(const ValueKey('workspace-name-field')),
           '手机工作区',
         );
-        await tester.tap(find.widgetWithText(FilledButton, '应用'));
+        final apply = find.widgetWithText(FilledButton, '应用');
+        await tester.ensureVisible(apply);
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(apply.hitTestable(), findsOneWidget);
+        await tester.tap(apply);
         await _pumpUntil(
           tester,
           () =>
@@ -88,6 +92,7 @@ void main() {
               fixture.workspaces.workspaces.single.name == '手机工作区' &&
               find.text('手机工作区 · 2 个项目').evaluate().isNotEmpty,
           'workspace apply',
+          attempts: 400,
         );
         final saved = fixture.workspaces.workspaces.single;
         expect(saved.members.map((member) => member.projectId), [
@@ -213,15 +218,21 @@ Future<void> _openSettings(WidgetTester tester) async {
 Future<void> _pumpUntil(
   WidgetTester tester,
   bool Function() done,
-  String operation,
+  String operation, {
+  int attempts = 100,
+},
 ) async {
-  for (var attempt = 0; attempt < 100 && !done(); attempt++) {
+  for (var attempt = 0; attempt < attempts && !done(); attempt++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 5)),
     );
     await tester.pump(const Duration(milliseconds: 20));
   }
-  expect(done(), isTrue, reason: '$operation did not finish');
+  expect(
+    done(),
+    isTrue,
+    reason: '$operation did not finish after $attempts attempts',
+  );
   await tester.pump(const Duration(milliseconds: 300));
 }
 

@@ -327,7 +327,9 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                                       ),
                                     ),
                                   Positioned(
-                                    key: const ValueKey('workbench-sidebar-slot'),
+                                    key: const ValueKey(
+                                      'workbench-sidebar-slot',
+                                    ),
                                     left: 0,
                                     top: 0,
                                     bottom: 0,
