@@ -68,6 +68,15 @@ class SettingsStore extends ChangeNotifier {
   /// 编辑器顶部的打开文件标签栏可见。
   bool showEditorTabs = true;
 
+  /// 平板与桌面工作台显示符号栏。手机不读这个开关，始终显示。
+  bool largeScreenSymbolBar = false;
+
+  /// 界面缩放倍数，范围见 [minUiScale] 与 [maxUiScale]。
+  double uiScale = 1.0;
+
+  static const double minUiScale = 0.5;
+  static const double maxUiScale = 2.0;
+
   /// 自动保存：每次内容修改后立即排队写盘，覆盖前备份上一版本。
   bool autoSave = false;
 
@@ -138,6 +147,12 @@ class SettingsStore extends ChangeNotifier {
         if (data is Map) {
           minimap = data['minimap'] as bool? ?? minimap;
           showEditorTabs = data['showEditorTabs'] as bool? ?? showEditorTabs;
+          largeScreenSymbolBar =
+              data['largeScreenSymbolBar'] as bool? ?? largeScreenSymbolBar;
+          final scale = data['uiScale'];
+          if (scale is num && scale.isFinite) {
+            uiScale = scale.toDouble().clamp(minUiScale, maxUiScale);
+          }
           autoSave = data['autoSave'] as bool? ?? autoSave;
           final font = data['editorFont'] == 'systemMono'
               ? EditorFonts.defaultFont
@@ -232,6 +247,8 @@ class SettingsStore extends ChangeNotifier {
       'version': 1,
       'minimap': minimap,
       'showEditorTabs': showEditorTabs,
+      'largeScreenSymbolBar': largeScreenSymbolBar,
+      'uiScale': uiScale,
       'autoSave': autoSave,
       'editorFont': editorFont,
       'editorFontSize': editorFontSize,
@@ -410,6 +427,23 @@ class SettingsStore extends ChangeNotifier {
     aiThinking = value;
     await _persist();
     notifyListeners();
+  }
+
+  Future<void> setLargeScreenSymbolBar(bool value) async {
+    if (largeScreenSymbolBar == value) return;
+    largeScreenSymbolBar = value;
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 设置界面缩放。超出范围的值收进范围，按 0.1 取整，避免累加误差。
+  Future<void> setUiScale(double value) async {
+    if (!value.isFinite) return;
+    final next = ((value.clamp(minUiScale, maxUiScale)) * 10).round() / 10;
+    if (uiScale == next) return;
+    uiScale = next;
+    notifyListeners();
+    await _persist();
   }
 
   Future<void> setMinimap(bool value) async {
