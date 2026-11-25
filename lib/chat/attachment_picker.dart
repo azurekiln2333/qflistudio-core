@@ -1,9 +1,11 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/file_service.dart';
+import '../shell/large_screen_controller.dart';
 import '../workspace/saved_workspace.dart';
 import '../workspace/workspace_store.dart';
 
@@ -153,6 +155,44 @@ Future<List<String>?> showAttachmentPicker(
   required String projectRoot,
   required WorkspaceStore workspaces,
 }) {
+  if (LargeScreenScope.maybeOf(context) != null) {
+    final target = context.findRenderObject();
+    final overlay =
+        Navigator.of(
+              context,
+              rootNavigator: true,
+            ).overlay!.context.findRenderObject()!
+            as RenderBox;
+    final anchor = target is RenderBox && target.hasSize
+        ? target.localToGlobal(
+            Offset(8, target.size.height - 8),
+            ancestor: overlay,
+          )
+        : const Offset(24, 24);
+    final desktop = LargeScreenScope.isDesktop(context);
+    return showGeneralDialog<List<String>>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.transparent,
+      transitionDuration: Duration.zero,
+      pageBuilder: (_, _, _) => InheritedTheme.captureAll(
+        context,
+        _AttachmentMenu(
+          source: source,
+          anchor: anchor,
+          desktop: desktop,
+          load: () => switch (source) {
+            AttachmentSource.project => listProjectAttachments(projectRoot),
+            AttachmentSource.workspace => listWorkspaceAttachments(
+              projectRoot: projectRoot,
+              workspaces: workspaces.workspaces,
+            ),
+          },
+        ),
+      ),
+    );
+  }
   return showModalBottomSheet<List<String>>(
     context: context,
     isScrollControlled: true,
@@ -168,6 +208,194 @@ Future<List<String>?> showAttachmentPicker(
       },
     ),
   );
+}
+
+/// Workbench-only menu. The route owns dismissal; file access and results are
+/// identical to the phone sheet. Checkbox items keep the menu open for multi-pick.
+class _AttachmentMenu extends StatefulWidget {
+  const _AttachmentMenu({
+    required this.source,
+    required this.anchor,
+    required this.desktop,
+    required this.load,
+  });
+
+  final AttachmentSource source;
+  final Offset anchor;
+  final bool desktop;
+  final Future<List<AttachmentFile>> Function() load;
+
+  @override
+  State<_AttachmentMenu> createState() => _AttachmentMenuState();
+}
+
+class _AttachmentMenuState extends State<_AttachmentMenu> {
+  final MenuController _controller = MenuController();
+  final Set<String> _selected = {};
+  late Future<List<AttachmentFile>> _future;
+  bool _finished = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.load();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _controller.open();
+    });
+  }
+
+  void _finish([List<String>? result]) {
+    if (!mounted || _finished) return;
+    _finished = true;
+    Navigator.of(context).pop(result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final available = MediaQuery.sizeOf(context);
+    final width = (available.width - 32).clamp(0.0, 400.0);
+    final itemStyle = MenuItemButton.styleFrom(
+      minimumSize: Size(width, widget.desktop ? 32 : 48),
+      maximumSize: Size(width, double.infinity),
+      tapTargetSize: widget.desktop
+          ? MaterialTapTargetSize.shrinkWrap
+          : MaterialTapTargetSize.padded,
+      visualDensity: widget.desktop
+          ? VisualDensity.compact
+          : VisualDensity.standard,
+    );
+    return Stack(
+      children: [
+        Positioned(
+          left: widget.anchor.dx.clamp(16.0, available.width - 16),
+          top: widget.anchor.dy.clamp(16.0, available.height - 16),
+          child: FutureBuilder<List<AttachmentFile>>(
+            future: _future,
+            builder: (context, snapshot) {
+              final files = snapshot.data ?? const <AttachmentFile>[];
+              return MenuAnchor(
+                key: const ValueKey('attachment-workbench-menu'),
+                controller: _controller,
+                crossAxisUnconstrained: false,
+                consumeOutsideTap: true,
+                onClose: () {
+                  // Menu callbacks can run while the overlay is rebuilding.
+                  WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => _finish(),
+                  );
+                },
+                style: MenuStyle(
+                  backgroundColor: WidgetStatePropertyAll(
+                    theme.colorScheme.surfaceContainer,
+                  ),
+                  maximumSize: WidgetStatePropertyAll(
+                    Size(width, available.height * 0.72),
+                  ),
+                ),
+                menuChildren: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: SizedBox(
+                      width: width - 24,
+                      child: Text(
+                        widget.source == AttachmentSource.project
+                            ? '项目文件'
+                            : '工作区文件（只读）',
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  if (snapshot.connectionState != ConnectionState.done)
+                    MenuItemButton(
+                      style: itemStyle,
+                      child: const Text('正在读取文件…'),
+                    )
+                  else if (snapshot.hasError) ...[
+                    MenuItemButton(
+                      style: itemStyle,
+                      child: const Text('读取文件失败'),
+                    ),
+                    MenuItemButton(
+                      key: const ValueKey('attachment-menu-retry'),
+                      style: itemStyle,
+                      closeOnActivate: false,
+                      onPressed: () => setState(() => _future = widget.load()),
+                      leadingIcon: const Icon(Icons.refresh, size: 18),
+                      child: const Text('重试'),
+                    ),
+                  ] else if (files.isEmpty)
+                    MenuItemButton(
+                      style: itemStyle,
+                      child: Text(
+                        widget.source == AttachmentSource.project
+                            ? '这个项目还没有文件'
+                            : '没有找到工作区文件',
+                      ),
+                    )
+                  else
+                    for (final file in files)
+                      CheckboxMenuButton(
+                        key: ValueKey('attachment-${file.path}'),
+                        style: itemStyle,
+                        value: _selected.contains(file.path),
+                        closeOnActivate: false,
+                        onChanged: (checked) => setState(() {
+                          if (checked == true) {
+                            _selected.add(file.path);
+                          } else {
+                            _selected.remove(file.path);
+                          }
+                        }),
+                        child: SizedBox(
+                          width: (width - 80).clamp(0.0, width),
+                          child: Tooltip(
+                            message: '${file.group} / ${file.label}',
+                            child: Text(
+                              widget.source == AttachmentSource.workspace
+                                  ? '${file.group} / ${file.label}'
+                                  : file.label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ),
+                  const Divider(height: 1),
+                  MenuItemButton(
+                    key: const ValueKey('attachment-confirm'),
+                    style: itemStyle,
+                    closeOnActivate: false,
+                    leadingIcon: const Icon(Icons.attach_file, size: 18),
+                    onPressed: _selected.isEmpty
+                        ? null
+                        : () => _finish(_selected.toList()),
+                    child: Text(
+                      _selected.isEmpty ? '选择文件' : '附加 ${_selected.length} 个文件',
+                    ),
+                  ),
+                  MenuItemButton(
+                    key: const ValueKey('attachment-menu-cancel'),
+                    autofocus: true,
+                    style: itemStyle,
+                    closeOnActivate: false,
+                    shortcut: const SingleActivator(LogicalKeyboardKey.escape),
+                    onPressed: _finish,
+                    child: const Text('取消'),
+                  ),
+                ],
+                child: const SizedBox(width: 1, height: 1),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 /// 附件选择面板。多选，确认后一次性返回。

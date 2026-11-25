@@ -342,8 +342,9 @@ class _ComposerCardState extends State<ComposerCard> {
   static String _attachmentLabel(String path) {
     final slashed = path.replaceAll('\\', '/');
     // Restored sessions may contain paths created on another platform.
-    if (!p.posix.isAbsolute(path) && !p.windows.isAbsolute(path))
+    if (!p.posix.isAbsolute(path) && !p.windows.isAbsolute(path)) {
       return slashed;
+    }
     final parts = slashed.split('/').where((part) => part.isNotEmpty).toList();
     if (parts.length <= 2) return slashed;
     return parts.sublist(parts.length - 2).join('/');

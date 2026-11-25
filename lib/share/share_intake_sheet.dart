@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/project.dart';
+import '../shell/large_screen_controller.dart';
 import '../session/agent_session.dart';
 import 'share_inbox.dart';
 import 'share_intake.dart';
@@ -37,6 +38,23 @@ Future<ShareIntakeChoice?> showShareIntakeSheet(
   required List<Project> projects,
   required List<AgentSessionMeta> Function(String projectId) sessionsOf,
 }) {
+  if (_hasWorkbench(context)) {
+    return showDialog<ShareIntakeChoice>(
+      context: context,
+      builder: (_) => Dialog(
+        key: const ValueKey('share-intake-dialog'),
+        constraints: const BoxConstraints(maxWidth: 560),
+        insetPadding: const EdgeInsets.all(24),
+        clipBehavior: Clip.antiAlias,
+        child: ShareIntakeSheet(
+          batch: batch,
+          projects: projects,
+          sessionsOf: sessionsOf,
+          workbench: true,
+        ),
+      ),
+    );
+  }
   return showModalBottomSheet<ShareIntakeChoice>(
     context: context,
     isScrollControlled: true,
@@ -49,6 +67,25 @@ Future<ShareIntakeChoice?> showShareIntakeSheet(
   );
 }
 
+bool _hasWorkbench(BuildContext context) {
+  if (LargeScreenScope.maybeOf(context) != null) return true;
+  // ShareIntakeHost launches from navigatorKey.currentContext, above the
+  // workbench's inherited scope. Inspect that navigator's mounted shell rather
+  // than guessing the device family from its window size or operating system.
+  var found = false;
+  void visit(Element element) {
+    if (found) return;
+    if (element.widget is LargeScreenScope) {
+      found = true;
+    } else if (element.widget is! Navigator) {
+      element.visitChildElements(visit);
+    }
+  }
+
+  Navigator.of(context).context.visitChildElements(visit);
+  return found;
+}
+
 /// 选择面板：先选去处，再选项目，放进项目时选子目录，附到会话时选会话。
 class ShareIntakeSheet extends StatefulWidget {
   const ShareIntakeSheet({
@@ -56,8 +93,10 @@ class ShareIntakeSheet extends StatefulWidget {
     required this.batch,
     required this.projects,
     required this.sessionsOf,
+    this.workbench = false,
   });
 
+  final bool workbench;
   final ShareInboxBatch batch;
   final List<Project> projects;
   final List<AgentSessionMeta> Function(String projectId) sessionsOf;
@@ -76,6 +115,7 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    if (widget.workbench) return _buildWorkbench(context, theme);
     return SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(
@@ -98,6 +138,70 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
               Flexible(child: _body(context)),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWorkbench(BuildContext context, ThemeData theme) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.72,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 8, 16, 16),
+        child: Column(
+          key: const ValueKey('share-intake-sheet'),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                if (_step != _Step.destination)
+                  IconButton(
+                    key: const ValueKey('share-intake-back'),
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).backButtonTooltip,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 48,
+                      height: 48,
+                    ),
+                    onPressed: () => setState(() {
+                      _step = _step == _Step.project
+                          ? _Step.destination
+                          : _Step.project;
+                    }),
+                    icon: const Icon(Icons.arrow_back, size: 20),
+                  ),
+                Expanded(
+                  child: Text(
+                    '收到 ${widget.batch.files.length} 个文件',
+                    style: theme.textTheme.titleLarge,
+                  ),
+                ),
+                IconButton(
+                  key: const ValueKey('share-intake-dialog-close'),
+                  tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 48,
+                    height: 48,
+                  ),
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.close, size: 20),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Flexible(
+              child: SingleChildScrollView(child: _fileList(context, theme)),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Divider(height: 1),
+            ),
+            Flexible(child: _body(context)),
+          ],
         ),
       ),
     );
