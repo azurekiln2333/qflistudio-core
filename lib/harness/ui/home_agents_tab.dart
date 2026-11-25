@@ -14,6 +14,7 @@ import 'package:path/path.dart' as p;
 import '../../i18n/studio_localizations.dart';
 import '../../services/app_paths.dart';
 import '../../shell/agent_runtime_factory.dart';
+import '../../shell/large_screen_controller.dart';
 import '../../store/auth_store.dart';
 import '../../store/project_store.dart';
 import '../../store/settings_store.dart';
@@ -110,6 +111,7 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
 
   /// 正在补接已绑定的电脑，避免打开与下拉刷新同时开两条连接。
   bool _attachingRemote = false;
+  final TextEditingController _search = TextEditingController();
 
   /// 当前渲染的行，测试用来断言排序与合并。
   @visibleForTesting
@@ -341,6 +343,7 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     _sub?.cancel();
     _unwatchRuntime();
     _writer.dispose();
+    _search.dispose();
     if (_ownsHub) _hub.dispose();
     super.dispose();
   }
@@ -348,6 +351,9 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
   @override
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
+    if (LargeScreenScope.maybeOf(context) != null) {
+      return _buildWorkbench(context);
+    }
     if (_loading && _rows.isEmpty) {
       return Center(
         key: const ValueKey('agents-loading'),
@@ -408,6 +414,164 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
     );
   }
 
+  Widget _buildWorkbench(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final l10n = StudioLocalizations.of(context);
+    final desktop = LargeScreenScope.isDesktop(context);
+    final query = _search.text.trim().toLowerCase();
+    final groups = <String, List<AgentsIndexRow>>{};
+    for (final row in _rows) {
+      if (query.isNotEmpty &&
+          ![
+            row.session.title,
+            row.session.cwd ?? '',
+            row.hostLabel,
+          ].any((value) => value.toLowerCase().contains(query))) {
+        continue;
+      }
+      groups.putIfAbsent(row.session.hostId, () => []).add(row);
+    }
+    return Material(
+      key: const ValueKey('agents-workbench-panel'),
+      color: scheme.surfaceContainerLow,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            key: const ValueKey('agents-workbench-header'),
+            height: desktop ? 40 : 48,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12, right: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text('Agents', style: theme.textTheme.titleSmall),
+                  ),
+                  IconButton(
+                    key: const ValueKey('agents-workbench-refresh'),
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).refreshIndicatorSemanticLabel,
+                    constraints: BoxConstraints.tightFor(
+                      width: desktop ? 32 : 48,
+                      height: desktop ? 32 : 48,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.refresh, size: 20),
+                    onPressed: refresh,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: SizedBox(
+              height: desktop ? 36 : 48,
+              child: TextField(
+                key: const ValueKey('agents-workbench-search'),
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                style: theme.textTheme.bodySmall,
+                decoration: InputDecoration(
+                  hintText: '搜索会话',
+                  isDense: true,
+                  filled: true,
+                  fillColor: scheme.surfaceContainerHigh,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  prefixIcon: const Icon(Icons.search, size: 20),
+                  prefixIconConstraints: BoxConstraints.tightFor(
+                    width: desktop ? 36 : 48,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide(color: scheme.primary, width: 2),
+                  ),
+                  suffixIcon: query.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: MaterialLocalizations.of(
+                            context,
+                          ).deleteButtonTooltip,
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(Icons.close, size: 18),
+                          onPressed: () => setState(_search.clear),
+                        ),
+                ),
+              ),
+            ),
+          ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                l10n.agentsRefreshFailed,
+                key: const ValueKey('agents-refresh-failed'),
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+              ),
+            ),
+          Expanded(
+            child: _loading && _rows.isEmpty
+                ? const Center(
+                    key: ValueKey('agents-loading'),
+                    child: CircularProgressIndicator(),
+                  )
+                : groups.isEmpty
+                ? Center(
+                    key: const ValueKey('agents-empty'),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        query.isEmpty ? l10n.agentsEmpty : '没有匹配的会话',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                  )
+                : ListView(
+                    key: const ValueKey('agents-list'),
+                    padding: EdgeInsets.zero,
+                    children: [
+                      for (final entry in groups.entries) ...[
+                        Padding(
+                          key: ValueKey('agents-host-${entry.key}'),
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                          child: Text(
+                            entry.value.first.hostLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                        for (final row in entry.value)
+                          AgentsRowTile(
+                            row: row,
+                            onTap: widget.onOpenSession == null
+                                ? null
+                                : () => widget.onOpenSession!(row),
+                            onDetails: widget.onOpenDetails == null
+                                ? null
+                                : () => widget.onOpenDetails!(row),
+                          ),
+                      ],
+                    ],
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 内置 Agent 的主机 id，与 `kStudioHostId` 同一写法。
   static const String _studioHostId = 'studio';
 }
@@ -427,6 +591,9 @@ class AgentsRowTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (LargeScreenScope.maybeOf(context) != null) {
+      return _WorkbenchAgentsRow(row: row, onTap: onTap, onDetails: onDetails);
+    }
     final theme = Theme.of(context);
     final status = row.session.status;
     final path = row.session.cwd;
@@ -487,17 +654,119 @@ class AgentsRowTile extends StatelessWidget {
   }
 }
 
+class _WorkbenchAgentsRow extends StatefulWidget {
+  const _WorkbenchAgentsRow({required this.row, this.onTap, this.onDetails});
+
+  final AgentsIndexRow row;
+  final VoidCallback? onTap;
+  final VoidCallback? onDetails;
+
+  @override
+  State<_WorkbenchAgentsRow> createState() => _WorkbenchAgentsRowState();
+}
+
+class _WorkbenchAgentsRowState extends State<_WorkbenchAgentsRow> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final row = widget.row;
+    final height = LargeScreenScope.isDesktop(context) ? 32.0 : 48.0;
+    return Tooltip(
+      message: [
+        row.session.title,
+        row.hostLabel,
+        row.session.cwd ?? '',
+      ].join('\n'),
+      child: InkWell(
+        key: ValueKey('agents-row-${row.rowKey}'),
+        onTap: widget.onTap,
+        mouseCursor: widget.onTap == null
+            ? SystemMouseCursors.basic
+            : SystemMouseCursors.click,
+        onFocusChange: (value) => setState(() => _focused = value),
+        overlayColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.pressed) ||
+              states.contains(WidgetState.focused)) {
+            return scheme.onSurface.withValues(alpha: 0.10);
+          }
+          if (states.contains(WidgetState.hovered)) {
+            return scheme.onSurface.withValues(alpha: 0.08);
+          }
+          return null;
+        }),
+        child: Container(
+          height: height,
+          padding: const EdgeInsets.only(left: 12, right: 4),
+          foregroundDecoration: BoxDecoration(
+            border: Border.all(
+              color: _focused ? scheme.primary : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            children: [
+              _StatusDot(
+                status: row.session.status,
+                label: harnessStatusLabel(row.session.status),
+                rowKey: row.rowKey,
+                themed: true,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  row.session.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+              if (row.session.updatedAt case final updated?) ...[
+                const SizedBox(width: 6),
+                Text(
+                  harnessRelativeTime(updated),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (widget.onDetails != null)
+                IconButton(
+                  key: ValueKey('agents-details-${row.rowKey}'),
+                  tooltip: StudioLocalizations.of(context).agentsDetails,
+                  constraints: BoxConstraints.tightFor(
+                    width: height,
+                    height: height,
+                  ),
+                  padding: EdgeInsets.zero,
+                  icon: Icon(
+                    Icons.info_outline,
+                    size: LargeScreenScope.isDesktop(context) ? 16 : 20,
+                  ),
+                  onPressed: widget.onDetails,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 状态圆点。
 ///
-/// 颜色固定，不取主题色（裁定 R3）。未知画空心圈。文字语义标签同时给
-/// 读屏与长按提示，不只靠颜色区分。
+/// Phone colors retain their original status mapping. Workbench colors use
+/// ColorScheme roles. Both expose status text; unknown remains an outline.
 class _StatusDot extends StatelessWidget {
   const _StatusDot({
     required this.status,
     required this.label,
     required this.rowKey,
+    this.themed = false,
   });
 
+  final bool themed;
   final HarnessSessionStatus status;
 
   /// 状态的文字说法，读屏与长按都能读到。
@@ -509,6 +778,14 @@ class _StatusDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final role = switch (status) {
+      HarnessSessionStatus.blocked => scheme.tertiary,
+      HarnessSessionStatus.working => scheme.primary,
+      HarnessSessionStatus.idle => scheme.onSurfaceVariant,
+      HarnessSessionStatus.done => scheme.secondary,
+      HarnessSessionStatus.exited => scheme.error,
+      HarnessSessionStatus.unknown => scheme.outline,
+    };
     return Semantics(
       container: true,
       label: label,
@@ -521,9 +798,13 @@ class _StatusDot extends StatelessWidget {
           height: 10,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: harnessStatusDotColor(status),
+            color: themed
+                ? (status == HarnessSessionStatus.unknown ? null : role)
+                : harnessStatusDotColor(status),
             border: Border.all(
-              color: harnessStatusDotBorderColor(scheme, status),
+              color: themed
+                  ? role
+                  : harnessStatusDotBorderColor(scheme, status),
               width: 1.5,
             ),
           ),

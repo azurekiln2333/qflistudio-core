@@ -6,6 +6,7 @@ import '../harness/harness_host.dart';
 import '../harness/hub/agents_index.dart';
 import '../harness/hub/harness_hub.dart';
 import '../harness/ui/hub_chat_view.dart';
+import 'large_screen_controller.dart';
 
 /// Center-area chat for an Agent session that has no usable editor project.
 ///
@@ -134,41 +135,45 @@ class _WorkbenchSessionViewState extends State<WorkbenchSessionView> {
       key: const ValueKey('workbench-session-view'),
       children: [
         Material(
-          color: theme.colorScheme.surface,
+          color: theme.colorScheme.surfaceContainerLow,
           child: SizedBox(
-            height: 56,
+            key: const ValueKey('workbench-session-header'),
+            height: LargeScreenScope.isDesktop(context) ? 40 : 48,
             child: Row(
               children: [
-                const SizedBox(width: 16),
-                const Icon(Icons.forum_outlined),
                 const SizedBox(width: 12),
+                const Icon(Icons.forum_outlined, size: 18),
+                const SizedBox(width: 8),
                 Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.row.session.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall,
-                      ),
-                      Text(
-                        widget.row.hostLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ],
+                  child: Text(
+                    widget.row.session.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Text(
+                    widget.row.hostLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
                 IconButton(
                   key: const ValueKey('workbench-session-close'),
                   tooltip: '关闭会话',
+                  constraints: BoxConstraints.tightFor(
+                    width: LargeScreenScope.isDesktop(context) ? 40 : 48,
+                    height: LargeScreenScope.isDesktop(context) ? 40 : 48,
+                  ),
+                  padding: EdgeInsets.zero,
                   onPressed: _close,
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close, size: 20),
                 ),
-                const SizedBox(width: 8),
               ],
             ),
           ),
