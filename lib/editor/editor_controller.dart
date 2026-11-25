@@ -23,6 +23,7 @@ class EditorController extends ChangeNotifier {
   final ValueChanged<OpenFile>? onContentChanged;
   bool _disposed = false;
   final List<OpenFile> files = [];
+  final Set<OpenFile> _retiredFiles = {};
   int _currentIndex = -1;
 
   OpenFile? get current => (_currentIndex >= 0 && _currentIndex < files.length)
@@ -132,6 +133,7 @@ class EditorController extends ChangeNotifier {
   }
 
   void _markDirty(OpenFile open) {
+    if (_disposed || !files.contains(open)) return;
     // re_editor 在 CodeEditor 首次挂载时会在 build 阶段同步通知一次，
     // 这是初始化而非内容修改：此刻 notifyListeners 会打断构建，
     // 还会把刚打开的文件误标为未保存，直接忽略。
@@ -170,8 +172,7 @@ class EditorController extends ChangeNotifier {
     if (index < 0 || index >= files.length) return;
     final wasCurrent = index == _currentIndex;
     final wasBeforeCurrent = index < _currentIndex;
-    files[index].dispose();
-    files.removeAt(index);
+    _retireFile(files.removeAt(index));
     if (files.isEmpty) {
       _currentIndex = -1;
     } else if (wasCurrent) {
@@ -186,11 +187,31 @@ class EditorController extends ChangeNotifier {
   void closeAll({OpenFile? keep}) {
     for (final f in [...files]) {
       if (keep != null && identical(f, keep)) continue;
-      f.dispose();
       files.remove(f);
+      _retireFile(f);
     }
     _currentIndex = files.isEmpty ? -1 : 0;
     notifyListeners();
+  }
+
+  // Removing a tab changes the model immediately, but its render objects live
+  // until this frame finishes. A GlobalKey move (e.g. wide to medium Agent
+  // layout) reattaches the old gutter before updating its widgets. Keep its
+  // diagnostics/controllers alive until that subtree has been reconciled.
+  void _retireFile(OpenFile file) {
+    final schedule = _retiredFiles.isEmpty;
+    _retiredFiles.add(file);
+    if (!schedule) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _disposeRetiredFiles());
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  void _disposeRetiredFiles() {
+    final retired = _retiredFiles.toList();
+    _retiredFiles.clear();
+    for (final file in retired) {
+      file.dispose();
+    }
   }
 
   /// 保存指定标签页；失败返回错误信息。
@@ -267,8 +288,7 @@ class EditorController extends ChangeNotifier {
     for (var i = files.length - 1; i >= 0; i--) {
       final filePath = p.canonicalize(files[i].path);
       if (filePath == target || p.isWithin(target, filePath)) {
-        files[i].dispose();
-        files.removeAt(i);
+        _retireFile(files.removeAt(i));
       }
     }
     if (currentPath != null) {
@@ -369,6 +389,7 @@ class EditorController extends ChangeNotifier {
       open.dispose();
     }
     files.clear();
+    _disposeRetiredFiles();
     super.dispose();
   }
 }

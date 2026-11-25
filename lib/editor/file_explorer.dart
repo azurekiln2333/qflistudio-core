@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
 import '../store/project_store.dart';
+import '../shell/large_screen_controller.dart';
+import '../shell/shortcut_label.dart';
 import '../services/file_service.dart';
 import '../editor/new_file_dialog.dart';
 import '../store/settings_store.dart';
@@ -54,7 +56,11 @@ class FileExplorer extends StatefulWidget {
     this.headerTrailing,
     this.sections,
     this.refreshSignal,
+    this.largeScreen = false,
   });
+
+  /// 大屏模式由外壳传入。它移除卡片装饰，并按桌面或平板选择行高。
+  final bool largeScreen;
 
   /// 标题栏最右侧的控件：文件/会话切换按钮。
   ///
@@ -1369,6 +1375,9 @@ class _FileExplorerState extends State<FileExplorer> {
         final rel = p.isWithin(owner.path, node.path)
             ? p.relative(node.path, from: owner.path).replaceAll(r'\', '/')
             : node.path;
+        if (widget.largeScreen) {
+          return Tooltip(message: rel, child: _buildRow(context, node, 0));
+        }
         return ListTile(
           dense: true,
           visualDensity: VisualDensity.compact,
@@ -1400,7 +1409,15 @@ class _FileExplorerState extends State<FileExplorer> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final body = _buildBody(context, scheme);
+    final body = widget.largeScreen
+        ? ListenableBuilder(
+            listenable: widget.editor,
+            builder: (context, _) => _buildBody(context, scheme),
+          )
+        : _buildBody(context, scheme);
+    if (widget.largeScreen) {
+      return Material(color: scheme.surfaceContainerLow, child: body);
+    }
     if (!widget.outlined) {
       return ColoredBox(color: scheme.surfaceContainerLow, child: body);
     }
@@ -1436,26 +1453,28 @@ class _FileExplorerState extends State<FileExplorer> {
       builder: (context, constraints) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ConstrainedBox(
-            // Grows instead of clipping when large text needs more than 48px,
-            // so short panels only give up space from the tree below.
-            constraints: const BoxConstraints(minHeight: 48),
-            child: Row(
-              children: [
-                const SizedBox(width: 4),
-                // 项目选择器在最左，开着标题栏剩余宽度。
-                Expanded(child: _buildHeaderTitle(context, scheme, sections)),
-                ..._buildHeaderActions(context, sections, constraints.maxWidth),
-                // 文件/会话切换固定在右端，和动作按钮同一个尺寸。
-                if (widget.headerTrailing case final trailing?) ...[trailing],
-                const SizedBox(width: 4),
-              ],
+          if (widget.largeScreen)
+            _buildLargeScreenHeader(context, constraints.maxWidth)
+          else
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48),
+              child: Row(
+                children: [
+                  const SizedBox(width: 4),
+                  Expanded(child: _buildHeaderTitle(context, scheme, sections)),
+                  ..._buildHeaderActions(
+                    context,
+                    sections,
+                    constraints.maxWidth,
+                  ),
+                  if (widget.headerTrailing case final trailing?) ...[trailing],
+                  const SizedBox(width: 4),
+                ],
+              ),
             ),
-          ),
-          // Always visible: saving a workspace must stay reachable even when
-          // the panel is short and the registry has a single project.
-          if (sections == null ||
-              sections.state.sidebarSection == SidebarSection.files)
+          if (!widget.largeScreen &&
+              (sections == null ||
+                  sections.state.sidebarSection == SidebarSection.files))
             ConstrainedBox(
               constraints: const BoxConstraints(minHeight: 40),
               child: Padding(
@@ -1507,6 +1526,165 @@ class _FileExplorerState extends State<FileExplorer> {
         ],
       ),
     );
+  }
+
+  /// Compact large-screen chrome has no project picker or section switch.
+  /// Workspace settings and multi-member navigation live in the More menu.
+  Widget _buildLargeScreenHeader(BuildContext context, double availableWidth) {
+    final desktop = LargeScreenScope.isDesktop(context);
+    final headerHeight = desktop ? 40.0 : 48.0;
+    final buttonWidth = desktop ? 32.0 : 48.0;
+    // Reserve readable project identity before spending space on actions.
+    // Narrow tablet sidebars keep touch targets, not six squeezed buttons.
+    final titleWidth = desktop ? 80.0 : 96.0;
+    final fullActions = availableWidth >= titleWidth + buttonWidth * 6 + 4;
+    final showSearch = availableWidth >= titleWidth + buttonWidth * 4 + 4;
+    final labels = StudioLocalizations.of(context);
+    final controller = LargeScreenScope.maybeOf(context);
+    final projectListLabel = labels.isEnglish
+        ? 'Project list'
+        : labels.isTraditionalChinese
+        ? '專案列表'
+        : '项目列表';
+    final actionStyle = ButtonStyle(
+      minimumSize: WidgetStatePropertyAll(Size(buttonWidth, headerHeight)),
+      maximumSize: WidgetStatePropertyAll(Size(buttonWidth, headerHeight)),
+      padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.standard,
+    );
+    Widget action({
+      Key? key,
+      required String tooltip,
+      required IconData icon,
+      required VoidCallback? onPressed,
+    }) => IconButton(
+      key: key,
+      tooltip: tooltip,
+      style: actionStyle,
+      iconSize: 20,
+      onPressed: onPressed,
+      icon: Icon(icon),
+    );
+    void toggleSearch() => setState(() {
+      _searchOpen = !_searchOpen;
+      _searchQuery = '';
+      _searchController.clear();
+    });
+    MenuItemButton item({
+      Key? key,
+      required String label,
+      required VoidCallback onPressed,
+      Widget? trailingIcon,
+    }) => MenuItemButton(
+      key: key,
+      onPressed: onPressed,
+      trailingIcon: trailingIcon,
+      style: ButtonStyle(
+        minimumSize: WidgetStatePropertyAll(Size(0, desktop ? 32 : 48)),
+        visualDensity: VisualDensity.standard,
+        padding: const WidgetStatePropertyAll(
+          EdgeInsets.symmetric(horizontal: 12),
+        ),
+      ),
+      child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+    );
+    final canManageWorkspace =
+        _savedWorkspace != null ||
+        supportsSavedWorkspaces ||
+        !isMainStudioRelease;
+    return SizedBox(
+      key: const ValueKey('file-explorer-header'),
+      height: headerHeight,
+      child: Row(
+        children: [
+          action(
+            key: const ValueKey('workbench-explorer-projects'),
+            tooltip: projectListLabel,
+            onPressed: controller?.showProjects,
+            icon: Icons.arrow_back,
+          ),
+          Expanded(
+            child: Text(
+              _browsing.name,
+              key: const ValueKey('file-explorer-header-project-name'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+          ),
+          action(
+            tooltip: '新建文件 (${shortcutLabel('Ctrl+N')})',
+            icon: Icons.note_add_outlined,
+            onPressed: () => _create(null, false),
+          ),
+          if (fullActions)
+            action(
+              tooltip: '新建文件夹',
+              icon: Icons.create_new_folder_outlined,
+              onPressed: () => _create(null, true),
+            ),
+          if (showSearch)
+            action(
+              tooltip: _searchOpen ? '退出搜索' : '搜索文件',
+              icon: _searchOpen ? Icons.close : Icons.search,
+              onPressed: toggleSearch,
+            ),
+          if (fullActions)
+            action(tooltip: '刷新', icon: Icons.refresh, onPressed: _refresh),
+          MenuAnchor(
+            menuChildren: [
+              if (!showSearch)
+                item(
+                  label: _searchOpen ? '退出搜索' : '搜索文件',
+                  onPressed: toggleSearch,
+                ),
+              if (!fullActions) ...[
+                item(label: '新建文件夹', onPressed: () => _create(null, true)),
+                item(label: '刷新', onPressed: _refresh),
+                const Divider(),
+              ],
+              if (canManageWorkspace)
+                item(label: '工作区设置', onPressed: _manageWorkspace),
+              if (_savedWorkspace != null)
+                item(
+                  label: '添加项目到工作区',
+                  onPressed: _pickProjectsToAddToWorkspace,
+                ),
+              if (_workspace.length > 1) ...[
+                const Divider(),
+                for (final project in _workspace)
+                  item(
+                    key: ValueKey(
+                      'file-explorer-workspace-member-${project.id}',
+                    ),
+                    label: project.name,
+                    trailingIcon: p.equals(project.path, _browsing.path)
+                        ? const Icon(Icons.check, size: 18)
+                        : null,
+                    onPressed: () => _switchProject(project),
+                  ),
+                const Divider(),
+              ],
+              item(label: '全部折叠', onPressed: _collapseAll),
+            ],
+            builder: (context, menu, _) => action(
+              key: const ValueKey('file-explorer-more'),
+              tooltip: '更多文件操作',
+              icon: Icons.more_vert,
+              onPressed: () => menu.isOpen ? menu.close() : menu.open(),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+    );
+  }
+
+  void _collapseAll() {
+    if (_expanded.isEmpty) return;
+    setState(_expanded.clear);
+    unawaited(_persistExpanded());
   }
 
   /// 共享标题栏左侧的主标题：文件段是项目选择器，会话段是会话标题。
@@ -1816,7 +1994,9 @@ class _FileExplorerState extends State<FileExplorer> {
                   onSecondaryTapUp: (details) =>
                       _showMenu(_root, details.globalPosition),
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    padding: EdgeInsets.symmetric(
+                      vertical: widget.largeScreen ? 2 : 8,
+                    ),
                     children: [
                       for (final root in _roots)
                         KeyedSubtree(
@@ -1865,11 +2045,25 @@ class _FileExplorerState extends State<FileExplorer> {
       child: Ink(
         decoration: BoxDecoration(
           color: selected
-              ? scheme.surfaceContainerHighest.withValues(alpha: 0.6)
+              ? widget.largeScreen
+                    ? scheme.secondaryContainer
+                    : scheme.surfaceContainerHighest.withValues(alpha: 0.6)
               : null,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: widget.largeScreen
+              ? BorderRadius.zero
+              : BorderRadius.circular(8),
         ),
         child: InkWell(
+          mouseCursor: widget.largeScreen ? SystemMouseCursors.click : null,
+          hoverColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.08)
+              : null,
+          highlightColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.10)
+              : null,
+          focusColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.10)
+              : null,
           onTap: () {
             if (node.isDir) {
               _toggle(node);
@@ -1882,9 +2076,17 @@ class _FileExplorerState extends State<FileExplorer> {
           child: ConstrainedBox(
             // Tree rows grow with the text scale; a fixed 34px row overflowed
             // by a couple of pixels at 2.0x on short panels.
-            constraints: const BoxConstraints(minHeight: 34),
+            constraints: BoxConstraints(
+              minHeight: widget.largeScreen
+                  ? (LargeScreenScope.isDesktop(context) ? 28 : 40)
+                  : 34,
+            ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
+              padding: EdgeInsets.symmetric(
+                vertical: widget.largeScreen
+                    ? (LargeScreenScope.isDesktop(context) ? 0 : 3)
+                    : 3,
+              ),
               child: Row(
                 children: [
                   SizedBox(width: 8.0 + depth * 18.0),
@@ -1921,7 +2123,9 @@ class _FileExplorerState extends State<FileExplorer> {
                         color: node.isDir
                             ? scheme.onSurface
                             : (selected
-                                  ? scheme.onSurface
+                                  ? widget.largeScreen
+                                        ? scheme.onSecondaryContainer
+                                        : scheme.onSurface
                                   : scheme.onSurfaceVariant),
                       ),
                     ),
@@ -1944,7 +2148,7 @@ class _FileExplorerState extends State<FileExplorer> {
       ),
     );
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      padding: EdgeInsets.symmetric(horizontal: widget.largeScreen ? 0 : 4),
       child: row,
     );
   }
