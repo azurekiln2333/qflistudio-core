@@ -24,6 +24,7 @@ import 'editor_delete_fix.dart';
 import 'editor_selection_toolbar.dart';
 import '../services/cloud_sync_service.dart';
 import '../services/file_encoding.dart';
+import '../services/project_file_access.dart';
 import '../services/code_formatter.dart';
 import '../services/local_web_server.dart';
 import '../services/runner_service.dart';
@@ -51,6 +52,7 @@ import 'editor_output_panel.dart';
 import 'editor_diagnostics.dart';
 import 'editor_find_panel.dart';
 import 'file_explorer.dart';
+import 'new_file_dialog.dart';
 import 'highlight_themes.dart';
 import 'open_file.dart';
 import 'editor_problems_bar.dart';
@@ -80,7 +82,7 @@ import 'agent/agent_pane_switcher.dart';
 import 'agent/editor_agent_host.dart';
 import 'agent/editor_sidebar_tabs.dart';
 import '../shell/large_screen_controller.dart';
-import '../shell/workbench_chrome.dart';
+import '../shell/shortcut_label.dart';
 import 'agent/session_list_view.dart';
 import '../harness/harness_host.dart';
 import '../harness/harness_session_target.dart';
@@ -117,6 +119,37 @@ class GotoLineIntent extends Intent {
 
 class FormatIntent extends Intent {
   const FormatIntent();
+}
+
+enum _EditorCommand {
+  terminal,
+  bottomPanel,
+  agent,
+  closeTab,
+  nextTab,
+  previousTab,
+  newFile,
+  run,
+}
+
+class _EditorCommandIntent extends Intent {
+  const _EditorCommandIntent(this.command);
+
+  final _EditorCommand command;
+}
+
+/// Let the page handle Agent and save shortcuts while retaining all other
+/// code-editor bindings. In particular, Ctrl/Cmd+L must not select a line.
+class _PageCodeShortcuts extends DefaultCodeShortcutsActivatorsBuilder {
+  const _PageCodeShortcuts();
+
+  @override
+  List<ShortcutActivator>? build(CodeShortcutType type) {
+    if (type == CodeShortcutType.lineSelect || type == CodeShortcutType.save) {
+      return const [];
+    }
+    return super.build(type);
+  }
 }
 
 /// Borrows one controller and overrides only its newline entry point.
@@ -345,7 +378,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   double _terminalDragAnchor = 0;
 
   bool _aiCollapsed = false;
-  _BottomPanel _bottomPanel = _BottomPanel.none;
+  _BottomPanel _selectedBottomPanel = _BottomPanel.none;
+  _BottomPanel _lastBottomPanel = _BottomPanel.terminal;
+
+  _BottomPanel get _bottomPanel => _selectedBottomPanel;
+  set _bottomPanel(_BottomPanel panel) {
+    if (panel != _BottomPanel.none) _lastBottomPanel = panel;
+    _selectedBottomPanel = panel;
+  }
+
   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
 
   /// agent 宿主：持有侧边栏分段、主体分段和对话流收起状态。
@@ -1746,10 +1787,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _toggleExplorer() {
-    if (_largeScreen case final largeScreen?) {
-      largeScreen.select(WorkbenchActivity.files);
-      return;
-    }
+    // The workbench owns explorer navigation; it never calls this phone action.
+    if (_largeScreen != null) return;
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
     if (wide) {
       // 侧栏默认隐藏，第一次点击为展开。
@@ -2088,6 +2127,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               runtime: runtime,
               state: host.state,
               onCollapse: _collapseAgentPanel,
+              showCollapse: _largeScreen == null,
               onCreateSession: _createAgentSession,
               child: pane ?? const SizedBox.shrink(),
             ),
@@ -2100,9 +2140,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           top: 0,
           bottom: 0,
           width: Breakpoints.agentPaneWidth,
-          child: Offstage(offstage: collapsed, child: content),
+          child: Offstage(
+            offstage: collapsed,
+            child: _largeScreen == null
+                ? content
+                : TickerMode(
+                    enabled: !collapsed,
+                    child: ExcludeFocus(
+                      excluding: collapsed,
+                      child: ExcludeSemantics(
+                        excluding: collapsed,
+                        child: IgnorePointer(
+                          ignoring: collapsed,
+                          child: content,
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
         ),
-        if (collapsed)
+        if (collapsed && _largeScreen == null)
           AgentDockRail(
             onExpand: _showAgentPanel,
             badgeCount: _agentBadgeCount(),
@@ -2118,7 +2175,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 抽屉和桌面侧边栏共用这里。
   Widget _buildSidebar(BuildContext context, {VoidCallback? onFileOpened}) {
     final host = _agentHost;
-    if (host == null) {
+    if (host == null || _largeScreen != null) {
       return _buildExplorerCard(context, onFileOpened: onFileOpened);
     }
     final runtime = host.runtime;
@@ -2289,6 +2346,94 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     setState(
       () => _bottomPanel = visible ? _BottomPanel.none : _BottomPanel.terminal,
     );
+  }
+
+  void _toggleBottomPanel() {
+    final next = _bottomPanel == _BottomPanel.none
+        ? _lastBottomPanel
+        : _BottomPanel.none;
+    if (next == _BottomPanel.terminal) _terminalCollapsed = false;
+    _showPanel(next);
+  }
+
+  void _invokeEditorCommand(_EditorCommand command) {
+    switch (command) {
+      case _EditorCommand.terminal:
+        if (_terminalVisible) _terminalKey.currentState?.unfocusInput();
+        if (!_terminalVisible) _terminalCollapsed = false;
+        _toggleTerminalPanel();
+      case _EditorCommand.bottomPanel:
+        _toggleBottomPanel();
+      case _EditorCommand.agent:
+        _toggleAgentPanel();
+      case _EditorCommand.closeTab:
+        if (_editor.current != null) {
+          unawaited(_closeTab(_editor.currentIndex));
+        }
+      case _EditorCommand.nextTab:
+      case _EditorCommand.previousTab:
+        if (_editor.files.isEmpty) return;
+        final delta = command == _EditorCommand.nextTab ? 1 : -1;
+        _editor.select((_editor.currentIndex + delta) % _editor.files.length);
+      case _EditorCommand.newFile:
+        unawaited(_newFile());
+      case _EditorCommand.run:
+        if (!_runningProject && !_debugger.busy) unawaited(_runProject());
+    }
+  }
+
+  Future<void> _newFile() async {
+    final current = _editor.current;
+    final owner = current == null ? widget.project : _gitOwnerOf(current);
+    if (owner == null || !_isProjectAvailable(owner.path)) {
+      _showSnack('项目文件夹已不可用');
+      return;
+    }
+    final name = await showNewFileDialog(
+      context,
+      settings: widget.settings,
+      projectLanguage: owner.language,
+    );
+    if (!mounted || name == null) return;
+    if (!_isProjectAvailable(owner.path)) {
+      _showSnack('项目文件夹已不可用');
+      return;
+    }
+    final path = p.normalize(p.join(owner.path, name));
+    if (p.isAbsolute(name) || !p.isWithin(owner.path, path)) {
+      _showSnack('文件名必须位于当前项目内');
+      return;
+    }
+    try {
+      if (!ProjectFileAccess.isExternal(owner.path) &&
+          !await Directory(owner.path).exists()) {
+        if (mounted) _showSnack('项目文件夹已不可用');
+        return;
+      }
+      if (await FileSystemEntity.type(path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        if (mounted) _showSnack('“$name”已存在');
+        return;
+      }
+      await ProjectFileAccess.writeBytes(path, const <int>[]);
+      if (!mounted) return;
+      _treeRefresh.value++;
+      final error = await _editor.openPath(
+        path,
+        ownerProjectName: owner.name,
+        ownerProjectPath: owner.path,
+        ownerProjectType: owner.type,
+        shouldOpen: () => mounted && _isProjectAvailable(owner.path),
+      );
+      if (!mounted) return;
+      if (error != null) {
+        _showSnack(error);
+      } else {
+        _showEditorPane(recheckDisk: false);
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) _showSnack('创建失败：${error.message}');
+    }
   }
 
   void _openSettings() {
@@ -3386,24 +3531,76 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide;
     // 窄屏用原撤销按钮的位置切换面板。
     // 标题保留原宽度。
-    final undoInMenu = _agentHost != null && !wide;
+    final undoInMenu = _largeScreen != null || (_agentHost != null && !wide);
     final editorVisible = wideAgentPane || !_agentPanelActive;
     final focusMode = _inlineFocusDocuments.contains(_editor.current);
     final sidebarVisible = !focusMode && (_explorerVisible ?? false);
     // Android 的窗口铺到屏幕底边，导航条会压住最后一屏内容，由编辑器自己让位。
     final bottomInset = EditorBottomInset.insetOf(context);
     return Shortcuts(
-      shortcuts: const {
-        SingleActivator(LogicalKeyboardKey.keyS, control: true): SaveIntent(),
-        SingleActivator(LogicalKeyboardKey.keyS, meta: true): SaveIntent(),
-        SingleActivator(LogicalKeyboardKey.keyF, control: true): FindIntent(),
-        SingleActivator(LogicalKeyboardKey.keyF, meta: true): FindIntent(),
-        SingleActivator(LogicalKeyboardKey.keyG, control: true):
-            GotoLineIntent(),
-        SingleActivator(LogicalKeyboardKey.keyI, control: true): FormatIntent(),
+      shortcuts: {
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true):
+            const SaveIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyS, meta: true):
+            const SaveIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            const FindIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
+            const FindIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyG, control: true):
+            const GotoLineIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyI, control: true):
+            const FormatIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true):
+            const GotoLineIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyI, meta: true):
+            const FormatIntent(),
+        const SingleActivator(LogicalKeyboardKey.backquote, control: true):
+            const _EditorCommandIntent(_EditorCommand.terminal),
+        const SingleActivator(LogicalKeyboardKey.backquote, meta: true):
+            const _EditorCommandIntent(_EditorCommand.terminal),
+        if (!_terminalInputHasFocus) ...{
+          const SingleActivator(LogicalKeyboardKey.keyJ, control: true):
+              const _EditorCommandIntent(_EditorCommand.bottomPanel),
+          const SingleActivator(LogicalKeyboardKey.keyJ, meta: true):
+              const _EditorCommandIntent(_EditorCommand.bottomPanel),
+          const SingleActivator(LogicalKeyboardKey.keyL, control: true):
+              const _EditorCommandIntent(_EditorCommand.agent),
+          const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
+              const _EditorCommandIntent(_EditorCommand.agent),
+          const SingleActivator(LogicalKeyboardKey.keyW, control: true):
+              const _EditorCommandIntent(_EditorCommand.closeTab),
+          const SingleActivator(LogicalKeyboardKey.keyW, meta: true):
+              const _EditorCommandIntent(_EditorCommand.closeTab),
+        },
+        const SingleActivator(LogicalKeyboardKey.tab, control: true):
+            const _EditorCommandIntent(_EditorCommand.nextTab),
+        const SingleActivator(
+          LogicalKeyboardKey.tab,
+          control: true,
+          shift: true,
+        ): const _EditorCommandIntent(
+          _EditorCommand.previousTab,
+        ),
+        const SingleActivator(LogicalKeyboardKey.tab, meta: true):
+            const _EditorCommandIntent(_EditorCommand.nextTab),
+        const SingleActivator(LogicalKeyboardKey.tab, meta: true, shift: true):
+            const _EditorCommandIntent(_EditorCommand.previousTab),
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true):
+            const _EditorCommandIntent(_EditorCommand.newFile),
+        const SingleActivator(LogicalKeyboardKey.keyN, meta: true):
+            const _EditorCommandIntent(_EditorCommand.newFile),
+        const SingleActivator(LogicalKeyboardKey.f5):
+            const _EditorCommandIntent(_EditorCommand.run),
       },
       child: Actions(
         actions: {
+          _EditorCommandIntent: CallbackAction<_EditorCommandIntent>(
+            onInvoke: (intent) {
+              _invokeEditorCommand(intent.command);
+              return null;
+            },
+          ),
           SaveIntent: CallbackAction<SaveIntent>(
             onInvoke: (_) {
               _saveCurrent();
@@ -3477,7 +3674,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                   statusBarBrightness: scheme.brightness,
                                 )
                               : null,
-                          leading: selected != null
+                          leading: selected != null || _largeScreen != null
                               ? null
                               : IconButton(
                                   tooltip: sidebarVisible ? '收起文件树' : '打开文件树',
@@ -3509,8 +3706,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           active: _agentPanelActive,
                                           switchesPane: !wideAgentPane,
                                           onPressed: _toggleAgentPanel,
+                                          shortcut: _largeScreen == null
+                                              ? null
+                                              : shortcutLabel('Ctrl+L'),
                                         ),
-                                      if (widget.onMinimize != null)
+                                      if (_largeScreen == null &&
+                                          widget.onMinimize != null)
                                         IconButton(
                                           tooltip: '暂时收起编辑器',
                                           onPressed: widget.onMinimize,
@@ -3556,7 +3757,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                         // configured project entry, a long press runs
                                         // the file that is active when it fires.
                                         Tooltip(
-                                          message: _runButtonTooltip,
+                                          message: _largeScreen == null
+                                              ? _runButtonTooltip
+                                              : '$_runButtonTooltip (${shortcutLabel('F5')})',
                                           child: Semantics(
                                             button: true,
                                             enabled:
@@ -3622,6 +3825,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                             );
                                             return;
                                           }
+                                          if (value.startsWith('workbench:')) {
+                                            final id = value.substring(10);
+                                            for (final action
+                                                in _workbenchMenuActions(
+                                                  context,
+                                                )) {
+                                              if (action.id == id) {
+                                                action.onPressed?.call();
+                                                break;
+                                              }
+                                            }
+                                            return;
+                                          }
                                           switch (value) {
                                             case 'recover_orphan':
                                               unawaited(_recoverOrphanedFile());
@@ -3636,6 +3852,32 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                           }
                                         },
                                         itemBuilder: (context) => [
+                                          if (_largeScreen != null) ...[
+                                            for (final action
+                                                in _workbenchMenuActions(
+                                                  context,
+                                                ))
+                                              PopupMenuItem<String>(
+                                                key: ValueKey(
+                                                  'workbench-menu-${action.id}',
+                                                ),
+                                                value: 'workbench:${action.id}',
+                                                enabled:
+                                                    action.onPressed != null,
+                                                child: Row(
+                                                  children: [
+                                                    Icon(action.icon, size: 20),
+                                                    const SizedBox(width: 12),
+                                                    Flexible(
+                                                      child: Text(
+                                                        action.tooltip,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            const PopupMenuDivider(),
+                                          ],
                                           for (final action in inlineMenu)
                                             PopupMenuItem<String>(
                                               key: ValueKey(
@@ -3787,7 +4029,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                               ),
                                             ),
                                           // 矮窗口下快捷栏让位，这一批动作回到菜单，一个都不丢。
-                                          if (!focusMode &&
+                                          if (_largeScreen == null &&
+                                              !focusMode &&
                                               !_quickBarFits(context)) ...[
                                             const PopupMenuDivider(),
                                             for (final action
@@ -4079,7 +4322,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                         if (agentEnabled && layout == WorkbenchLayout.wide)
                           SizedBox(
                             width: agentCollapsed
-                                ? _agentRailWidth
+                                ? (_largeScreen == null ? _agentRailWidth : 0)
                                 : Breakpoints.agentPaneWidth,
                             child: Listener(
                               behavior: HitTestBehavior.translucent,
@@ -4097,6 +4340,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     // 快捷栏整个不画（与标签栏、符号栏、状态栏的让位规则一致）。
                     // 25 dp 的条要的就是 25 dp，不再按 36 dp 留位置。
                     final showQuickBar =
+                        _largeScreen == null &&
                         !focusMode &&
                         bodyHeight >=
                             minEditorHeight +
@@ -4491,8 +4735,96 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     );
   }
 
+  /// Workbench menus reuse action enablement, not the phone fallback list.
+  List<EditorQuickBarAction> _workbenchMenuActions(BuildContext context) {
+    const ids = {
+      'undo',
+      'save',
+      'find',
+      'goto',
+      'format',
+      'content_tool',
+      'minimap',
+      'git',
+      'cloud_pull',
+      'online_terminal',
+      'close_editor',
+    };
+    final shortcuts = {
+      'undo': 'Ctrl+Z',
+      'save': 'Ctrl+S',
+      'find': 'Ctrl+F',
+      'goto': 'Ctrl+G',
+      'format': 'Ctrl+I',
+    };
+    return [
+      for (final action in _quickBarEditorActions(context))
+        if (ids.contains(action.id))
+          EditorQuickBarAction(
+            id: action.id,
+            icon: action.icon,
+            tooltip: shortcuts.containsKey(action.id)
+                ? action.tooltip.replaceAll(
+                    shortcuts[action.id]!,
+                    shortcutLabel(shortcuts[action.id]!),
+                  )
+                : action.tooltip,
+            onPressed: action.onPressed,
+            active: action.active,
+          ),
+    ];
+  }
+
+  Widget _buildWorkbenchPanels() {
+    final scheme = Theme.of(context).colorScheme;
+    const panels = [
+      (_BottomPanel.terminal, Icons.terminal_outlined, '终端'),
+      (_BottomPanel.output, Icons.output, '输出'),
+      (_BottomPanel.problems, Icons.warning_amber_outlined, '问题'),
+      (_BottomPanel.debug, Icons.bug_report_outlined, '调试'),
+      (_BottomPanel.debugConsole, Icons.data_object, '调试控制台'),
+      (_BottomPanel.ports, Icons.router_outlined, '端口'),
+    ];
+    return Row(
+      key: const ValueKey('workbench-panel-buttons'),
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final (panel, icon, label) in panels)
+          IconButton(
+            key: ValueKey('workbench-panel-${panel.name}'),
+            tooltip: panel == _BottomPanel.terminal
+                ? '$label (${shortcutLabel('Ctrl+`')})'
+                : _bottomPanel == panel
+                ? '$label (${shortcutLabel('Ctrl+J')})'
+                : label,
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            style: IconButton.styleFrom(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            color: _bottomPanel == panel
+                ? scheme.primary
+                : scheme.onSurfaceVariant,
+            onPressed: () {
+              if (panel == _BottomPanel.terminal) {
+                if (_terminalVisible) _terminalKey.currentState?.unfocusInput();
+                if (!_terminalVisible) _terminalCollapsed = false;
+                _toggleTerminalPanel();
+              } else {
+                _showPanel(_bottomPanel == panel ? _BottomPanel.none : panel);
+              }
+            },
+            icon: Icon(icon),
+          ),
+      ],
+    );
+  }
+
   /// 快捷栏没有空间时（矮窗口），同一批动作回到「更多」菜单。
   List<EditorQuickBarAction> _quickBarFallbackActions(BuildContext context) {
+    if (_largeScreen != null) return const [];
     final agentMode = _quickBarAgentMode;
     final actions = agentMode
         ? _quickBarAgentActions()
@@ -4531,7 +4863,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       readOnly: open?.readOnly == true,
       brokenProject: open != null && _isOrphaned(open),
       undoInMenu:
-          host != null && MediaQuery.sizeOf(context).width < _wideBreakpoint,
+          _largeScreen != null ||
+          (host != null && MediaQuery.sizeOf(context).width < _wideBreakpoint),
       minimapVisible: widget.settings.minimap,
       terminalVisible: _terminalVisible,
       contentPanelOpen: panelOpen,
@@ -4599,7 +4932,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final scheme = Theme.of(context).colorScheme;
     final open = _editor.current;
     if (open == null || _tabController == null) {
-      return Center(
+      final empty = Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -4618,6 +4951,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           ],
         ),
       );
+      if (_largeScreen == null) return empty;
+      return Column(
+        children: [
+          Expanded(child: empty),
+          Align(
+            alignment: Alignment.centerRight,
+            child: _buildWorkbenchPanels(),
+          ),
+        ],
+      );
     }
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -4631,6 +4974,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             !focused && widget.settings.showEditorTabs && available >= 220;
         final showSymbols =
             !focused &&
+            (_largeScreen == null || widget.settings.largeScreenSymbolBar) &&
             available >= 160 &&
             (contribution?.showCoreSymbols ?? true);
         final showStatus =
@@ -4740,14 +5084,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 ),
               )
             else
-              GestureDetector(
-                onTap: () => _closeTab(_editor.files.indexOf(open)),
-                child: Icon(
-                  Icons.close,
-                  size: 15,
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
+              _buildTabCloseButton(open, scheme),
           ],
         ),
       ),
@@ -4758,6 +5095,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       onSecondaryTapUp: (details) => _showTabMenu(open, details.globalPosition),
       child: tab,
     );
+  }
+
+  Widget _buildTabCloseButton(OpenFile open, ColorScheme scheme) {
+    final button = GestureDetector(
+      onTap: () => _closeTab(_editor.files.indexOf(open)),
+      child: Icon(Icons.close, size: 15, color: scheme.onSurfaceVariant),
+    );
+    return _largeScreen == null
+        ? button
+        : Tooltip(message: '关闭标签 (${shortcutLabel('Ctrl+W')})', child: button);
   }
 
   Future<void> _showTabMenu(OpenFile open, Offset position) async {
@@ -4910,6 +5257,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 focusNode: open.focusNode,
                 scrollController: open.scrollController,
                 findController: open.findController,
+                shortcutsActivatorsBuilder: const _PageCodeShortcuts(),
                 shortcutOverrideActions: {
                   ...editorShortcutOverrides(open.controller),
                   ...?contribution?.shortcutOverrideActions,
@@ -5163,7 +5511,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                     ),
                   ],
                 ],
-                if (open.dirty && !widget.project.isCloud) ...[
+                if (_largeScreen != null) ...[
+                  const Spacer(),
+                  SizedBox(
+                    width: (constraints.maxWidth * 0.55).clamp(0.0, 168.0),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: _buildWorkbenchPanels(),
+                    ),
+                  ),
+                ],
+                if (open.dirty &&
+                    !widget.project.isCloud &&
+                    (_largeScreen == null || constraints.maxWidth >= 400)) ...[
                   const SizedBox(width: 12),
                   Text(
                     '未保存',

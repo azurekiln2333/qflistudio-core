@@ -21,6 +21,7 @@ class AgentEntryButton extends StatelessWidget {
     required this.active,
     required this.onPressed,
     this.switchesPane = false,
+    this.shortcut,
   });
 
   final EditorAgentHost host;
@@ -32,6 +33,9 @@ class AgentEntryButton extends StatelessWidget {
 
   /// 窄屏和中屏切回编辑器。宽屏收起右栏。
   final bool switchesPane;
+
+  /// Workbench-only label; phone tooltips retain their existing text.
+  final String? shortcut;
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +54,8 @@ class AgentEntryButton extends StatelessWidget {
 
   Widget _button(int badge) => IconButton(
     key: const ValueKey('editor-agent-toggle'),
-    tooltip: active ? (switchesPane ? '返回编辑器' : '收起 Agent 面板') : '打开 Agent 面板',
+    tooltip:
+        '${active ? (switchesPane ? '返回编辑器' : '收起 Agent 面板') : '打开 Agent 面板'}${shortcut == null ? '' : ' ($shortcut)'}',
     onPressed: onPressed,
     icon: AgentBadgeIcon(
       badgeCount: badge,
@@ -102,12 +107,16 @@ class AgentDock extends StatelessWidget {
     required this.onCollapse,
     required this.onCreateSession,
     required this.child,
+    this.showCollapse = true,
   });
 
   final AgentRuntime runtime;
   final WorkbenchState state;
 
   final VoidCallback onCollapse;
+
+  /// The workbench uses its top-bar Agent toggle as the sole collapse control.
+  final bool showCollapse;
 
   /// 新建会话并把 Agent 面板切到它上面。
   final Future<void> Function() onCreateSession;
@@ -159,12 +168,13 @@ class AgentDock extends StatelessWidget {
                       onPressed: () => onCreateSession(),
                       icon: const Icon(Icons.add_comment_outlined, size: 20),
                     ),
-                    IconButton(
-                      key: const ValueKey('editor-agent-collapse'),
-                      tooltip: '收起 Agent 面板',
-                      onPressed: onCollapse,
-                      icon: const Icon(Icons.chevron_right),
-                    ),
+                    if (showCollapse)
+                      IconButton(
+                        key: const ValueKey('editor-agent-collapse'),
+                        tooltip: '收起 Agent 面板',
+                        onPressed: onCollapse,
+                        icon: const Icon(Icons.chevron_right),
+                      ),
                     const SizedBox(width: 4),
                   ],
                 );
