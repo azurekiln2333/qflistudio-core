@@ -74,15 +74,23 @@ jobs:
         if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         run: flutter analyze --no-pub --no-fatal-infos 2>&1 | tee "$RUNNER_TEMP/core-analyze.log"
       - name: Run the complete test suite
+        id: tests
         if: ${{ !cancelled() && steps.packages.outcome == 'success' }}
         run: flutter test --no-pub --reporter json 2>&1 | tee "$RUNNER_TEMP/core-test.json"
       - name: Report failed tests
-        if: ${{ failure() && steps.packages.outcome == 'success' }}
-        run: |
-          python3 - "$RUNNER_TEMP/core-test.json" <<'PY'
+        if: ${{ !cancelled() && steps.tests.outcome == 'failure' }}
+        env:
+          TEST_LOG: ${{ runner.temp }}/core-test.json
+        run: &report-failed-tests |
+          python3 - "$TEST_LOG" <<'PY'
           import json, re, sys
+          from collections import deque
           suites, tests, errors, stacks, prints = {}, {}, {}, {}, {}
+          failures, tail = [], deque(maxlen=40)
           ROOT = re.compile(r'file:///\S*?/qfli_studio_core/')
+
+          def escape(text):
+              return text.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
 
           def frames(text):
               # Keep only frames from our own sources and tests.
@@ -94,21 +102,39 @@ jobs:
               return out[:8]
 
           def detail(tid):
-              # The caught exception that flutter_test prints before "Test failed".
+              # Collapse adjacent copies before the annotation budget is applied.
               lines = errors.get(tid, '').strip().splitlines()[1:8]
+              blocks = []
               for msg in prints.get(tid, []):
                   if 'EXCEPTION CAUGHT' not in msg:
                       continue
-                  kept = []
-                  for l in msg.splitlines():
-                      if l.startswith('When the exception was thrown') or l.startswith('The relevant error-causing'):
-                          break
-                      if l.strip() and not l.startswith('══'):
-                          kept.append(l.rstrip())
-                  lines += kept[:14] + frames(msg)
+                  for block in re.split(r'(?m)^.*EXCEPTION CAUGHT[^\n]*(?:\n|$)', msg)[1:]:
+                      kept = []
+                      for line in block.splitlines():
+                          if line.startswith(('When the exception was thrown', 'The relevant error-causing')):
+                              break
+                          if line.strip() and not line.startswith('══'):
+                              kept.append(line.rstrip())
+                      own_frames = frames(block)
+                      key = (tuple(kept), tuple(own_frames))
+                      if blocks and blocks[-1][0] == key:
+                          blocks[-1][2] += 1
+                      else:
+                          blocks.append([key, kept[:14] + own_frames, 1])
+              for _, block, count in blocks:
+                  lines += block
+                  if count > 1:
+                      lines.append(f'[same exception repeated {count} times consecutively]')
               return lines + frames(stacks.get(tid, ''))
 
-          for line in open(sys.argv[1], encoding='utf-8', errors='replace'):
+          try:
+              log = open(sys.argv[1], encoding='utf-8', errors='replace')
+          except OSError as error:
+              print(f'::error title=All failed tests::{escape(str(error))[:60000]}')
+              sys.exit(0)
+
+          for line in log:
+              tail.append(line.rstrip())
               line = line.strip()
               if not line.startswith('{'):
                   continue
@@ -127,15 +153,24 @@ jobs:
                   stacks.setdefault(e['testID'], e.get('stackTrace') or '')
               elif kind == 'print':
                   prints.setdefault(e.get('testID'), []).append(e.get('message') or '')
-              elif kind == 'testDone' and e.get('result') != 'success' and not e.get('hidden'):
+              elif kind == 'testDone' and e.get('result') in ('failure', 'error'):
                   path, name = tests.get(e['testID'], ('', '?'))
                   lines = errors.get(e['testID'], '').strip().splitlines()
-                  first = lines[0][:200] if lines else e.get('result', '')
+                  first = lines[0] if lines else e.get('result', '')
                   head = ' '.join(f'{path} :: {name} :: {first}'.split())
-                  body = ['    ' + l.strip()[:240] for l in detail(e['testID']) if l.strip()]
-                  text = '\n'.join([head] + body)[:4000]
-                  text = text.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
-                  print(f'::error title=Failed test::{text}')
+                  failures.append(head)
+                  # Reserve error slot ten for the complete failure inventory.
+                  number = len(failures)
+                  level = 'error' if number <= 9 else 'warning' if number <= 19 else 'notice'
+                  if number <= 29:
+                      body = ['    ' + l.strip()[:240] for l in detail(e['testID']) if l.strip()]
+                      text = escape('\n'.join([head] + body)[:4000])
+                      print(f'::{level} title=Failed test::{text}')
+          log.close()
+          summary = '\n'.join(failures) if failures else (
+              'Test command failed without completed failure events. Last output:\n' + '\n'.join(tail)
+          )
+          print(f'::error title=All failed tests::{escape(summary)[:60000]}')
           PY
       - name: Upload verification logs
         if: always()
@@ -147,3 +182,62 @@ jobs:
             ${{ runner.temp }}/core-analyze.log
             ${{ runner.temp }}/core-test.json
           if-no-files-found: ignore
+
+  screenshots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: qfli_studio_core
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-next
+          ref: ${{ env.APP_REF }}
+          path: qflistudio
+          persist-credentials: false
+      - name: Install screenshot fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ${{ runner.temp }}/flutter_ohos
+            ~/.pub-cache
+          key: core-shots-ohos-${{ env.FLUTTER_OHOS_REVISION }}-${{ hashFiles('qfli_studio_core/pubspec.lock') }}
+          restore-keys: core-ohos-${{ env.FLUTTER_OHOS_REVISION }}-
+      - name: Install the pinned OHOS Flutter SDK
+        working-directory: qfli_studio_core
+        run: |
+          bash ../qflistudio/tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter_ohos" "$FLUTTER_OHOS_TAG" "$FLUTTER_OHOS_REVISION" --ohos
+          echo "$RUNNER_TEMP/flutter_ohos/bin" >> "$GITHUB_PATH"
+      - name: Resolve packages
+        id: packages
+        working-directory: qfli_studio_core
+        run: |
+          flutter config --no-analytics
+          flutter config --no-enable-ohos
+          flutter pub get
+      - name: Capture workbench screenshots
+        id: tests
+        working-directory: qfli_studio_core
+        env:
+          QFLI_SCREENSHOTS: '1'
+        run: flutter test --no-pub test/screenshots/workbench_screenshots_test.dart --reporter json 2>&1 | tee "$RUNNER_TEMP/workbench-screenshots.json"
+      - name: Report failed tests
+        if: ${{ !cancelled() && steps.tests.outcome == 'failure' }}
+        env:
+          TEST_LOG: ${{ runner.temp }}/workbench-screenshots.json
+        run: *report-failed-tests
+      - name: Upload workbench screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: workbench-screenshots-${{ github.sha }}
+          path: |
+            qfli_studio_core/build/screenshots/*.png
+            ${{ runner.temp }}/workbench-screenshots.json
+          if-no-files-found: warn
