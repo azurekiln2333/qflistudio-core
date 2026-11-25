@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/project.dart';
 import '../store/project_store.dart';
+import '../shell/large_screen_controller.dart';
 import '../services/file_service.dart';
 import '../editor/new_file_dialog.dart';
 import '../store/settings_store.dart';
@@ -54,7 +55,11 @@ class FileExplorer extends StatefulWidget {
     this.headerTrailing,
     this.sections,
     this.refreshSignal,
+    this.largeScreen = false,
   });
+
+  /// 大屏模式由外壳传入。它移除卡片装饰，并按桌面或平板选择行高。
+  final bool largeScreen;
 
   /// 标题栏最右侧的控件：文件/会话切换按钮。
   ///
@@ -1369,6 +1374,9 @@ class _FileExplorerState extends State<FileExplorer> {
         final rel = p.isWithin(owner.path, node.path)
             ? p.relative(node.path, from: owner.path).replaceAll(r'\', '/')
             : node.path;
+        if (widget.largeScreen) {
+          return Tooltip(message: rel, child: _buildRow(context, node, 0));
+        }
         return ListTile(
           dense: true,
           visualDensity: VisualDensity.compact,
@@ -1400,7 +1408,15 @@ class _FileExplorerState extends State<FileExplorer> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final body = _buildBody(context, scheme);
+    final body = widget.largeScreen
+        ? ListenableBuilder(
+            listenable: widget.editor,
+            builder: (context, _) => _buildBody(context, scheme),
+          )
+        : _buildBody(context, scheme);
+    if (widget.largeScreen) {
+      return Material(color: scheme.surfaceContainerLow, child: body);
+    }
     if (!widget.outlined) {
       return ColoredBox(color: scheme.surfaceContainerLow, child: body);
     }
@@ -1816,7 +1832,9 @@ class _FileExplorerState extends State<FileExplorer> {
                   onSecondaryTapUp: (details) =>
                       _showMenu(_root, details.globalPosition),
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    padding: EdgeInsets.symmetric(
+                      vertical: widget.largeScreen ? 2 : 8,
+                    ),
                     children: [
                       for (final root in _roots)
                         KeyedSubtree(
@@ -1865,11 +1883,25 @@ class _FileExplorerState extends State<FileExplorer> {
       child: Ink(
         decoration: BoxDecoration(
           color: selected
-              ? scheme.surfaceContainerHighest.withValues(alpha: 0.6)
+              ? widget.largeScreen
+                    ? scheme.secondaryContainer
+                    : scheme.surfaceContainerHighest.withValues(alpha: 0.6)
               : null,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: widget.largeScreen
+              ? BorderRadius.zero
+              : BorderRadius.circular(8),
         ),
         child: InkWell(
+          mouseCursor: widget.largeScreen ? SystemMouseCursors.click : null,
+          hoverColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.08)
+              : null,
+          highlightColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.10)
+              : null,
+          focusColor: widget.largeScreen
+              ? scheme.onSurface.withValues(alpha: 0.10)
+              : null,
           onTap: () {
             if (node.isDir) {
               _toggle(node);
@@ -1882,9 +1914,17 @@ class _FileExplorerState extends State<FileExplorer> {
           child: ConstrainedBox(
             // Tree rows grow with the text scale; a fixed 34px row overflowed
             // by a couple of pixels at 2.0x on short panels.
-            constraints: const BoxConstraints(minHeight: 34),
+            constraints: BoxConstraints(
+              minHeight: widget.largeScreen
+                  ? (LargeScreenScope.isDesktop(context) ? 28 : 40)
+                  : 34,
+            ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
+              padding: EdgeInsets.symmetric(
+                vertical: widget.largeScreen
+                    ? (LargeScreenScope.isDesktop(context) ? 0 : 3)
+                    : 3,
+              ),
               child: Row(
                 children: [
                   SizedBox(width: 8.0 + depth * 18.0),
@@ -1921,7 +1961,9 @@ class _FileExplorerState extends State<FileExplorer> {
                         color: node.isDir
                             ? scheme.onSurface
                             : (selected
-                                  ? scheme.onSurface
+                                  ? widget.largeScreen
+                                        ? scheme.onSecondaryContainer
+                                        : scheme.onSurface
                                   : scheme.onSurfaceVariant),
                       ),
                     ),
@@ -1944,7 +1986,7 @@ class _FileExplorerState extends State<FileExplorer> {
       ),
     );
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      padding: EdgeInsets.symmetric(horizontal: widget.largeScreen ? 0 : 4),
       child: row,
     );
   }

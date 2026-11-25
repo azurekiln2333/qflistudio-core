@@ -12,6 +12,7 @@ import 'package:re_editor/re_editor.dart';
 import '../config/ohos_platform.dart';
 import '../chat/composer_draft.dart';
 import '../git/git_backend.dart';
+import '../git/git_branch_label.dart';
 import '../models/project.dart';
 import '../i18n/studio_localizations.dart';
 import '../pages/git/git_worktree_guard.dart';
@@ -138,14 +139,16 @@ class _EditorCommandIntent extends Intent {
   final _EditorCommand command;
 }
 
-/// Let the page handle Agent and save shortcuts while retaining all other
-/// code-editor bindings. In particular, Ctrl/Cmd+L must not select a line.
+/// Delegate page-owned shortcuts without disabling an absent Agent's binding.
 class _PageCodeShortcuts extends DefaultCodeShortcutsActivatorsBuilder {
-  const _PageCodeShortcuts();
+  const _PageCodeShortcuts({required this.hasAgent});
+
+  final bool hasAgent;
 
   @override
   List<ShortcutActivator>? build(CodeShortcutType type) {
-    if (type == CodeShortcutType.lineSelect || type == CodeShortcutType.save) {
+    if (type == CodeShortcutType.save ||
+        (hasAgent && type == CodeShortcutType.lineSelect)) {
       return const [];
     }
     return super.build(type);
@@ -399,6 +402,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 和 agent 宿主同级：主机由 [HarnessHosts] 装配，没有注册时为空，
   /// 面板只显示内置 Agent 的原生会话。
   HarnessHub? _harnessHub;
+  bool _ownsHarnessHub = false;
 
   /// agent 文件变更事件的订阅；换运行时或销毁时摘掉。
   StreamSubscription<AgentFileChange>? _agentFileSub;
@@ -430,6 +434,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   /// 终端会话、输入卡片草稿）原地迁移而不重建。
   final GlobalKey _editorColumnKey = GlobalKey(debugLabel: 'editor-column');
   final GlobalKey _agentPaneKey = GlobalKey(debugLabel: 'editor-agent-pane');
+
+  /// Preferred desktop width; its drag handle clamps it to 320–720 dp.
+  double _agentPaneWidth = Breakpoints.agentPaneWidth;
+  double? _agentDragWidth;
+  final Map<String, Future<String?>> _branchLabels = {};
+  final Map<OpenFile, _WorkbenchSelectionToolbarController> _selectionMenus =
+      {};
 
   /// Mirror of the terminal prompt's focus state, kept in sync by
   /// [_onTerminalInputFocusChanged].
@@ -543,6 +554,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             projectId: widget.project.id,
             signedIn: () => widget.auth.isLoggedIn,
           );
+      _ownsHarnessHub = widget.ownsHarnessHub;
       // 注入的运行时已就绪：现在就订阅它的文件变更事件。
       _syncAgentFileEvents();
       if (widget.agentPaneRequest > 0) {
@@ -632,11 +644,39 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         )) {
       _reconcileWorkspaceMembers();
     }
+    // Workbench session entry can reuse this editor with a different shared hub.
+    // Switch before handling its reveal/target requests; never dispose a caller's hub.
+    if (_largeScreen != null &&
+        _agentHost != null &&
+        !identical(oldWidget.harnessHub, widget.harnessHub)) {
+      for (final cancel in _sessionWaits.toList()) {
+        cancel();
+      }
+      _sessionWaits.clear();
+      final previousHub = _harnessHub;
+      final previousOwned = _ownsHarnessHub;
+      _harnessHub =
+          widget.harnessHub ??
+          harnessHubFor(
+            auth: widget.auth,
+            store: widget.store,
+            settings: widget.settings,
+            projectRoot: widget.project.path,
+            runtime: _agentHost?.runtime,
+            projectId: widget.project.id,
+            signedIn: () => widget.auth.isLoggedIn,
+          );
+      _ownsHarnessHub = widget.harnessHub == null || widget.ownsHarnessHub;
+      if (previousOwned) previousHub?.dispose();
+    }
     if (oldWidget.agentPaneRequest != widget.agentPaneRequest) {
       _revealAgentPane();
     }
     final target = widget.initialHarnessSession;
-    if (target != null && target != oldWidget.initialHarnessSession) {
+    if (target != null &&
+        (target != oldWidget.initialHarnessSession ||
+            (_largeScreen != null &&
+                !identical(oldWidget.harnessHub, widget.harnessHub)))) {
       unawaited(_openInitialHarnessSession(target));
     }
   }
@@ -693,7 +733,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       target,
       bind: _sessionWaits.add,
     );
-    if (!mounted) return;
+    if (!mounted || !identical(_harnessHub, hub)) return;
     if (session == null) {
       _showSnack('打不开这个会话：等待超时');
       return;
@@ -794,6 +834,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     }
     final generation = ++_visibilityGeneration;
     if (widget.retainedVisibility?.value != true) {
+      for (final menu in _selectionMenus.values) {
+        menu.hide(context);
+      }
       if (_hiddenViews.isNotEmpty) return;
       for (final file in _editor.files) {
         final scroll = file.scrollController;
@@ -1139,7 +1182,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _agentHost?.removeListener(_onAgentHostChanged);
     _agentHost?.dispose();
     _agentHost = null;
-    if (widget.ownsHarnessHub) _harnessHub?.dispose();
+    if (_ownsHarnessHub) _harnessHub?.dispose();
     _harnessHub = null;
     _hiddenViews.clear();
     // TEMP-DIAG (remove after device verification).
@@ -1160,6 +1203,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     _debugSub?.cancel();
     _cloud?.dispose();
     _tabController?.dispose();
+    for (final menu in _selectionMenus.values) {
+      menu.hide(context);
+    }
+    _selectionMenus.clear();
     _analysis.removeListener(_onAnalysisChanged);
     _debugger.removeListener(_onDebuggerChanged);
     _debugger.dispose();
@@ -1273,6 +1320,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final largeScreen = LargeScreenScope.maybeOf(context);
+    // The shell can hide its retained center without changing editor identity.
+    if (largeScreen != null && !TickerMode.valuesOf(context).enabled) {
+      for (final menu in _selectionMenus.values) {
+        menu.hide(context);
+      }
+    }
     if (!identical(largeScreen, _largeScreen)) {
       _largeScreen?.unregisterFiles(this);
       _largeScreen = largeScreen;
@@ -1287,6 +1340,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   void _onEditorChanged() {
     final current = _editor.current;
     if (!identical(_inlineActiveDocument, current)) {
+      for (final entry in _selectionMenus.entries) {
+        if (!identical(entry.key, current)) entry.value.hide(context);
+      }
       final previous = _inlineActiveDocument;
       _inlineActiveDocument = current;
       if (_inlineFocusDocuments.contains(previous) ||
@@ -1568,6 +1624,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }) async {
     if (!mounted) return;
     _treeRefresh.value++;
+    if (_largeScreen != null) {
+      setState(() => _branchLabels.remove(root));
+    }
     final rootKey = workspacePathKey(root);
     for (final open in [..._editor.files]) {
       if (!mounted || !_editor.files.contains(open)) return;
@@ -1670,7 +1729,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             };
       _pinchStartFontSize =
           contribution?.sourceTextStyle?.fontSize ?? _fontSize;
-    } else if (_activePointers.length == 1) {
+    } else if (_activePointers.length == 1 && _largeScreen == null) {
       // 单指按下：启动长按计时器，500ms 后弹出粘贴工具栏。
       _longPressTimer?.cancel();
       _longPressTimer = Timer(const Duration(milliseconds: 500), () {
@@ -1748,6 +1807,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     if (!mounted) return;
     final count = _editor.files.length;
     _codeViews.removeWhere((file, _) => !_editor.files.contains(file));
+    _selectionMenus.removeWhere((file, menu) {
+      if (_editor.files.contains(file)) return false;
+      menu.hide(context);
+      return true;
+    });
     for (final file in _inlineDocuments.keys.toList()) {
       if (_editor.files.contains(file)) continue;
       _inlineSourceControllers.remove(file)?.dispose();
@@ -1787,8 +1851,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   void _toggleExplorer() {
-    // The workbench owns explorer navigation; it never calls this phone action.
-    if (_largeScreen != null) return;
+    final shell = _largeScreen;
+    if (shell != null) {
+      shell.showFiles();
+      return;
+    }
     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
     if (wide) {
       // 侧栏默认隐藏，第一次点击为展开。
@@ -1811,6 +1878,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     final host = _agentHost;
     if (host != null) {
       final pane = host.state.mainPane;
+      if (_largeScreen != null &&
+          pane == MainPane.agent &&
+          layoutOf(MediaQuery.sizeOf(context).width) != WorkbenchLayout.wide) {
+        for (final menu in _selectionMenus.values) {
+          menu.hide(context);
+        }
+      }
       if (pane == MainPane.editor && _lastMainPane != MainPane.editor) {
         unawaited(_recheckOpenTabsFromDisk());
       }
@@ -2116,6 +2190,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     EditorAgentHost? host, {
     required bool collapsed,
     required Widget? pane,
+    required double width,
   }) {
     if (host == null) return const SizedBox.shrink();
     final runtime = host.runtime;
@@ -2139,7 +2214,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           left: 0,
           top: 0,
           bottom: 0,
-          width: Breakpoints.agentPaneWidth,
+          width: _largeScreen == null
+              ? Breakpoints.agentPaneWidth
+              : width - _agentSeparatorWidth,
           child: Offstage(
             offstage: collapsed,
             child: _largeScreen == null
@@ -3564,10 +3641,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
               const _EditorCommandIntent(_EditorCommand.bottomPanel),
           const SingleActivator(LogicalKeyboardKey.keyJ, meta: true):
               const _EditorCommandIntent(_EditorCommand.bottomPanel),
-          const SingleActivator(LogicalKeyboardKey.keyL, control: true):
-              const _EditorCommandIntent(_EditorCommand.agent),
-          const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
-              const _EditorCommandIntent(_EditorCommand.agent),
+          if (_agentHost != null) ...{
+            const SingleActivator(LogicalKeyboardKey.keyL, control: true):
+                const _EditorCommandIntent(_EditorCommand.agent),
+            const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
+                const _EditorCommandIntent(_EditorCommand.agent),
+          },
           const SingleActivator(LogicalKeyboardKey.keyW, control: true):
               const _EditorCommandIntent(_EditorCommand.closeTab),
           const SingleActivator(LogicalKeyboardKey.keyW, meta: true):
@@ -3633,6 +3712,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             drawerScrimColor: scheme.surface,
             appBar: focusMode
                 ? null
+                : _largeScreen != null
+                ? PreferredSize(
+                    preferredSize: Size.fromHeight(
+                      LargeScreenScope.isDesktop(context) ? 40 : 48,
+                    ),
+                    child: ListenableBuilder(
+                      listenable: _editor,
+                      builder: (context, _) => _buildWorkbenchHeader(context),
+                    ),
+                  )
                 : PreferredSize(
                     preferredSize: const Size.fromHeight(kToolbarHeight),
                     child: SelectionToolbarScope(
@@ -4173,6 +4262,17 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                         (layout == WorkbenchLayout.wide
                             ? !agentCollapsed
                             : agentHost.state.mainPane == MainPane.agent);
+                    // Keep the preference while fitting a center narrowed by
+                    // the shell sidebar. The source view must retain room.
+                    final agentWidth = _largeScreen == null
+                        ? Breakpoints.agentPaneWidth
+                        : _agentPaneWidth.clamp(
+                            0.0,
+                            (constraints.maxWidth - 240).clamp(
+                              _agentSeparatorWidth,
+                              720.0,
+                            ),
+                          );
                     final agentPane = agentEnabled
                         ? _buildAgentPane(agentHost, active: agentVisible)
                         : null;
@@ -4319,11 +4419,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                             ),
                           ),
                         ),
-                        if (agentEnabled && layout == WorkbenchLayout.wide)
+                        if (agentEnabled && layout == WorkbenchLayout.wide) ...[
+                          if (_largeScreen != null && !agentCollapsed)
+                            _buildAgentResizeHandle(context, agentWidth),
                           SizedBox(
+                            key: const ValueKey('workbench-agent-pane'),
                             width: agentCollapsed
                                 ? (_largeScreen == null ? _agentRailWidth : 0)
-                                : Breakpoints.agentPaneWidth,
+                                : (_largeScreen == null
+                                      ? Breakpoints.agentPaneWidth
+                                      : agentWidth - _agentSeparatorWidth),
                             child: Listener(
                               behavior: HitTestBehavior.translucent,
                               onPointerDown: (_) => _focusAgentPane(),
@@ -4331,9 +4436,11 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                                 agentHost,
                                 collapsed: agentCollapsed,
                                 pane: agentPane,
+                                width: agentWidth,
                               ),
                             ),
                           ),
+                        ],
                       ],
                     );
                     // 矮窗口下先让出可选镶边：顶栏 56 之后已经不够编辑器的最小高度时，
@@ -4638,6 +4745,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
     FileExplorerSections? sections,
   }) {
     return FileExplorer(
+      largeScreen: _largeScreen != null,
+      outlined: _largeScreen == null,
       headerTrailing: headerTrailing,
       sections: sections,
       refreshSignal: _treeRefresh,
@@ -4680,6 +4789,338 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             },
     );
   }
+
+  double get _agentSeparatorWidth =>
+      LargeScreenScope.isDesktop(context) ? 8.0 : 48.0;
+
+  Widget _buildAgentResizeHandle(BuildContext context, double displayedWidth) {
+    final scheme = Theme.of(context).colorScheme;
+    return GestureDetector(
+      key: const ValueKey('agent-pane-resize-handle'),
+      behavior: HitTestBehavior.opaque,
+      onDoubleTap: () => setState(() {
+        _agentDragWidth = null;
+        _agentPaneWidth = Breakpoints.agentPaneWidth;
+      }),
+      // A shell-constrained pane may be narrower than its saved preference.
+      // Start at the visible separator, not at that hidden preferred width.
+      onHorizontalDragStart: (_) => _agentDragWidth = displayedWidth,
+      onHorizontalDragUpdate: (details) => setState(() {
+        _agentPaneWidth =
+            ((_agentDragWidth ?? displayedWidth) - details.delta.dx).clamp(
+              320.0,
+              720.0,
+            );
+        _agentDragWidth = _agentPaneWidth;
+      }),
+      onHorizontalDragEnd: (_) => _agentDragWidth = null,
+      onHorizontalDragCancel: () => _agentDragWidth = null,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: SizedBox(
+          width: _agentSeparatorWidth,
+          child: Center(
+            child: Container(width: 1, color: scheme.outlineVariant),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWorkbenchHeader(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final open = _editor.current;
+    final height = LargeScreenScope.isDesktop(context) ? 40.0 : 48.0;
+    final buttonSize = LargeScreenScope.isDesktop(context) ? 32.0 : 48.0;
+    return Material(
+      color: scheme.surfaceContainer,
+      child: SafeArea(
+        bottom: false,
+        child: SizedBox(
+          key: const ValueKey('workbench-editor-title-bar'),
+          height: height,
+          child: IconButtonTheme(
+            data: IconButtonThemeData(
+              style: IconButton.styleFrom(
+                minimumSize: Size.square(buttonSize),
+                maximumSize: Size.square(buttonSize),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.standard,
+              ),
+            ),
+            child: Row(
+              children: [
+                Expanded(child: _buildWorkbenchTitle(context)),
+                Tooltip(
+                  message: '$_runButtonTooltip (${shortcutLabel('F5')})',
+                  child: GestureDetector(
+                    onLongPress: _runningProject || _debugger.busy
+                        ? null
+                        : _runActiveFile,
+                    child: IconButton(
+                      key: const ValueKey('workbench-editor-run'),
+                      onPressed: _runningProject || _debugger.busy
+                          ? null
+                          : _runProject,
+                      icon: const Icon(Icons.play_arrow),
+                    ),
+                  ),
+                ),
+                if (_agentHost case final host?)
+                  AgentEntryButton(
+                    host: host,
+                    active: _agentPanelActive,
+                    switchesPane:
+                        layoutOf(MediaQuery.sizeOf(context).width) !=
+                        WorkbenchLayout.wide,
+                    onPressed: _toggleAgentPanel,
+                    shortcut: shortcutLabel('Ctrl+L'),
+                  ),
+                _buildWorkbenchMore(context, open),
+                if (LargeScreenScope.isDesktop(context))
+                  const SizedBox(width: 4),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  SingleActivator _menuShortcut(LogicalKeyboardKey key) =>
+      SingleActivator(key, control: !Platform.isMacOS, meta: Platform.isMacOS);
+
+  MenuItemButton _workbenchMenuItem({
+    required String id,
+    required String label,
+    required IconData icon,
+    VoidCallback? onPressed,
+    MenuSerializableShortcut? shortcut,
+  }) => MenuItemButton(
+    key: ValueKey(id),
+    shortcut: shortcut,
+    onPressed: onPressed,
+    style: ButtonStyle(
+      minimumSize: WidgetStatePropertyAll(
+        Size(0, LargeScreenScope.isDesktop(context) ? 32 : 48),
+      ),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 12),
+      ),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.standard,
+    ),
+    leadingIcon: Icon(icon, size: 18),
+    child: Text(label),
+  );
+
+  Widget _buildWorkbenchMore(BuildContext context, OpenFile? open) {
+    const editing = {'save', 'undo', 'find', 'goto', 'format'};
+    const workspace = {'git', 'cloud_pull', 'online_terminal'};
+    final actions = _workbenchMenuActions(context);
+    final host = _agentHost;
+    final runtime = host?.runtime;
+    final inline = _inlineDocumentFor(open);
+    final shortcuts = {
+      'save': LogicalKeyboardKey.keyS,
+      'undo': LogicalKeyboardKey.keyZ,
+      'find': LogicalKeyboardKey.keyF,
+      'goto': LogicalKeyboardKey.keyG,
+      'format': LogicalKeyboardKey.keyI,
+    };
+    MenuItemButton actionItem(EditorQuickBarAction action) =>
+        _workbenchMenuItem(
+          id: 'workbench-menu-${action.id}',
+          label: action.tooltip.replaceFirst(RegExp(r' \([^)]*\)$'), ''),
+          icon: action.icon,
+          shortcut: shortcuts.containsKey(action.id)
+              ? _menuShortcut(shortcuts[action.id]!)
+              : null,
+          onPressed: action.onPressed,
+        );
+    return MenuAnchor(
+      menuChildren: [
+        _workbenchMenuItem(
+          id: 'workbench-menu-new-file',
+          label: '新建文件',
+          icon: Icons.note_add_outlined,
+          shortcut: _menuShortcut(LogicalKeyboardKey.keyN),
+          onPressed: () => unawaited(_newFile()),
+        ),
+        for (final action in actions)
+          if (editing.contains(action.id)) actionItem(action),
+        const Divider(),
+        for (final action in actions)
+          if (!editing.contains(action.id) &&
+              !workspace.contains(action.id) &&
+              action.id != 'close_editor')
+            actionItem(action),
+        if (_hasDocumentTool(open) &&
+            !actions.any((action) => action.id == 'content_tool'))
+          _workbenchMenuItem(
+            id: 'workbench-menu-document-tool',
+            label: '编辑与预览',
+            icon: Icons.chrome_reader_mode_outlined,
+            onPressed: _openContentTool,
+          ),
+        for (final action in [...?inline?.actions, ...?inline?.menuActions])
+          _workbenchMenuItem(
+            id: 'inline-menu-${action.id}',
+            label: action.label,
+            icon: action.icon,
+            onPressed: action.enabled && open != null
+                ? () => unawaited(_invokeInlineDocumentAction(open, action))
+                : null,
+          ),
+        for (final tool
+            in StudioProfile.current?.editorFileTools ??
+                const <EditorFileTool>[])
+          if (tool.extensions.contains(
+            p.extension(open?.name ?? '').toLowerCase(),
+          ))
+            _workbenchMenuItem(
+              id: 'workbench-file-tool-${tool.id}',
+              label: tool.label,
+              icon: tool.icon,
+              onPressed: !_runningFileTool && open?.readOnly != true
+                  ? () => unawaited(_runEditorTool(tool.id))
+                  : null,
+            ),
+        if (open != null && _isOrphaned(open))
+          _workbenchMenuItem(
+            id: 'workbench-menu-recover',
+            label: '另存为…（项目不可用）',
+            icon: Icons.save_as_outlined,
+            onPressed: () => unawaited(_recoverOrphanedFile()),
+          ),
+        const Divider(),
+        for (final action in actions)
+          if (workspace.contains(action.id)) actionItem(action),
+        if (_canRunBackground)
+          _workbenchMenuItem(
+            id: 'workbench-menu-background-run',
+            label: '后台运行（实验）',
+            icon: Icons.notifications_outlined,
+            onPressed:
+                !_runningProject &&
+                    !_runningFileTool &&
+                    !_debugger.busy &&
+                    _terminalKey.currentState?.hasRunningWork != true
+                ? () => unawaited(_runInBackgroundSiblingApp())
+                : null,
+          ),
+        if (_interopTargetFor(
+              _entryFileOf(open?.projectRootPath ?? widget.project.path),
+            )
+            case final target?) ...[
+          _workbenchMenuItem(
+            id: 'workbench-menu-interop-run',
+            label: '运行（${target.productName}）',
+            icon: Icons.developer_board_outlined,
+            onPressed: !_runningProject && !_debugger.busy
+                ? () => unawaited(_runInSiblingApp())
+                : null,
+          ),
+          _workbenchMenuItem(
+            id: 'workbench-menu-run-online',
+            label: '改用在线终端运行',
+            icon: Icons.cloud_outlined,
+            onPressed:
+                !_runningProject &&
+                    !_debugger.busy &&
+                    StudioProfile.current?.offlineOnly != true
+                ? () => unawaited(_runProjectOnline())
+                : null,
+          ),
+        ],
+        if (host != null) ...[
+          const Divider(),
+          // Sessions live in the shell, and connection retry lives in the pane.
+          // Keep the quick bar's remaining Agent commands reachable here.
+          for (final id in ['agent-new-session', 'agent-stop'])
+            ListenableBuilder(
+              listenable: Listenable.merge([
+                host,
+                if (runtime != null) ...[runtime.sessions, runtime.liveChanges],
+              ]),
+              builder: (context, _) => actionItem(
+                _quickBarAgentActions().singleWhere(
+                  (action) => action.id == id,
+                ),
+              ),
+            ),
+        ],
+        if (actions.any((action) => action.id == 'close_editor')) ...[
+          const Divider(),
+          for (final action in actions)
+            if (action.id == 'close_editor') actionItem(action),
+        ],
+      ],
+      builder: (context, controller, child) => IconButton(
+        key: const ValueKey('workbench-editor-more'),
+        tooltip: '更多',
+        onPressed: () =>
+            controller.isOpen ? controller.close() : controller.open(),
+        icon: const Icon(Icons.more_vert),
+      ),
+    );
+  }
+
+  Widget _buildWorkbenchTitle(BuildContext context) {
+    if (_tabController == null || _editor.files.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Text('编辑器', style: Theme.of(context).textTheme.titleSmall),
+      );
+    }
+    // TabBar reserves 2dp below each child even with a custom indicator.
+    // A 38dp viewport therefore leaves the IDE tab itself exactly 36dp.
+    return SizedBox(
+      height: 38,
+      child: TabBar(
+        controller: _tabController,
+        isScrollable: true,
+        tabAlignment: TabAlignment.start,
+        padding: EdgeInsets.zero,
+        labelPadding: EdgeInsets.zero,
+        dividerColor: Colors.transparent,
+        indicator: const BoxDecoration(),
+        tabs: [for (final file in _editor.files) _buildTab(context, file)],
+      ),
+    );
+  }
+
+  Widget _buildWorkbenchTab(BuildContext context, OpenFile open) =>
+      _WorkbenchEditorTab(
+        key: ObjectKey(open),
+        file: open,
+        label: open.tabLabel(widget.project.name),
+        icon: open.timeLabel != null ? Icons.history : _iconFor(open.name),
+        selected: identical(open, _editor.current),
+        onSelect: () => _editor.select(_editor.files.indexOf(open)),
+        onClose: () => unawaited(_handleTabMenuAction(open, 'close_this')),
+        menuChildren: [
+          for (final (id, label, icon) in const [
+            ('share', '分享文件', Icons.share_outlined),
+            ('copy_name', '复制文件名', Icons.copy_outlined),
+            ('close_this', '关闭当前标签', Icons.close),
+            ('close_others', '关闭其他标签', Icons.tab_unselected),
+            ('close_all', '关闭所有标签', Icons.clear_all),
+          ]) ...[
+            if (id == 'close_this') const Divider(),
+            _workbenchMenuItem(
+              id: 'workbench-tab-menu-$id',
+              label: label,
+              icon: icon,
+              shortcut: id == 'close_this'
+                  ? _menuShortcut(LogicalKeyboardKey.keyW)
+                  : null,
+              onPressed: () => unawaited(_handleTabMenuAction(open, id)),
+            ),
+          ],
+        ],
+      );
 
   Widget _buildProjectTitle(BuildContext context, ColorScheme scheme) {
     // AppBar 的 titleSpacing 为 0，这里补回标题原本的 16px 起始间距。
@@ -4797,12 +5238,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
                 : _bottomPanel == panel
                 ? '$label (${shortcutLabel('Ctrl+J')})'
                 : label,
-            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            constraints: BoxConstraints.tightFor(
+              width: LargeScreenScope.isDesktop(context) ? 28 : 48,
+              height: LargeScreenScope.isDesktop(context) ? 24 : 48,
+            ),
             style: IconButton.styleFrom(
               tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.standard,
             ),
             padding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
+            visualDensity: VisualDensity.standard,
             iconSize: 16,
             color: _bottomPanel == panel
                 ? scheme.primary
@@ -4951,16 +5396,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           ],
         ),
       );
-      if (_largeScreen == null) return empty;
-      return Column(
-        children: [
-          Expanded(child: empty),
-          Align(
-            alignment: Alignment.centerRight,
-            child: _buildWorkbenchPanels(),
-          ),
-        ],
-      );
+      if (_largeScreen != null) {
+        return Column(
+          children: [
+            Expanded(child: _buildWorkbenchEmpty(context)),
+            _buildWorkbenchStatus(context, null),
+          ],
+        );
+      }
+      return empty;
     }
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -4971,7 +5415,10 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         final contribution = _inlineDocumentFor(open);
         final focused = _inlineFocusDocuments.contains(open);
         final showTabs =
-            !focused && widget.settings.showEditorTabs && available >= 220;
+            _largeScreen == null &&
+            !focused &&
+            widget.settings.showEditorTabs &&
+            available >= 220;
         final showSymbols =
             !focused &&
             (_largeScreen == null || widget.settings.largeScreenSymbolBar) &&
@@ -4985,7 +5432,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
           children: [
             if (showTabs) _buildTabBar(context),
             Expanded(
-              child: _editor.files.length <= 1 || !showTabs
+              child:
+                  _editor.files.length <= 1 ||
+                      (!showTabs && _largeScreen == null)
                   ? _buildDocumentView(context, open)
                   : TabBarView(
                       controller: _tabController,
@@ -5059,6 +5508,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   Widget _buildTab(BuildContext context, OpenFile open) {
+    if (_largeScreen != null) return _buildWorkbenchTab(context, open);
     final scheme = Theme.of(context).colorScheme;
     final tab = Tab(
       height: 44,
@@ -5108,7 +5558,6 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
   }
 
   Future<void> _showTabMenu(OpenFile open, Offset position) async {
-    final index = _editor.files.indexOf(open);
     final action = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -5127,6 +5576,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       ],
     );
     if (!mounted || action == null) return;
+    await _handleTabMenuAction(open, action);
+  }
+
+  Future<void> _handleTabMenuAction(OpenFile open, String action) async {
+    final index = _editor.files.indexOf(open);
+    if (index < 0) return;
     switch (action) {
       case 'share':
         final shared = await ShareService.shareText(
@@ -5237,122 +5692,132 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
             settings: widget.settings,
             ownerType: open.projectType,
           );
+    final source = Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Listener(
+            onPointerDown: _handlePointerDown,
+            onPointerMove: _handlePointerMove,
+            onPointerUp: _handlePointerUp,
+            onPointerCancel: _handlePointerUp,
+            child: CodeEditor(
+              controller: _inlineSourceControllers[open] ?? open.controller,
+              focusNode: open.focusNode,
+              toolbarController: _largeScreen == null
+                  ? null
+                  : _selectionMenus.putIfAbsent(
+                      open,
+                      () => _WorkbenchSelectionToolbarController(
+                        readOnly: open.readOnly,
+                      ),
+                    ),
+              scrollController: open.scrollController,
+              findController: open.findController,
+              shortcutsActivatorsBuilder: _PageCodeShortcuts(
+                hasAgent: _agentHost != null,
+              ),
+              shortcutOverrideActions: {
+                ...editorShortcutOverrides(open.controller),
+                ...?contribution?.shortcutOverrideActions,
+              },
+              style: CodeEditorStyle(
+                fontSize: fontSize,
+                fontFamily: textStyle.fontFamily,
+                fontFamilyFallback: textStyle.fontFamilyFallback,
+                fontWeight: textStyle.fontWeight,
+                fontStyle: textStyle.fontStyle,
+                fontHeight: textStyle.height,
+                backgroundColor:
+                    theme?.theme['root']?.backgroundColor ?? scheme.surface,
+                textColor: theme?.theme['root']?.color ?? scheme.onSurface,
+                cursorColor:
+                    HighlightThemes.editorColor(
+                      widget.settings,
+                      'editorCursor.foreground',
+                    ) ??
+                    scheme.primary,
+                selectionColor:
+                    HighlightThemes.editorColor(
+                      widget.settings,
+                      'editor.selectionBackground',
+                    ) ??
+                    scheme.primary.withValues(alpha: 0.25),
+                highlightColor: scheme.primaryContainer.withValues(alpha: 0.4),
+                cursorLineColor:
+                    HighlightThemes.editorColor(
+                      widget.settings,
+                      'editor.lineHighlightBackground',
+                    ) ??
+                    scheme.surfaceContainerHighest,
+                chunkIndicatorColor: scheme.outlineVariant,
+                codeTheme: theme,
+              ),
+              wordWrap: false,
+              autofocus: false,
+              readOnly: open.readOnly,
+              indicatorBuilder:
+                  (context, editingController, chunkController, notifier) {
+                    return Row(
+                      children: [
+                        if (_debugger.debugger != null && !open.readOnly)
+                          EditorDebugGutter(
+                            debug: _debugger,
+                            file: open,
+                            notifier: notifier,
+                          ),
+                        if (open.diagnostics case final diagnostics?)
+                          EditorDiagnosticGutter(
+                            diagnostics: diagnostics,
+                            notifier: notifier,
+                          ),
+                        DefaultCodeLineNumber(
+                          controller: editingController,
+                          notifier: notifier,
+                          minNumberCount: 1,
+                          textStyle: textStyle.copyWith(
+                            color: scheme.onSurfaceVariant.withValues(
+                              alpha: 0.55,
+                            ),
+                            fontSize: fontSize,
+                          ),
+                          focusedTextStyle: textStyle.copyWith(
+                            color: scheme.primary,
+                            fontSize: fontSize,
+                          ),
+                        ),
+                        DefaultCodeChunkIndicator(
+                          width: 18,
+                          controller: chunkController,
+                          notifier: notifier,
+                        ),
+                      ],
+                    );
+                  },
+              findBuilder: (context, controller, readOnly) =>
+                  EditorFindReplacePanel(
+                    controller: controller,
+                    readOnly: readOnly,
+                  ),
+            ),
+          ),
+        ),
+        VerticalDivider(width: 1, thickness: 1, color: scheme.outlineVariant),
+        if (widget.settings.minimap)
+          CodeMinimap(
+            controller: open.controller,
+            scrollController: open.scrollController,
+          ),
+      ],
+    );
+    if (_largeScreen != null) return source;
     return EditorProblemsBar(
       analysis: _analysis,
       onOpenProblems: () => setState(() {
         _terminalKey.currentState?.unfocusInput();
         _bottomPanel = _BottomPanel.problems;
       }),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: Listener(
-              onPointerDown: _handlePointerDown,
-              onPointerMove: _handlePointerMove,
-              onPointerUp: _handlePointerUp,
-              onPointerCancel: _handlePointerUp,
-              child: CodeEditor(
-                controller: _inlineSourceControllers[open] ?? open.controller,
-                focusNode: open.focusNode,
-                scrollController: open.scrollController,
-                findController: open.findController,
-                shortcutsActivatorsBuilder: const _PageCodeShortcuts(),
-                shortcutOverrideActions: {
-                  ...editorShortcutOverrides(open.controller),
-                  ...?contribution?.shortcutOverrideActions,
-                },
-                style: CodeEditorStyle(
-                  fontSize: fontSize,
-                  fontFamily: textStyle.fontFamily,
-                  fontFamilyFallback: textStyle.fontFamilyFallback,
-                  fontWeight: textStyle.fontWeight,
-                  fontStyle: textStyle.fontStyle,
-                  fontHeight: textStyle.height,
-                  backgroundColor:
-                      theme?.theme['root']?.backgroundColor ?? scheme.surface,
-                  textColor: theme?.theme['root']?.color ?? scheme.onSurface,
-                  cursorColor:
-                      HighlightThemes.editorColor(
-                        widget.settings,
-                        'editorCursor.foreground',
-                      ) ??
-                      scheme.primary,
-                  selectionColor:
-                      HighlightThemes.editorColor(
-                        widget.settings,
-                        'editor.selectionBackground',
-                      ) ??
-                      scheme.primary.withValues(alpha: 0.25),
-                  highlightColor: scheme.primaryContainer.withValues(
-                    alpha: 0.4,
-                  ),
-                  cursorLineColor:
-                      HighlightThemes.editorColor(
-                        widget.settings,
-                        'editor.lineHighlightBackground',
-                      ) ??
-                      scheme.surfaceContainerHighest,
-                  chunkIndicatorColor: scheme.outlineVariant,
-                  codeTheme: theme,
-                ),
-                wordWrap: false,
-                autofocus: false,
-                readOnly: open.readOnly,
-                indicatorBuilder:
-                    (context, editingController, chunkController, notifier) {
-                      return Row(
-                        children: [
-                          if (_debugger.debugger != null && !open.readOnly)
-                            EditorDebugGutter(
-                              debug: _debugger,
-                              file: open,
-                              notifier: notifier,
-                            ),
-                          if (open.diagnostics case final diagnostics?)
-                            EditorDiagnosticGutter(
-                              diagnostics: diagnostics,
-                              notifier: notifier,
-                            ),
-                          DefaultCodeLineNumber(
-                            controller: editingController,
-                            notifier: notifier,
-                            minNumberCount: 1,
-                            textStyle: textStyle.copyWith(
-                              color: scheme.onSurfaceVariant.withValues(
-                                alpha: 0.55,
-                              ),
-                              fontSize: fontSize,
-                            ),
-                            focusedTextStyle: textStyle.copyWith(
-                              color: scheme.primary,
-                              fontSize: fontSize,
-                            ),
-                          ),
-                          DefaultCodeChunkIndicator(
-                            width: 18,
-                            controller: chunkController,
-                            notifier: notifier,
-                          ),
-                        ],
-                      );
-                    },
-                findBuilder: (context, controller, readOnly) =>
-                    EditorFindReplacePanel(
-                      controller: controller,
-                      readOnly: readOnly,
-                    ),
-              ),
-            ),
-          ),
-          VerticalDivider(width: 1, thickness: 1, color: scheme.outlineVariant),
-          if (widget.settings.minimap)
-            CodeMinimap(
-              controller: open.controller,
-              scrollController: open.scrollController,
-            ),
-        ],
-      ),
+      child: source,
     );
   }
 
@@ -5402,7 +5867,233 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
         const [';', ':', '(', ')', '[', ']', '"', "'", '=', '<', '>'];
   }
 
+  Widget _buildWorkbenchEmpty(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            key: const ValueKey('workbench-editor-empty'),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('开始编辑', style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 16),
+              for (final (id, label, shortcut, icon, action) in [
+                (
+                  'new',
+                  '新建文件',
+                  'Ctrl+N',
+                  Icons.note_add_outlined,
+                  () => unawaited(_newFile()),
+                ),
+                (
+                  'explorer',
+                  '打开资源管理器',
+                  'Ctrl+Shift+E',
+                  Icons.folder_outlined,
+                  _toggleExplorer,
+                ),
+                if (_agentHost != null)
+                  (
+                    'agent',
+                    'Agent',
+                    'Ctrl+L',
+                    Icons.smart_toy_outlined,
+                    _toggleAgentPanel,
+                  ),
+                (
+                  'terminal',
+                  '终端',
+                  'Ctrl+`',
+                  Icons.terminal_outlined,
+                  () => _invokeEditorCommand(_EditorCommand.terminal),
+                ),
+              ])
+                TextButton(
+                  key: ValueKey('workbench-empty-$id'),
+                  onPressed: action,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size(
+                      0,
+                      LargeScreenScope.isDesktop(context) ? 36 : 48,
+                    ),
+                    foregroundColor: scheme.onSurfaceVariant,
+                    alignment: Alignment.centerLeft,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(icon, size: 20),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(label)),
+                      Text(shortcutLabel(shortcut)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWorkbenchStatus(BuildContext context, OpenFile? open) {
+    final scheme = Theme.of(context).colorScheme;
+    final height = LargeScreenScope.isDesktop(context) ? 24.0 : 48.0;
+    final root = open?.projectRootPath ?? widget.project.path;
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        _analysis,
+        if (open != null) open.controller,
+      ]),
+      builder: (context, _) => Material(
+        color: scheme.surfaceContainerLow,
+        child: SizedBox(
+          key: const ValueKey('workbench-editor-status'),
+          height: height,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(top: BorderSide(color: scheme.outlineVariant)),
+            ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                Widget statusText(String value) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text(
+                    value,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                );
+                final selection = open?.controller.selection;
+                return Row(
+                  children: [
+                    Flexible(
+                      child: FutureBuilder<String?>(
+                        key: ValueKey(root),
+                        future: _branchLabels.putIfAbsent(
+                          root,
+                          () => readProjectGitBranch(root),
+                        ),
+                        builder: (context, snapshot) => Tooltip(
+                          message: snapshot.data ?? '无 Git 分支',
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Row(
+                              key: const ValueKey('workbench-status-branch'),
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.account_tree_outlined,
+                                  size: 14,
+                                ),
+                                const SizedBox(width: 4),
+                                Flexible(
+                                  child: Text(
+                                    snapshot.data ?? '—',
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelSmall,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Tooltip(
+                      message:
+                          _analysis.unavailableReason ??
+                          (_analysis.pending
+                              ? '正在检查…'
+                              : '问题 ${_analysis.problems.length}'),
+                      child: SizedBox(
+                        key: const ValueKey('workbench-status-problems'),
+                        height: height,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.warning_amber_outlined, size: 14),
+                            statusText(
+                              _analysis.unavailableReason != null ||
+                                      !_analysis.checked
+                                  ? '—'
+                                  : '${_analysis.problems.length}',
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    SizedBox(
+                      width: (constraints.maxWidth * 0.48).clamp(
+                        0.0,
+                        LargeScreenScope.isDesktop(context) ? 168.0 : 288.0,
+                      ),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: _buildWorkbenchPanels(),
+                      ),
+                    ),
+                    if (selection != null && constraints.maxWidth >= 440)
+                      statusText(
+                        '行 ${selection.extentIndex + 1}, 列 ${selection.extentOffset + 1}',
+                      ),
+                    if (open != null && constraints.maxWidth >= 540)
+                      InkWell(
+                        key: const ValueKey('workbench-status-encoding'),
+                        mouseCursor: SystemMouseCursors.click,
+                        onTap: () => _showEncodingDialog(open),
+                        child: SizedBox(
+                          height: height,
+                          child: Center(child: statusText(open.encoding)),
+                        ),
+                      ),
+                    if (open != null && constraints.maxWidth >= 640)
+                      statusText(
+                        languageForFileName(
+                          open.name,
+                          ownerType: open.projectType,
+                        ),
+                      ),
+                    if (widget.project.isCloud)
+                      Tooltip(
+                        message:
+                            _syncError ??
+                            switch (_syncState) {
+                              SyncState.syncing => '正在同步',
+                              SyncState.synced => '已同步',
+                              SyncState.offline => '同步离线',
+                              SyncState.idle => '云端项目',
+                            },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Icon(
+                            _syncState == SyncState.offline
+                                ? Icons.cloud_off_outlined
+                                : Icons.cloud_outlined,
+                            size: 14,
+                            color: _syncState == SyncState.offline
+                                ? scheme.error
+                                : scheme.primary,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildStatusBar(BuildContext context, OpenFile open) {
+    if (_largeScreen != null) return _buildWorkbenchStatus(context, open);
     final scheme = Theme.of(context).colorScheme;
     return ListenableBuilder(
       listenable: Listenable.merge([open.controller, widget.settings]),
@@ -5549,5 +6240,231 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
       '.md' || '.txt' => Icons.article_outlined,
       _ => Icons.code_outlined,
     };
+  }
+}
+
+/// Workbench-only tabs own hover/focus state without rebuilding the code view.
+class _WorkbenchEditorTab extends StatefulWidget {
+  const _WorkbenchEditorTab({
+    super.key,
+    required this.file,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onSelect,
+    required this.onClose,
+    required this.menuChildren,
+  });
+
+  final OpenFile file;
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onSelect;
+  final VoidCallback onClose;
+  final List<Widget> menuChildren;
+
+  @override
+  State<_WorkbenchEditorTab> createState() => _WorkbenchEditorTabState();
+}
+
+class _WorkbenchEditorTabState extends State<_WorkbenchEditorTab> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final showClose =
+        _hovered || _focused || (widget.selected && !widget.file.dirty);
+    return MenuAnchor(
+      menuChildren: widget.menuChildren,
+      builder: (context, controller, child) => GestureDetector(
+        onSecondaryTapUp: (details) =>
+            controller.open(position: details.localPosition),
+        onLongPressStart: (details) =>
+            controller.open(position: details.localPosition),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: Material(
+            key: ValueKey('workbench-tab-${widget.file.path}'),
+            color: widget.selected ? scheme.surface : scheme.surfaceContainer,
+            child: InkWell(
+              onTap: widget.onSelect,
+              onFocusChange: (value) => setState(() => _focused = value),
+              mouseCursor: SystemMouseCursors.click,
+              hoverColor: scheme.onSurface.withValues(alpha: 0.08),
+              highlightColor: scheme.onSurface.withValues(alpha: 0.10),
+              focusColor: scheme.onSurface.withValues(alpha: 0.10),
+              child: Container(
+                height: 36,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      width: 2,
+                      color: widget.selected
+                          ? scheme.primary
+                          : scheme.surfaceContainer,
+                    ),
+                    left: BorderSide(
+                      color: _focused
+                          ? scheme.primary
+                          : (widget.selected
+                                ? scheme.surface
+                                : scheme.surfaceContainer),
+                    ),
+                    right: BorderSide(
+                      color: _focused
+                          ? scheme.primary
+                          : (widget.selected
+                                ? scheme.surface
+                                : scheme.surfaceContainer),
+                    ),
+                    top: BorderSide(
+                      color: _focused
+                          ? scheme.primary
+                          : (widget.selected
+                                ? scheme.surface
+                                : scheme.surfaceContainer),
+                    ),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(widget.icon, size: 16, color: scheme.onSurfaceVariant),
+                    const SizedBox(width: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 200),
+                      child: Text(
+                        widget.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox.square(
+                      dimension: 20,
+                      child: showClose
+                          ? Tooltip(
+                              message: '关闭标签 (${shortcutLabel('Ctrl+W')})',
+                              child: InkWell(
+                                key: ValueKey(
+                                  'workbench-tab-close-${widget.file.path}',
+                                ),
+                                onTap: widget.onClose,
+                                mouseCursor: SystemMouseCursors.click,
+                                child: Icon(
+                                  Icons.close,
+                                  size: 15,
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            )
+                          : widget.file.dirty
+                          ? Center(
+                              child: Container(
+                                key: ValueKey(
+                                  'workbench-tab-dirty-${widget.file.path}',
+                                ),
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  color: scheme.primary,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            )
+                          : null,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// re_editor's mobile controller force-unwraps renderRect, which is null for
+/// desktop right clicks. This controller accepts both anchor representations.
+class _WorkbenchSelectionToolbarController
+    implements SelectionToolbarController {
+  _WorkbenchSelectionToolbarController({required this.readOnly});
+
+  final bool readOnly;
+  ValueNotifier<bool>? _visibility;
+  late final ContextMenuController _menu = ContextMenuController(
+    onRemove: _detachVisibility,
+  );
+
+  void _detachVisibility() {
+    _visibility?.removeListener(_onVisibilityChanged);
+    _visibility = null;
+  }
+
+  void _onVisibilityChanged() {
+    if (_visibility?.value == false) _menu.remove();
+  }
+
+  @override
+  void hide(BuildContext context) {
+    _menu.remove();
+    _detachVisibility();
+  }
+
+  @override
+  void show({
+    required BuildContext context,
+    required CodeLineEditingController controller,
+    required TextSelectionToolbarAnchors anchors,
+    Rect? renderRect,
+    required LayerLink layerLink,
+    required ValueNotifier<bool> visibility,
+  }) {
+    hide(context);
+    if (!visibility.value) return;
+    _visibility = visibility;
+    visibility.addListener(_onVisibilityChanged);
+    final anchor = anchors.primaryAnchor;
+    _menu.show(
+      context: context,
+      contextMenuBuilder: (_) => InheritedTheme.captureAll(
+        context,
+        TapRegion(
+          groupId: CodeEditor,
+          onTapOutside: (_) => _menu.remove(),
+          child: TextSelectionToolbar(
+            key: const ValueKey('workbench-selection-menu'),
+            anchorAbove: anchor,
+            anchorBelow: anchors.secondaryAnchor ?? anchor,
+            children: [
+              for (final (label, keys, action) in [
+                ('全选', 'Ctrl+A', controller.selectAll),
+                if (!readOnly) ('剪切', 'Ctrl+X', controller.cut),
+                ('复制', 'Ctrl+C', controller.copy),
+                if (!readOnly) ('粘贴', 'Ctrl+V', controller.paste),
+              ])
+                Tooltip(
+                  message: '$label (${shortcutLabel(keys)})',
+                  child: TextButton(
+                    onPressed: () {
+                      action();
+                      _menu.remove();
+                    },
+                    child: Text(label),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
