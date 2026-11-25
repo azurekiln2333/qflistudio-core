@@ -19,6 +19,7 @@ import 'services/app_restore_gate.dart';
 import 'services/studio_profile.dart';
 import 'services/runner_service.dart';
 import 'shell/large_screen_workbench.dart';
+import 'shell/ui_zoom.dart';
 import 'splash_screen.dart';
 import 'store/auth_store.dart';
 import 'store/project_store.dart';
@@ -195,11 +196,16 @@ class _QfliAppState extends State<QfliApp> {
       builder: (context, appearance, _) => MaterialApp(
         navigatorKey: widget.navigatorKey,
         navigatorObservers: [_editors.navigatorObserver],
-        builder: (context, child) => GitHubScope(
-          controller: _github,
-          child: _formFactor == AppFormFactor.phone
-              ? RetainedEditorHost(controller: _editors, child: child!)
-              : child!,
+        builder: (context, child) => UiZoom(
+          settings: settings,
+          enabled: _formFactor != null && _formFactor != AppFormFactor.phone,
+          mouseWheelEnabled: _formFactor == AppFormFactor.desktop,
+          child: GitHubScope(
+            controller: _github,
+            child: _formFactor == AppFormFactor.phone
+                ? RetainedEditorHost(controller: _editors, child: child!)
+                : child!,
+          ),
         ),
         title:
             StudioProfile.current?.appTitle ?? StudioProductCatalog.qfliStudio,

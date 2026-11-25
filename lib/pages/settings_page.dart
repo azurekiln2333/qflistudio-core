@@ -13,6 +13,8 @@ import '../services/app_paths.dart';
 import '../services/file_backup.dart';
 import '../services/picker_service.dart';
 import '../services/studio_profile.dart';
+import '../shell/large_screen_controller.dart';
+import '../shell/shortcut_label.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
@@ -260,6 +262,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
       body: ListenableBuilder(
@@ -285,6 +288,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       trailing: const Icon(Icons.chevron_right),
                       onTap: _pickThemeMode,
                     ),
+                    if (largeScreen) _zoomSetting(),
                     ListTile(
                       leading: const Icon(Icons.palette_outlined),
                       title: const Text('代码高亮'),
@@ -316,6 +320,15 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
                       ),
                     ),
+                    if (largeScreen)
+                      SwitchListTile(
+                        key: const ValueKey('settings-large-screen-symbols'),
+                        secondary: const Icon(Icons.keyboard_outlined),
+                        title: const Text('大屏显示符号栏'),
+                        subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
+                        value: settings.largeScreenSymbolBar,
+                        onChanged: settings.setLargeScreenSymbolBar,
+                      ),
                     SwitchListTile(
                       secondary: const Icon(Icons.map_outlined),
                       title: const Text('代码鸟瞰图'),
@@ -346,6 +359,7 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ],
                 ),
+                if (largeScreen) _shortcutSection(),
                 if (widget.showAi && _customAiEndpointAllowed)
                   SettingsSection(
                     title: 'AI 助手',
@@ -435,6 +449,76 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+
+  Widget _zoomSetting() => ListTile(
+    key: const ValueKey('settings-ui-zoom'),
+    leading: const Icon(Icons.zoom_in_outlined),
+    title: const Text('界面缩放'),
+    subtitle: Wrap(
+      spacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text('${(settings.uiScale * 100).round()}%'),
+        IconButton(
+          key: const ValueKey('settings-ui-zoom-out'),
+          tooltip: '缩小界面 (${shortcutLabel('Ctrl+-')})',
+          onPressed: settings.uiScale > SettingsStore.minUiScale
+              ? () => settings.setUiScale(settings.uiScale - 0.1)
+              : null,
+          icon: const Icon(Icons.remove),
+        ),
+        IconButton(
+          key: const ValueKey('settings-ui-zoom-in'),
+          tooltip: '放大界面 (${shortcutLabel('Ctrl+= / Ctrl++')})',
+          onPressed: settings.uiScale < SettingsStore.maxUiScale
+              ? () => settings.setUiScale(settings.uiScale + 0.1)
+              : null,
+          icon: const Icon(Icons.add),
+        ),
+        Tooltip(
+          message: '复原界面缩放 (${shortcutLabel('Ctrl+0')})',
+          child: TextButton(
+            key: const ValueKey('settings-ui-zoom-reset'),
+            onPressed: settings.uiScale == 1
+                ? null
+                : () => settings.setUiScale(1),
+            child: const Text('复原'),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _shortcutSection() => SettingsSection(
+    title: '快捷键',
+    children: [
+      const ListTile(subtitle: Text('终端获得焦点时，关闭标签、底部面板和 Agent 栏的快捷键交给终端。')),
+      for (final entry in const [
+        ('放大界面', 'Ctrl+= / Ctrl++ / Ctrl+NumpadAdd', '全局'),
+        ('缩小界面', 'Ctrl+- / Ctrl+NumpadSubtract', '全局'),
+        ('复原界面缩放', 'Ctrl+0 / Ctrl+Numpad0', '全局'),
+        ('显示或收起侧栏', 'Ctrl+B', '工作台'),
+        ('资源管理器', 'Ctrl+Shift+E', '工作台'),
+        ('Agents 列表', 'Ctrl+Shift+A', '工作台'),
+        ('设置', 'Ctrl+,', '工作台'),
+        ('显示或收起终端', 'Ctrl+`', '编辑器'),
+        ('显示或收起底部面板', 'Ctrl+J', '编辑器'),
+        ('显示或收起 Agent 栏', 'Ctrl+L', '编辑器'),
+        ('关闭当前文件标签', 'Ctrl+W', '编辑器'),
+        ('下一个 / 上一个文件标签', 'Ctrl+Tab / Ctrl+Shift+Tab', '编辑器'),
+        ('新建文件', 'Ctrl+N', '编辑器'),
+        ('运行', 'F5', '编辑器'),
+        ('保存', 'Ctrl+S', '编辑器'),
+        ('查找', 'Ctrl+F', '编辑器'),
+        ('跳行', 'Ctrl+G', '编辑器'),
+        ('格式化', 'Ctrl+I', '编辑器'),
+      ])
+        ListTile(
+          title: Text(entry.$1),
+          subtitle: Text('${shortcutLabel(entry.$2)} · ${entry.$3}'),
+        ),
+    ],
+  );
 
   Future<void> _pickThemeMode() async {
     final picked = await showDialog<String>(
