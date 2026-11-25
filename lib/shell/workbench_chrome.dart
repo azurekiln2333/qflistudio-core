@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../i18n/studio_localizations.dart';
+import '../models/project.dart';
+import 'large_screen_controller.dart';
 import 'shortcut_label.dart';
+import 'workbench_theme.dart';
 
 /// 大屏工作台左侧图标导航的六个去处。
 ///
@@ -22,13 +25,10 @@ enum WorkbenchActivity {
   static const files = explorer;
 }
 
-/// VS Code 式图标导航条。
+/// MD3 navigation rail for the six workbench destinations.
 ///
-/// 固定 52px 宽：不随文字缩放变宽，也不显示展开的文字标签，
-/// 否则侧栏宽度会被导航条挤走。每个按钮是 44px 触控目标，
-/// 语义标签与 tooltip 都来自本地化层，选中项用主题色高亮。
-///
-/// 高度不足时上半部分可滚动：底部设置与头像始终留在左下角。
+/// The four primary destinations use NavigationRail. Settings and the account
+/// avatar stay anchored at the bottom of the same 80dp rail.
 class WorkbenchActivityRail extends StatelessWidget {
   const WorkbenchActivityRail({
     super.key,
@@ -38,41 +38,31 @@ class WorkbenchActivityRail extends StatelessWidget {
     this.accountLabel,
   });
 
-  /// 当前选中的去处。决定高亮项，也决定侧栏显示哪一块内容。
   final WorkbenchActivity selected;
-
-  /// 用户点了某个图标。同一个值也会在重复点击时回调。
   final ValueChanged<WorkbenchActivity> onSelected;
-
-  /// 头像图片；为空或加载失败时退回首字母或图标占位。
   final ImageProvider? avatarImage;
-
-  /// 账号名，用于头像的语义标签与首字母回退。
   final String? accountLabel;
 
-  /// 导航条宽度。导出给宿主排版与测试断言。
-  static const double width = 52;
-
-  /// 单个图标的触控目标边长。
-  static const double touchTarget = 44;
-
-  /// 顶部的两个主要去处。
+  static const double width = 80;
+  static const double touchTarget = 48;
   static const List<WorkbenchActivity> primary = <WorkbenchActivity>[
     WorkbenchActivity.explorer,
     WorkbenchActivity.agents,
   ];
-
-  /// 主去处下方的辅助入口。
   static const List<WorkbenchActivity> secondary = <WorkbenchActivity>[
     WorkbenchActivity.tools,
     WorkbenchActivity.tutorial,
   ];
+  static const List<WorkbenchActivity> _railActivities = [
+    WorkbenchActivity.explorer,
+    WorkbenchActivity.agents,
+    WorkbenchActivity.tools,
+    WorkbenchActivity.tutorial,
+  ];
 
-  /// 单个图标的稳定标识。侧栏宿主与测试用它定位具体入口。
   static ValueKey<String> activityKey(WorkbenchActivity activity) =>
       ValueKey<String>('workbench-rail-${activity.name}');
 
-  /// 底部头像的稳定标识。
   static const ValueKey<String> avatarKey = ValueKey<String>(
     'workbench-rail-avatar',
   );
@@ -81,45 +71,66 @@ class WorkbenchActivityRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final l = StudioLocalizations.of(context);
+    final index = _railActivities.indexOf(selected);
     return Container(
       width: width,
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
+        color: scheme.surfaceContainerLow,
         border: Border(right: BorderSide(color: scheme.outlineVariant)),
       ),
       child: SafeArea(
         right: false,
         child: Column(
-          children: <Widget>[
+          children: [
             Expanded(
-              // 窗口很矮时可滚动，图标不会被裁掉一半。
-              child: SingleChildScrollView(
-                child: Column(
-                  children: <Widget>[
-                    for (final activity in primary)
-                      _RailButton(
+              child: NavigationRail(
+                minWidth: width,
+                minExtendedWidth: width,
+                selectedIndex: index < 0 ? null : index,
+                onDestinationSelected: (value) =>
+                    onSelected(_railActivities[value]),
+                labelType: NavigationRailLabelType.all,
+                scrollable: true,
+                useIndicator: true,
+                indicatorColor: scheme.secondaryContainer,
+                indicatorShape: const StadiumBorder(),
+                selectedLabelTextStyle: Theme.of(context).textTheme.labelMedium,
+                unselectedLabelTextStyle: Theme.of(
+                  context,
+                ).textTheme.labelMedium,
+                groupAlignment: -0.85,
+                destinations: [
+                  for (final activity in _railActivities)
+                    NavigationRailDestination(
+                      icon: MouseRegion(
                         key: activityKey(activity),
-                        activity: activity,
-                        selected: activity == selected,
-                        onPressed: onSelected,
-                        label: _tooltipFor(activity, l),
-                        icon: _iconFor(activity),
+                        cursor: SystemMouseCursors.click,
+                        child: Tooltip(
+                          message: _tooltipFor(activity, l),
+                          child: Icon(_iconFor(activity), size: 24),
+                        ),
                       ),
-                    const SizedBox(height: 8),
-                    for (final activity in secondary)
-                      _RailButton(
+                      selectedIcon: MouseRegion(
                         key: activityKey(activity),
-                        activity: activity,
-                        selected: activity == selected,
-                        onPressed: onSelected,
-                        label: _labelFor(activity, l),
-                        icon: _iconFor(activity),
+                        cursor: SystemMouseCursors.click,
+                        child: Tooltip(
+                          message: _tooltipFor(activity, l),
+                          child: Icon(_iconFor(activity), size: 24),
+                        ),
                       ),
-                  ],
-                ),
+                      label: SizedBox(
+                        width: 72,
+                        child: Text(
+                          _labelFor(activity, l),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
-            // 底部固定在左下角：设置与账号。
             _RailButton(
               key: activityKey(WorkbenchActivity.settings),
               activity: WorkbenchActivity.settings,
@@ -143,27 +154,15 @@ class WorkbenchActivityRail extends StatelessWidget {
     );
   }
 
-  static IconData _iconFor(WorkbenchActivity activity) {
-    switch (activity) {
-      case WorkbenchActivity.explorer:
-        return Icons.folder_copy_outlined;
-      case WorkbenchActivity.agents:
-        return Icons.smart_toy_outlined;
-      case WorkbenchActivity.tools:
-        return Icons.handyman_outlined;
-      case WorkbenchActivity.tutorial:
-        return Icons.menu_book_outlined;
-      case WorkbenchActivity.settings:
-        return Icons.settings_outlined;
-      case WorkbenchActivity.profile:
-        return Icons.account_circle_outlined;
-    }
-  }
+  static IconData _iconFor(WorkbenchActivity activity) => switch (activity) {
+    WorkbenchActivity.explorer => Icons.folder_copy_outlined,
+    WorkbenchActivity.agents => Icons.smart_toy_outlined,
+    WorkbenchActivity.tools => Icons.handyman_outlined,
+    WorkbenchActivity.tutorial => Icons.menu_book_outlined,
+    WorkbenchActivity.settings => Icons.settings_outlined,
+    WorkbenchActivity.profile => Icons.account_circle_outlined,
+  };
 
-  /// 导航条的语义标签。
-  ///
-  /// 复用 [StudioLocalizations] 的条目。
-  /// 资源管理器与设置使用同一套三语文案。
   static String _labelFor(WorkbenchActivity activity, StudioLocalizations l) {
     switch (activity) {
       case WorkbenchActivity.explorer:
@@ -203,10 +202,6 @@ class WorkbenchActivityRail extends StatelessWidget {
       : '设置';
 }
 
-/// 一个 44px 触控目标的图标按钮。
-///
-/// 用 [InkWell] 而不是 NavigationRailDestination：后者在展开时会加宽，
-/// 与固定 52px 的宽度约束冲突。焦点圈交给主题的 `focusColor`。
 class _RailButton extends StatelessWidget {
   const _RailButton({
     super.key,
@@ -226,42 +221,42 @@ class _RailButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: label,
-      child: Tooltip(
-        message: label,
-        child: SizedBox(
-          width: WorkbenchActivityRail.width,
-          height: WorkbenchActivityRail.touchTarget,
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () => onPressed(activity),
-              child: Stack(
-                alignment: Alignment.center,
-                children: <Widget>[
-                  // 选中指示：左侧一条主题色竖条，与 VS Code 一致。
-                  if (selected)
-                    Positioned(
-                      left: 0,
-                      top: 6,
-                      bottom: 6,
-                      child: Container(
-                        width: 2,
-                        decoration: BoxDecoration(
-                          color: scheme.primary,
-                          borderRadius: BorderRadius.circular(1),
-                        ),
+    return WorkbenchFocusOutline(
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: label,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: Tooltip(
+            message: label,
+            child: SizedBox(
+              width: WorkbenchActivityRail.width,
+              height: WorkbenchActivityRail.touchTarget,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => onPressed(activity),
+                  child: Center(
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      width: 56,
+                      height: 32,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: selected ? scheme.secondaryContainer : null,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Icon(
+                        icon,
+                        size: 24,
+                        color: selected
+                            ? scheme.onSecondaryContainer
+                            : scheme.onSurfaceVariant,
                       ),
                     ),
-                  Icon(
-                    icon,
-                    size: 20,
-                    color: selected ? scheme.primary : scheme.onSurfaceVariant,
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -269,6 +264,46 @@ class _RailButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Resizable IDE-style sidebar edge. Double-click restores the default width.
+class WorkbenchSidebarDivider extends StatelessWidget {
+  const WorkbenchSidebarDivider({
+    super.key,
+    required this.controller,
+    this.touchLayout = false,
+  });
+
+  final LargeScreenController controller;
+  final bool touchLayout;
+  static const double desktopHitWidth = 6;
+  static const double touchHitWidth = 48;
+
+  static const ValueKey<String> dividerKey = ValueKey<String>(
+    'workbench-sidebar-divider',
+  );
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    cursor: SystemMouseCursors.resizeColumn,
+    child: GestureDetector(
+      key: dividerKey,
+      behavior: HitTestBehavior.opaque,
+      onPanUpdate: (details) => controller.setSidebarWidth(
+        controller.sidebarWidth + details.delta.dx,
+      ),
+      onDoubleTap: controller.resetSidebarWidth,
+      child: SizedBox(
+        width: touchLayout ? touchHitWidth : desktopHitWidth,
+        child: Center(
+          child: Container(
+            width: 1,
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// 底部头像按钮：选中即打开账号面板。
@@ -294,32 +329,37 @@ class _AvatarButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final initial = _initialOf(accountLabel);
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: label,
-      child: Tooltip(
-        message: label,
-        child: SizedBox(
-          width: WorkbenchActivityRail.width,
-          height: WorkbenchActivityRail.touchTarget,
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: onPressed,
-              child: Center(
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: selected ? scheme.primary : scheme.outlineVariant,
+    return WorkbenchFocusOutline(
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: label,
+        child: Tooltip(
+          message: label,
+          child: SizedBox(
+            width: WorkbenchActivityRail.width,
+            height: WorkbenchActivityRail.touchTarget,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                mouseCursor: SystemMouseCursors.click,
+                onTap: onPressed,
+                child: Center(
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: selected
+                            ? scheme.primary
+                            : scheme.outlineVariant,
+                      ),
+                      color: scheme.surfaceContainerHigh,
                     ),
-                    color: scheme.surfaceContainerHigh,
+                    clipBehavior: Clip.antiAlias,
+                    child: _avatarChild(scheme, initial),
                   ),
-                  clipBehavior: Clip.antiAlias,
-                  child: _avatarChild(scheme, initial),
                 ),
               ),
             ),
@@ -365,58 +405,136 @@ class _AvatarButton extends StatelessWidget {
   }
 }
 
-/// 空工作台的欢迎区。
-///
-/// 只说明当前没有打开的项目，并给一个打开项目的动作。
-/// 不放统计数字或仪表盘：那些内容会与项目侧栏重复。
+/// The empty workbench offers existing project commands and recent projects.
 class WorkbenchWelcome extends StatelessWidget {
-  const WorkbenchWelcome({super.key, required this.onOpenProject});
+  const WorkbenchWelcome({
+    super.key,
+    required this.onOpenProject,
+    this.onCreateProject,
+    this.onCloneRepository,
+    this.projects = const [],
+    this.onOpenRecent,
+  });
 
-  /// 用户点了「打开项目」。由宿主决定弹选择器还是登记目录。
   final VoidCallback onOpenProject;
+  final VoidCallback? onCreateProject;
+  final VoidCallback? onCloneRepository;
+  final List<Project> projects;
+  final ValueChanged<Project>? onOpenRecent;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l = StudioLocalizations.of(context);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 360),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(
-                Icons.space_dashboard_outlined,
-                size: 40,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                l.noProjects,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                l.isEnglish
-                    ? 'Choose a folder or create a project to start editing.'
-                    : l.isTraditionalChinese
-                    ? '選擇資料夾或建立專案後即可開始編輯。'
-                    : '选择文件夹或新建项目后即可开始编辑。',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+    final recent = [...projects]
+      ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
+    Widget heading(String text) => Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(text, style: theme.textTheme.titleMedium),
+    );
+    Widget action(
+      String label,
+      IconData icon,
+      String keys,
+      VoidCallback? onPressed,
+    ) => Tooltip(
+      message: '$label (${shortcutLabel(keys)})',
+      child: TextButton(
+        style: TextButton.styleFrom(alignment: Alignment.centerLeft),
+        onPressed: onPressed,
+        child: Row(
+          children: [
+            Icon(icon, size: 20),
+            const SizedBox(width: 12),
+            Expanded(child: Text(label)),
+            if (MediaQuery.sizeOf(context).width >= 600) ...[
+              const SizedBox(width: 8),
+              Text(shortcutLabel(keys), style: theme.textTheme.labelSmall),
+            ],
+          ],
+        ),
+      ),
+    );
+    final start = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        heading(
+          l.isEnglish
+              ? 'Start'
+              : l.isTraditionalChinese
+              ? '開始'
+              : '开始',
+        ),
+        action(
+          l.createProject,
+          Icons.create_new_folder_outlined,
+          'Ctrl+Shift+N',
+          onCreateProject,
+        ),
+        action(
+          l.addExistingProject,
+          Icons.folder_open_outlined,
+          'Ctrl+O',
+          onOpenProject,
+        ),
+        if (onCloneRepository != null)
+          action(
+            l.isEnglish ? 'Clone repository' : '克隆仓库',
+            Icons.cloud_download_outlined,
+            'Ctrl+Shift+G',
+            onCloneRepository,
+          ),
+      ],
+    );
+    final history = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        heading(
+          l.isEnglish
+              ? 'Recent projects'
+              : l.isTraditionalChinese
+              ? '最近專案'
+              : '最近项目',
+        ),
+        if (recent.isEmpty)
+          Text(l.noProjects, style: theme.textTheme.bodySmall)
+        else
+          for (final project in recent.take(8))
+            TextButton(
+              style: TextButton.styleFrom(alignment: Alignment.centerLeft),
+              onPressed: onOpenRecent == null
+                  ? null
+                  : () => onOpenRecent!(project),
+              child: Tooltip(
+                message: project.path,
+                child: Text(
+                  project.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(height: 20),
-              FilledButton.icon(
-                onPressed: onOpenProject,
-                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                label: Text(l.addExistingProject),
-              ),
-            ],
+            ),
+      ],
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) => Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 880),
+            child: constraints.maxWidth >= 600
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: start),
+                      const SizedBox(width: 48),
+                      Expanded(child: history),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [start, const SizedBox(height: 32), history],
+                  ),
           ),
         ),
       ),
