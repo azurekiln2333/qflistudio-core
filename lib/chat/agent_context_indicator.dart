@@ -173,7 +173,11 @@ class _AgentContextIndicatorState extends State<AgentContextIndicator> {
       childFocusNode: _focus,
       alignmentOffset: const Offset(0, 6),
       style: MenuStyle(
-        padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+        // Preserve WorkbenchTheme's transparent gutter around the painted
+        // menu surface while keeping this custom popover's own content padding.
+        padding: const WidgetStatePropertyAll(
+          EdgeInsets.symmetric(horizontal: 8, vertical: 16),
+        ),
         backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
       ),
       onClose: () {
@@ -190,6 +194,7 @@ class _AgentContextIndicatorState extends State<AgentContextIndicator> {
             child: ConstrainedBox(
               constraints: BoxConstraints(maxHeight: height),
               child: SingleChildScrollView(
+                key: const ValueKey('agent-context-capacity-menu-content'),
                 padding: const EdgeInsets.all(16),
                 child: _details(context),
               ),

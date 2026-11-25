@@ -234,6 +234,7 @@ class _QfliAppState extends State<QfliApp> {
                 settings: settings,
               )
             : LargeScreenWorkbench(
+                formFactor: _formFactor,
                 editors: _editors,
                 store: widget.store,
                 auth: widget.auth,

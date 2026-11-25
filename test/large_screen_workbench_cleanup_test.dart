@@ -7,6 +7,10 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:qfli_studio_core/chat/composer_draft.dart';
 import 'package:qfli_studio_core/editor/retained_editor_host.dart';
+import 'package:qfli_studio_core/harness/harness_host.dart';
+import 'package:qfli_studio_core/harness/hub/agents_index.dart';
+import 'package:qfli_studio_core/harness/ui/agents_entry.dart';
+import 'package:qfli_studio_core/shell/workbench_session_view.dart';
 import 'package:qfli_studio_core/harness/harness_session_target.dart';
 import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
 import 'package:qfli_studio_core/models/project.dart';
@@ -24,6 +28,7 @@ import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/workspace/saved_workspace.dart';
 import 'package:qfli_studio_core/workspace/workspace_store.dart';
+import 'support/fake_harness_host.dart';
 
 Future<void> _finishExplorerTransition(WidgetTester tester) async {
   await tester.pump();
@@ -42,7 +47,18 @@ class _FilePanel extends StatefulWidget {
 
 class _FilePanelState extends State<_FilePanel> {
   @override
-  Widget build(BuildContext context) => const Text('Retained file panel');
+  Widget build(BuildContext context) => Column(
+    children: [
+      // R5/R14: registered files panels now own their single header.
+      IconButton(
+        key: WorkbenchExplorer.backKey,
+        tooltip: '项目列表',
+        onPressed: LargeScreenScope.maybeOf(context)!.showProjects,
+        icon: const Icon(Icons.arrow_back),
+      ),
+      const Text('Retained file panel'),
+    ],
+  );
 }
 
 class _Paths extends PathProviderPlatform {
@@ -56,6 +72,11 @@ class _Paths extends PathProviderPlatform {
   @override
   Future<String?> getTemporaryPath() async => root;
 }
+
+Finder _projectLabel(String name) => find.descendant(
+  of: find.byType(WorkbenchProjectRow),
+  matching: find.text(name),
+);
 
 /// Avoids starting real runtimes: these tests exercise the shell and Home's
 /// project-open boundary, while the existing host suite covers editor state.
@@ -200,7 +221,7 @@ void main() {
   }
 
   Future<void> project(WidgetTester tester, String name) async {
-    await tester.tap(find.text(name).first);
+    await tester.tap(_projectLabel(name));
     for (var i = 0; i < 12; i++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 10)),
@@ -208,6 +229,79 @@ void main() {
       await tester.pump(const Duration(milliseconds: 25));
     }
   }
+
+  testWidgets('R4: unresolved session uses the real retained center overlay', (
+    tester,
+  ) async {
+    final fixture = await mount(tester);
+    await project(tester, 'Alpha');
+    final sessionKey = fixture.editors.activeSessionKey;
+    final retainedHost = tester.element(
+      find.byKey(const ValueKey('workbench-editor-host')),
+    );
+    fixture.layout.showProjects();
+    await tester.pump();
+    await _finishExplorerTransition(tester);
+    final home = tester.widget<HomeTab>(find.byType(HomeTab));
+    final info = HarnessSessionInfo(
+      id: 'missing',
+      hostId: 'local',
+      providerId: 'pi',
+      title: 'Standalone conversation',
+      status: HarnessSessionStatus.idle,
+      capabilities: const {HarnessCapability.transcript},
+      cwd: p.join(root.path, 'missing-session-root'),
+    );
+    final handle = FakeSessionHandle(info: info);
+    final hub = HarnessHub(
+      hosts: [
+        FakeHarnessHost(
+          id: 'local',
+          label: 'Local',
+          kind: HarnessHostKind.local,
+          initialSessions: [info],
+          openHandler: (_) async => handle,
+        ),
+      ],
+      desktop: true,
+    );
+    await tester.runAsync(
+      () => openAgentSession(
+        tester.element(find.byType(HomeTab)),
+        row: AgentsIndexRow(
+          session: info,
+          hostLabel: 'Local',
+          hostKind: HarnessHostKind.local,
+        ),
+        auth: home.auth,
+        store: home.store,
+        settings: home.settings,
+        harnessHub: hub,
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(WorkbenchSessionView), findsOneWidget);
+    expect(find.textContaining('先打开一个项目'), findsNothing);
+    expect(fixture.editors.activeSessionKey, sessionKey);
+    expect(
+      tester.element(
+        find.byKey(
+          const ValueKey('workbench-editor-host'),
+          skipOffstage: false,
+        ),
+      ),
+      same(retainedHost),
+    );
+    await project(tester, 'Beta');
+    expect(find.byType(WorkbenchSessionView), findsNothing);
+    expect(fixture.editors.activeProject!.name, 'Beta');
+    expect(fixture.layout.explorerPage, ExplorerPage.files);
+    expect(handle.detachCount, 1);
+    expect(handle.stopCount, 0);
+    await hub.shutdown();
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('project clicks switch to Files and resume the same live key', (
     tester,
@@ -223,6 +317,11 @@ void main() {
     expect(layout.centerOverlay, isNull);
     expect(layout.explorerPage, ExplorerPage.files);
     expect(editors.sessionInfos, hasLength(1));
+    // This fake controller starts no editor. Supply its registered files
+    // header instead of relying on the duplicate shell header removed by R5.
+    layout.registerFiles(editors, (_) => const _FilePanel());
+    layout.activateFiles(editors);
+    await tester.pump();
     await tester.tap(find.byKey(WorkbenchExplorer.backKey));
     await tester.pump();
     await _finishExplorerTransition(tester);
@@ -280,6 +379,35 @@ void main() {
     expect(editors.activeSessionKey, 'workspace:kept');
     expect(editors.resumed.last, 'workspace:kept');
     expect(editors.sessionInfos, hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('visible Explorer does not duplicate the welcome project list', (
+    tester,
+  ) async {
+    await mount(tester);
+    final welcome = find.byType(WorkbenchWelcome);
+    expect(welcome, findsNothing);
+    // R5/V9, round 4: the center gives passive shortcuts, not duplicate actions.
+    final hints = find.byType(WorkbenchShortcutHints);
+    expect(hints, findsOneWidget);
+    expect(
+      find.descendant(of: hints, matching: find.byType(TextButton)),
+      findsNothing,
+    );
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Beta'), findsOneWidget);
+    expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer)),
+    );
+    await tester.pump();
+    expect(welcome, findsOneWidget);
+    expect(hints, findsNothing);
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Beta'), findsOneWidget);
+    expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -363,6 +491,89 @@ void main() {
     expect(find.text('Conversation'), findsNothing);
     expect(tester.state(find.byType(HomeTab)), same(home));
   });
+
+  testWidgets(
+    'shell notices stay centered inside the central area at each width',
+    (tester) async {
+      final fixture = await mount(tester);
+      final home = tester.element(find.byType(HomeTab));
+      final messenger = ScaffoldMessenger.of(home);
+      final center = find.byKey(const ValueKey('workbench-center-scaffold'));
+      for (final width in [1440.0, 1200.0, 1024.0, 500.0]) {
+        tester.view.physicalSize = Size(width, 850);
+        await tester.pump();
+        for (final sidebarVisible in [true, false]) {
+          fixture.layout.select(WorkbenchActivity.explorer, toggle: false);
+          if (!sidebarVisible) fixture.layout.toggleSidebar();
+          await tester.pump();
+          messenger.showSnackBar(
+            const SnackBar(content: Text('Central notice')),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          // V11 concerns the painted surface, not MD3's expanding Align.
+          final notice = find.descendant(
+            of: find.byType(SnackBar),
+            matching: find.byType(Material),
+          );
+          expect(notice, findsOneWidget);
+          expect(
+            Scaffold.of(tester.element(notice)),
+            same(tester.state<ScaffoldState>(center)),
+          );
+          expect(ScaffoldMessenger.of(tester.element(notice)), same(messenger));
+          final centralRect = tester.getRect(center);
+          final centerLeft =
+              WorkbenchActivityRail.width +
+              (!fixture.layout.compact && sidebarVisible
+                  ? fixture.layout.sidebarWidth
+                  : 0);
+          expect(centralRect.left, closeTo(centerLeft, 1));
+          expect(centralRect.right, closeTo(width, 1));
+          final noticeRect = tester.getRect(notice);
+          expect(noticeRect.center.dx, closeTo(centralRect.center.dx, 1));
+          expect(noticeRect.width, greaterThan(0));
+          expect(noticeRect.width, lessThanOrEqualTo(480));
+          expect(noticeRect.left, greaterThanOrEqualTo(centralRect.left));
+          expect(noticeRect.right, lessThanOrEqualTo(centralRect.right));
+          messenger.removeCurrentSnackBar();
+          await tester.pump();
+        }
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'workbench project search stays visible and filters the retained panel',
+    (tester) async {
+      await mount(tester);
+      final home = find.byType(HomeTab);
+      final field = find.descendant(
+        of: home,
+        matching: find.byKey(const ValueKey('workbench-project-search')),
+      );
+      expect(field, findsOneWidget);
+      expect(
+        find.descendant(of: home, matching: find.byType(AppBar)),
+        findsNothing,
+      );
+      expect(
+        find.descendant(of: home, matching: find.byType(TabBar)),
+        findsNothing,
+      );
+      await tester.enterText(field, 'Alpha');
+      await tester.pump();
+      // The query also appears in EditableText. Check project row labels.
+      expect(_projectLabel('Alpha'), findsOneWidget);
+      expect(_projectLabel('Beta'), findsNothing);
+      await tester.enterText(field, '');
+      await tester.pump();
+      expect(_projectLabel('Alpha'), findsOneWidget);
+      expect(_projectLabel('Beta'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'shell shortcuts select rather than toggle and use platform modifier',

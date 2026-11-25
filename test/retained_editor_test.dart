@@ -28,8 +28,10 @@ import 'package:qfli_studio_core/store/auth_store.dart';
 import 'package:qfli_studio_core/store/project_store.dart';
 import 'package:qfli_studio_core/store/settings_store.dart';
 import 'package:qfli_studio_core/shell/large_screen_workbench.dart';
+import 'package:qfli_studio_core/shell/workbench_explorer.dart';
 import 'package:qfli_studio_core/shell/workbench_chrome.dart';
 import 'package:qfli_studio_core/editor/file_explorer.dart';
+import 'package:qfli_studio_core/shell/large_screen_controller.dart';
 import 'package:re_editor/re_editor.dart';
 
 const _sample =
@@ -61,14 +63,33 @@ void main() {
     testWidgets('$family uses one workbench and preserves live project state', (
       tester,
     ) async {
+      // R5/V9: these desktop/tablet hint assertions use Simplified Chinese.
+      // QfliApp otherwise resolves the host locale (English on Linux CI).
+      tester.platformDispatcher.localeTestValue = const Locale('zh', 'CN');
+      addTearDown(tester.platformDispatcher.clearLocaleTestValue);
       final fixture = _Fixture(root);
       await fixture.mount(tester, formFactor: family);
       expect(find.byType(LargeScreenWorkbench), findsOneWidget);
       expect(find.byType(HomePage), findsNothing);
-      expect(find.byType(WorkbenchWelcome), findsOneWidget);
+      // R5/V9, design §11.2: visible Explorer owns the project commands.
+      expect(find.byType(WorkbenchWelcome), findsNothing);
+      // R5/V9, round 4: the passive hint list replaces the old prompt, not
+      // another Start surface. Explorer remains the only project-action owner.
+      expect(find.byType(WorkbenchShortcutHints), findsOneWidget);
       expect(find.byType(FileExplorer, skipOffstage: false), findsNothing);
       final shell = tester.widget<LargeScreenWorkbench>(
         find.byType(LargeScreenWorkbench),
+      );
+      // R21/V1: injected tablet family must exercise touch density in CI.
+      final scope = tester.widget<LargeScreenScope>(
+        find.byType(LargeScreenScope),
+      );
+      expect(scope.formFactor, family);
+      expect(
+        Theme.of(tester.element(find.byType(HomeTab))).visualDensity,
+        family == AppFormFactor.desktop
+            ? VisualDensity.compact
+            : VisualDensity.standard,
       );
       final rail = find.byType(WorkbenchActivityRail);
       final rootNavigator = Navigator.of(tester.element(rail));
@@ -77,6 +98,16 @@ void main() {
       expect(rail, findsOneWidget);
       final alphaState = tester.state(find.byType(EditorPage));
       final alpha = _editor(tester);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('workbench-editor-title-bar')))
+            .height,
+        family == AppFormFactor.desktop ? 40 : 48,
+      );
+      expect(
+        tester.getSize(find.byKey(WorkbenchSidebarDivider.dividerKey)).width,
+        family == AppFormFactor.desktop ? 6 : 48,
+      );
       final open = alpha.current!;
       open.controller.text = '// kept edit\nclass Main {}';
       const selection = CodeLineSelection(
@@ -89,7 +120,8 @@ void main() {
       await tester.pump();
       expect(open.dirty, isTrue);
 
-      await _menu(tester, 'terminal');
+      // R8/R9: use the large-screen terminal command instead of QuickBar.
+      await _workbenchTerminal(tester);
       final terminalFinder = find.byType(TerminalPane);
       final terminal = tester.state<TerminalPaneState>(terminalFinder);
       final inputFinder = find.descendant(
@@ -111,13 +143,14 @@ void main() {
         await _pumpFrames(tester);
       }
 
-      await select(WorkbenchActivity.files);
+      // R10–R14/V2, design §11.2: one Explorer replaces Projects/Files.
+      // A project open already selects Files. Return through its back button.
       expect(find.byType(FileExplorer), findsOneWidget);
       final tree = tester.state(find.byType(FileExplorer));
       await select(WorkbenchActivity.agents);
       expect(find.byType(FileExplorer), findsNothing);
       expect(_editor(tester), same(alpha));
-      await select(WorkbenchActivity.projects);
+      await select(WorkbenchActivity.explorer);
       await fixture.open(tester, 'Beta');
       expect(rootNavigator.canPop(), isFalse);
       expect(shell.editors.sessionInfos, hasLength(2));
@@ -143,7 +176,7 @@ void main() {
       );
       expect(input.controller!.text, 'unfinished local command');
 
-      await select(WorkbenchActivity.files);
+      // R13: returning from Profile restores the exact retained Files panel.
       expect(tester.state(find.byType(FileExplorer)), same(tree));
       tester.view.physicalSize = const Size(500, 800);
       await _pumpFrames(tester);
@@ -151,12 +184,12 @@ void main() {
       expect(find.byType(HomePage), findsNothing);
       expect(tester.state(find.byType(FileExplorer)), same(tree));
       // Toggle the same sidebar away to interact with the narrow center.
-      await select(WorkbenchActivity.files);
+      await select(WorkbenchActivity.explorer);
       expect(find.byType(FileExplorer), findsNothing);
       expect(_editor(tester), same(alpha));
       tester.view.physicalSize = const Size(1200, 850);
       await _pumpFrames(tester);
-      await select(WorkbenchActivity.files);
+      await select(WorkbenchActivity.explorer);
       expect(tester.state(find.byType(FileExplorer)), same(tree));
       expect(shell.editors.sessionInfos, hasLength(2));
       expect(open.controller.selection, selection);
@@ -167,13 +200,15 @@ void main() {
       );
       expect(avatar.left, lessThan(WorkbenchActivityRail.width));
       expect(avatar.bottom, greaterThan(800));
-      await _menu(tester, 'close_editor');
+      await _workbenchClose(tester);
       expect(find.text('有未保存的更改'), findsOneWidget);
       await tester.tap(find.text('丢弃'));
       await _pumpIoUntil(tester, () => !alphaState.mounted);
       await _pumpFrames(tester);
       expect(find.byType(FileExplorer), findsNothing);
-      expect(find.byType(WorkbenchWelcome), findsOneWidget);
+      // R5/V9: closing the editor must not duplicate visible project actions.
+      expect(find.byType(WorkbenchWelcome), findsNothing);
+      expect(find.byType(WorkbenchShortcutHints), findsOneWidget);
       expect(shell.editors.sessionInfos, hasLength(1));
       expect(tester.takeException(), isNull);
     });
@@ -797,11 +832,45 @@ void main() {
   );
 }
 
-EditorController _editor(WidgetTester tester) =>
-    tester
-            .widget<SelectionToolbarScope>(find.byType(SelectionToolbarScope))
-            .editor
+EditorController _editor(WidgetTester tester) {
+  if (find.byType(LargeScreenWorkbench).evaluate().isNotEmpty) {
+    // R21/V5, design §11.2: the workbench title observes the real controller,
+    // while SelectionToolbarScope belongs to the unchanged phone AppBar.
+    final headerOwner = find.ancestor(
+      of: find.byKey(const ValueKey('workbench-editor-title-bar')),
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is ListenableBuilder &&
+            widget.listenable is EditorController,
+      ),
+    );
+    return tester.widget<ListenableBuilder>(headerOwner).listenable
         as EditorController;
+  }
+  return tester
+          .widget<SelectionToolbarScope>(find.byType(SelectionToolbarScope))
+          .editor
+      as EditorController;
+}
+
+Future<void> _workbenchTerminal(WidgetTester tester) async {
+  final editor = find.byType(EditorPage);
+  final panel = find.descendant(
+    of: editor,
+    matching: find.byKey(const ValueKey('workbench-panel-terminal')),
+  );
+  // R8/R9, design §11.2: the integrated editor has one status command.
+  await tester.tap(panel);
+  await _pumpFrames(tester);
+}
+
+Future<void> _workbenchClose(WidgetTester tester) async {
+  // R8/R9/V6, design §11.2: use the integrated MenuAnchor command.
+  await tester.tap(find.byKey(const ValueKey('workbench-editor-more')));
+  await _pumpFrames(tester);
+  await tester.tap(find.byKey(const ValueKey('workbench-menu-close_editor')));
+  await _pumpFrames(tester);
+}
 
 Future<void> _tab(WidgetTester tester, IconData icon) async {
   await tester.tap(find.byIcon(icon).first);
@@ -1022,7 +1091,22 @@ class _Fixture {
   }
 
   Future<void> open(WidgetTester tester, String name) async {
-    await tester.tap(find.text(name));
+    if (find.byType(LargeScreenWorkbench).evaluate().isNotEmpty) {
+      // R12/R14, design §11.2: only large-screen fixture navigation changes.
+      final back = find.byKey(WorkbenchExplorer.backKey);
+      if (back.evaluate().isNotEmpty) {
+        await tester.tap(back);
+        await _pumpFrames(tester);
+      }
+      final projects = find.descendant(
+        of: find.byType(HomeTab),
+        matching: find.text(name),
+      );
+      await tester.ensureVisible(projects);
+      await tester.tap(projects);
+    } else {
+      await tester.tap(find.text(name));
+    }
     final editors = find.byType(EditorPage);
     await _pumpIoUntil(
       tester,

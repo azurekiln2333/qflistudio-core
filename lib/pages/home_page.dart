@@ -53,6 +53,8 @@ import '../services/local_audit_service.dart';
 import '../editor/open_performance.dart';
 import '../services/local_stats_service.dart';
 import '../workspace/saved_workspaces_tab.dart';
+import '../shell/workbench_explorer.dart';
+import '../services/file_service.dart';
 import '../shell/large_screen_controller.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
@@ -353,6 +355,7 @@ class _HomeTabState extends State<HomeTab>
   String _languageFilter = '';
   int _gitRefreshRevision = 0;
   RetainedEditorController? _retainedEditor;
+  LargeScreenController? _workbenchLayout;
   bool _retainedEditorVisible = false;
   String? _archiveBusyLabel;
   final Map<int, _HomeCloneTaskState> _cloneTasks = {};
@@ -607,6 +610,7 @@ class _HomeTabState extends State<HomeTab>
     for (final task in _cloneTasks.values) {
       task.cancellation.cancel();
     }
+    _workbenchLayout?.unbindProjectActions(this);
     _retainedEditor?.removeListener(_onRetainedEditorChanged);
     _homeGeneration++;
     _cloudActions.removeListener(_onCloudChanged);
@@ -639,6 +643,9 @@ class _HomeTabState extends State<HomeTab>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    if (widget.embedded && LargeScreenScope.maybeOf(context) != null) {
+      return _workbenchProjects(context);
+    }
     final l10n = StudioLocalizations.of(context);
     return Scaffold(
       appBar: AppBar(
@@ -826,6 +833,226 @@ class _HomeTabState extends State<HomeTab>
           );
         },
       ),
+    );
+  }
+
+  Widget _workbenchProjects(BuildContext context) {
+    final l = StudioLocalizations.of(context);
+    final layout = LargeScreenScope.maybeOf(context)!;
+    _workbenchLayout = layout;
+    // All project command entry points share Home's existing scope-aware flow.
+    layout.bindProjectActions(
+      this,
+      create: () => unawaited(_createFromCurrentScope(context)),
+      openFolder: () => unawaited(_addExistingProject()),
+      clone: () => unawaited(_cloneRepository()),
+      openRecent: (project) => unawaited(_openProject(context, project)),
+    );
+    String scopeLabel(ProjectScope scope) => switch (scope) {
+      ProjectScope.all => l.allProjects,
+      ProjectScope.history => l.historyProjects,
+      ProjectScope.favorite => l.favoriteProjects,
+      ProjectScope.workspace => l.isEnglish ? 'Workspaces' : '工作区',
+      ProjectScope.cloud => l.cloudProjects,
+      ProjectScope.github => 'GitHub',
+      ProjectScope.agents => l.agentsTab,
+    };
+    return ListenableBuilder(
+      listenable: Listenable.merge([widget.store, _projectTabs]),
+      builder: (context, _) {
+        final scope = _orderedScopes[_projectTabs.index];
+        var projects = _projectsFor(scope);
+        final query = _query.trim().toLowerCase();
+        if (query.isNotEmpty) {
+          projects = projects
+              .where(
+                (project) =>
+                    project.name.toLowerCase().contains(query) ||
+                    project.path.toLowerCase().contains(query),
+              )
+              .toList();
+        }
+        if (_languageFilter.isNotEmpty) {
+          projects = projects
+              .where((project) => project.language == _languageFilter)
+              .toList();
+        }
+        final current = _retainedEditor?.activeProject;
+        final opened = _retainedEditor?.sessionInfos;
+        final special =
+            scope == ProjectScope.workspace || scope == ProjectScope.github;
+        return WorkbenchProjectsPanel(
+          searchController: _searchController,
+          onSearchChanged: (value) => setState(() => _query = value),
+          onCreate: layout.createProject,
+          onOpenFolder: AppPaths.isDesktop ? () => layout.openFolder() : null,
+          onClone: StudioProfile.current?.offlineOnly == true
+              ? null
+              : () => layout.cloneRepository(),
+          filterItems: [
+            for (final value in _orderedScopes)
+              MenuItemButton(
+                leadingIcon: Icon(
+                  scope == value ? Icons.check : null,
+                  size: 18,
+                ),
+                onPressed: () {
+                  _projectTabs.index = _orderedScopes.indexOf(value);
+                  setState(() {});
+                },
+                child: Text(scopeLabel(value)),
+              ),
+            const Divider(),
+            MenuItemButton(
+              onPressed: () => setState(() => _languageFilter = ''),
+              child: Text(l.allLanguages),
+            ),
+            for (final language in _languageChips)
+              MenuItemButton(
+                leadingIcon: Icon(
+                  _languageFilter == language ? Icons.check : null,
+                  size: 18,
+                ),
+                onPressed: () => setState(() => _languageFilter = language),
+                child: Text(language),
+              ),
+          ],
+          moreItems: [
+            MenuItemButton(
+              onPressed: () => unawaited(_refreshProjects(scope)),
+              leadingIcon: const Icon(Icons.refresh, size: 18),
+              child: Text(l.refresh),
+            ),
+            MenuItemButton(
+              onPressed: _archiveBusyLabel == null
+                  ? () => unawaited(_importProjectArchive())
+                  : null,
+              child: Text(l.isEnglish ? 'Import project (.qsz)' : '导入项目（.qsz）'),
+            ),
+            MenuItemButton(
+              onPressed: () => unawaited(_removeMissingProjects(context)),
+              child: Text(l.removeMissingProjects),
+            ),
+          ],
+          progress: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_archiveBusyLabel case final message?)
+                Padding(padding: const EdgeInsets.all(8), child: Text(message)),
+              HomeGitCloneTasks(
+                maxHeight: 140,
+                tasks: [
+                  for (final task in _cloneTasks.values)
+                    HomeGitCloneTask(
+                      id: task.id,
+                      name: task.name,
+                      progress: task.progress,
+                      cancelling: task.cancelling,
+                      onCancel: () => _cancelClone(task.id),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          body: special
+              ? _buildScopePage(context, scope)
+              : projects.isEmpty
+              ? Center(
+                  child: Text(
+                    query.isEmpty
+                        ? l.noProjects
+                        : l.isEnglish
+                        ? 'No matching projects'
+                        : '没有匹配的项目',
+                  ),
+                )
+              : ListView.builder(
+                  padding: EdgeInsets.zero,
+                  itemCount: projects.length,
+                  itemBuilder: (context, index) {
+                    final project = projects[index];
+                    return WorkbenchProjectRow(
+                      project: project,
+                      current:
+                          current != null && _sameProjectPath(current, project),
+                      opened:
+                          opened?.any(
+                            (session) =>
+                                _sameProjectPath(session.project, project),
+                          ) ??
+                          false,
+                      onOpen: () => unawaited(_openProject(context, project)),
+                      menuItems: [
+                        MenuItemButton(
+                          onPressed: () => widget.store.setFavorite(
+                            project,
+                            !project.favorite,
+                          ),
+                          child: Text(
+                            project.favorite
+                                ? (l.isEnglish ? 'Unfavorite' : '取消收藏')
+                                : l.favoriteProjects,
+                          ),
+                        ),
+                        if (AppPaths.isDesktop && !project.isCloud)
+                          MenuItemButton(
+                            onPressed: () => unawaited(
+                              FileService.revealInFileManager(project.path),
+                            ),
+                            child: Text(
+                              l.isEnglish
+                                  ? 'Show in file manager'
+                                  : '在资源管理器中显示',
+                            ),
+                          ),
+                        if (!project.isCloud)
+                          MenuItemButton(
+                            onPressed: () =>
+                                unawaited(_exportProjectArchive(project)),
+                            child: Text(
+                              l.isEnglish ? 'Export project' : '压缩导出项目',
+                            ),
+                          ),
+                        MenuItemButton(
+                          onPressed:
+                              !project.isCloud || !_cloudActions.isBusy(project)
+                              ? () => unawaited(_shareProject(project))
+                              : null,
+                          child: Text(l.shareProjectZip),
+                        ),
+                        if (project.isCloud) ...[
+                          MenuItemButton(
+                            onPressed: !_cloudActions.isBusy(project)
+                                ? () => unawaited(_cacheProject(project))
+                                : null,
+                            child: Text(l.updateProjectCache),
+                          ),
+                          MenuItemButton(
+                            onPressed: !_cloudActions.isBusy(project)
+                                ? () => unawaited(_clearProjectCache(project))
+                                : null,
+                            child: Text(l.clearProjectCache),
+                          ),
+                        ],
+                        const Divider(),
+                        MenuItemButton(
+                          onPressed:
+                              !project.isCloud ||
+                                  (!_cloudActions.isBusy(project) &&
+                                      !_deletingCloudProjects.contains(
+                                        project.id,
+                                      ))
+                              ? () =>
+                                    unawaited(_deleteProject(context, project))
+                              : null,
+                          child: Text(l.isEnglish ? 'Delete' : '删除'),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+        );
+      },
     );
   }
 

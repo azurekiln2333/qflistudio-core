@@ -5,8 +5,9 @@ import 'package:qfli_studio_core/shell/workbench_chrome.dart';
 import 'package:qfli_studio_core/shell/workbench_explorer.dart';
 
 class _Probe extends StatefulWidget {
-  const _Probe(this.label);
+  const _Probe(this.label, {this.onBack});
   final String label;
+  final VoidCallback? onBack;
 
   @override
   State<_Probe> createState() => _ProbeState();
@@ -16,9 +17,20 @@ class _ProbeState extends State<_Probe> {
   int count = 0;
 
   @override
-  Widget build(BuildContext context) => TextButton(
-    onPressed: () => setState(() => count++),
-    child: Text('${widget.label}: $count'),
+  Widget build(BuildContext context) => Column(
+    children: [
+      // R5/R14: registered files content owns its header, including Back.
+      if (widget.onBack != null)
+        IconButton(
+          key: WorkbenchExplorer.backKey,
+          onPressed: widget.onBack,
+          icon: const Icon(Icons.arrow_back),
+        ),
+      TextButton(
+        onPressed: () => setState(() => count++),
+        child: Text('${widget.label}: $count'),
+      ),
+    ],
   );
 }
 
@@ -45,7 +57,7 @@ void main() {
                 controller: controller,
                 projectName: 'Alpha',
                 projects: const _Probe('Projects'),
-                files: const _Probe('Files'),
+                files: _Probe('Files', onBack: controller.showProjects),
               ),
             ),
           ),
@@ -75,7 +87,9 @@ void main() {
         ),
         same(projects),
       );
-      expect(find.text('Alpha'), findsOneWidget);
+      // R5: the Explorer transition no longer repeats a project title above
+      // the FileExplorer header.
+      expect(find.text('Alpha'), findsNothing);
       await tester.tap(find.text('Files: 0'));
       final files = tester.state(find.byType(_Probe));
       final owner = Object();

@@ -12,6 +12,7 @@ import '../harness/hub/harness_hosts.dart';
 import '../harness/ui/agent_session_details_page.dart';
 import '../harness/ui/agents_entry.dart';
 import '../harness/ui/home_agents_tab.dart';
+import '../layout/app_form_factor.dart';
 import '../layout/breakpoints.dart';
 import '../pages/home_page.dart';
 import '../pages/local_content_pages.dart';
@@ -26,7 +27,6 @@ import '../services/studio_profile.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
-import '../widgets/project_dialogs.dart';
 import 'large_screen_controller.dart';
 import 'workbench_chrome.dart';
 import 'workbench_explorer.dart';
@@ -41,12 +41,14 @@ class LargeScreenWorkbench extends StatefulWidget {
     required this.store,
     required this.auth,
     required this.settings,
+    this.formFactor,
   });
 
   final RetainedEditorController editors;
   final ProjectStore store;
   final AuthStore auth;
   final SettingsStore settings;
+  final AppFormFactor? formFactor;
 
   @override
   State<LargeScreenWorkbench> createState() => _LargeScreenWorkbenchState();
@@ -73,8 +75,30 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
     _editorHost = RetainedEditorHost(
       controller: widget.editors,
       showRestoreControl: false,
-      child: WorkbenchWelcome(onOpenProject: _addExisting),
+      child: ListenableBuilder(
+        listenable: Listenable.merge([widget.store, _layout]),
+        builder: (context, _) {
+          if (_layout.activity == WorkbenchActivity.explorer &&
+              _layout.sidebarVisible) {
+            return WorkbenchShortcutHints(
+              includeClone: StudioProfile.current?.offlineOnly != true,
+            );
+          }
+          return WorkbenchWelcome(
+            onOpenProject: _layout.openFolder,
+            onCreateProject: _layout.createProject,
+            onCloneRepository: StudioProfile.current?.offlineOnly == true
+                ? null
+                : _layout.cloneRepository,
+            projects: widget.store.projects
+                .where((project) => !project.isCloud)
+                .toList(),
+            onOpenRecent: _layout.openRecent,
+          );
+        },
+      ),
     );
+    _page(WorkbenchActivity.explorer);
     if (Platform.isWindows) {
       _drop = DesktopFolderDrop(
         store: widget.store,
@@ -139,19 +163,6 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
     } else {
       _layout.toggleSidebar();
     }
-  }
-
-  Future<void> _addExisting() async {
-    final project = await showAddExistingDialog(context, widget.store);
-    if (!mounted || project == null) return;
-    widget.editors.open(
-      project: project,
-      auth: widget.auth,
-      store: widget.store,
-      settings: widget.settings,
-    );
-    _layout.closeCenterOverlay();
-    _layout.showFiles();
   }
 
   Widget _agentsPanel() {
@@ -259,6 +270,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
     widget.editors.setRootBackHandling(true);
     _agents?.dispose();
     _examples.dispose();
+    _pages.clear();
     _layout.dispose();
     super.dispose();
   }
@@ -279,11 +291,27 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
       child: child!,
     ),
     child: Theme(
-      data: WorkbenchTheme.from(Theme.of(context)),
+      data: WorkbenchTheme.from(
+        Theme.of(context),
+        formFactor:
+            widget.formFactor ??
+            (AppPaths.isDesktop ? AppFormFactor.desktop : AppFormFactor.tablet),
+      ),
       child: LargeScreenScope(
         controller: _layout,
+        formFactor:
+            widget.formFactor ??
+            (AppPaths.isDesktop ? AppFormFactor.desktop : AppFormFactor.tablet),
         child: Shortcuts(
           shortcuts: {
+            _shortcut(LogicalKeyboardKey.keyN, shift: true):
+                const _ProjectCommandIntent(_ProjectCommand.create),
+            _shortcut(LogicalKeyboardKey.keyO): const _ProjectCommandIntent(
+              _ProjectCommand.openFolder,
+            ),
+            if (StudioProfile.current?.offlineOnly != true)
+              _shortcut(LogicalKeyboardKey.keyG, shift: true):
+                  const _ProjectCommandIntent(_ProjectCommand.clone),
             _shortcut(LogicalKeyboardKey.keyB): const _ToggleSidebarIntent(),
             _shortcut(LogicalKeyboardKey.keyE, shift: true):
                 const _SelectActivityIntent(WorkbenchActivity.explorer),
@@ -295,6 +323,19 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
           },
           child: Actions(
             actions: {
+              _ProjectCommandIntent: CallbackAction<_ProjectCommandIntent>(
+                onInvoke: (intent) {
+                  switch (intent.command) {
+                    case _ProjectCommand.create:
+                      _layout.createProject();
+                    case _ProjectCommand.openFolder:
+                      _layout.openFolder();
+                    case _ProjectCommand.clone:
+                      _layout.cloneRepository();
+                  }
+                  return null;
+                },
+              ),
               _ToggleSidebarIntent: CallbackAction<_ToggleSidebarIntent>(
                 onInvoke: (_) {
                   _toggleSidebar();
@@ -314,8 +355,9 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                 controller: widget.editors,
                 child: ScaffoldMessenger(
                   key: _scaffold,
-                  child: Scaffold(
-                    body: SafeArea(
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surface,
+                    child: SafeArea(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           final compact =
@@ -326,10 +368,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                             listenable: _layout,
                             builder: (context, _) {
                               final workspace = _layout.showsWorkspace;
-                              final sideWidth =
+                              final availableSidebarWidth =
                                   (constraints.maxWidth -
                                           WorkbenchActivityRail.width)
-                                      .clamp(0.0, Breakpoints.sidebarWidth);
+                                      .clamp(0.0, double.infinity);
+                              final dividerWidth =
+                                  LargeScreenScope.isDesktop(context)
+                                  ? WorkbenchSidebarDivider.desktopHitWidth
+                                  : WorkbenchSidebarDivider.touchHitWidth;
+                              final sideWidth = _layout.sidebarWidth
+                                  .clamp(
+                                    0.0,
+                                    availableSidebarWidth.clamp(
+                                      0.0,
+                                      LargeScreenController.maxSidebarWidth,
+                                    ),
+                                  )
+                                  .toDouble();
                               final sideShown =
                                   workspace && _layout.sidebarVisible;
                               _page(_layout.activity);
@@ -392,6 +447,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
                                             child: _sidebar(),
                                           ),
                                         ),
+                                        if (!compact && sideShown)
+                                          Positioned(
+                                            key: const ValueKey(
+                                              'workbench-sidebar-divider-slot',
+                                            ),
+                                            left: sideWidth - dividerWidth / 2,
+                                            top: 0,
+                                            bottom: 0,
+                                            width: dividerWidth,
+                                            child: WorkbenchSidebarDivider(
+                                              controller: _layout,
+                                              touchLayout:
+                                                  !LargeScreenScope.isDesktop(
+                                                    context,
+                                                  ),
+                                            ),
+                                          ),
                                       ],
                                     ),
                                   ),
@@ -423,34 +495,55 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
   Widget _center(bool workspace) => LayoutBuilder(
     builder: (context, constraints) => MediaQuery(
       data: MediaQuery.of(context).copyWith(size: constraints.biggest),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          _retain(
-            key: const ValueKey('workbench-editor-host'),
-            visible: workspace && _layout.centerOverlay == null,
-            child: _editorHost,
+      child: Theme(
+        data: Theme.of(context).copyWith(
+          snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
+            width: (constraints.maxWidth - 32).clamp(0.0, 480.0).toDouble(),
           ),
-          for (final entry in _pages.entries)
-            if (entry.key != WorkbenchActivity.explorer &&
-                entry.key != WorkbenchActivity.agents)
+        ),
+        child: Scaffold(
+          key: const ValueKey('workbench-center-scaffold'),
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
               _retain(
-                key: ValueKey(entry.key),
-                visible: entry.key == _layout.activity,
-                child: entry.value,
+                key: const ValueKey('workbench-editor-host'),
+                visible: workspace && _layout.centerOverlay == null,
+                child: _editorHost,
               ),
-          if (_layout.centerOverlay case final overlay?)
-            _retain(
-              key: const ValueKey('workbench-center-overlay'),
-              visible: workspace,
-              child: Builder(builder: overlay),
-            ),
-        ],
+              for (final entry in _pages.entries)
+                if (entry.key != WorkbenchActivity.explorer &&
+                    entry.key != WorkbenchActivity.agents)
+                  _retain(
+                    key: ValueKey(entry.key),
+                    visible: entry.key == _layout.activity,
+                    child: entry.value,
+                  ),
+              if (_layout.centerOverlay case final overlay?)
+                _retain(
+                  key: const ValueKey('workbench-center-overlay'),
+                  visible: workspace,
+                  child: Builder(builder: overlay),
+                ),
+            ],
+          ),
+        ),
       ),
     ),
   );
 
-  Widget _sidebar() {
+  Widget _sidebar() => Builder(
+    builder: (context) => Theme(
+      data: Theme.of(context).copyWith(
+        snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
+          width: _layout.sidebarWidth.clamp(0.0, 480.0).toDouble(),
+        ),
+      ),
+      child: _sidebarContent(),
+    ),
+  );
+
+  Widget _sidebarContent() {
     final panels = _layout.filePanels;
     _visitedFiles.removeWhere((owner) => !panels.containsKey(owner));
     if (_layout.activity == WorkbenchActivity.explorer &&
@@ -514,6 +607,13 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
           ),
         ),
       );
+}
+
+enum _ProjectCommand { create, openFolder, clone }
+
+class _ProjectCommandIntent extends Intent {
+  const _ProjectCommandIntent(this.command);
+  final _ProjectCommand command;
 }
 
 class _ToggleSidebarIntent extends Intent {
