@@ -3,7 +3,6 @@
 // only on this file. Changes go through the harness-hub task root.
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 
