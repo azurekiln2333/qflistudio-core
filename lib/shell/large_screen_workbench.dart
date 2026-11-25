@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../content/asset_content_repository.dart';
 import '../content/content_repository.dart';
@@ -28,6 +29,7 @@ import '../store/settings_store.dart';
 import '../widgets/project_dialogs.dart';
 import 'large_screen_controller.dart';
 import 'workbench_chrome.dart';
+import 'workbench_explorer.dart';
 import 'workbench_theme.dart';
 
 /// One route for project selection and editing on desktop/tablet. Editors stay
@@ -59,6 +61,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
   HarnessHub? _agents;
   DesktopFolderDrop? _drop;
   String? _resumeSession;
+  String? _visibleSession;
   final _visitedFiles = <Object>{};
   late final Widget _editorHost;
 
@@ -83,8 +86,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
             store: widget.store,
             settings: widget.settings,
           );
-          _layout.showWorkspace();
-          _layout.closeCompactSidebar();
+          _layout.closeCenterOverlay();
+          _layout.showFiles();
         },
         onError: _showError,
       );
@@ -101,18 +104,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
 
   void _editorsChanged() {
     if (!mounted) return;
-    if (!widget.editors.isVisible) {
+    final session = widget.editors.activeSessionKey;
+    // Popup notifications are not project opens. Keep a conversation overlay
+    // until a session actually changes or an explicit open clears it.
+    if (session == _visibleSession) return;
+    _visibleSession = session;
+    if (session == null) {
       _layout.activateFiles(null);
       return;
     }
     _resumeSession = null;
-    _layout.showWorkspace();
-    _layout.closeCompactSidebar();
+    _layout.closeCenterOverlay();
+    _layout.showFiles();
   }
 
-  void _select(WorkbenchActivity activity) {
+  void _select(WorkbenchActivity activity, {bool toggle = true}) {
     final wasWorkspace = _layout.showsWorkspace;
-    _layout.select(activity);
+    _layout.select(activity, toggle: toggle);
     if (wasWorkspace && !_layout.showsWorkspace) {
       _resumeSession = widget.editors.activeSessionKey;
       widget.editors.minimize();
@@ -125,6 +133,14 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
     }
   }
 
+  void _toggleSidebar() {
+    if (!_layout.showsWorkspace) {
+      _select(WorkbenchActivity.explorer, toggle: false);
+    } else {
+      _layout.toggleSidebar();
+    }
+  }
+
   Future<void> _addExisting() async {
     final project = await showAddExistingDialog(context, widget.store);
     if (!mounted || project == null) return;
@@ -134,6 +150,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
       store: widget.store,
       settings: widget.settings,
     );
+    _layout.closeCenterOverlay();
+    _layout.showFiles();
   }
 
   Widget _agentsPanel() {
@@ -176,7 +194,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
   Widget _page(WorkbenchActivity activity) => _pages.putIfAbsent(
     activity,
     () => switch (activity) {
-      WorkbenchActivity.projects => HomeTab(
+      WorkbenchActivity.explorer => HomeTab(
         store: widget.store,
         auth: widget.auth,
         settings: widget.settings,
@@ -213,7 +231,6 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
               ),
       ),
       WorkbenchActivity.tutorial => _tutorialPage(),
-      WorkbenchActivity.files => const SizedBox.shrink(),
     },
   );
 
@@ -254,7 +271,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         if (!_layout.showsWorkspace) {
-          _select(WorkbenchActivity.projects);
+          _select(WorkbenchActivity.explorer, toggle: false);
         } else {
           unawaited(widget.editors.handleBack());
         }
@@ -265,88 +282,127 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
       data: WorkbenchTheme.from(Theme.of(context)),
       child: LargeScreenScope(
         controller: _layout,
-        child: RetainedEditorScope(
-          controller: widget.editors,
-          child: ScaffoldMessenger(
-            key: _scaffold,
-            child: Scaffold(
-              body: SafeArea(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final compact =
-                        constraints.maxWidth < Breakpoints.sidebarPersistent;
-                    _layout.setCompact(compact);
-                    return ListenableBuilder(
-                      listenable: _layout,
-                      builder: (context, _) {
-                        final workspace = _layout.showsWorkspace;
-                        final sideWidth =
-                            (constraints.maxWidth - WorkbenchActivityRail.width)
-                                .clamp(0.0, Breakpoints.sidebarWidth);
-                        final sideShown = workspace && _layout.sidebarVisible;
-                        if (_layout.activity != WorkbenchActivity.files) {
-                          _page(_layout.activity);
-                        }
-                        return Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            ListenableBuilder(
-                              listenable: widget.auth,
-                              builder: (context, _) {
-                                final user = widget.auth.user;
-                                final avatar = user?.avatarUrl ?? '';
-                                return WorkbenchActivityRail(
-                                  selected: _layout.activity,
-                                  onSelected: _select,
-                                  accountLabel: user?.nickname,
-                                  avatarImage: avatar.isEmpty
-                                      ? null
-                                      : NetworkImage(avatar),
-                                );
-                              },
-                            ),
-                            Expanded(
-                              child: Stack(
+        child: Shortcuts(
+          shortcuts: {
+            _shortcut(LogicalKeyboardKey.keyB): const _ToggleSidebarIntent(),
+            _shortcut(LogicalKeyboardKey.keyE, shift: true):
+                const _SelectActivityIntent(WorkbenchActivity.explorer),
+            _shortcut(LogicalKeyboardKey.keyA, shift: true):
+                const _SelectActivityIntent(WorkbenchActivity.agents),
+            _shortcut(LogicalKeyboardKey.comma): const _SelectActivityIntent(
+              WorkbenchActivity.settings,
+            ),
+          },
+          child: Actions(
+            actions: {
+              _ToggleSidebarIntent: CallbackAction<_ToggleSidebarIntent>(
+                onInvoke: (_) {
+                  _toggleSidebar();
+                  return null;
+                },
+              ),
+              _SelectActivityIntent: CallbackAction<_SelectActivityIntent>(
+                onInvoke: (intent) {
+                  _select(intent.activity, toggle: false);
+                  return null;
+                },
+              ),
+            },
+            child: Focus(
+              autofocus: true,
+              child: RetainedEditorScope(
+                controller: widget.editors,
+                child: ScaffoldMessenger(
+                  key: _scaffold,
+                  child: Scaffold(
+                    body: SafeArea(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          final compact =
+                              constraints.maxWidth <
+                              Breakpoints.sidebarPersistent;
+                          _layout.setCompact(compact);
+                          return ListenableBuilder(
+                            listenable: _layout,
+                            builder: (context, _) {
+                              final workspace = _layout.showsWorkspace;
+                              final sideWidth =
+                                  (constraints.maxWidth -
+                                          WorkbenchActivityRail.width)
+                                      .clamp(0.0, Breakpoints.sidebarWidth);
+                              final sideShown =
+                                  workspace && _layout.sidebarVisible;
+                              _page(_layout.activity);
+                              return Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  Positioned.fill(
-                                    key: const ValueKey('workbench-center'),
-                                    left: !compact && sideShown ? sideWidth : 0,
-                                    child: _center(workspace),
+                                  ListenableBuilder(
+                                    listenable: widget.auth,
+                                    builder: (context, _) {
+                                      final user = widget.auth.user;
+                                      final avatar = user?.avatarUrl ?? '';
+                                      return WorkbenchActivityRail(
+                                        selected: _layout.activity,
+                                        onSelected: _select,
+                                        accountLabel: user?.nickname,
+                                        avatarImage: avatar.isEmpty
+                                            ? null
+                                            : NetworkImage(avatar),
+                                      );
+                                    },
                                   ),
-                                  if (compact && sideShown)
-                                    Positioned.fill(
-                                      key: const ValueKey('workbench-scrim'),
-                                      child: GestureDetector(
-                                        onTap: _layout.closeCompactSidebar,
-                                        child: ColoredBox(
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .scrim
-                                              .withValues(alpha: 0.25),
+                                  Expanded(
+                                    child: Stack(
+                                      children: [
+                                        Positioned.fill(
+                                          key: const ValueKey(
+                                            'workbench-center',
+                                          ),
+                                          left: !compact && sideShown
+                                              ? sideWidth
+                                              : 0,
+                                          child: _center(workspace),
                                         ),
-                                      ),
-                                    ),
-                                  Positioned(
-                                    key: const ValueKey(
-                                      'workbench-sidebar-slot',
-                                    ),
-                                    left: 0,
-                                    top: 0,
-                                    bottom: 0,
-                                    width: sideWidth,
-                                    child: _retain(
-                                      visible: sideShown,
-                                      child: _sidebar(),
+                                        if (compact && sideShown)
+                                          Positioned.fill(
+                                            key: const ValueKey(
+                                              'workbench-scrim',
+                                            ),
+                                            child: GestureDetector(
+                                              onTap:
+                                                  _layout.closeCompactSidebar,
+                                              child: ColoredBox(
+                                                color: Theme.of(context)
+                                                    .colorScheme
+                                                    .scrim
+                                                    .withValues(alpha: 0.25),
+                                              ),
+                                            ),
+                                          ),
+                                        Positioned(
+                                          key: const ValueKey(
+                                            'workbench-sidebar-slot',
+                                          ),
+                                          left: 0,
+                                          top: 0,
+                                          bottom: 0,
+                                          width: sideWidth,
+                                          child: _retain(
+                                            visible: sideShown,
+                                            child: _sidebar(),
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
-                              ),
-                            ),
-                          ],
-                        );
-                      },
-                    );
-                  },
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -356,6 +412,14 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
     ),
   );
 
+  SingleActivator _shortcut(LogicalKeyboardKey key, {bool shift = false}) =>
+      SingleActivator(
+        key,
+        control: !Platform.isMacOS,
+        meta: Platform.isMacOS,
+        shift: shift,
+      );
+
   Widget _center(bool workspace) => LayoutBuilder(
     builder: (context, constraints) => MediaQuery(
       data: MediaQuery.of(context).copyWith(size: constraints.biggest),
@@ -364,17 +428,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
         children: [
           _retain(
             key: const ValueKey('workbench-editor-host'),
-            visible: workspace,
+            visible: workspace && _layout.centerOverlay == null,
             child: _editorHost,
           ),
           for (final entry in _pages.entries)
-            if (entry.key != WorkbenchActivity.projects &&
+            if (entry.key != WorkbenchActivity.explorer &&
                 entry.key != WorkbenchActivity.agents)
               _retain(
                 key: ValueKey(entry.key),
                 visible: entry.key == _layout.activity,
                 child: entry.value,
               ),
+          if (_layout.centerOverlay case final overlay?)
+            _retain(
+              key: const ValueKey('workbench-center-overlay'),
+              visible: workspace,
+              child: Builder(builder: overlay),
+            ),
         ],
       ),
     ),
@@ -383,7 +453,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
   Widget _sidebar() {
     final panels = _layout.filePanels;
     _visitedFiles.removeWhere((owner) => !panels.containsKey(owner));
-    if (_layout.activity == WorkbenchActivity.files) {
+    if (_layout.activity == WorkbenchActivity.explorer &&
+        _layout.explorerPage == ExplorerPage.files) {
       if (_layout.activeEditor case final owner?) {
         _visitedFiles.add(owner);
       }
@@ -394,35 +465,35 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          for (final activity in [
-            WorkbenchActivity.projects,
-            WorkbenchActivity.agents,
-          ])
-            if (_pages[activity] case final page?)
-              _retain(
-                key: ValueKey(activity),
-                visible: _layout.activity == activity,
-                child: page,
+          if (_pages[WorkbenchActivity.explorer] case final projects?)
+            _retain(
+              key: const ValueKey('workbench-explorer'),
+              visible: _layout.activity == WorkbenchActivity.explorer,
+              child: WorkbenchExplorer(
+                controller: _layout,
+                projectName: widget.editors.activeProject?.name,
+                projects: projects,
+                files: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    for (final entry in panels.entries.where(
+                      (entry) => _visitedFiles.contains(entry.key),
+                    ))
+                      _retain(
+                        key: ObjectKey(entry.key),
+                        visible: identical(entry.key, _layout.activeEditor),
+                        child: Builder(builder: entry.value),
+                      ),
+                  ],
+                ),
               ),
-          _retain(
-            key: const ValueKey('workbench-files'),
-            visible: _layout.activity == WorkbenchActivity.files,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (_layout.activeEditor == null)
-                  const Center(child: Text('先打开一个项目')),
-                for (final entry in panels.entries.where(
-                  (entry) => _visitedFiles.contains(entry.key),
-                ))
-                  _retain(
-                    key: ObjectKey(entry.key),
-                    visible: identical(entry.key, _layout.activeEditor),
-                    child: Builder(builder: entry.value),
-                  ),
-              ],
             ),
-          ),
+          if (_pages[WorkbenchActivity.agents] case final agents?)
+            _retain(
+              key: const ValueKey('workbench-agents'),
+              visible: _layout.activity == WorkbenchActivity.agents,
+              child: agents,
+            ),
         ],
       ),
     );
@@ -443,4 +514,13 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
           ),
         ),
       );
+}
+
+class _ToggleSidebarIntent extends Intent {
+  const _ToggleSidebarIntent();
+}
+
+class _SelectActivityIntent extends Intent {
+  const _SelectActivityIntent(this.activity);
+  final WorkbenchActivity activity;
 }

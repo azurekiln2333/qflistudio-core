@@ -1,19 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../i18n/studio_localizations.dart';
+import 'shortcut_label.dart';
 
-/// 大屏工作台左侧图标导航的七个去处。
+/// 大屏工作台左侧图标导航的六个去处。
 ///
 /// 一个枚举值对应侧栏的一种内容，切换时只替换侧栏与欢迎区，
 /// 中间的编辑器与各列表状态由宿主保留。
 enum WorkbenchActivity {
-  projects,
-  files,
+  explorer,
   agents,
   tools,
   tutorial,
   settings,
-  profile,
+  profile;
+
+  // Source compatibility for callers migrating to the single Explorer entry.
+  // These aliases are not extra destinations in values or the rail.
+  // Use explorer and LargeScreenController.showProjects()/showFiles().
+  static const projects = explorer;
+  static const files = explorer;
 }
 
 /// VS Code 式图标导航条。
@@ -50,10 +56,9 @@ class WorkbenchActivityRail extends StatelessWidget {
   /// 单个图标的触控目标边长。
   static const double touchTarget = 44;
 
-  /// 顶部的三块主要去处。
+  /// 顶部的两个主要去处。
   static const List<WorkbenchActivity> primary = <WorkbenchActivity>[
-    WorkbenchActivity.projects,
-    WorkbenchActivity.files,
+    WorkbenchActivity.explorer,
     WorkbenchActivity.agents,
   ];
 
@@ -97,7 +102,7 @@ class WorkbenchActivityRail extends StatelessWidget {
                         activity: activity,
                         selected: activity == selected,
                         onPressed: onSelected,
-                        label: _labelFor(activity, l),
+                        label: _tooltipFor(activity, l),
                         icon: _iconFor(activity),
                       ),
                     const SizedBox(height: 8),
@@ -120,7 +125,7 @@ class WorkbenchActivityRail extends StatelessWidget {
               activity: WorkbenchActivity.settings,
               selected: selected == WorkbenchActivity.settings,
               onPressed: onSelected,
-              label: _labelFor(WorkbenchActivity.settings, l),
+              label: _tooltipFor(WorkbenchActivity.settings, l),
               icon: _iconFor(WorkbenchActivity.settings),
             ),
             _AvatarButton(
@@ -140,10 +145,8 @@ class WorkbenchActivityRail extends StatelessWidget {
 
   static IconData _iconFor(WorkbenchActivity activity) {
     switch (activity) {
-      case WorkbenchActivity.projects:
+      case WorkbenchActivity.explorer:
         return Icons.folder_copy_outlined;
-      case WorkbenchActivity.files:
-        return Icons.description_outlined;
       case WorkbenchActivity.agents:
         return Icons.smart_toy_outlined;
       case WorkbenchActivity.tools:
@@ -159,14 +162,16 @@ class WorkbenchActivityRail extends StatelessWidget {
 
   /// 导航条的语义标签。
   ///
-  /// 复用 [StudioLocalizations] 已有的条目；只有「文件」与「设置」在
-  /// 内核里还没有对应 getter，此处就地按同一套三语文案取值。
+  /// 复用 [StudioLocalizations] 的条目。
+  /// 资源管理器与设置使用同一套三语文案。
   static String _labelFor(WorkbenchActivity activity, StudioLocalizations l) {
     switch (activity) {
-      case WorkbenchActivity.projects:
-        return l.allProjects;
-      case WorkbenchActivity.files:
-        return _filesLabel(l);
+      case WorkbenchActivity.explorer:
+        return l.isEnglish
+            ? 'Explorer'
+            : l.isTraditionalChinese
+            ? '資源管理器'
+            : '资源管理器';
       case WorkbenchActivity.agents:
         return l.agentsTab;
       case WorkbenchActivity.tools:
@@ -180,11 +185,16 @@ class WorkbenchActivityRail extends StatelessWidget {
     }
   }
 
-  static String _filesLabel(StudioLocalizations l) => l.isEnglish
-      ? 'Files'
-      : l.isTraditionalChinese
-      ? '檔案'
-      : '文件';
+  static String _tooltipFor(WorkbenchActivity activity, StudioLocalizations l) {
+    final keys = switch (activity) {
+      WorkbenchActivity.explorer => 'Ctrl+Shift+E',
+      WorkbenchActivity.agents => 'Ctrl+Shift+A',
+      WorkbenchActivity.settings => 'Ctrl+,',
+      _ => null,
+    };
+    final label = _labelFor(activity, l);
+    return keys == null ? label : '$label (${shortcutLabel(keys)})';
+  }
 
   static String _settingsLabel(StudioLocalizations l) => l.isEnglish
       ? 'Settings'

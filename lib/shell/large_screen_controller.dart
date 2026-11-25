@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 
 import 'workbench_chrome.dart';
 
+enum ExplorerPage { projects, files }
+
 /// Presentation state only. Project, editor and Agent lifetimes remain with
 /// their existing owners. Resizing never replaces this controller.
 class LargeScreenController extends ChangeNotifier {
-  WorkbenchActivity _activity = WorkbenchActivity.projects;
+  WorkbenchActivity _activity = WorkbenchActivity.explorer;
+  ExplorerPage _explorerPage = ExplorerPage.projects;
   bool _sidebarVisible = true;
   bool _compact = false;
   bool _disposed = false;
@@ -15,6 +18,7 @@ class LargeScreenController extends ChangeNotifier {
   WidgetBuilder? _centerOverlay;
 
   WorkbenchActivity get activity => _activity;
+  ExplorerPage get explorerPage => _explorerPage;
   bool get sidebarVisible => _sidebarVisible;
   bool get compact => _compact;
   Object? get activeEditor => _activeEditor;
@@ -27,6 +31,8 @@ class LargeScreenController extends ChangeNotifier {
 
   void showCenterOverlay(WidgetBuilder builder) {
     _centerOverlay = builder;
+    if (!showsWorkspace) _activity = WorkbenchActivity.agents;
+    closeCompactSidebar();
     notifyListeners();
   }
 
@@ -37,9 +43,7 @@ class LargeScreenController extends ChangeNotifier {
   }
 
   bool get showsWorkspace => switch (_activity) {
-    WorkbenchActivity.projects ||
-    WorkbenchActivity.files ||
-    WorkbenchActivity.agents => true,
+    WorkbenchActivity.explorer || WorkbenchActivity.agents => true,
     _ => false,
   };
 
@@ -54,7 +58,33 @@ class LargeScreenController extends ChangeNotifier {
 
   void showWorkspace() {
     if (showsWorkspace) return;
-    _activity = WorkbenchActivity.projects;
+    _activity = WorkbenchActivity.explorer;
+    notifyListeners();
+  }
+
+  void toggleSidebar() {
+    if (!showsWorkspace) {
+      _activity = WorkbenchActivity.explorer;
+      _sidebarVisible = true;
+    } else {
+      _sidebarVisible = !_sidebarVisible;
+    }
+    notifyListeners();
+  }
+
+  void showProjects() {
+    _activity = WorkbenchActivity.explorer;
+    _explorerPage = ExplorerPage.projects;
+    _sidebarVisible = true;
+    notifyListeners();
+  }
+
+  void showFiles() {
+    // An editor registers its tree on the following frame. Opening a project
+    // may request this page before the panel is registered.
+    _activity = WorkbenchActivity.explorer;
+    _explorerPage = ExplorerPage.files;
+    _sidebarVisible = true;
     notifyListeners();
   }
 
@@ -84,7 +114,10 @@ class LargeScreenController extends ChangeNotifier {
 
   void unregisterFiles(Object owner) {
     _files.remove(owner);
-    if (_activeEditor == owner) _activeEditor = null;
+    if (_activeEditor == owner) {
+      _activeEditor = null;
+      _explorerPage = ExplorerPage.projects;
+    }
     _notifyAfterFrame();
   }
 

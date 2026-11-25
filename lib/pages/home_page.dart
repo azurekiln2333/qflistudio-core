@@ -53,6 +53,7 @@ import '../services/local_audit_service.dart';
 import '../editor/open_performance.dart';
 import '../services/local_stats_service.dart';
 import '../workspace/saved_workspaces_tab.dart';
+import '../shell/large_screen_controller.dart';
 
 /// 应用外壳：功能、教程、示例和个人页均为独立页面。
 class HomePage extends StatefulWidget {
@@ -476,7 +477,12 @@ class _HomeTabState extends State<HomeTab>
     final visible = _retainedEditor?.isVisible ?? false;
     final returnedHome = _retainedEditorVisible && !visible;
     _retainedEditorVisible = visible;
-    if (mounted && returnedHome) setState(() => _gitRefreshRevision++);
+    if (!mounted) return;
+    if (returnedHome) {
+      setState(() => _gitRefreshRevision++);
+    } else if (widget.embedded && LargeScreenScope.maybeOf(context) != null) {
+      setState(() {});
+    }
   }
 
   /// Reads the saved tab order once, as soon as the store can read without a
@@ -1324,7 +1330,7 @@ class _HomeTabState extends State<HomeTab>
   }
 
   Widget _buildCard(BuildContext context, Project project) {
-    return ProjectCard(
+    final card = ProjectCard(
       project: project,
       gitRefreshRevision: _gitRefreshRevision,
       onOpen: () => _openProject(context, project),
@@ -1346,6 +1352,62 @@ class _HomeTabState extends State<HomeTab>
           ? () => unawaited(_clearProjectCache(project))
           : null,
     );
+    if (!widget.embedded || LargeScreenScope.maybeOf(context) == null) {
+      return card;
+    }
+    final editors = _retainedEditor;
+    final opened =
+        editors?.sessionInfos.any(
+          (session) => _sameProjectPath(session.project, project),
+        ) ??
+        false;
+    final current = editors?.activeProject;
+    final active = current != null && _sameProjectPath(current, project);
+    final l = StudioLocalizations.of(context);
+    final label = active
+        ? (l.isEnglish
+              ? 'Current project'
+              : l.isTraditionalChinese
+              ? '目前專案'
+              : '当前项目')
+        : (l.isEnglish
+              ? 'Open project'
+              : l.isTraditionalChinese
+              ? '已開啟'
+              : '已打开');
+    return Semantics(
+      label: opened ? label : null,
+      selected: active,
+      child: Stack(
+        children: [
+          card,
+          if (opened)
+            Positioned(
+              left: 4,
+              top: 4,
+              child: IgnorePointer(
+                child: Tooltip(
+                  message: label,
+                  child: Icon(
+                    active ? Icons.radio_button_checked : Icons.circle_outlined,
+                    size: 12,
+                    color: Theme.of(context).colorScheme.primary,
+                    semanticLabel: label,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  bool _sameProjectPath(Project a, Project b) {
+    final first = p.normalize(p.absolute(a.path));
+    final second = p.normalize(p.absolute(b.path));
+    return Platform.isWindows
+        ? first.toLowerCase() == second.toLowerCase()
+        : first == second;
   }
 
   // R5/R6: capture the account generation before download/ZIP/native handoff.
@@ -1809,14 +1871,40 @@ class _HomeTabState extends State<HomeTab>
       ),
     );
     if (!context.mounted) return;
-    await openEditorPage(
-      context,
-      project: project,
-      auth: widget.auth,
-      store: widget.store,
-      settings: widget.settings,
-      initialOpenPath: initialOpenFile,
-    );
+    final largeScreen = widget.embedded
+        ? LargeScreenScope.maybeOf(context)
+        : null;
+    final editors = largeScreen == null
+        ? null
+        : RetainedEditorScope.maybeOf(context);
+    final sessions = editors?.sessionInfos
+        .where((session) => _sameProjectPath(session.project, project))
+        .toList();
+    if (editors != null &&
+        initialOpenFile == null &&
+        sessions != null &&
+        sessions.isNotEmpty) {
+      // A saved workspace can share this primary project. Resume its exact
+      // retained key instead of creating a second standalone editor.
+      final current = sessions.where(
+        (session) => session.key == editors.activeSessionKey,
+      );
+      editors.resumeSession(
+        current.isNotEmpty ? current.first.key : sessions.first.key,
+      );
+    } else {
+      await openEditorPage(
+        context,
+        project: project,
+        auth: widget.auth,
+        store: widget.store,
+        settings: widget.settings,
+        initialOpenPath: initialOpenFile,
+      );
+    }
+    // Reopening the already visible session must still leave Projects.
+    largeScreen?.closeCenterOverlay();
+    largeScreen?.showFiles();
     if (mounted) setState(() => _gitRefreshRevision++);
     OpenPerformance.endOpen();
   }
