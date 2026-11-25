@@ -7,6 +7,7 @@ import '../i18n/studio_localizations.dart';
 import '../services/api_client.dart';
 import '../services/recovery_service.dart';
 import '../services/studio_profile.dart';
+import '../shell/large_screen_controller.dart';
 import '../store/auth_store.dart';
 import '../store/settings_store.dart';
 import '../store/project_store.dart';
@@ -91,16 +92,19 @@ class _ProfileTabState extends State<ProfileTab> {
     // section is omitted: the login entry, the account header/stats and the
     // sign-out button. The local-only sections (recovery, settings, about) stay.
     final offlineOnly = StudioProfile.current?.offlineOnly == true;
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
     final github = offlineOnly ? null : GitHubScope.maybeOf(context);
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          StudioLocalizations.of(context).profile,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
-      ),
+      appBar: largeScreen
+          ? null
+          : AppBar(
+              title: Text(
+                StudioLocalizations.of(context).profile,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ),
       body: SafeArea(
         bottom: false,
         child: ListenableBuilder(
@@ -108,13 +112,26 @@ class _ProfileTabState extends State<ProfileTab> {
           builder: (context, _) => Align(
             alignment: Alignment.topCenter,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 840),
+              constraints: BoxConstraints(maxWidth: largeScreen ? 720 : 840),
               child: RefreshIndicator(
                 onRefresh: _refresh,
                 child: ListView(
                   physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                  padding: EdgeInsets.fromLTRB(
+                    largeScreen ? 24 : 16,
+                    largeScreen ? 20 : 8,
+                    largeScreen ? 24 : 16,
+                    32,
+                  ),
                   children: [
+                    if (largeScreen)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 24),
+                        child: Text(
+                          StudioLocalizations.of(context).profile,
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                      ),
                     if (!offlineOnly) _profileHeader(context),
                     if (!offlineOnly) const SizedBox(height: 16),
                     if (!offlineOnly && widget.auth.isLoggedIn) ...[

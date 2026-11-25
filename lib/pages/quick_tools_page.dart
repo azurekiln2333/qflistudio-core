@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../i18n/studio_localizations.dart';
 import '../services/studio_profile.dart';
+import '../shell/large_screen_controller.dart';
 import '../store/project_store.dart';
 import 'content_tools_pages.dart';
 import 'terminax_terminal_page.dart';
@@ -36,61 +37,71 @@ class FunctionsTab extends StatelessWidget {
       inlineTools == null || store != null,
       'FunctionsTab requires a ProjectStore when toolsTabBuilder is provided.',
     );
-    // 共享工具页（netrix 风格）对所有产品开放：两种显示密度对语言 App 的
-    // 现有工具同样生效。移植来的 netrix 工具由可见范围过滤，语言 App 下
-    // 一个都不显示（见 ToolAudience）。
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+    final body = inlineTools != null
+        ? inlineTools(store!, onOpenTerminal)
+        : ToolsGrid(
+            onOpenTerminal: onOpenTerminal,
+            sections: [
+              if (onOpenContentTool != null)
+                ToolSection(
+                  title: '专用',
+                  icon: Icons.build_outlined,
+                  tools: [
+                    ToolDefinition(
+                      icon: switch (StudioProfile.current?.productKey) {
+                        StudioProductCatalog.webForgeKey => Icons.language,
+                        StudioProductCatalog.jsonKey => Icons.data_object,
+                        StudioProductCatalog.noteKey => Icons.article_outlined,
+                        StudioProductCatalog.sqlabKey => Icons.storage_outlined,
+                        _ => Icons.build_outlined,
+                      },
+                      title: switch (StudioProfile.current?.productKey) {
+                        StudioProductCatalog.webForgeKey => 'Web 工具',
+                        StudioProductCatalog.jsonKey => l10n.jsonTools,
+                        StudioProductCatalog.noteKey => l10n.markdownTools,
+                        StudioProductCatalog.sqlabKey => l10n.sqlTools,
+                        _ => l10n.functions,
+                      },
+                      description: switch (StudioProfile.current?.productKey) {
+                        StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
+                        StudioProductCatalog.jsonKey => l10n.jsonStructure,
+                        StudioProductCatalog.noteKey => l10n.markdownPreview,
+                        StudioProductCatalog.sqlabKey => l10n.executeQuery,
+                        _ => l10n.functions,
+                      },
+                      onTap: onOpenContentTool!,
+                    ),
+                  ],
+                ),
+            ],
+          );
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          l10n.tools,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
-      ),
-      body: inlineTools != null
-          ? inlineTools(store!, onOpenTerminal)
-          : ToolsGrid(
-              onOpenTerminal: onOpenTerminal,
-              sections: [
-                if (onOpenContentTool != null)
-                  ToolSection(
-                    title: '专用',
-                    icon: Icons.build_outlined,
-                    tools: [
-                      ToolDefinition(
-                        icon: switch (StudioProfile.current?.productKey) {
-                          StudioProductCatalog.webForgeKey => Icons.language,
-                          StudioProductCatalog.jsonKey => Icons.data_object,
-                          StudioProductCatalog.noteKey =>
-                            Icons.article_outlined,
-                          StudioProductCatalog.sqlabKey =>
-                            Icons.storage_outlined,
-                          _ => Icons.build_outlined,
-                        },
-                        title: switch (StudioProfile.current?.productKey) {
-                          StudioProductCatalog.webForgeKey => 'Web 工具',
-                          StudioProductCatalog.jsonKey => l10n.jsonTools,
-                          StudioProductCatalog.noteKey => l10n.markdownTools,
-                          StudioProductCatalog.sqlabKey => l10n.sqlTools,
-                          _ => l10n.functions,
-                        },
-                        description: switch (StudioProfile
-                            .current
-                            ?.productKey) {
-                          StudioProductCatalog.webForgeKey =>
-                            '本地服务、HTTP 请求与编解码',
-                          StudioProductCatalog.jsonKey => l10n.jsonStructure,
-                          StudioProductCatalog.noteKey => l10n.markdownPreview,
-                          StudioProductCatalog.sqlabKey => l10n.executeQuery,
-                          _ => l10n.functions,
-                        },
-                        onTap: onOpenContentTool!,
-                      ),
-                    ],
-                  ),
-              ],
+      appBar: largeScreen
+          ? null
+          : AppBar(
+              title: Text(
+                l10n.tools,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
             ),
+      body: largeScreen
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+                  child: Text(
+                    l10n.tools,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                ),
+                Expanded(child: body),
+              ],
+            )
+          : body,
     );
   }
 }
