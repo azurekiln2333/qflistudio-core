@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../shell/large_screen_controller.dart';
 import '../tools/ported/models.dart' as netrix;
 import '../tools/ported/netrix_localizations.dart';
 import '../tools/ported/netrix_tool_page.dart';
@@ -210,9 +211,10 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
       if (!_filtering)
         for (final id in _state.recent) ?byId[id],
     ];
-    final horizontal = ToolsTheme.horizontalPadding(
-      MediaQuery.sizeOf(context).width,
-    );
+    final workbench = LargeScreenScope.maybeOf(context) != null;
+    final horizontal = workbench
+        ? 24.0
+        : ToolsTheme.horizontalPadding(MediaQuery.sizeOf(context).width);
 
     return CustomScrollView(
       key: const PageStorageKey<String>('tools-scroll'),
@@ -229,6 +231,7 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
               onCategoryChanged: (value) => setState(() => _category = value),
               onDensityChanged: _state.setDensity,
               onCardColumnsChanged: _state.setCardColumns,
+              automaticGrid: workbench,
               strings: strings,
             ),
           ),
@@ -302,13 +305,15 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
   ) {
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, bottom),
-      sliver: _state.density == ToolCardDensity.compact
+      sliver:
+          LargeScreenScope.maybeOf(context) == null &&
+              _state.density == ToolCardDensity.compact
           ? _rowsSliver(entries)
           : _cardsSliver(entries),
     );
   }
 
-  /// 宽松显示：按用户选择固定为一列或两列。
+  /// Workbench cards reflow automatically; phone cards retain saved columns.
   Widget _cardsSliver(List<ToolsBrowserEntry> entries) {
     final strings = NetrixLocalizations.of(context);
     final textTheme = Theme.of(context).textTheme;
@@ -316,23 +321,44 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
     final extraTextHeight =
         _extraLineHeight(scaler, textTheme.titleMedium, 16) +
         2 * _extraLineHeight(scaler, textTheme.bodySmall, 12);
+    final workbench = LargeScreenScope.maybeOf(context) != null;
+    final delegate = SliverChildBuilderDelegate((context, index) {
+      final entry = entries[index];
+      final isFavorite = _state.favorites.contains(entry.id);
+      return ToolCard(
+        icon: entry.icon,
+        title: entry.title,
+        description: entry.description,
+        onTap: () => _open(context, entry),
+        isFavorite: isFavorite,
+        onToggleFavorite: () => _state.toggleFavorite(entry.id),
+        favoriteTooltip: isFavorite
+            ? strings.removeFavorite
+            : strings.addFavorite,
+        openTooltip: strings.openTool,
+      );
+    }, childCount: entries.length);
+    if (workbench) {
+      return SliverLayoutBuilder(
+        builder: (context, constraints) {
+          // V10: layout only. Never overwrite the phone's saved preferences.
+          final columns = ((constraints.crossAxisExtent + 16) / (280 + 16))
+              .floor()
+              .clamp(1, 1000);
+          return SliverGrid(
+            delegate: delegate,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+            ),
+          );
+        },
+      );
+    }
     return SliverGrid(
-      delegate: SliverChildBuilderDelegate((context, index) {
-        final entry = entries[index];
-        final isFavorite = _state.favorites.contains(entry.id);
-        return ToolCard(
-          icon: entry.icon,
-          title: entry.title,
-          description: entry.description,
-          onTap: () => _open(context, entry),
-          isFavorite: isFavorite,
-          onToggleFavorite: () => _state.toggleFavorite(entry.id),
-          favoriteTooltip: isFavorite
-              ? strings.removeFavorite
-              : strings.addFavorite,
-          openTooltip: strings.openTool,
-        );
-      }, childCount: entries.length),
+      delegate: delegate,
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: _state.cardColumns,
         mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
@@ -408,6 +434,7 @@ class _ToolsBrowserHeader extends StatelessWidget {
     required this.onCategoryChanged,
     required this.onDensityChanged,
     required this.onCardColumnsChanged,
+    required this.automaticGrid,
     required this.strings,
   });
 
@@ -419,6 +446,7 @@ class _ToolsBrowserHeader extends StatelessWidget {
   final ValueChanged<netrix.ToolCategory?> onCategoryChanged;
   final ValueChanged<ToolCardDensity> onDensityChanged;
   final ValueChanged<int> onCardColumnsChanged;
+  final bool automaticGrid;
   final NetrixLocalizations strings;
 
   @override
@@ -458,62 +486,66 @@ class _ToolsBrowserHeader extends StatelessWidget {
             ),
           ),
         ],
-        const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerRight,
-          child: Wrap(
-            alignment: WrapAlignment.end,
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SegmentedButton<ToolCardDensity>(
-                  segments: <ButtonSegment<ToolCardDensity>>[
-                    ButtonSegment<ToolCardDensity>(
-                      value: ToolCardDensity.standard,
-                      icon: const Icon(Icons.view_agenda_outlined),
-                      label: Text(strings.standard),
-                    ),
-                    ButtonSegment<ToolCardDensity>(
-                      value: ToolCardDensity.compact,
-                      icon: const Icon(Icons.view_compact_outlined),
-                      label: Text(strings.compact),
-                    ),
-                  ],
-                  selected: <ToolCardDensity>{density},
-                  showSelectedIcon: false,
-                  onSelectionChanged: (values) {
-                    if (values.isNotEmpty) onDensityChanged(values.first);
-                  },
-                ),
-              ),
-              if (density == ToolCardDensity.standard)
+        if (!automaticGrid) ...<Widget>[
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
-                  child: SegmentedButton<int>(
-                    segments: <ButtonSegment<int>>[
-                      ButtonSegment<int>(
-                        value: 1,
+                  child: SegmentedButton<ToolCardDensity>(
+                    segments: <ButtonSegment<ToolCardDensity>>[
+                      ButtonSegment<ToolCardDensity>(
+                        value: ToolCardDensity.standard,
                         icon: const Icon(Icons.view_agenda_outlined),
-                        label: Text(strings.oneColumn),
+                        label: Text(strings.standard),
                       ),
-                      ButtonSegment<int>(
-                        value: 2,
-                        icon: const Icon(Icons.view_column_outlined),
-                        label: Text(strings.twoColumns),
+                      ButtonSegment<ToolCardDensity>(
+                        value: ToolCardDensity.compact,
+                        icon: const Icon(Icons.view_compact_outlined),
+                        label: Text(strings.compact),
                       ),
                     ],
-                    selected: <int>{cardColumns},
+                    selected: <ToolCardDensity>{density},
                     showSelectedIcon: false,
                     onSelectionChanged: (values) {
-                      if (values.isNotEmpty) onCardColumnsChanged(values.first);
+                      if (values.isNotEmpty) onDensityChanged(values.first);
                     },
                   ),
                 ),
-            ],
+                if (density == ToolCardDensity.standard)
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<int>(
+                      segments: <ButtonSegment<int>>[
+                        ButtonSegment<int>(
+                          value: 1,
+                          icon: const Icon(Icons.view_agenda_outlined),
+                          label: Text(strings.oneColumn),
+                        ),
+                        ButtonSegment<int>(
+                          value: 2,
+                          icon: const Icon(Icons.view_column_outlined),
+                          label: Text(strings.twoColumns),
+                        ),
+                      ],
+                      selected: <int>{cardColumns},
+                      showSelectedIcon: false,
+                      onSelectionChanged: (values) {
+                        if (values.isNotEmpty) {
+                          onCardColumnsChanged(values.first);
+                        }
+                      },
+                    ),
+                  ),
+              ],
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

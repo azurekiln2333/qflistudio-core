@@ -102,12 +102,11 @@ void main() {
     final shell = LargeScreenController();
     await tester.pumpWidget(_app(settings, shell));
     await tester.pumpAndSettle();
+    // R21/V10: the MD3 settings rail replaces scrolling the full settings list.
+    await tester.tap(find.widgetWithText(ListTile, '编辑器'));
+    await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('settings-large-screen-symbols'));
-    await tester.scrollUntilVisible(
-      toggle,
-      160,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.ensureVisible(toggle);
     expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
     await tester.tap(toggle);
     await tester.pump();
@@ -133,11 +132,9 @@ void main() {
     final shell = LargeScreenController();
     await tester.pumpWidget(_app(settings, shell));
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.text('快捷键'),
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
+    // R21/V10: select the shortcut detail rather than scrolling the rail.
+    await tester.tap(find.widgetWithText(ListTile, '快捷键'));
+    await tester.pumpAndSettle();
     final expected = [
       'Ctrl+= / Ctrl++ / Ctrl+NumpadAdd',
       'Ctrl+- / Ctrl+NumpadSubtract',

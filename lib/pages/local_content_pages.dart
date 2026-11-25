@@ -8,6 +8,7 @@ import '../content/local_content_adapter.dart';
 import '../i18n/studio_localizations.dart';
 import '../models/tutorial.dart';
 import '../services/studio_profile.dart';
+import '../shell/large_screen_controller.dart';
 import '../store/auth_store.dart';
 import '../store/project_store.dart';
 import '../store/settings_store.dart';
@@ -68,35 +69,38 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
   @override
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+    final content = FutureBuilder<Tutorial?>(
+      future: _tutorial,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final tutorial = snapshot.data;
+        if (tutorial == null) {
+          return _LocalContentError(message: l10n.localTutorialMissing);
+        }
+        return _TutorialList(
+          tutorial: tutorial,
+          store: widget.store,
+          auth: widget.auth,
+          settings: widget.settings,
+        );
+      },
+    );
     return Scaffold(
-      appBar: AppBar(
-        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
-        centerTitle: false,
-        title: Text(
-          l10n.tutorial,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
-      ),
-      body: FutureBuilder<Tutorial?>(
-        future: _tutorial,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final tutorial = snapshot.data;
-          if (tutorial == null) {
-            return _LocalContentError(message: l10n.localTutorialMissing);
-          }
-          return _TutorialList(
-            tutorial: tutorial,
-            store: widget.store,
-            auth: widget.auth,
-            settings: widget.settings,
-          );
-        },
-      ),
+      appBar: largeScreen
+          ? null
+          : AppBar(
+              centerTitle: false,
+              title: Text(
+                l10n.tutorial,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ),
+      body: _largeScreenPageBody(context, l10n.tutorial, content),
     );
   }
 }
@@ -233,78 +237,116 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
 
   @override
   Widget build(BuildContext context) {
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
     final l10n = StudioLocalizations.of(context);
     final labels = _ContentLabels(context);
-    return Scaffold(
-      appBar: AppBar(
-        // 与主页相同的折叠搜索：折叠时只有一个放大镜图标。
-        toolbarHeight: _searchOpen
-            ? collapsedSearchToolbarHeight(context)
-            : null,
-        leading: _searchOpen
-            ? IconButton(
+    final content = Column(
+      children: [
+        TabBar(
+          key: const ValueKey('tutorial-center-sections'),
+          controller: _sections,
+          onTap: _selectSection,
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          dividerColor: Colors.transparent,
+          labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+          tabs: [
+            Tab(
+              key: TutorialCenterPage.tutorialSectionKey,
+              height: 36,
+              child: Center(child: Text(l10n.tutorial)),
+            ),
+            Tab(
+              key: TutorialCenterPage.examplesSectionKey,
+              height: 36,
+              child: Center(child: Text(l10n.examples)),
+            ),
+          ],
+        ),
+        Expanded(
+          child: _sections.index == TutorialCenterSection.tutorial.index
+              ? _buildTutorialSection()
+              : _buildExamplesSection(),
+        ),
+      ],
+    );
+    final searchControl = _searchOpen
+        ? Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 320,
+                child: CollapsedSearchField(
+                  fieldKey: const ValueKey('content-query'),
+                  controller: _filter.query,
+                  label: l10n.searchContent,
+                  clearTooltip: labels.clear,
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              IconButton(
                 tooltip: l10n.exitSearch,
-                icon: const Icon(Icons.arrow_back),
                 onPressed: _closeSearch,
-              )
-            : null,
-        automaticallyImplyLeading: false,
-        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
-        centerTitle: false,
-        title: _searchOpen
-            ? CollapsedSearchField(
-                fieldKey: const ValueKey('content-query'),
-                controller: _filter.query,
-                label: l10n.searchContent,
-                clearTooltip: labels.clear,
-                onChanged: (_) => setState(() {}),
-              )
-            : Text(
-                l10n.tutorial,
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-              ),
-        actions: _searchOpen
-            ? const [SizedBox(width: 8)]
-            : [
-                CollapsedSearchButton(
-                  tooltip: l10n.searchContent,
-                  onPressed: _openSearch,
-                ),
-                const SizedBox(width: 8),
-              ],
-      ),
-      body: Column(
-        children: [
-          TabBar(
-            key: const ValueKey('tutorial-center-sections'),
-            controller: _sections,
-            onTap: _selectSection,
-            isScrollable: true,
-            tabAlignment: TabAlignment.start,
-            dividerColor: Colors.transparent,
-            labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-            tabs: [
-              Tab(
-                key: TutorialCenterPage.tutorialSectionKey,
-                height: 36,
-                child: Center(child: Text(l10n.tutorial)),
-              ),
-              Tab(
-                key: TutorialCenterPage.examplesSectionKey,
-                height: 36,
-                child: Center(child: Text(l10n.examples)),
+                icon: const Icon(Icons.close),
               ),
             ],
-          ),
-          Expanded(
-            child: _sections.index == TutorialCenterSection.tutorial.index
-                ? _buildTutorialSection()
-                : _buildExamplesSection(),
-          ),
-        ],
-      ),
+          )
+        : IconButton(
+            tooltip: l10n.searchContent,
+            onPressed: _openSearch,
+            icon: const Icon(Icons.search),
+          );
+    return Scaffold(
+      appBar: largeScreen
+          ? null
+          : AppBar(
+              toolbarHeight: _searchOpen
+                  ? collapsedSearchToolbarHeight(context)
+                  : null,
+              leading: _searchOpen
+                  ? IconButton(
+                      tooltip: l10n.exitSearch,
+                      icon: const Icon(Icons.arrow_back),
+                      onPressed: _closeSearch,
+                    )
+                  : null,
+              automaticallyImplyLeading: false,
+              centerTitle: false,
+              title: _searchOpen
+                  ? CollapsedSearchField(
+                      fieldKey: const ValueKey('content-query'),
+                      controller: _filter.query,
+                      label: l10n.searchContent,
+                      clearTooltip: labels.clear,
+                      onChanged: (_) => setState(() {}),
+                    )
+                  : Text(
+                      l10n.tutorial,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+              actions: _searchOpen
+                  ? const [SizedBox(width: 8)]
+                  : [
+                      CollapsedSearchButton(
+                        tooltip: l10n.searchContent,
+                        onPressed: _openSearch,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+            ),
+      body: largeScreen
+          ? Column(
+              children: [
+                _LargeScreenPageHeader(
+                  title: l10n.tutorial,
+                  actions: [searchControl],
+                ),
+                Expanded(child: content),
+              ],
+            )
+          : content,
     );
   }
 
@@ -419,35 +461,39 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
   @override
   Widget build(BuildContext context) {
     final l10n = StudioLocalizations.of(context);
+    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+    final content = FutureBuilder<List<ExampleCode>>(
+      future: _examples,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final examples = snapshot.data;
+        if (examples == null || examples.isEmpty) {
+          return _LocalContentError(message: l10n.localExamplesMissing);
+        }
+        return _ExampleCodeList(
+          items: examples,
+          store: widget.store,
+          auth: widget.auth,
+          settings: widget.settings,
+          examples: widget.examples,
+        );
+      },
+    );
     return Scaffold(
-      appBar: AppBar(
-        centerTitle: false,
-        title: Text(
-          l10n.examples,
-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            color: Theme.of(context).colorScheme.primary,
-          ),
-        ),
-      ),
-      body: FutureBuilder<List<ExampleCode>>(
-        future: _examples,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final examples = snapshot.data;
-          if (examples == null || examples.isEmpty) {
-            return _LocalContentError(message: l10n.localExamplesMissing);
-          }
-          return _ExampleCodeList(
-            items: examples,
-            store: widget.store,
-            auth: widget.auth,
-            settings: widget.settings,
-            examples: widget.examples,
-          );
-        },
-      ),
+      appBar: largeScreen
+          ? null
+          : AppBar(
+              centerTitle: false,
+              title: Text(
+                l10n.examples,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ),
+      body: _largeScreenPageBody(context, l10n.examples, content),
     );
   }
 }
@@ -505,6 +551,84 @@ class _TutorialListState extends State<_TutorialList> {
     ];
     final labels = _ContentLabels(context);
     final count = rows.where((row) => row.lesson != null).length;
+    if (LargeScreenScope.maybeOf(context) != null) {
+      final chapterEntries =
+          <({TutorialChapter chapter, List<TutorialLesson> lessons})>[
+            for (final chapter in widget.tutorial.chapters)
+              if (chapter.lessons.any((lesson) => _matches(chapter, lesson)))
+                (
+                  chapter: chapter,
+                  lessons: chapter.lessons
+                      .where((lesson) => _matches(chapter, lesson))
+                      .toList(growable: false),
+                ),
+          ];
+      return _LargeScreenContentList(
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            sliver: SliverToBoxAdapter(
+              child: _ContentFilterBar(
+                selection: _filter,
+                languages: [
+                  for (final lesson in lessons)
+                    _contentLanguage(lesson.type, lesson.language),
+                ],
+                levels: [for (final lesson in lessons) lesson.level],
+                resultLabel: labels.lessonCount(count),
+                onChanged: () => setState(() {}),
+                searchInToolbar: widget.searchInToolbar,
+              ),
+            ),
+          ),
+          if (chapterEntries.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _emptyResults(context),
+            )
+          else
+            for (final entry in chapterEntries) ...[
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                  child: Text(
+                    entry.chapter.title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                ),
+              ),
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                sliver: _largeScreenCardGrid(
+                  itemCount: entry.lessons.length,
+                  itemBuilder: (context, index) {
+                    final lesson = entry.lessons[index];
+                    return _LargeScreenContentGridCard(
+                      key: ValueKey(lesson.id),
+                      icon: Icons.menu_book_outlined,
+                      title: lesson.title,
+                      language: _contentLanguage(lesson.type, lesson.language),
+                      summary: lesson.summary,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => _LessonPage(
+                            lesson: lesson,
+                            store: widget.store,
+                            auth: widget.auth,
+                            settings: widget.settings,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+        ],
+      );
+    }
     return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
       itemCount: rows.isEmpty ? 2 : rows.length + 1,
@@ -627,6 +751,61 @@ class _ExampleCodeListState extends State<_ExampleCodeList> {
           ),
         )
         .toList(growable: false);
+    if (LargeScreenScope.maybeOf(context) != null) {
+      return _LargeScreenContentList(
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            sliver: SliverToBoxAdapter(
+              child: _ContentFilterBar(
+                selection: _filter,
+                languages: [
+                  for (final example in widget.items)
+                    _contentLanguage(example.type, example.language),
+                ],
+                levels: [for (final example in widget.items) example.level],
+                resultLabel: l10n.examplesCount(items.length),
+                onChanged: () => setState(() {}),
+                searchInToolbar: widget.searchInToolbar,
+              ),
+            ),
+          ),
+          if (items.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _emptyResults(context),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+              sliver: _largeScreenCardGrid(
+                itemCount: items.length,
+                itemBuilder: (context, index) {
+                  final example = items[index];
+                  return _LargeScreenContentGridCard(
+                    key: ValueKey(example.id),
+                    icon: Icons.code_outlined,
+                    title: example.title,
+                    language: _contentLanguage(example.type, example.language),
+                    summary: example.summary,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ExampleDetailPage(
+                          example: example,
+                          store: widget.store,
+                          auth: widget.auth,
+                          settings: widget.settings,
+                          examples: widget.examples,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+        ],
+      );
+    }
     return _ContentList.builder(
       padding: const EdgeInsets.only(top: 8, bottom: 32),
       itemCount: items.isEmpty ? 2 : items.length + 1,
@@ -740,9 +919,7 @@ Future<_ExampleCatalog> _loadExampleCatalog({
 void _showSavedExamplesUnavailable(BuildContext context) =>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          StudioLocalizations.of(context).savedExamplesUnavailable,
-        ),
+        content: Text(StudioLocalizations.of(context).savedExamplesUnavailable),
       ),
     );
 
@@ -1231,6 +1408,146 @@ class _BulletLine extends StatelessWidget {
           ),
           Expanded(child: Text(text)),
         ],
+      ),
+    );
+  }
+}
+
+Widget _largeScreenCardGrid({
+  required int itemCount,
+  required IndexedWidgetBuilder itemBuilder,
+}) => SliverLayoutBuilder(
+  builder: (context, constraints) {
+    const minCardWidth = 280.0;
+    const spacing = 16.0;
+    final crossAxisCount =
+        ((constraints.crossAxisExtent + spacing) / (minCardWidth + spacing))
+            .floor()
+            .clamp(1, 4)
+            .toInt();
+    return SliverGrid(
+      delegate: SliverChildBuilderDelegate(itemBuilder, childCount: itemCount),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: crossAxisCount,
+        mainAxisExtent: 144,
+        crossAxisSpacing: spacing,
+        mainAxisSpacing: spacing,
+      ),
+    );
+  },
+);
+
+Widget _largeScreenPageBody(BuildContext context, String title, Widget child) {
+  if (LargeScreenScope.maybeOf(context) == null) return child;
+  return Column(
+    children: [
+      _LargeScreenPageHeader(title: title),
+      Expanded(child: child),
+    ],
+  );
+}
+
+class _LargeScreenPageHeader extends StatelessWidget {
+  const _LargeScreenPageHeader({required this.title, this.actions = const []});
+
+  final String title;
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(title, style: Theme.of(context).textTheme.headlineSmall),
+        ),
+        ...actions,
+      ],
+    ),
+  );
+}
+
+class _LargeScreenContentList extends StatelessWidget {
+  const _LargeScreenContentList({required this.slivers});
+
+  final List<Widget> slivers;
+
+  @override
+  Widget build(BuildContext context) => Align(
+    alignment: Alignment.topCenter,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 1100),
+      child: CustomScrollView(slivers: slivers),
+    ),
+  );
+}
+
+class _LargeScreenContentGridCard extends StatelessWidget {
+  const _LargeScreenContentGridCard({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.language,
+    required this.summary,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String language;
+  final String summary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card.filled(
+      color: theme.colorScheme.surfaceContainerLow,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      languageLabel(language),
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    Icons.arrow_forward,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                summary,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

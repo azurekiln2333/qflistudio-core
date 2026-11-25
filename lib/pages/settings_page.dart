@@ -55,6 +55,8 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// Set in [dispose]; guards every post-await `setState` / context use.
   bool _disposed = false;
+  final _sectionKeys = List<GlobalKey>.generate(7, (_) => GlobalKey());
+  int _selectedCategory = 0;
 
   SettingsStore get settings => widget.settings;
 
@@ -78,9 +80,10 @@ class _SettingsPageState extends State<SettingsPage> {
   ///
   /// 从主界面进入不超过 4 次点击：主界面 → 我的 → 设置 → 本分组，
   /// 所以三个入口都在这一屏直接可见，不再嵌二级页面。
-  Widget _accountSection(BuildContext context) {
+  Widget _accountSection(BuildContext context, {Key? key}) {
     final auth = _auth!;
     return SettingsSection(
+      key: key,
       title: '账户与隐私',
       children: [
         ListTile(
@@ -126,7 +129,8 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 「设备与远程」：配对、已绑定电脑和撤销。
   ///
   /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
-  Widget _devicesSection(BuildContext context) => SettingsSection(
+  Widget _devicesSection(BuildContext context, {Key? key}) => SettingsSection(
+    key: key,
     title: '设备与远程',
     children: [
       ListTile(
@@ -263,188 +267,297 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final largeScreen = LargeScreenScope.maybeOf(context) != null;
+    bool showCategory(int index) => !largeScreen || _selectedCategory == index;
     return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
+      appBar: largeScreen ? null : AppBar(title: const Text('设置')),
       body: ListenableBuilder(
         listenable: settings,
-        builder: (context, _) => Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 840),
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-              children: [
-                SettingsSection(
-                  title: '外观与体验',
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.brightness_6_outlined),
-                      title: const Text('外观'),
-                      subtitle: Text(switch (settings.themeMode) {
-                        'light' => '浅色',
-                        'dark' => '深色',
-                        _ => '跟随系统',
-                      }),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: _pickThemeMode,
+        builder: (context, _) => Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (largeScreen) _settingsCategoryRail(context),
+            Expanded(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: largeScreen ? 720 : 840,
+                  ),
+                  child: ListView(
+                    padding: EdgeInsets.fromLTRB(
+                      largeScreen ? 24 : 16,
+                      largeScreen ? 20 : 12,
+                      largeScreen ? 24 : 16,
+                      32,
                     ),
-                    if (largeScreen) _zoomSetting(),
-                    ListTile(
-                      leading: const Icon(Icons.palette_outlined),
-                      title: const Text('代码高亮'),
-                      subtitle: const Text('配色、TextMate 与自定义语法'),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              HighlightSettingsPage(settings: settings),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                SettingsSection(
-                  title: '编辑器',
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.text_fields),
-                      title: const Text('编辑器字体'),
-                      subtitle: Text(
-                        '${EditorFonts.choices[settings.editorFont]} · ${settings.editorFontSize.toStringAsFixed(1)}',
-                      ),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              EditorFontSettingsPage(settings: settings),
-                        ),
-                      ),
-                    ),
-                    if (largeScreen)
-                      SwitchListTile(
-                        key: const ValueKey('settings-large-screen-symbols'),
-                        secondary: const Icon(Icons.keyboard_outlined),
-                        title: const Text('大屏显示符号栏'),
-                        subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
-                        value: settings.largeScreenSymbolBar,
-                        onChanged: settings.setLargeScreenSymbolBar,
-                      ),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.map_outlined),
-                      title: const Text('代码鸟瞰图'),
-                      subtitle: const Text('在编辑器右侧快速定位代码'),
-                      value: settings.minimap,
-                      onChanged: settings.setMinimap,
-                    ),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.tab_outlined),
-                      title: const Text('文件标签栏'),
-                      subtitle: const Text('在编辑器顶部显示已打开的文件'),
-                      value: settings.showEditorTabs,
-                      onChanged: settings.setShowEditorTabs,
-                    ),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.autorenew_outlined),
-                      title: const Text('自动保存'),
-                      subtitle: const Text('每次修改后立即保存'),
-                      value: settings.autoSave,
-                      onChanged: settings.setAutoSave,
-                    ),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.history_outlined),
-                      title: const Text('历史版本备份'),
-                      subtitle: const Text('自动保存和云同步覆盖文件前保留上一版本'),
-                      value: settings.backupEnabled,
-                      onChanged: settings.setBackupEnabled,
-                    ),
-                  ],
-                ),
-                if (largeScreen) _shortcutSection(),
-                if (widget.showAi && _customAiEndpointAllowed)
-                  SettingsSection(
-                    title: 'AI 助手',
                     children: [
-                      ListTile(
-                        leading: const Icon(Icons.auto_awesome_outlined),
-                        title: const Text('个人 AI 接口'),
-                        subtitle: Text(
-                          settings.aiModel.isEmpty
-                              ? '连接你自己的 AI 服务与密钥'
-                              : '${settings.aiModel} · ${settings.aiProtocol.label}',
+                      if (largeScreen)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 24),
+                          child: Text(
+                            '设置',
+                            style: Theme.of(context).textTheme.headlineSmall,
+                          ),
                         ),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => editAiSettings(context, settings),
-                      ),
-                      // 只影响直连的 Responses 与 Messages 请求字段
-                      // （design §4.4：默认关闭，不支持思考的模型会返回 400）。
-                      SwitchListTile(
-                        key: const ValueKey('settings-ai-thinking'),
-                        secondary: const Icon(Icons.psychology_outlined),
-                        title: const Text('请求思考过程'),
-                        subtitle: const Text(
-                          '只对 Responses 与 Messages 协议生效。模型不支持思考时请关闭。',
+                      if (showCategory(0))
+                        SettingsSection(
+                          key: _sectionKeys[0],
+                          title: '外观与体验',
+                          children: [
+                            ListTile(
+                              leading: const Icon(Icons.brightness_6_outlined),
+                              title: const Text('外观'),
+                              subtitle: Text(switch (settings.themeMode) {
+                                'light' => '浅色',
+                                'dark' => '深色',
+                                _ => '跟随系统',
+                              }),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: _pickThemeMode,
+                            ),
+                            if (largeScreen) _zoomSetting(),
+                            ListTile(
+                              leading: const Icon(Icons.palette_outlined),
+                              title: const Text('代码高亮'),
+                              subtitle: const Text('配色、TextMate 与自定义语法'),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      HighlightSettingsPage(settings: settings),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                        value: settings.aiThinking,
-                        onChanged: settings.setAiThinking,
-                      ),
+                      if (showCategory(1))
+                        SettingsSection(
+                          key: _sectionKeys[1],
+                          title: '编辑器',
+                          children: [
+                            ListTile(
+                              leading: const Icon(Icons.text_fields),
+                              title: const Text('编辑器字体'),
+                              subtitle: Text(
+                                '${EditorFonts.choices[settings.editorFont]} · ${settings.editorFontSize.toStringAsFixed(1)}',
+                              ),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => EditorFontSettingsPage(
+                                    settings: settings,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (largeScreen)
+                              SwitchListTile(
+                                key: const ValueKey(
+                                  'settings-large-screen-symbols',
+                                ),
+                                secondary: const Icon(Icons.keyboard_outlined),
+                                title: const Text('大屏显示符号栏'),
+                                subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
+                                value: settings.largeScreenSymbolBar,
+                                onChanged: settings.setLargeScreenSymbolBar,
+                              ),
+                            SwitchListTile(
+                              secondary: const Icon(Icons.map_outlined),
+                              title: const Text('代码鸟瞰图'),
+                              subtitle: const Text('在编辑器右侧快速定位代码'),
+                              value: settings.minimap,
+                              onChanged: settings.setMinimap,
+                            ),
+                            SwitchListTile(
+                              secondary: const Icon(Icons.tab_outlined),
+                              title: const Text('文件标签栏'),
+                              subtitle: const Text('在编辑器顶部显示已打开的文件'),
+                              value: settings.showEditorTabs,
+                              onChanged: settings.setShowEditorTabs,
+                            ),
+                            SwitchListTile(
+                              secondary: const Icon(Icons.autorenew_outlined),
+                              title: const Text('自动保存'),
+                              subtitle: const Text('每次修改后立即保存'),
+                              value: settings.autoSave,
+                              onChanged: settings.setAutoSave,
+                            ),
+                            SwitchListTile(
+                              secondary: const Icon(Icons.history_outlined),
+                              title: const Text('历史版本备份'),
+                              subtitle: const Text('自动保存和云同步覆盖文件前保留上一版本'),
+                              value: settings.backupEnabled,
+                              onChanged: settings.setBackupEnabled,
+                            ),
+                          ],
+                        ),
+                      if (largeScreen && showCategory(2))
+                        _shortcutSection(key: _sectionKeys[2]),
+                      if (showCategory(3) &&
+                          widget.showAi &&
+                          _customAiEndpointAllowed)
+                        SettingsSection(
+                          key: _sectionKeys[3],
+                          title: 'AI 助手',
+                          children: [
+                            ListTile(
+                              leading: const Icon(Icons.auto_awesome_outlined),
+                              title: const Text('个人 AI 接口'),
+                              subtitle: Text(
+                                settings.aiModel.isEmpty
+                                    ? '连接你自己的 AI 服务与密钥'
+                                    : '${settings.aiModel} · ${settings.aiProtocol.label}',
+                              ),
+                              trailing: const Icon(Icons.chevron_right),
+                              onTap: () => editAiSettings(context, settings),
+                            ),
+                            // 只影响直连的 Responses 与 Messages 请求字段
+                            // （design §4.4：默认关闭，不支持思考的模型会返回 400）。
+                            SwitchListTile(
+                              key: const ValueKey('settings-ai-thinking'),
+                              secondary: const Icon(Icons.psychology_outlined),
+                              title: const Text('请求思考过程'),
+                              subtitle: const Text(
+                                '只对 Responses 与 Messages 协议生效。模型不支持思考时请关闭。',
+                              ),
+                              value: settings.aiThinking,
+                              onChanged: settings.setAiThinking,
+                            ),
+                          ],
+                        ),
+                      if (showCategory(4) && _showsAccountSection)
+                        _accountSection(context, key: _sectionKeys[4]),
+                      if (showCategory(5) && RemoteComputerPage.isSupported)
+                        _devicesSection(context, key: _sectionKeys[5]),
+                      if (showCategory(6))
+                        SettingsSection(
+                          key: _sectionKeys[6],
+                          title: '数据与存储',
+                          children: [
+                            FutureBuilder<String?>(
+                              future: _backupDirectory,
+                              builder: (context, snapshot) => ListTile(
+                                leading: const Icon(Icons.folder_copy_outlined),
+                                title: const Text('历史备份目录'),
+                                subtitle: Text(
+                                  snapshot.data ??
+                                      (snapshot.connectionState ==
+                                              ConnectionState.done
+                                          ? '暂时无法读取目录'
+                                          : '正在读取…'),
+                                ),
+                              ),
+                            ),
+                            const ListTile(
+                              leading: Icon(Icons.delete_sweep_outlined),
+                              title: Text('项目回收站'),
+                              subtitle: Text(
+                                '删除的项目会保存在应用数据目录的 recyclebin/projects_bin 中',
+                              ),
+                            ),
+                            ListTile(
+                              leading: const Icon(Icons.file_upload_outlined),
+                              title: const Text('导出全部数据'),
+                              subtitle: const Text(
+                                '打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份',
+                              ),
+                              trailing: const Icon(Icons.chevron_right),
+                              enabled: _busyLabel == null,
+                              onTap: _busyLabel == null ? _exportAllData : null,
+                            ),
+                            ListTile(
+                              leading: const Icon(Icons.file_download_outlined),
+                              title: const Text('导入全部数据'),
+                              subtitle: const Text('校验后暂存，下次启动应用时替换当前数据（不可撤销）'),
+                              trailing: const Icon(Icons.chevron_right),
+                              enabled: _busyLabel == null,
+                              onTap: _busyLabel == null ? _importAllData : null,
+                            ),
+                            if (_busyLabel != null)
+                              ListTile(
+                                leading: const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                  ),
+                                ),
+                                title: Text(_busyLabel!),
+                                subtitle: const LinearProgressIndicator(
+                                  minHeight: 3,
+                                ),
+                              ),
+                          ],
+                        ),
                     ],
                   ),
-                if (_showsAccountSection) _accountSection(context),
-                if (RemoteComputerPage.isSupported) _devicesSection(context),
-                SettingsSection(
-                  title: '数据与存储',
-                  children: [
-                    FutureBuilder<String?>(
-                      future: _backupDirectory,
-                      builder: (context, snapshot) => ListTile(
-                        leading: const Icon(Icons.folder_copy_outlined),
-                        title: const Text('历史备份目录'),
-                        subtitle: Text(
-                          snapshot.data ??
-                              (snapshot.connectionState == ConnectionState.done
-                                  ? '暂时无法读取目录'
-                                  : '正在读取…'),
-                        ),
-                      ),
-                    ),
-                    const ListTile(
-                      leading: Icon(Icons.delete_sweep_outlined),
-                      title: Text('项目回收站'),
-                      subtitle: Text(
-                        '删除的项目会保存在应用数据目录的 recyclebin/projects_bin 中',
-                      ),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.file_upload_outlined),
-                      title: const Text('导出全部数据'),
-                      subtitle: const Text('打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份'),
-                      trailing: const Icon(Icons.chevron_right),
-                      enabled: _busyLabel == null,
-                      onTap: _busyLabel == null ? _exportAllData : null,
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.file_download_outlined),
-                      title: const Text('导入全部数据'),
-                      subtitle: const Text('校验后暂存，下次启动应用时替换当前数据（不可撤销）'),
-                      trailing: const Icon(Icons.chevron_right),
-                      enabled: _busyLabel == null,
-                      onTap: _busyLabel == null ? _importAllData : null,
-                    ),
-                    if (_busyLabel != null)
-                      ListTile(
-                        leading: const SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(strokeWidth: 2.5),
-                        ),
-                        title: Text(_busyLabel!),
-                        subtitle: const LinearProgressIndicator(minHeight: 3),
-                      ),
-                  ],
                 ),
-              ],
+              ),
             ),
-          ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _settingsCategoryRail(BuildContext context) {
+    final theme = Theme.of(context);
+    final entries = <(String, IconData, int)>[
+      ('外观与体验', Icons.palette_outlined, 0),
+      ('编辑器', Icons.code_outlined, 1),
+      if (LargeScreenScope.maybeOf(context) != null)
+        ('快捷键', Icons.keyboard_command_key_outlined, 2),
+      if (widget.showAi && _customAiEndpointAllowed)
+        ('AI 助手', Icons.auto_awesome_outlined, 3),
+      if (_showsAccountSection) ('账户与隐私', Icons.privacy_tip_outlined, 4),
+      if (RemoteComputerPage.isSupported)
+        ('设备与远程', Icons.devices_other_outlined, 5),
+      ('数据与存储', Icons.storage_outlined, 6),
+    ];
+    return SizedBox(
+      width: 240,
+      child: Material(
+        color: theme.colorScheme.surfaceContainerLow,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(12, 20, 12, 16),
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text('设置', style: theme.textTheme.titleLarge),
+            ),
+            const SizedBox(height: 16),
+            for (final entry in entries)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: ListTile(
+                  dense: true,
+                  selected: _selectedCategory == entry.$3,
+                  selectedTileColor: theme.colorScheme.secondaryContainer,
+                  leading: Icon(
+                    entry.$2,
+                    size: 20,
+                    color: _selectedCategory == entry.$3
+                        ? theme.colorScheme.onSecondaryContainer
+                        : null,
+                  ),
+                  title: Text(
+                    entry.$1,
+                    style: _selectedCategory == entry.$3
+                        ? TextStyle(
+                            color: theme.colorScheme.onSecondaryContainer,
+                          )
+                        : null,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(28),
+                  ),
+                  onTap: () {
+                    if (_selectedCategory == entry.$3) return;
+                    setState(() => _selectedCategory = entry.$3);
+                  },
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -489,7 +602,8 @@ class _SettingsPageState extends State<SettingsPage> {
     ),
   );
 
-  Widget _shortcutSection() => SettingsSection(
+  Widget _shortcutSection({Key? key}) => SettingsSection(
+    key: key,
     title: '快捷键',
     children: [
       const ListTile(subtitle: Text('终端获得焦点时，关闭标签、底部面板和 Agent 栏的快捷键交给终端。')),
