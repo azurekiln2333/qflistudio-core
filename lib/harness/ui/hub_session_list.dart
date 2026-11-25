@@ -20,6 +20,7 @@ class HubNewSessionButton extends StatefulWidget {
     this.onLaunched,
     this.onError,
     this.dense = false,
+    this.buttonSize,
   });
 
   final HarnessHub hub;
@@ -30,6 +31,9 @@ class HubNewSessionButton extends StatefulWidget {
   final void Function(HarnessSessionHandle handle)? onLaunched;
   final void Function(Object error)? onError;
   final bool dense;
+
+  /// Explicit workbench trigger and menu-row size; null preserves phone sizing.
+  final double? buttonSize;
 
   @override
   State<HubNewSessionButton> createState() => _HubNewSessionButtonState();
@@ -99,24 +103,37 @@ class _HubNewSessionButtonState extends State<HubNewSessionButton> {
           tooltip: '新建会话',
           iconSize: 20,
           padding: EdgeInsets.zero,
-          constraints: BoxConstraints.tightFor(
-            width: widget.dense ? 32 : 44,
-            height: widget.dense ? 32 : 44,
-          ),
+          // PopupMenuButton.constraints sizes the menu, not its icon trigger.
+          constraints: widget.buttonSize == null
+              ? BoxConstraints.tightFor(
+                  width: widget.dense ? 32 : 44,
+                  height: widget.dense ? 32 : 44,
+                )
+              : null,
+          style: widget.buttonSize == null
+              ? null
+              : IconButton.styleFrom(
+                  fixedSize: Size.square(widget.buttonSize!),
+                  minimumSize: Size.square(widget.buttonSize!),
+                  maximumSize: Size.square(widget.buttonSize!),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.standard,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
           icon: const Icon(Icons.add_comment_outlined),
           itemBuilder: (context) => [
             if (providers.isEmpty)
-              const PopupMenuItem<String>(
+              PopupMenuItem<String>(
                 value: '__none__',
                 enabled: false,
-                height: 44,
+                height: widget.buttonSize ?? 44,
                 child: Text('没有检测到可启动的 harness'),
               ),
             for (final provider in providers)
               PopupMenuItem<String>(
                 value: provider.id,
                 enabled: provider.available,
-                height: 44,
+                height: widget.buttonSize ?? 44,
                 child: Row(
                   children: [
                     Expanded(

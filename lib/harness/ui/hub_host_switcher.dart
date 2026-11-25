@@ -17,6 +17,8 @@ class HubHostSwitcher extends StatelessWidget {
     this.remoteConnecting = false,
     this.remoteUnavailable = false,
     this.dense = false,
+    this.surface = true,
+    this.touchTargets = false,
   });
 
   final HarnessHub hub;
@@ -39,61 +41,73 @@ class HubHostSwitcher extends StatelessWidget {
   /// 窄屏会话视图里用更紧的高度。
   final bool dense;
 
+  /// Standalone switchers paint a surface and divider.
+  final bool surface;
+
+  /// Give chips a 48dp height on tablet without changing chip density.
+  final bool touchTargets;
+
   @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: hub,
-      builder: (context, _) {
-        final hosts = hub.hosts;
-        if (hosts.isEmpty && onAddComputer == null && onOpenRemote == null) {
-          return const SizedBox.shrink();
-        }
-        final scheme = Theme.of(context).colorScheme;
-        return Container(
-          key: const ValueKey('hub-host-switcher'),
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainerLow,
-            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
-          ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: EdgeInsets.symmetric(
-              horizontal: 8,
-              vertical: dense ? 4 : 6,
-            ),
-            child: Row(
-              children: [
-                for (final host in hosts) ...[
-                  _HostChip(
-                    key: ValueKey('hub-host-${host.id}'),
-                    label: host.label,
-                    icon: _iconFor(host.kind),
-                    selected: host.id == hub.currentHostId,
-                    state: hub.stateOf(host.id),
-                    hint: hub.hintOf(host.id),
-                    dense: dense,
-                    onTap: () => hub.selectHost(host.id),
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                if (onOpenRemote != null) ...[
-                  _RemotePendingChip(
-                    dense: dense,
-                    connecting: remoteConnecting,
-                    unavailable: remoteUnavailable,
-                    onTap: onOpenRemote!,
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                if (onAddComputer != null)
-                  _AddComputerChip(dense: dense, onTap: onAddComputer!),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: hub,
+    builder: (context, _) {
+      final hosts = hub.hosts;
+      if (hosts.isEmpty && onAddComputer == null && onOpenRemote == null) {
+        return const SizedBox.shrink();
+      }
+      final scheme = Theme.of(context).colorScheme;
+      final chips = SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.symmetric(
+          horizontal: 8,
+          vertical: surface ? (dense ? 4 : 6) : 0,
+        ),
+        child: Row(
+          children: [
+            for (final host in hosts) ...[
+              _HostChip(
+                key: ValueKey('hub-host-${host.id}'),
+                label: host.label,
+                icon: _iconFor(host.kind),
+                selected: host.id == hub.currentHostId,
+                state: hub.stateOf(host.id),
+                hint: hub.hintOf(host.id),
+                dense: dense,
+                touchTarget: touchTargets,
+                onTap: () => hub.selectHost(host.id),
+              ),
+              const SizedBox(width: 6),
+            ],
+            if (onOpenRemote != null) ...[
+              _RemotePendingChip(
+                dense: dense,
+                connecting: remoteConnecting,
+                unavailable: remoteUnavailable,
+                touchTarget: touchTargets,
+                onTap: onOpenRemote!,
+              ),
+              const SizedBox(width: 6),
+            ],
+            if (onAddComputer != null)
+              _AddComputerChip(
+                dense: dense,
+                touchTarget: touchTargets,
+                onTap: onAddComputer!,
+              ),
+          ],
+        ),
+      );
+      if (!surface) return chips;
+      return Container(
+        key: const ValueKey('hub-host-switcher'),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLow,
+          border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+        ),
+        child: chips,
+      );
+    },
+  );
 
   static IconData _iconFor(HarnessHostKind kind) => switch (kind) {
     HarnessHostKind.local => Icons.computer_outlined,
@@ -142,6 +156,7 @@ class _HostChip extends StatelessWidget {
     required this.state,
     required this.hint,
     required this.dense,
+    required this.touchTarget,
     required this.onTap,
   });
 
@@ -151,6 +166,7 @@ class _HostChip extends StatelessWidget {
   final HarnessHostState state;
   final String? hint;
   final bool dense;
+  final bool touchTarget;
   final VoidCallback onTap;
 
   @override
@@ -161,6 +177,7 @@ class _HostChip extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(999),
       child: Container(
+        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
         padding: EdgeInsets.symmetric(
           horizontal: dense ? 8 : 10,
           vertical: dense ? 4 : 6,
@@ -219,12 +236,14 @@ class _RemotePendingChip extends StatelessWidget {
     required this.dense,
     required this.connecting,
     required this.unavailable,
+    required this.touchTarget,
     required this.onTap,
   });
 
   final bool dense;
   final bool connecting;
   final bool unavailable;
+  final bool touchTarget;
   final VoidCallback onTap;
 
   @override
@@ -239,6 +258,7 @@ class _RemotePendingChip extends StatelessWidget {
       onTap: connecting ? null : onTap,
       borderRadius: BorderRadius.circular(999),
       child: Container(
+        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
         padding: EdgeInsets.symmetric(
           horizontal: dense ? 8 : 10,
           vertical: dense ? 4 : 6,
@@ -278,9 +298,14 @@ class _RemotePendingChip extends StatelessWidget {
 }
 
 class _AddComputerChip extends StatelessWidget {
-  const _AddComputerChip({required this.dense, required this.onTap});
+  const _AddComputerChip({
+    required this.dense,
+    required this.touchTarget,
+    required this.onTap,
+  });
 
   final bool dense;
+  final bool touchTarget;
   final VoidCallback onTap;
 
   @override
@@ -292,6 +317,7 @@ class _AddComputerChip extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(999),
       child: Container(
+        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
         padding: EdgeInsets.symmetric(
           horizontal: dense ? 8 : 10,
           vertical: dense ? 4 : 6,

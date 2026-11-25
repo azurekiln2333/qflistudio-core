@@ -13,6 +13,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
 import 'package:qfli_studio_core/harness/harness_host.dart';
 import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
 import 'package:qfli_studio_core/harness/ui/hub_agents_surface.dart';
@@ -22,8 +23,14 @@ import 'package:qfli_studio_core/harness/ui/hub_session_list.dart';
 import 'package:qfli_studio_core/harness/ui/hub_session_view.dart';
 import 'package:qfli_studio_core/harness/ui/hub_terminal_key_bar.dart';
 import 'package:qfli_studio_core/harness/ui/hub_terminal_view.dart';
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
+import 'package:qfli_studio_core/shell/large_screen_controller.dart';
+import 'package:qfli_studio_core/shell/shortcut_label.dart';
+import 'package:qfli_studio_core/shell/workbench_state.dart';
+import 'package:qfli_studio_core/shell/workbench_theme.dart';
 import 'package:xterm/xterm.dart';
 
+import '../support/fake_agent.dart';
 import '../support/fake_harness_host.dart';
 
 Widget _wrap(Widget child) => MaterialApp(
@@ -346,6 +353,324 @@ void main() {
       expect(find.byKey(const ValueKey('hub-tab-0')), findsOneWidget);
     },
   );
+
+  for (final viewport in [
+    (
+      formFactor: AppFormFactor.desktop,
+      size: const Size(1440, 900),
+      paneWidth: 400.0,
+    ),
+    (
+      formFactor: AppFormFactor.desktop,
+      size: const Size(1024, 768),
+      paneWidth: 944.0,
+    ),
+    (
+      formFactor: AppFormFactor.tablet,
+      size: const Size(1180, 820),
+      paneWidth: 400.0,
+    ),
+  ]) {
+    for (final brightness in Brightness.values) {
+      testWidgets(
+        'workbench Agent header has one surface/action: ${viewport.size}, $brightness',
+        (tester) async {
+          final formFactor = viewport.formFactor;
+          final desktop = formFactor == AppFormFactor.desktop;
+          final expectedHeight = desktop ? 40.0 : 48.0;
+          final actionSize = desktop ? 32.0 : 48.0;
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = viewport.size;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          final host = FakeHarnessHost(
+            id: 'local',
+            label: '本机',
+            kind: HarnessHostKind.local,
+            initialSessions: [
+              fakeSession(hostId: 'local', id: 'idle', title: '未选择的会话'),
+            ],
+            providerList: const [
+              HarnessProviderInfo(
+                id: 'claude',
+                label: 'Claude Code',
+                available: true,
+              ),
+            ],
+          );
+          final hub = HarnessHub(hosts: [host], desktop: true);
+          final layout = LargeScreenController();
+          final state = WorkbenchState(projectId: 'project');
+          final runtime = FakeAgentRuntime(sessions: MemoryAgentSessionStore());
+          addTearDown(hub.dispose);
+          addTearDown(layout.dispose);
+          addTearDown(state.dispose);
+          addTearDown(runtime.sessions.dispose);
+          addTearDown(runtime.fileEvents.close);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: WorkbenchTheme.from(
+                ThemeData(useMaterial3: true, brightness: brightness),
+                formFactor: formFactor,
+              ),
+              home: LargeScreenScope(
+                controller: layout,
+                formFactor: formFactor,
+                child: Scaffold(
+                  body: Align(
+                    alignment: Alignment.topLeft,
+                    child: SizedBox(
+                      width: viewport.paneWidth,
+                      height: 720,
+                      child: AgentDock(
+                        runtime: runtime,
+                        state: state,
+                        onCollapse: () {},
+                        onCreateSession: () async {},
+                        child: HubAgentsSurface(
+                          hub: hub,
+                          studioPane: const SizedBox.shrink(),
+                          projectRoot: 'D:/project',
+                          onAddComputer: () {},
+                          openRemoteHost: () async => null,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+
+          final header = find.byKey(const ValueKey('hub-agents-header'));
+          final surface = find.byKey(
+            const ValueKey('hub-agents-header-surface'),
+          );
+          expect(tester.getSize(header).height, expectedHeight);
+          expect(tester.getSize(surface).width, viewport.paneWidth);
+          final scheme = Theme.of(tester.element(surface)).colorScheme;
+          expect(
+            tester.widget<Material>(surface).color,
+            scheme.surfaceContainerLow,
+          );
+          expect(
+            find.byKey(const ValueKey('hub-host-switcher')),
+            findsNothing,
+            reason: 'The host chips must not paint a second surface block.',
+          );
+          expect(
+            find.ancestor(
+              of: find.byKey(const ValueKey('hub-sessions-refresh')),
+              matching: surface,
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.ancestor(
+              of: find.byKey(const ValueKey('hub-host-local')),
+              matching: surface,
+            ),
+            findsOneWidget,
+          );
+          expect(find.byKey(const ValueKey('hub-new-session')), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('editor-agent-new-session')),
+            findsNothing,
+            reason: 'The host-row action replaces the legacy title-row action.',
+          );
+          expect(find.text('Agent 面板'), findsNothing);
+          expect(
+            find.byKey(const ValueKey('editor-agent-collapse')),
+            findsNothing,
+          );
+          for (final key in ['hub-sessions-refresh', 'hub-new-session']) {
+            final action = find.byKey(ValueKey(key));
+            expect(tester.getSize(action), Size.square(actionSize));
+            expect(
+              tester.getRect(surface).contains(tester.getCenter(action)),
+              isTrue,
+            );
+          }
+          final chipTapTargets = [
+            find.descendant(
+              of: find.byKey(const ValueKey('hub-host-local')),
+              matching: find.byType(InkWell),
+            ),
+            find.byKey(const ValueKey('hub-host-pending-remote')),
+            find.byKey(const ValueKey('hub-add-computer')),
+          ];
+          for (final chip in chipTapTargets) {
+            expect(
+              tester.getSize(chip).height,
+              desktop ? lessThanOrEqualTo(expectedHeight) : expectedHeight,
+            );
+            // Narrow panes intentionally scroll host chips, not header actions.
+            await tester.ensureVisible(chip);
+            await tester.pump();
+            expect(
+              tester.getRect(surface).contains(tester.getCenter(chip)),
+              isTrue,
+            );
+          }
+          expect(
+            find.text('从左侧 Agents 入口选择会话（${shortcutLabel('Ctrl+Shift+A')}）。'),
+            findsOneWidget,
+          );
+          expect(find.text('从左侧会话列表选一个，或新建会话。'), findsNothing);
+          expect(find.byType(HubNewSessionButton), findsOneWidget);
+          final newSession = find.byKey(const ValueKey('hub-new-session'));
+          expect(
+            tester.widget<PopupMenuButton<String>>(newSession).constraints,
+            isNull,
+          );
+          await tester.tap(newSession);
+          await _settle(tester);
+          final provider = find.widgetWithText(
+            PopupMenuItem<String>,
+            'Claude Code',
+          );
+          expect(provider, findsOneWidget);
+          expect(tester.getSize(provider).width, greaterThan(actionSize));
+          expect(
+            tester.widget<PopupMenuItem<String>>(provider).height,
+            actionSize,
+          );
+          if (!desktop) {
+            expect(tester.getSize(provider).height, greaterThanOrEqualTo(48));
+          }
+          await tester.tap(find.text('Claude Code'));
+          await _settle(tester);
+          expect(hub.activeSession?.providerId, 'claude');
+          expect(hub.activeSession?.cwd, 'D:/project');
+          final close = find.byKey(const ValueKey('hub-session-close'));
+          expect(close, findsOneWidget);
+          expect(
+            tester.getTopLeft(close).dy,
+            greaterThanOrEqualTo(tester.getBottomLeft(header).dy),
+          );
+          expect(tester.getSize(header).height, expectedHeight);
+          expect(find.byType(HubNewSessionButton), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('editor-agent-new-session')),
+            findsNothing,
+          );
+
+          await tester.tap(close);
+          await _settle(tester);
+          host.emitSessions([]);
+          await _settle(tester);
+          expect(find.text('本机 还没有会话'), findsOneWidget);
+          expect(
+            find.text(
+              '从左侧 Agents 查看会话（${shortcutLabel('Ctrl+Shift+A')}）。\n点击顶部按钮新建会话。',
+            ),
+            findsOneWidget,
+          );
+          expect(find.byType(HubNewSessionButton), findsOneWidget);
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox.shrink());
+        },
+      );
+    }
+  }
+
+  testWidgets('phone host header keeps its existing new-session entry', (
+    tester,
+  ) async {
+    final hub = buildHub();
+    final state = WorkbenchState(projectId: 'project');
+    final runtime = FakeAgentRuntime(sessions: MemoryAgentSessionStore());
+    addTearDown(hub.dispose);
+    addTearDown(state.dispose);
+    addTearDown(runtime.sessions.dispose);
+    addTearDown(runtime.fileEvents.close);
+    await awaitSessions(tester);
+    await tester.pumpWidget(
+      _wrap(
+        AgentDock(
+          runtime: runtime,
+          state: state,
+          onCollapse: () {},
+          onCreateSession: () async {},
+          child: HubAgentsSurface(
+            hub: hub,
+            studioPane: const Center(child: Text('STUDIO-PANE')),
+            projectRoot: 'D:/proj/alpha',
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Phone still keeps both historical launch affordances; only workbench R5
+    // removes the empty-state button in favor of its Agents rail guidance.
+    expect(find.byType(HubNewSessionButton), findsNWidgets(2));
+    expect(find.text('Agent 面板'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('editor-agent-new-session')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('editor-agent-collapse')), findsOneWidget);
+    expect(find.byKey(const ValueKey('hub-host-switcher')), findsOneWidget);
+    expect(find.byKey(const ValueKey('hub-agents-header')), findsNothing);
+    expect(find.text('从左侧会话列表选一个，或新建会话。'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  for (final formFactor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
+    testWidgets(
+      'workbench keeps its host header before hosts arrive: $formFactor',
+      (tester) async {
+        final hub = HarnessHub(hosts: const [], desktop: true);
+        final layout = LargeScreenController();
+        addTearDown(hub.dispose);
+        addTearDown(layout.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: WorkbenchTheme.from(
+              ThemeData(useMaterial3: true),
+              formFactor: formFactor,
+            ),
+            home: LargeScreenScope(
+              controller: layout,
+              formFactor: formFactor,
+              child: Scaffold(
+                body: HubAgentsSurface(
+                  hub: hub,
+                  studioPane: const Text('STUDIO-PANE'),
+                  projectRoot: 'D:/project',
+                  onAddComputer: () {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .getSize(find.byKey(const ValueKey('hub-agents-header')))
+              .height,
+          formFactor == AppFormFactor.desktop ? 40 : 48,
+        );
+        expect(
+          find.byKey(const ValueKey('hub-agents-header-surface')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('hub-new-session')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('hub-sessions-refresh')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('hub-add-computer')), findsOneWidget);
+        expect(find.text('STUDIO-PANE'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      },
+    );
+  }
 
   testWidgets('the paired computer is only opened when the user asks for it', (
     tester,

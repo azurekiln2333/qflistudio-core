@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 
 import '../harness_host.dart';
 import '../hub/harness_hub.dart';
+import '../../shell/large_screen_controller.dart';
+import '../../shell/shortcut_label.dart';
 import 'hub_host_switcher.dart';
 import 'hub_session_list.dart';
 import 'hub_session_view.dart';
@@ -107,6 +109,7 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
     return AnimatedBuilder(
       animation: hub,
       builder: (context, _) {
+        final workbench = LargeScreenScope.maybeOf(context) != null;
         final host = hub.currentHost;
         final active = hub.activeSession;
         final showsHubSession =
@@ -125,22 +128,38 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
                 remoteConnecting: _remoteConnecting,
                 remoteUnavailable: _remoteUnavailable,
                 compact: widget.compact,
+                workbench: workbench,
                 projectRoot: widget.projectRoot,
               ),
             if (host == null)
-              // 一台可见主机都没有（手机端未配对）：主机条无处可挂，
-              // 这里自己占一行，不然用户找不到“已绑定电脑”和“添加电脑”。
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                child: HubHostSwitcher(
-                  hub: hub,
-                  onAddComputer: widget.onAddComputer,
-                  onOpenRemote: _remoteEntry,
-                  remoteConnecting: _remoteConnecting,
-                  remoteUnavailable: _remoteUnavailable,
-                  dense: widget.compact,
-                ),
-              ),
+              // The workbench host row is one shared surface with its actions.
+              // Phone keeps the existing standalone switcher presentation.
+              workbench
+                  ? Material(
+                      key: const ValueKey('hub-agents-header-surface'),
+                      color: Theme.of(context).colorScheme.surfaceContainerLow,
+                      child: _SwitcherRow(
+                        hub: hub,
+                        onAddComputer: widget.onAddComputer,
+                        onOpenRemote: _remoteEntry,
+                        remoteConnecting: _remoteConnecting,
+                        remoteUnavailable: _remoteUnavailable,
+                        compact: widget.compact,
+                        workbench: true,
+                        projectRoot: widget.projectRoot,
+                      ),
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                      child: HubHostSwitcher(
+                        hub: hub,
+                        onAddComputer: widget.onAddComputer,
+                        onOpenRemote: _remoteEntry,
+                        remoteConnecting: _remoteConnecting,
+                        remoteUnavailable: _remoteUnavailable,
+                        dense: widget.compact,
+                      ),
+                    ),
             if (_remoteConnecting) const _RemoteConnectingBanner(),
             if (host == null && hub.hostBuildError != null)
               _HostBuildFailure(error: hub.hostBuildError!),
@@ -158,6 +177,7 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
                       hub: hub,
                       host: host,
                       projectRoot: widget.projectRoot,
+                      workbench: workbench,
                     ),
             ),
           ],
@@ -230,6 +250,7 @@ class _HostHeader extends StatelessWidget {
     required this.remoteConnecting,
     required this.remoteUnavailable,
     required this.compact,
+    required this.workbench,
     required this.projectRoot,
   });
 
@@ -240,6 +261,7 @@ class _HostHeader extends StatelessWidget {
   final bool remoteConnecting;
   final bool remoteUnavailable;
   final bool compact;
+  final bool workbench;
   final String projectRoot;
 
   @override
@@ -248,17 +270,18 @@ class _HostHeader extends StatelessWidget {
     final scheme = theme.colorScheme;
     final state = hub.stateOf(host.id);
     final hint = hub.hintOf(host.id);
-    return Column(
+    final header = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
         _SwitcherRow(
           hub: hub,
-          host: host,
           onAddComputer: onAddComputer,
           onOpenRemote: onOpenRemote,
           remoteConnecting: remoteConnecting,
           remoteUnavailable: remoteUnavailable,
           compact: compact,
+          workbench: workbench,
           projectRoot: projectRoot,
         ),
         if (hint != null && hint.isNotEmpty)
@@ -291,90 +314,97 @@ class _HostHeader extends StatelessWidget {
           ),
       ],
     );
+    return workbench
+        ? Material(
+            key: const ValueKey('hub-agents-header-surface'),
+            color: scheme.surfaceContainerLow,
+            child: header,
+          )
+        : header;
   }
 }
 
 class _SwitcherRow extends StatelessWidget {
   const _SwitcherRow({
     required this.hub,
-    required this.host,
     required this.onAddComputer,
     required this.onOpenRemote,
     required this.remoteConnecting,
     required this.remoteUnavailable,
     required this.compact,
+    required this.workbench,
     required this.projectRoot,
   });
 
   final HarnessHub hub;
-  final HarnessHost host;
   final VoidCallback? onAddComputer;
   final VoidCallback? onOpenRemote;
   final bool remoteConnecting;
   final bool remoteUnavailable;
   final bool compact;
+  final bool workbench;
   final String projectRoot;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Row(
+    final desktop = workbench && LargeScreenScope.isDesktop(context);
+    final actionSize = desktop ? 32.0 : 48.0;
+    final hostChips = HubHostSwitcher(
+      hub: hub,
+      onAddComputer: onAddComputer,
+      onOpenRemote: onOpenRemote,
+      remoteConnecting: remoteConnecting,
+      remoteUnavailable: remoteUnavailable,
+      dense: compact,
+      surface: !workbench,
+      touchTargets: workbench && !desktop,
+    );
+    final actions = Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(
-          child: _HostChips(
-            hub: hub,
-            onAddComputer: onAddComputer,
-            onOpenRemote: onOpenRemote,
-            remoteConnecting: remoteConnecting,
-            remoteUnavailable: remoteUnavailable,
-            compact: compact,
-          ),
-        ),
         IconButton(
           key: const ValueKey('hub-sessions-refresh'),
           tooltip: '刷新会话',
           iconSize: 18,
           padding: EdgeInsets.zero,
-          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+          constraints: BoxConstraints.tightFor(
+            width: workbench ? actionSize : 36,
+            height: workbench ? actionSize : 36,
+          ),
+          style: workbench
+              ? IconButton.styleFrom(
+                  visualDensity: VisualDensity.standard,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                )
+              : null,
           onPressed: hub.refresh,
           icon: const Icon(Icons.refresh),
         ),
-        SizedBox(width: 2),
+        const SizedBox(width: 2),
         Container(width: 1, height: 20, color: scheme.outlineVariant),
-        SizedBox(width: 2),
-        HubNewSessionButton(hub: hub, cwd: projectRoot, dense: true),
+        const SizedBox(width: 2),
+        HubNewSessionButton(
+          hub: hub,
+          cwd: projectRoot,
+          dense: true,
+          buttonSize: workbench ? actionSize : null,
+        ),
       ],
     );
+    final row = Row(
+      children: [
+        Expanded(child: hostChips),
+        actions,
+      ],
+    );
+    if (!workbench) return row;
+    return SizedBox(
+      key: const ValueKey('hub-agents-header'),
+      height: desktop ? 40 : 48,
+      child: row,
+    );
   }
-}
-
-/// 主机选择条：直接复用 [HubHostSwitcher]，这里只是一个不滚动的窄容器。
-class _HostChips extends StatelessWidget {
-  const _HostChips({
-    required this.hub,
-    required this.onAddComputer,
-    required this.onOpenRemote,
-    required this.remoteConnecting,
-    required this.remoteUnavailable,
-    required this.compact,
-  });
-
-  final HarnessHub hub;
-  final VoidCallback? onAddComputer;
-  final VoidCallback? onOpenRemote;
-  final bool remoteConnecting;
-  final bool remoteUnavailable;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) => HubHostSwitcher(
-    hub: hub,
-    onAddComputer: onAddComputer,
-    onOpenRemote: onOpenRemote,
-    remoteConnecting: remoteConnecting,
-    remoteUnavailable: remoteUnavailable,
-    dense: compact,
-  );
 }
 
 /// 当前主机没有会话时的说明与启动入口。
@@ -383,11 +413,13 @@ class _HostEmptyState extends StatelessWidget {
     required this.hub,
     required this.host,
     required this.projectRoot,
+    required this.workbench,
   });
 
   final HarnessHub hub;
   final HarnessHost host;
   final String projectRoot;
+  final bool workbench;
 
   @override
   Widget build(BuildContext context) {
@@ -422,14 +454,18 @@ class _HostEmptyState extends StatelessWidget {
               unsupported
                   ? (hub.hintOf(host.id) ?? '检查这台电脑上是否已安装对应程序。')
                   : hasSessions
-                  ? '从左侧会话列表选一个，或新建会话。'
+                  ? workbench
+                        ? '从左侧 Agents 入口选择会话（${shortcutLabel('Ctrl+Shift+A')}）。'
+                        : '从左侧会话列表选一个，或新建会话。'
+                  : workbench
+                  ? '从左侧 Agents 查看会话（${shortcutLabel('Ctrl+Shift+A')}）。\n点击顶部按钮新建会话。'
                   : '从右上角的新建会话启动一个 harness，或先刷新。',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
             ),
-            if (!unsupported) ...[
+            if (!unsupported && !workbench) ...[
               const SizedBox(height: 12),
               HubNewSessionButton(hub: hub, cwd: projectRoot),
             ],
