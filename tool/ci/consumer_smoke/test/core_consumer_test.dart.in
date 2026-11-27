@@ -1,5 +1,5 @@
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/pages/auth/huawei_quick_login_view.dart';
 import 'package:qfli_studio_core/remote_control/models/herdr.dart';
@@ -34,7 +34,9 @@ void main() {
       view.onError('test-error');
       expect(codes, ['test-code']);
       expect(errors, ['test-error']);
-      await tester.pumpWidget(MaterialApp(home: view));
+      await tester.pumpWidget(
+        Directionality(textDirection: TextDirection.ltr, child: view),
+      );
       expect(find.byType(HuaweiQuickLoginView), findsOneWidget);
       expect(
         find.descendant(

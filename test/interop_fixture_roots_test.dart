@@ -25,7 +25,9 @@ void main() {
 
       expect(File(p.join(root.path, 'pubspec.yaml')).existsSync(), isTrue);
       expect(
-        File(p.join(root.path, 'lib/interop/interop_protocol.dart')).existsSync(),
+        File(
+          p.join(root.path, 'lib/interop/interop_protocol.dart'),
+        ).existsSync(),
         isTrue,
       );
     });

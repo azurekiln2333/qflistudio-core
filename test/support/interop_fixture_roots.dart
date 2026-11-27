@@ -38,7 +38,10 @@ class InteropFixtureRoots {
     if (decoded is! Map<String, dynamic> ||
         decoded['configVersion'] != 2 ||
         decoded['packages'] is! List<dynamic>) {
-      throw _packageConfigError(config, 'expected version 2 and a packages list');
+      throw _packageConfigError(
+        config,
+        'expected version 2 and a packages list',
+      );
     }
     final matches = (decoded['packages'] as List<dynamic>)
         .whereType<Map<String, dynamic>>()
@@ -67,7 +70,10 @@ class InteropFixtureRoots {
     ]) {
       final source = File(p.join(packageRoot.path, relative));
       if (!source.existsSync()) {
-        throw _packageConfigError(config, 'missing package file: ${source.path}');
+        throw _packageConfigError(
+          config,
+          'missing package file: ${source.path}',
+        );
       }
     }
     return packageRoot;
