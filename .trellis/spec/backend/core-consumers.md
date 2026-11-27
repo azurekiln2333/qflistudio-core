@@ -96,3 +96,28 @@ The full core suite and path matrix continue on the pinned OHOS SDK.
 Wrong: hide an undefined `OhosView` behind a runtime platform check and assume
 official Flutter can compile it. Correct: explicitly prepare the approved runner
 copy and keep the original native file for the OHOS job.
+
+## 9. Consumer UI migration from the older 573d1b6 baseline
+
+Consumers moving from `573d1b6` to `1ae4674` adopt these existing public Core
+contracts, already present at `476a30a`; do not revert Core to obsolete selectors:
+
+- Generated Dart template execution prints exactly `Hello, QFLIStudioN!`.
+  Keep the real template creation, execution and exact stdout assertion.
+- `HomePage` has four destinations: Home, Tools, Content, Profile. Profile is
+  index 3. Offline Content uses `TutorialCenterPage` for tutorials and examples;
+  there is no separate examples destination. Verify each named destination and
+  reach the intended local surface before executing every offline policy check.
+- A fitting editor quick bar exposes Settings through its localized tooltip/icon
+  action. The overflow fallback supplies quick actions on short layouts. Tests
+  must activate the applicable Settings action and prove navigation, while
+  retaining Git/cloud absence and offline AI/login/network restrictions.
+- `QfliApp(formFactor: AppFormFactor.phone)` is the deterministic phone-shell
+  contract for embedded consumers and hosted phone tests. Without an override,
+  real Linux selects desktop/workbench. `TargetPlatformVariant.android` alone
+  does not change the host OS. Keep first-frame loading, readiness and exact
+  shell assertions; cover desktop separately rather than weakening phone checks.
+
+These explicit selector/output migrations preserve behavioral coverage. They do
+not authorize assertion deletion, skips, tolerated errors or consumer pin changes.
+The consumer owner must validate the migrated tests on its exact hosted SHA.
