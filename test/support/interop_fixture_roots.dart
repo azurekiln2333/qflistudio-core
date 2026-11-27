@@ -1,5 +1,5 @@
+import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:path/path.dart' as p;
 
@@ -25,30 +25,79 @@ class InteropFixtureRoots {
   final Directory app;
   final Directory java;
 
-  static Directory resolveCorePackageRoot() {
-    final sourceUri = Isolate.resolvePackageUriSync(
-      Uri.parse('package:qfli_studio_core/interop/interop_protocol.dart'),
-    );
-    if (sourceUri == null || sourceUri.scheme != 'file') {
-      throw StateError(
-        'Could not resolve '
-        'package:qfli_studio_core/interop/interop_protocol.dart '
-        'to a file URI: $sourceUri',
-      );
+  static Directory resolveCorePackageRoot({File? packageConfig}) {
+    final config = (packageConfig ?? _findPackageConfig()).absolute;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(config.readAsStringSync());
+    } on FileSystemException catch (error) {
+      throw _packageConfigError(config, 'cannot read configuration: $error');
+    } on FormatException catch (error) {
+      throw _packageConfigError(config, 'invalid JSON: ${error.message}');
     }
-
-    final source = File.fromUri(sourceUri);
-    final packageRoot = Directory(
-      p.dirname(p.dirname(p.dirname(source.path))),
-    );
-    if (!source.existsSync() ||
-        !File(p.join(packageRoot.path, 'pubspec.yaml')).existsSync()) {
-      throw StateError(
-        'Resolved qfli_studio_core package source has no matching '
-        'package root: ${source.path}',
-      );
+    if (decoded is! Map<String, dynamic> ||
+        decoded['configVersion'] != 2 ||
+        decoded['packages'] is! List<dynamic>) {
+      throw _packageConfigError(config, 'expected version 2 and a packages list');
+    }
+    final matches = (decoded['packages'] as List<dynamic>)
+        .whereType<Map<String, dynamic>>()
+        .where((package) => package['name'] == 'qfli_studio_core')
+        .toList();
+    if (matches.length != 1) {
+      throw _packageConfigError(config, 'expected one qfli_studio_core entry');
+    }
+    final rootValue = matches.single['rootUri'];
+    if (rootValue is! String || rootValue.trim().isEmpty) {
+      throw _packageConfigError(config, 'qfli_studio_core rootUri is missing');
+    }
+    final Uri rootUri;
+    try {
+      rootUri = config.uri.resolve(rootValue);
+    } on FormatException catch (error) {
+      throw _packageConfigError(config, 'invalid rootUri: ${error.message}');
+    }
+    if (rootUri.scheme != 'file') {
+      throw _packageConfigError(config, 'rootUri must resolve to a file URI');
+    }
+    final packageRoot = Directory.fromUri(rootUri);
+    for (final relative in <String>[
+      'pubspec.yaml',
+      'lib/interop/interop_protocol.dart',
+    ]) {
+      final source = File(p.join(packageRoot.path, relative));
+      if (!source.existsSync()) {
+        throw _packageConfigError(config, 'missing package file: ${source.path}');
+      }
     }
     return packageRoot;
+  }
+
+  static File _findPackageConfig() {
+    // The working directory locates configuration, never the core checkout.
+    // Resolve the package identity from that configuration even in consumers.
+    var directory = Directory.current.absolute;
+    while (true) {
+      final config = File(
+        p.join(directory.path, '.dart_tool', 'package_config.json'),
+      );
+      if (config.existsSync()) return config;
+      final parent = directory.parent;
+      if (parent.path == directory.path) {
+        throw StateError(
+          'Cannot resolve qfli_studio_core: no .dart_tool/package_config.json '
+          'at or above ${Directory.current.path}. '
+          'Run package resolution on the hosted runner first.',
+        );
+      }
+      directory = parent;
+    }
+  }
+
+  static StateError _packageConfigError(File config, String detail) {
+    return StateError(
+      'Cannot resolve qfli_studio_core from ${config.path}: $detail',
+    );
   }
 
   static InteropFixtureRoots resolve({
@@ -93,17 +142,13 @@ class InteropFixtureRoots {
       final source = configuredPath == null
           ? 'legacy sibling default (because $key is unset)'
           : '$key';
-      throw StateError(
-        '$source must point to an existing directory: $path',
-      );
+      throw StateError('$source must point to an existing directory: $path');
     }
 
     for (final relative in requiredFiles) {
       final fixturePath = p.join(root.path, relative);
       if (!File(fixturePath).existsSync()) {
-        throw StateError(
-          '$key is missing required fixture: $fixturePath',
-        );
+        throw StateError('$key is missing required fixture: $fixturePath');
       }
     }
     return root;

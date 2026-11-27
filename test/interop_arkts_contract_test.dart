@@ -86,11 +86,7 @@ void main() {
 
     final transport = read(
       coreRoot,
-      p.join(
-        'lib',
-        'interop',
-        'interop_transport.dart',
-      ),
+      p.join('lib', 'interop', 'interop_transport.dart'),
     );
     final bridge = read(
       fixtures.app,
@@ -144,9 +140,7 @@ void main() {
       final copied = RegExp(
         "raw\\.set\\('([A-Za-z][A-Za-z0-9]*)'",
       ).allMatches(bridge).map((match) => match.group(1)!).toSet();
-      final stored = RegExp(
-        "raw\\.set\\(key,",
-      ).hasMatch(bridge);
+      final stored = RegExp("raw\\.set\\(key,").hasMatch(bridge);
       expect(
         copied,
         containsAll(<String>['targetBundle']),
@@ -216,13 +210,7 @@ void main() {
     test('no bundle permission is declared or needed', () {
       final module = read(
         fixtures.app,
-        p.join(
-          'ohos',
-          'entry',
-          'src',
-          'main',
-          'module.json5',
-        ),
+        p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
       );
       expect(module, isNot(contains('GET_BUNDLE_INFO')));
       final strings = read(
@@ -315,24 +303,13 @@ void main() {
     test('the module exports the ability the Studio target names', () {
       final module = read(
         fixtures.java,
-        p.join(
-          'ohos',
-          'entry',
-          'src',
-          'main',
-          'module.json5',
-        ),
+        p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
       );
-      expect(
-        module,
-        contains('"name": "${InteropTargets.java.abilityName}"'),
-      );
+      expect(module, contains('"name": "${InteropTargets.java.abilityName}"'));
       expect(module, contains('"exported": true'));
       expect(
         module,
-        contains(
-          './ets/interop/${InteropTargets.java.abilityName}.ets',
-        ),
+        contains('./ets/interop/${InteropTargets.java.abilityName}.ets'),
       );
     });
   });
@@ -340,13 +317,7 @@ void main() {
   group('Studio module', () {
     final module = read(
       fixtures.app,
-      p.join(
-        'ohos',
-        'entry',
-        'src',
-        'main',
-        'module.json5',
-      ),
+      p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
     );
 
     test('exports the bridge ability with the agreed action', () {

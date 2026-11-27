@@ -9,14 +9,14 @@
 `test/support/interop_fixture_roots.dart` provides:
 
 ```dart
-static Directory resolveCorePackageRoot();
+static Directory resolveCorePackageRoot({File? packageConfig});
 static InteropFixtureRoots resolve({
   required Directory packageRoot,
   Map<String, String>? environment,
 });
 ```
 
-The result holds `Directory app` and `Directory java`. Core resolution uses `Isolate.resolvePackageUriSync` for `package:qfli_studio_core/interop/interop_protocol.dart`, checks the file URI/source/pubspec and derives its owning package root. Do not infer that root from `Directory.current` or a checkout folder name.
+The result holds `Directory app` and `Directory java`. Core resolution reads version-2 `package_config.json`, requires exactly one `qfli_studio_core` entry, resolves its `rootUri` relative to the configuration URI, and checks the core protocol source and pubspec. The optional file is a test injection. By default, search for `.dart_tool/package_config.json` at the working directory and its ancestors; the working directory locates configuration, never establishes the core package identity. Do not derive core from a checkout basename. `Isolate.resolvePackageUriSync` is unsupported by the hosted Flutter test runtime (run 46042974549) and must not be used here.
 
 ## 3. Environment and file contracts
 
@@ -33,8 +33,9 @@ Required App fixtures under `ohos/entry/src/main/` are `ets/interop/StudioIntero
 
 | Condition | Required outcome |
 | --- | --- |
-| Package URI is null or non-file | `StateError` naming the unresolved package URI |
-| Resolved core source/pubspec is missing | `StateError` naming the resolved source path |
+| Configuration missing/unreadable/malformed or not version 2 | `StateError` naming package identity and configuration path/search location |
+| Missing/duplicate core identity or invalid/non-file root URI | `StateError` naming the configuration and invalid identity/root |
+| Resolved core source/pubspec is missing | `StateError` naming the configuration and resolved missing file |
 | Explicit root is empty/whitespace | `StateError` naming the environment key |
 | Root directory is absent | `StateError` naming the key/default selection and absolute path |
 | Required fixture file is absent | `StateError` naming the key and exact missing file |
@@ -53,10 +54,18 @@ Run resolver negative cases and the real contract assertions on GitHub-hosted ru
 
 Register all resolver unit cases unconditionally. The cloud-only policy governs where commands run; it must not silently remove negative assertions from a consumer's complete suite. Retain per-layout input identities, analyze/test output and intentional failure diagnostics as cloud artifacts.
 
+Exercise actual package discovery in the Flutter test runtime, a renamed checkout
+with spaces and a relative URI beside a decoy entry, missing/malformed config and
+missing package identity. Preserve all six external-root negative cases. A helper
+test that injects only `packageRoot` cannot prove runtime package discovery works.
+
 Migration changes need their own successful candidate run. A passing older SHA or temporary compatibility symlink cannot satisfy the source portability gate.
 
 ## 7. Wrong and correct
 
 Wrong: `Directory.current.parent/qfli_studio_core/lib/...` assumes both the working directory and checkout basename.
 
-Correct: resolve the package URI for the core source, then resolve external fixtures through validated explicit root keys or the documented legacy defaults. Keep the Dart package name unchanged when moving the checkout.
+Correct: resolve the named core entry from the runner's package configuration,
+then resolve external fixtures through validated explicit root keys or the
+documented legacy defaults. Keep the Dart package name unchanged when moving
+the checkout.

@@ -58,7 +58,10 @@ jobs:
       - name: Check the fixed filter source and regression formatting
         if: ${{ matrix.flavor == 'ohos' }}
         working-directory: qflistudio-core
-        run: dart format --output=none --set-exit-if-changed lib/pages/local_content_pages.dart test/local_content_filters_test.dart
+        run: |
+          dart format lib/pages/local_content_pages.dart test/local_content_filters_test.dart
+          git diff --binary -- lib/pages/local_content_pages.dart test/local_content_filters_test.dart | tee "$RUNNER_TEMP/core-consumer-format.patch"
+          test ! -s "$RUNNER_TEMP/core-consumer-format.patch"
       - name: Prepare the runner copy for the selected SDK
         env:
           FLAVOR: ${{ matrix.flavor }}
@@ -68,16 +71,24 @@ jobs:
           mkdir -p consumer/test
           cp qflistudio-core/tool/ci/consumer_smoke/pubspec.yaml.in consumer/pubspec.yaml
           cp qflistudio-core/tool/ci/consumer_smoke/test/core_consumer_test.dart.in consumer/test/core_consumer_test.dart
-          flutter --version --machine | tee "$RUNNER_TEMP/flutter-version.json"
-          python3 - "$RUNNER_TEMP/flutter-version.json" "$SDK_REVISION" <<'PY'
+          flutter config --no-analytics 2>&1 | tee "$RUNNER_TEMP/consumer-bootstrap.log"
+          flutter --version --machine | tee "$RUNNER_TEMP/flutter-version.log"
+          python3 - "$RUNNER_TEMP/flutter-version.log" "$RUNNER_TEMP/flutter-version.json" "$SDK_REVISION" <<'PY'
           import json, sys
-          version = json.load(open(sys.argv[1], encoding='utf-8'))
-          assert version['frameworkRevision'] == sys.argv[2], version
+          from pathlib import Path
+          lines = Path(sys.argv[1]).read_text(encoding='utf-8').splitlines()
+          start = next((i for i, line in enumerate(lines) if line.lstrip().startswith('{')), None)
+          if start is None:
+              raise ValueError('Flutter --version --machine did not emit a JSON object')
+          # First-run tool bootstrap may precede the object; the JSON tail must
+          # still be complete and valid, with the exact executed SDK identity.
+          version = json.loads('\n'.join(lines[start:]))
+          assert version['frameworkRevision'] == sys.argv[3], version
+          Path(sys.argv[2]).write_text(json.dumps(version, indent=2) + '\n', encoding='utf-8')
           PY
       - name: Resolve consumer without an xterm override
         working-directory: consumer
         run: |
-          flutter config --no-analytics
           flutter pub get 2>&1 | tee "$RUNNER_TEMP/consumer-pub.log"
           python3 - <<'PY'
           import json
@@ -106,6 +117,8 @@ jobs:
           path: |
             ${{ runner.temp }}/prepare-unit.log
             ${{ runner.temp }}/prepare.json
+            ${{ runner.temp }}/flutter-version.log
+            ${{ runner.temp }}/core-consumer-format.patch
             ${{ runner.temp }}/flutter-version.json
             ${{ runner.temp }}/consumer-*.log
             consumer/pubspec.lock
