@@ -50,6 +50,26 @@ item 7, the next gate-passed SHA requires a brain-coordinated wave; consumers ke
 Core-internal CI changes. Web's missing-language-key failures remain separately
 owned and are not attributed to this Row.
 
+## Follow-up: desktop card height at text scale 2
+
+Web retained exact evidence at Core `8e031313ffc8d531c5a6b4d131f721f35da04c86`,
+run `46069023957`, job `140741374987` (same owner diagnostic in App run
+`46069023876`, job `140741314086`): `320px desktop keeps workbench navigation
+with 2x text` reported a 44px bottom overflow at
+`lib/pages/local_content_pages.dart:1536:18`. The `_LargeScreenContentGridCard`
+Column received 168x104 after its 16px card padding. Phone navigation and the
+catalog title regressions already passed.
+
+The bounded repair derives additional grid-card height from the active
+`TextScaler` for one label, one title and two summary lines, while retaining the
+normal 144px geometry at scale 1, grid count/spacing and lazy construction. The
+language label remains single-line in a horizontal scroll view. Tutorial and
+example desktop regressions use a 320x900 viewport, 80px rail-equivalent inset,
+2x text, 168px card-column width, content bounds, full label/title/summary
+reachability, detail navigation and no-exception assertions. Existing assertions
+remain unchanged. This is consumer-facing library behavior and requires the
+targeted Web wave after the next Core gate; other consumers remain on `8e03131`.
+
 ## Note compile boundary
 
 Note `bcd7c879d32ac95327f069b5d6fac5932c76765d`, validation run `46011327362`,

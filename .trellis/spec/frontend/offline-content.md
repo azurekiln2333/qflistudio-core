@@ -28,6 +28,13 @@ text scale 2, reset must remain visible, hit-testable and restore the complete
 result set without a repository reload; do not constrain accessibility text scale
 or hide the action to conceal an overflow.
 
+Large-screen tutorial/example cards keep the full text scale in narrow workbench
+columns. Derive extra grid-card height from the active `TextScaler` for one
+language-label line, one title line and two summary lines; keep the language label
+single-line and horizontally scrollable so its identity is not wrapped or clipped.
+Preserve card tap/detail navigation and content bounds. Do not cap text scale,
+hide summaries, or suppress overflow assertions to fit the old fixed height.
+
 Tutorial/example `ListTile` titles opt into `_ContentTitle(wrap: true)`: badge
 and title may occupy separate runs. Keep the badge's subject identity and text
 scale; an oversized badge scrolls horizontally. Titles retain two-line ellipsis.

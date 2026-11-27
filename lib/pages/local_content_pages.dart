@@ -1447,11 +1447,25 @@ Widget _largeScreenCardGrid({
             .floor()
             .clamp(1, 4)
             .toInt();
+    final textTheme = Theme.of(context).textTheme;
+    final scaler = MediaQuery.textScalerOf(context);
+    double extraLineHeight(TextStyle? style, double fallbackSize) {
+      final size = style?.fontSize ?? fallbackSize;
+      return (scaler.scale(size) - size).clamp(0.0, double.infinity) *
+          (style?.height ?? 1.5);
+    }
+
+    // Keep normal card geometry and reserve the enlarged label, title and two
+    // summary lines without reducing the user's text scale.
+    final extraTextHeight =
+        extraLineHeight(textTheme.labelMedium, 12) +
+        extraLineHeight(textTheme.titleMedium, 16) +
+        2 * extraLineHeight(textTheme.bodySmall, 12);
     return SliverGrid(
       delegate: SliverChildBuilderDelegate(itemBuilder, childCount: itemCount),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: crossAxisCount,
-        mainAxisExtent: 144,
+        mainAxisExtent: 144 + extraTextHeight,
         crossAxisSpacing: spacing,
         mainAxisSpacing: spacing,
       ),
@@ -1538,10 +1552,15 @@ class _LargeScreenContentGridCard extends StatelessWidget {
                   Icon(icon, color: theme.colorScheme.primary),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      languageLabel(language),
-                      style: theme.textTheme.labelMedium?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Text(
+                        languageLabel(language),
+                        maxLines: 1,
+                        softWrap: false,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
                   ),

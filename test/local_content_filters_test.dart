@@ -7,10 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:qfli_studio_core/content/content_repository.dart';
 import 'package:qfli_studio_core/content/local_content_adapter.dart';
 import 'package:qfli_studio_core/i18n/studio_localizations.dart';
+import 'package:qfli_studio_core/layout/app_form_factor.dart';
 import 'package:qfli_studio_core/pages/local_content_pages.dart';
 import 'package:qfli_studio_core/services/example_code_store.dart';
 import 'package:qfli_studio_core/services/studio_profile.dart';
 import 'package:qfli_studio_core/services/tutorial_service.dart';
+import 'package:qfli_studio_core/shell/large_screen_controller.dart';
 import 'package:qfli_studio_core/widgets/language_badge.dart';
 
 void main() {
@@ -360,6 +362,113 @@ void main() {
               )
               .language,
           'javascript',
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final tutorials in [true, false]) {
+    testWidgets(
+      '${tutorials ? 'tutorial' : 'example'} desktop cards fit 320px with 2x text',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final shell = LargeScreenController();
+        addTearDown(shell.dispose);
+        StudioProfile.current = const StudioProfile(
+          id: 'web',
+          appTitle: 'Web',
+          templates: [],
+          productKey: 'webforge',
+          isOffline: true,
+        );
+        final repository = _Repository(
+          rows: [
+            {
+              'id': 'desktop-javascript',
+              'type': 'html',
+              'language': 'javascript',
+              'level': 'beginner',
+              'title': 'JavaScript subject',
+              'summary': 'A summary spanning two enlarged text lines',
+              'code': '<p>Demo</p>',
+            },
+          ],
+        );
+        await tester.pumpWidget(
+          _app(
+            Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.only(left: 80),
+                child: LargeScreenScope(
+                  controller: shell,
+                  formFactor: AppFormFactor.desktop,
+                  child: tutorials
+                      ? LocalTutorialsTab(
+                          language: 'html',
+                          repository: repository,
+                        )
+                      : ExampleCodeTab(
+                          language: 'html',
+                          repository: repository,
+                        ),
+                ),
+              ),
+            ),
+            scale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final title = find.text('JavaScript subject');
+        await tester.scrollUntilVisible(
+          title,
+          200,
+          scrollable: find
+              .descendant(
+                of: find.byType(CustomScrollView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.pumpAndSettle();
+        final card = find.ancestor(of: title, matching: find.byType(Card));
+        await tester.ensureVisible(card);
+        await tester.pumpAndSettle();
+        final column = find.descendant(
+          of: card,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Column &&
+                widget.children.any(
+                  (child) => child is Text && child.data == 'JavaScript subject',
+                ),
+          ),
+        );
+        final summary = find.text('A summary spanning two enlarged text lines');
+        final language = find.descendant(
+          of: card,
+          matching: find.text('JavaScript'),
+        );
+        expect(tester.getSize(column).width, 168);
+        expect(tester.getSize(column).height, greaterThan(104));
+        expect(MediaQuery.textScalerOf(tester.element(title)).scale(16), 32);
+        expect(language, findsOneWidget);
+        expect(title.hitTestable(), findsOneWidget);
+        expect(summary.hitTestable(), findsOneWidget);
+        expect(tester.getRect(title).right, lessThanOrEqualTo(320));
+        expect(
+          tester.getRect(summary).bottom,
+          lessThanOrEqualTo(tester.getRect(card).bottom),
+        );
+        expect(tester.takeException(), isNull);
+        await tester.tap(title);
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: find.byType(AppBar), matching: title),
+          findsOneWidget,
         );
         expect(tester.takeException(), isNull);
       },
