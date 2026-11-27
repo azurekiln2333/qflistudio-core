@@ -63,3 +63,26 @@ Authorized migration execution resumed. Independently preserved all refs/reflogs
 ### Next Steps
 
 - Finish static candidate review, publish only through shared push gate, validate exact SHA on GitHub, then pull and compare target and obtain Herdr handoff.
+
+
+## Session 3: Prepare reviewed core migration candidate under publication hold
+<!-- trellis-session: v=2 fp=8da77e290cfcdef9 -->
+
+**Date**: 2026-11-27
+**Task**: Prepare reviewed core migration candidate under publication hold
+**Branch**: `main`
+
+### Summary
+
+Preserved portable Trellis and inert source history, committed permanent interop fixture portability and hosted coverage, completed bounded source/index review. Core-last order prevents push request until brain releases it. Exact candidate CI, target parity and handoff remain pending; no local product execution or cleanup.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `beb333361484486306e48f66336d8d9a88075df6` | chore(migration): preserve portable progress and reviewed source history |
+| `9c70b5067a7347c3d5992686c24e56ef2d007151` | fix(test): resolve interop fixtures independently of checkout names |
+
+### Status
+
+[OK] **Completed**
