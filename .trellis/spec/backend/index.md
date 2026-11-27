@@ -20,7 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [Interop fixtures](./interop-fixtures.md) | Package-identity source resolution, explicit App/Java roots and hosted path matrix | Implementation; hosted validation pending |
-| [Core consumer dependencies](./core-consumers.md) | App path dependencies, retained CI checkout aliases and `re_editor`/`xterm` vendor overrides | Contract recorded; consumer migration/validation pending |
+| [Core consumer dependencies](./core-consumers.md) | Canonical paths, bundled xterm, re_editor override and explicit official/OHOS runner preparation | Candidate implemented; hosted validation pending |
 
 ---
 

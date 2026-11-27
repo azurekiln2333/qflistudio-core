@@ -1,0 +1,17 @@
+name: core_consumer_smoke
+publish_to: none
+environment:
+  sdk: ^3.11.5
+dependencies:
+  flutter:
+    sdk: flutter
+  qfli_studio_core:
+    path: ../qflistudio-core
+dependency_overrides:
+  re_editor:
+    path: ../qflistudio-core/vendor/re_editor
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true

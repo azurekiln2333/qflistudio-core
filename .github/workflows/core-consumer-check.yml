@@ -1,0 +1,114 @@
+name: core-consumer-check
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-consumer-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  consumer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: official
+            tag: 3.50.1
+            revision: ae9b586f34a8443573f82ef57c3bf914a908cbf7
+          - flavor: ohos
+            tag: 3.41.10-ohos-1.0.1
+            revision: adaf911c35c9136a7d18fc424d714c9ec7724e60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: qflistudio-core
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-next
+          ref: 69656b4ab14e706e85907ef4c4205d8cd35a1338
+          path: qflistudio
+          persist-credentials: false
+      - name: Require hosted execution and test preparation failures
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          python3 -B -m unittest discover -s qflistudio-core/tool/ci -p 'test_prepare_flutter_core.py' -v 2>&1 | tee "$RUNNER_TEMP/prepare-unit.log"
+      - name: Install the exact SDK
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+          SDK_TAG: ${{ matrix.tag }}
+          SDK_REVISION: ${{ matrix.revision }}
+        run: |
+          flags=()
+          if [ "$FLAVOR" = ohos ]; then flags+=(--ohos); fi
+          bash qflistudio/tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter" "$SDK_TAG" "$SDK_REVISION" "${flags[@]}"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Check the fixed filter source and regression formatting
+        if: ${{ matrix.flavor == 'ohos' }}
+        working-directory: qflistudio-core
+        run: dart format --output=none --set-exit-if-changed lib/pages/local_content_pages.dart test/local_content_filters_test.dart
+      - name: Prepare the runner copy for the selected SDK
+        env:
+          FLAVOR: ${{ matrix.flavor }}
+          SDK_REVISION: ${{ matrix.revision }}
+        run: |
+          python3 -B qflistudio-core/tool/ci/prepare_flutter_core.py --flavor "$FLAVOR" --sdk-root "$RUNNER_TEMP/flutter" --sdk-revision "$SDK_REVISION" | tee "$RUNNER_TEMP/prepare.json"
+          mkdir -p consumer/test
+          cp qflistudio-core/tool/ci/consumer_smoke/pubspec.yaml.in consumer/pubspec.yaml
+          cp qflistudio-core/tool/ci/consumer_smoke/test/core_consumer_test.dart.in consumer/test/core_consumer_test.dart
+          flutter --version --machine | tee "$RUNNER_TEMP/flutter-version.json"
+          python3 - "$RUNNER_TEMP/flutter-version.json" "$SDK_REVISION" <<'PY'
+          import json, sys
+          version = json.load(open(sys.argv[1], encoding='utf-8'))
+          assert version['frameworkRevision'] == sys.argv[2], version
+          PY
+      - name: Resolve consumer without an xterm override
+        working-directory: consumer
+        run: |
+          flutter config --no-analytics
+          flutter pub get 2>&1 | tee "$RUNNER_TEMP/consumer-pub.log"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import unquote, urljoin, urlparse
+          config = Path('.dart_tool/package_config.json').resolve()
+          packages = {p['name']: p for p in json.loads(config.read_text())['packages']}
+          core = Path('../qflistudio-core').resolve()
+          for name, expected in {'qfli_studio_core': core, 're_editor': core / 'vendor/re_editor', 'xterm': core / 'vendor/xterm'}.items():
+              uri = urljoin(config.as_uri(), packages[name]['rootUri'])
+              actual = Path(unquote(urlparse(uri).path)).resolve()
+              assert actual == expected, (name, str(actual), str(expected))
+              print(f'{name}={actual}')
+          PY
+      - name: Compile and exercise the consumer boundary
+        working-directory: consumer
+        run: |
+          dart format --output=none --set-exit-if-changed test
+          flutter analyze --no-pub 2>&1 | tee "$RUNNER_TEMP/consumer-analyze.log"
+          flutter test --no-pub --reporter expanded 2>&1 | tee "$RUNNER_TEMP/consumer-test.log"
+      - name: Retain exact consumer evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: core-consumer-${{ matrix.flavor }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/prepare-unit.log
+            ${{ runner.temp }}/prepare.json
+            ${{ runner.temp }}/flutter-version.json
+            ${{ runner.temp }}/consumer-*.log
+            consumer/pubspec.lock
+            consumer/.dart_tool/package_config.json
+          if-no-files-found: warn
+          retention-days: 14

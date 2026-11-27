@@ -1,0 +1,51 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:qfli_studio_core/pages/auth/huawei_quick_login_view.dart';
+import 'package:qfli_studio_core/remote_control/models/herdr.dart';
+import 'package:qfli_studio_core/remote_control/widgets/remote_terminal_pane.dart';
+
+void main() {
+  test('consumer uses the vendored terminal Unicode width table', () {
+    expect(displayWidth('A中'), 3);
+    expect(displayWidth('e\u0301'), 1);
+    expect(displayWidth('\u001b[31m中\u001b[0m'), 2);
+    final int width = unicodeV11.wcwidth(0x4e2d);
+    expect(width, 2);
+    // Loading this core widget also compiles xterm's TerminalView shortcuts.
+    expect(RemoteTerminalPane, isA<Type>());
+  });
+
+  testWidgets('Huawei view preserves API and stays inert off OHOS', (
+    tester,
+  ) async {
+    final previousPlatform = debugDefaultTargetPlatformOverride;
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      final codes = <String>[];
+      final errors = <String>[];
+      final view = HuaweiQuickLoginView(
+        agreementAccepted: true,
+        onAuthorizationCode: codes.add,
+        onError: errors.add,
+      );
+      expect(view.agreementAccepted, isTrue);
+      view.onAuthorizationCode('test-code');
+      view.onError('test-error');
+      expect(codes, ['test-code']);
+      expect(errors, ['test-error']);
+      await tester.pumpWidget(MaterialApp(home: view));
+      expect(find.byType(HuaweiQuickLoginView), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(HuaweiQuickLoginView),
+          matching: find.byType(SizedBox),
+        ),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = previousPlatform;
+    }
+  });
+}

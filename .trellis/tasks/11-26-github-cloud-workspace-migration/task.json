@@ -25,6 +25,6 @@
   ],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Preparation committed locally in beb333361484486306e48f66336d8d9a88075df6 and 9c70b5067a7347c3d5992686c24e56ef2d007151. Static review complete; exact candidate cloud checks pending. Core-last hold: do not write push request until brain confirms all other repositories have done.json. No final SHA or cleanup acceptance.",
+  "notes": "Core explicitly released by core-release.md on 2026-11-27 23:35. Finish only in-progress filter overflow and Note compile fixes, static review/commit, then exact-SHA push request allow []. Preserved preparation commits retained; hosted CI, final target parity/ACK and consumer bump wave remain pending. No cleanup acceptance.",
   "meta": {}
 }

@@ -23,7 +23,7 @@ Make GitHub main the complete source of this repository, including durable Trell
 
 ## Requirements
 
-Publication sequencing update, 2026-11-27 17:00: the user's core-last ruling requires every other repository to finish first. Continue preparing/reviewing core, but do not create `push/qflistudio-core.json` until the brain explicitly confirms all other repositories have done.json. Keep published `476a30a` stable meanwhile. The brain will coordinate one consumer pin-bump wave after final core publication; consumer acceptance of that future pin is not a prerequisite for their first migration pass.
+Publication sequencing update, 2026-11-27 23:35: `core-release.md` explicitly releases Core after all other 13 repositories have migrated or completed receipts. This supersedes the earlier all-done hold. Finish only the in-progress filter overflow and Note compile fixes, statically review and commit them, then submit the exact main SHA through `push/qflistudio-core.json` with `allow: []`. After gate PASS, obtain target parity/ACK and hosted evidence. The brain owns the consumer pin-bump wave; a gate PASS is not a claim of CI success.
 
 - R1: Inventory all remote/local branches, tags, registered worktrees, uncommitted source and ignored durable project files. Preserve legitimate work before changing branches or cleanup.
 - R2: Reconcile all reviewed valid branch changes into main without reverting newer work or publishing generated outputs. Record per-branch inclusion evidence. Audit all existing remotes for unique work; GitHub is the destination of record.
