@@ -1065,13 +1065,15 @@ class _ContentFilterBar extends StatelessWidget {
               ],
             ),
           ],
-          Row(
+          OverflowBar(
+            alignment: MainAxisAlignment.spaceBetween,
+            overflowAlignment: OverflowBarAlignment.start,
+            spacing: 8,
+            overflowSpacing: 4,
             children: [
-              Expanded(
-                child: Text(
-                  resultLabel,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
+              Text(
+                resultLabel,
+                style: Theme.of(context).textTheme.bodyMedium,
               ),
               if (selection.active)
                 TextButton.icon(

@@ -214,6 +214,70 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets(
+      '${tutorials ? 'tutorials' : 'examples'} reset stays reachable at 320px with 2x text',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final repository = _Repository();
+        final countLabel = tutorials ? 'lessons' : 'examples';
+        await tester.pumpWidget(
+          _app(
+            tutorials
+                ? LocalTutorialsTab(language: 'c', repository: repository)
+                : ExampleCodeTab(language: 'c', repository: repository),
+            scale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('3 $countLabel'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
+        final cppFilter = find.byKey(const ValueKey('content-language-cpp'));
+        await tester.ensureVisible(cppFilter);
+        await tester.pumpAndSettle();
+        await tester.tap(cppFilter);
+        await tester.pumpAndSettle();
+        expect(find.text('2 $countLabel'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
+        final query = find.byKey(const ValueKey('content-query'));
+        await tester.enterText(query, 'ownership');
+        await tester.pumpAndSettle();
+        final resultCount = find.text('1 $countLabel');
+        final reset = find.byKey(const ValueKey('content-reset'));
+        await tester.ensureVisible(reset);
+        await tester.pumpAndSettle();
+        expect(resultCount, findsOneWidget);
+        expect(find.text('Reset filters'), findsOneWidget);
+        expect(reset.hitTestable(), findsOneWidget);
+        expect(tester.getRect(resultCount).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(resultCount).right, lessThanOrEqualTo(320));
+        expect(tester.getRect(reset).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(reset).right, lessThanOrEqualTo(320));
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(reset);
+        await tester.pumpAndSettle();
+        expect(find.text('3 $countLabel'), findsOneWidget);
+        expect(tester.widget<TextField>(query).controller!.text, isEmpty);
+        expect(
+          tester
+              .widget<ChoiceChip>(
+                find.byKey(const ValueKey('content-language-all')),
+              )
+              .selected,
+          isTrue,
+        );
+        expect(reset, findsNothing);
+        expect(repository.tutorialRequests, tutorials ? 1 : 0);
+        expect(repository.exampleRequests, 1);
+        expect(tester.takeException(), isNull);
+      },
+    );
   }
 
   testWidgets(

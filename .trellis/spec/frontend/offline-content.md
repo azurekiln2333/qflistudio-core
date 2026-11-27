@@ -21,6 +21,13 @@ fallback only when language is empty. A CSS or JavaScript lesson may intentional
 import as runnable HTML. Search intersects subject language, difficulty and all
 query words across title/summary/concepts without reloading the repository.
 
+The filter result count and reset action use `OverflowBar`: retain both complete
+labels and allow vertical fallback when they cannot share the available width.
+Keep language/level chip rows horizontally scrollable. At 320 logical pixels with
+text scale 2, reset must remain visible, hit-testable and restore the complete
+result set without a repository reload; do not constrain accessibility text scale
+or hide the action to conceal an overflow.
+
 Old overrides inherit missing bundled metadata. Restore-default uses bundled code
 even when a detail page is reopened with the saved example as its initial model.
 
@@ -89,6 +96,13 @@ reservation to prove it observes complete imported content and survives a later
 rollback; inject write failure to cover safe empty cleanup and changed-target
 preservation.
 Materialized host files are not OHOS execution evidence.
+
+`local_content_filters_test.dart` additionally covers tutorial and example filters
+at 320px/text scale 2: apply a language and query, assert count/reset stay within
+the viewport, tap reset, verify all results and empty query, and retain every
+no-exception assertion. SQL run `46018672426`, job `140572422633`, directly located
+the tutorial overflow at baseline `_ContentFilterBar` Row line 1068. That evidence
+does not assign Web's separate missing-language-chip failure.
 
 ## 7. Wrong versus correct
 
