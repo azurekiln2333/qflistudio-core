@@ -5,6 +5,8 @@ import 'package:path/path.dart' as p;
 import 'package:qfli_studio_core/interop/interop_protocol.dart';
 import 'package:qfli_studio_core/interop/interop_targets.dart';
 
+import 'support/interop_fixture_roots.dart';
+
 /// Contract tests for the ArkTS half of qfli-interop/1.
 ///
 /// The ArkTS receiver cannot run in this test harness, so its behaviour is
@@ -13,10 +15,11 @@ import 'package:qfli_studio_core/interop/interop_targets.dart';
 /// failure mode that matters: one side silently drifting from the other on the
 /// allowlist, the protocol string or a grammar rule.
 void main() {
-  final root = Directory.current.parent;
+  final coreRoot = InteropFixtureRoots.resolveCorePackageRoot();
+  final fixtures = InteropFixtureRoots.resolve(packageRoot: coreRoot);
 
-  String read(String app, String relative) {
-    final file = File(p.join(root.path, app, relative));
+  String read(Directory root, String relative) {
+    final file = File(p.join(root.path, relative));
     if (!file.existsSync()) {
       throw StateError('missing ${file.path}');
     }
@@ -25,9 +28,16 @@ void main() {
 
   group('Studio side', () {
     final source = read(
-      'qflistudio',
-      p.join('ohos', 'entry', 'src', 'main', 'ets', 'interop',
-          'StudioInterop.ets'),
+      fixtures.app,
+      p.join(
+        'ohos',
+        'entry',
+        'src',
+        'main',
+        'ets',
+        'interop',
+        'StudioInterop.ets',
+      ),
     );
 
     test('speaks the same protocol string as the Dart client', () {
@@ -75,13 +85,24 @@ void main() {
     // channel arguments it sends and the ArkTS file for what it reads.
 
     final transport = read(
-      'qfli_studio_core',
-      p.join('lib', 'interop', 'interop_transport.dart'),
+      coreRoot,
+      p.join(
+        'lib',
+        'interop',
+        'interop_transport.dart',
+      ),
     );
     final bridge = read(
-      'qflistudio',
-      p.join('ohos', 'entry', 'src', 'main', 'ets', 'interop',
-          'StudioInterop.ets'),
+      fixtures.app,
+      p.join(
+        'ohos',
+        'entry',
+        'src',
+        'main',
+        'ets',
+        'interop',
+        'StudioInterop.ets',
+      ),
     );
 
     /// Top-level argument keys sent with `invokeMethod`/`invokeMapMethod`, in
@@ -187,27 +208,46 @@ void main() {
       ).firstMatch(bridge);
       expect(probeBody, isNotNull, reason: 'probeByStart is gone or renamed');
       final body = probeBody!.group(0)!;
-      expect(body, contains("'action'") );
+      expect(body, contains("'action'"));
       expect(body, contains("'analyze'"));
       expect(body, contains("'payloadUri'"));
     });
 
     test('no bundle permission is declared or needed', () {
       final module = read(
-        'qflistudio',
-        p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
+        fixtures.app,
+        p.join(
+          'ohos',
+          'entry',
+          'src',
+          'main',
+          'module.json5',
+        ),
       );
       expect(module, isNot(contains('GET_BUNDLE_INFO')));
       final strings = read(
-        'qflistudio',
-        p.join('ohos', 'entry', 'src', 'main', 'resources', 'base', 'element',
-            'string.json'),
+        fixtures.app,
+        p.join(
+          'ohos',
+          'entry',
+          'src',
+          'main',
+          'resources',
+          'base',
+          'element',
+          'string.json',
+        ),
       );
       expect(strings, isNot(contains('bundle_info_reason')));
     });
 
     test('the Dart reader accepts exactly the keys the bridge reports', () {
-      for (final key in <String>['installed', 'available', 'languages', 'protocol']) {
+      for (final key in <String>[
+        'installed',
+        'available',
+        'languages',
+        'protocol',
+      ]) {
         expect(transport, contains("raw['$key']"));
       }
     });
@@ -215,13 +255,23 @@ void main() {
 
   group('Java receiver', () {
     final source = read(
-      'qfli_java',
-      p.join('ohos', 'entry', 'src', 'main', 'ets', 'interop',
-          'InteropReceiver.ets'),
+      fixtures.java,
+      p.join(
+        'ohos',
+        'entry',
+        'src',
+        'main',
+        'ets',
+        'interop',
+        'InteropReceiver.ets',
+      ),
     );
 
     test('answers only the Studio bundle', () {
-      expect(source, contains("const ALLOWED_CALLER = '${InteropStudio.bundleName}'"));
+      expect(
+        source,
+        contains("const ALLOWED_CALLER = '${InteropStudio.bundleName}'"),
+      );
     });
 
     test('refuses any language it does not implement', () {
@@ -264,10 +314,19 @@ void main() {
 
     test('the module exports the ability the Studio target names', () {
       final module = read(
-        'qfli_java',
-        p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
+        fixtures.java,
+        p.join(
+          'ohos',
+          'entry',
+          'src',
+          'main',
+          'module.json5',
+        ),
       );
-      expect(module, contains('"name": "${InteropTargets.java.abilityName}"'));
+      expect(
+        module,
+        contains('"name": "${InteropTargets.java.abilityName}"'),
+      );
       expect(module, contains('"exported": true'));
       expect(
         module,
@@ -280,8 +339,14 @@ void main() {
 
   group('Studio module', () {
     final module = read(
-      'qflistudio',
-      p.join('ohos', 'entry', 'src', 'main', 'module.json5'),
+      fixtures.app,
+      p.join(
+        'ohos',
+        'entry',
+        'src',
+        'main',
+        'module.json5',
+      ),
     );
 
     test('exports the bridge ability with the agreed action', () {

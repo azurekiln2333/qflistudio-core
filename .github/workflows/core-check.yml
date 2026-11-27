@@ -65,9 +65,14 @@ jobs:
       - name: Check changed Dart formatting
         run: |
           mapfile -d '' files < <(git diff-tree --root --no-commit-id --name-only --diff-filter=ACMR -r -z HEAD -- '*.dart')
+          for required in test/interop_arkts_contract_test.dart test/interop_fixture_roots_test.dart test/support/interop_fixture_roots.dart; do
+            if [ -f "$required" ] && [[ ! " ${files[*]} " == *" $required "* ]]; then
+              files+=("$required")
+            fi
+          done
           if [ "${#files[@]}" -gt 0 ]; then
             dart format "${files[@]}"
-            git diff --binary -- "${files[@]}" > "$RUNNER_TEMP/core-format.patch"
+            git diff --binary -- "${files[@]}" | tee "$RUNNER_TEMP/core-format.patch"
             test ! -s "$RUNNER_TEMP/core-format.patch"
           fi
       - name: Analyze
@@ -182,6 +187,178 @@ jobs:
             ${{ runner.temp }}/core-analyze.log
             ${{ runner.temp }}/core-test.json
           if-no-files-found: ignore
+
+  interop-path-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: canonical
+            core_path: qflistudio-core
+            app_path: qflistudio
+            java_path: qfli_java
+          - mode: legacy
+            core_path: qfli_studio_core
+            app_path: qflistudio
+            java_path: qfli_java
+          - mode: relocated
+            core_path: relocated/core
+            app_path: relocated/fixtures/studio
+            java_path: relocated/fixtures/java
+          - mode: missing-app-root
+            core_path: qflistudio-core
+            app_path: qflistudio
+            java_path: qfli_java
+          - mode: invalid-java-root
+            core_path: qflistudio-core
+            app_path: qflistudio
+            java_path: qfli_java
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: ${{ matrix.core_path }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-next
+          ref: ${{ env.APP_REF }}
+          path: ${{ matrix.app_path }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: azurekiln2333/qflistudio-java
+          ref: ${{ env.JAVA_REF }}
+          path: ${{ matrix.java_path }}
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ${{ runner.temp }}/flutter_ohos
+            ~/.pub-cache
+          key: core-interop-${{ env.FLUTTER_OHOS_REVISION }}-${{ hashFiles(format('{0}/pubspec.lock', matrix.core_path)) }}
+          restore-keys: core-interop-${{ env.FLUTTER_OHOS_REVISION }}-
+      - name: Verify GitHub-hosted runner and exact fixture layout
+        working-directory: ${{ github.workspace }}
+        env:
+          CORE_PATH: ${{ matrix.core_path }}
+          APP_PATH: ${{ matrix.app_path }}
+          JAVA_PATH: ${{ matrix.java_path }}
+          EXPECTED_CORE_SHA: ${{ github.sha }}
+          EXPECTED_APP_SHA: ${{ env.APP_REF }}
+          EXPECTED_JAVA_SHA: ${{ env.JAVA_REF }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          core="$GITHUB_WORKSPACE/$CORE_PATH"
+          app="$GITHUB_WORKSPACE/$APP_PATH"
+          java="$GITHUB_WORKSPACE/$JAVA_PATH"
+          test "$(git -C "$core" rev-parse HEAD)" = "$EXPECTED_CORE_SHA"
+          test "$(git -C "$app" rev-parse HEAD)" = "$EXPECTED_APP_SHA"
+          test "$(git -C "$java" rev-parse HEAD)" = "$EXPECTED_JAVA_SHA"
+          test -f "$core/pubspec.yaml"
+          test -f "$app/ohos/entry/src/main/ets/interop/StudioInterop.ets"
+          test -f "$app/ohos/entry/src/main/module.json5"
+          test -f "$app/ohos/entry/src/main/resources/base/element/string.json"
+          test -f "$java/ohos/entry/src/main/ets/interop/InteropReceiver.ets"
+          test -f "$java/ohos/entry/src/main/module.json5"
+          printf 'mode=%s\ncore_path=%s\ncore_sha=%s\napp_path=%s\napp_sha=%s\njava_path=%s\njava_sha=%s\n' '${{ matrix.mode }}' "$CORE_PATH" "$EXPECTED_CORE_SHA" "$APP_PATH" "$EXPECTED_APP_SHA" "$JAVA_PATH" "$EXPECTED_JAVA_SHA" | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-layout.txt"
+      - name: Install the pinned OHOS Flutter SDK
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/${{ matrix.app_path }}/tool/ci/setup_flutter.sh" "$RUNNER_TEMP/flutter_ohos" "$FLUTTER_OHOS_TAG" "$FLUTTER_OHOS_REVISION" --ohos
+          echo "$RUNNER_TEMP/flutter_ohos/bin" >> "$GITHUB_PATH"
+      - name: Resolve packages
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        run: |
+          flutter config --no-analytics
+          flutter config --no-enable-ohos
+          flutter pub get
+      - name: Check resolver negative-case unit tests
+        if: ${{ matrix.mode == 'missing-app-root' || matrix.mode == 'invalid-java-root' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        run: |
+          set -o pipefail
+          flutter test test/interop_fixture_roots_test.dart --reporter expanded 2>&1 | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-resolver-test.log"
+      - name: Analyze complete suite with legacy sibling fixture defaults
+        if: ${{ matrix.mode == 'canonical' || matrix.mode == 'legacy' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        run: |
+          set -o pipefail
+          flutter analyze --no-pub --no-fatal-infos 2>&1 | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-analyze.log"
+      - name: Run complete suite with legacy sibling fixture defaults
+        if: ${{ matrix.mode == 'canonical' || matrix.mode == 'legacy' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        run: |
+          set -o pipefail
+          flutter test --no-pub --reporter expanded 2>&1 | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-test.log"
+      - name: Analyze complete suite with relocated fixture roots
+        if: ${{ matrix.mode == 'relocated' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        env:
+          QFLI_STUDIO_APP_ROOT: ${{ github.workspace }}/${{ matrix.app_path }}
+          QFLI_STUDIO_JAVA_ROOT: ${{ github.workspace }}/${{ matrix.java_path }}
+        run: |
+          set -o pipefail
+          flutter analyze --no-pub --no-fatal-infos 2>&1 | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-analyze.log"
+      - name: Run complete suite with relocated fixture roots
+        if: ${{ matrix.mode == 'relocated' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        env:
+          QFLI_STUDIO_APP_ROOT: ${{ github.workspace }}/${{ matrix.app_path }}
+          QFLI_STUDIO_JAVA_ROOT: ${{ github.workspace }}/${{ matrix.java_path }}
+        run: |
+          set -o pipefail
+          flutter test --no-pub --reporter expanded 2>&1 | tee "$RUNNER_TEMP/interop-${{ matrix.mode }}-test.log"
+      - name: Require missing App root to fail clearly
+        if: ${{ matrix.mode == 'missing-app-root' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        env:
+          QFLI_STUDIO_APP_ROOT: ${{ github.workspace }}/missing-app-fixture
+          EXPECTED_FIXTURE_ERROR: QFLI_STUDIO_APP_ROOT
+          EXPECTED_FIXTURE_PATH: ${{ github.workspace }}/missing-app-fixture
+        run: |
+          set +e
+          flutter test test/interop_arkts_contract_test.dart --reporter expanded > "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+          if [ "$status" -eq 0 ]; then
+            echo "Expected missing App fixture root to fail" >&2
+            exit 1
+          fi
+          grep -F "$EXPECTED_FIXTURE_ERROR" "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+          grep -F "$EXPECTED_FIXTURE_PATH" "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+      - name: Require invalid Java root to fail with its missing fixture
+        if: ${{ matrix.mode == 'invalid-java-root' }}
+        working-directory: ${{ github.workspace }}/${{ matrix.core_path }}
+        env:
+          QFLI_STUDIO_JAVA_ROOT: ${{ github.workspace }}/${{ matrix.java_path }}/ohos/entry/src/main
+          EXPECTED_FIXTURE_ERROR: QFLI_STUDIO_JAVA_ROOT
+          EXPECTED_FIXTURE_PATH: ${{ github.workspace }}/${{ matrix.java_path }}/ohos/entry/src/main/ohos/entry/src/main/ets/interop/InteropReceiver.ets
+        run: |
+          set +e
+          flutter test test/interop_arkts_contract_test.dart --reporter expanded > "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+          if [ "$status" -eq 0 ]; then
+            echo "Expected invalid Java fixture root to fail" >&2
+            exit 1
+          fi
+          grep -F "$EXPECTED_FIXTURE_ERROR" "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+          grep -F "$EXPECTED_FIXTURE_PATH" "$RUNNER_TEMP/interop-${{ matrix.mode }}-negative.log"
+      - name: Upload portability evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: interop-path-${{ matrix.mode }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/interop-${{ matrix.mode }}-*
+          if-no-files-found: warn
+          retention-days: 14
 
   screenshots:
     runs-on: ubuntu-24.04
