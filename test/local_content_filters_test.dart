@@ -278,6 +278,92 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+
+    testWidgets(
+      '${tutorials ? 'tutorials' : 'examples'} JavaScript title stays usable at 320px with 2x text',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        StudioProfile.current = const StudioProfile(
+          id: 'web',
+          appTitle: 'Web',
+          templates: [],
+          productKey: 'webforge',
+          isOffline: true,
+        );
+        final repository = _Repository(
+          rows: [
+            {
+              'id': 'javascript',
+              'type': 'html',
+              'language': 'javascript',
+              'level': 'beginner',
+              'title': 'JavaScript subject',
+              'summary': 'Executable document',
+              'code': '<p>Demo</p>',
+            },
+          ],
+        );
+        await tester.pumpWidget(
+          _app(
+            tutorials
+                ? LocalTutorialsTab(language: 'html', repository: repository)
+                : ExampleCodeTab(language: 'html', repository: repository),
+            scale: 2,
+          ),
+        );
+        await tester.pumpAndSettle();
+        final title = find.text('JavaScript subject');
+        await tester.scrollUntilVisible(
+          title,
+          200,
+          scrollable: find
+              .descendant(
+                of: find.byType(ListView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.pumpAndSettle();
+        final tile = find.ancestor(of: title, matching: find.byType(ListTile));
+        final badge = find.descendant(
+          of: tile,
+          matching: find.byType(LanguageBadge),
+        );
+        expect(tester.widget<LanguageBadge>(badge).language, 'javascript');
+        expect(
+          find.descendant(of: badge, matching: find.text('JavaScript')),
+          findsOneWidget,
+        );
+        expect(title.hitTestable(), findsOneWidget);
+        expect(tester.getRect(title).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(title).right, lessThanOrEqualTo(320));
+        expect(tester.getRect(badge).left, greaterThanOrEqualTo(0));
+        expect(tester.getRect(badge).right, lessThanOrEqualTo(320));
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(title);
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: find.byType(AppBar), matching: title),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<LanguageBadge>(
+                find.descendant(
+                  of: find.byType(AppBar),
+                  matching: find.byType(LanguageBadge),
+                ),
+              )
+              .language,
+          'javascript',
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
   }
 
   testWidgets(

@@ -666,6 +666,7 @@ class _TutorialListState extends State<_TutorialList> {
           title: _ContentTitle(
             title: lesson.title,
             language: _contentLanguage(lesson.type, lesson.language),
+            wrap: true,
           ),
           subtitle: Text(
             lesson.summary,
@@ -831,6 +832,7 @@ class _ExampleCodeListState extends State<_ExampleCodeList> {
           title: _ContentTitle(
             title: example.title,
             language: _contentLanguage(example.type, example.language),
+            wrap: true,
           ),
           subtitle: Text(
             example.summary,
@@ -1125,23 +1127,44 @@ Widget _emptyResults(BuildContext context) => Padding(
 );
 
 class _ContentTitle extends StatelessWidget {
-  const _ContentTitle({required this.title, required this.language});
+  const _ContentTitle({
+    required this.title,
+    required this.language,
+    this.wrap = false,
+  });
 
   final String title;
   final String language;
+  final bool wrap;
 
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      if (language.isNotEmpty) ...[
-        LanguageBadge(language: language),
-        const SizedBox(width: 8),
+  Widget build(BuildContext context) {
+    final titleText = Text(title, maxLines: 2, overflow: TextOverflow.ellipsis);
+    if (wrap) {
+      return Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          if (language.isNotEmpty)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: LanguageBadge(language: language),
+            ),
+          titleText,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        if (language.isNotEmpty) ...[
+          LanguageBadge(language: language),
+          const SizedBox(width: 8),
+        ],
+        Expanded(child: titleText),
       ],
-      Expanded(
-        child: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
-      ),
-    ],
-  );
+    );
+  }
 }
 
 class _ContentLabels {

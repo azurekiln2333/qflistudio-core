@@ -28,6 +28,12 @@ text scale 2, reset must remain visible, hit-testable and restore the complete
 result set without a repository reload; do not constrain accessibility text scale
 or hide the action to conceal an overflow.
 
+Tutorial/example `ListTile` titles opt into `_ContentTitle(wrap: true)`: badge
+and title may occupy separate runs. Keep the badge's subject identity and text
+scale; an oversized badge scrolls horizontally. Titles retain two-line ellipsis.
+Detail AppBars keep the compact default title layout rather than stacking content
+beyond the toolbar height. Do not reuse a rigid badge/title Row for catalog tiles.
+
 Old overrides inherit missing bundled metadata. Restore-default uses bundled code
 even when a detail page is reopened with the saved example as its initial model.
 
@@ -103,6 +109,13 @@ the viewport, tap reset, verify all results and empty query, and retain every
 no-exception assertion. SQL run `46018672426`, job `140572422633`, directly located
 the tutorial overflow at baseline `_ContentFilterBar` Row line 1068. That evidence
 does not assign Web's separate missing-language-chip failure.
+
+The same file covers JavaScript subjects with HTML executable type at 320px/2x
+for both catalogs: preserve badge identity/text, title bounds and hit-testability,
+open the detail page, retain its AppBar identity, and assert no exceptions.
+Retained Web run `46046455210`, job `140667074731`, locates the separate 11px
+overflow at `1ae4674` `_ContentTitle` Row line 1134, under `_ListTile` with
+208px width and 96px height. This is catalog-title ownership, not AppBar ownership.
 
 ## 7. Wrong versus correct
 

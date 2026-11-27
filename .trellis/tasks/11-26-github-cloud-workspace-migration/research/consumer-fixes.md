@@ -25,6 +25,31 @@ regressions at 320px/text scale 2, retaining every existing assertion and coveri
 filter/query selection, count/reset bounds, hit-testable reset and no reload.
 Independent source review passed; formatting and execution remain hosted-pending.
 
+## Follow-up: catalog title overflow after the first wave
+
+Web `a689f58887b4de8e2ccd2480c2785cc1c713400f`, Core
+`1ae4674a4b153701b0c3b3ff04b1a1b77a318611`, executed Flutter
+`244a0e8abb3085e8675589b13e219af8c41cb7aa`: owner-retained App run
+`46046455210`, job `140667074731`, reports 11px right overflow at
+`lib/pages/local_content_pages.dart:1134:41`. Tutorials at
+`18:08:11.6896419Z` and examples at `18:08:15.8516601Z` name
+`Row <- _ContentTitle <- DefaultTextStyle <- AnimatedDefaultTextStyle <- _ListTile`.
+Both have `BoxConstraints(w=208.0, 0.0<=h<=Infinity)` and `Size(208.0,96.0)`.
+The retained excerpt resolves catalog ownership; no new log download was needed.
+
+Only tutorial/example list callers select the wrapping title layout. Preserve
+subject badge identity and text scale, allow oversized badges to scroll, keep
+two-line title ellipsis and preserve detail AppBar layout. Two additive
+320px/text-scale-2 regressions retain title reachability, bounds, badge identity,
+navigation and no-exception assertions. Existing tests remain intact.
+
+Independent static review passed. Formatting and execution remain hosted-pending.
+This repair changes consumer-facing library behavior. Under `core-ref-wave.md`
+item 7, the next gate-passed SHA requires a brain-coordinated wave; consumers keep
+`1ae4674` until that instruction. The resolver and workflow bootstrap repairs are
+Core-internal CI changes. Web's missing-language-key failures remain separately
+owned and are not attributed to this Row.
+
 ## Note compile boundary
 
 Note `bcd7c879d32ac95327f069b5d6fac5932c76765d`, validation run `46011327362`,
