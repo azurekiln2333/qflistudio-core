@@ -443,7 +443,8 @@ void main() {
             (widget) =>
                 widget is Column &&
                 widget.children.any(
-                  (child) => child is Text && child.data == 'JavaScript subject',
+                  (child) =>
+                      child is Text && child.data == 'JavaScript subject',
                 ),
           ),
         );
