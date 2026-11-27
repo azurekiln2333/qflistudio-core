@@ -1,0 +1,3 @@
+{"file":".trellis/tasks/11-27-core-preserved-followups/research/README.md","reason":"Check inert preservation and prevent accidental feature activation"}
+{"file":".trellis/tasks/11-27-core-preserved-followups/research/wip-patch-manifest.json","reason":"Check source identities, normalization and complete selected-path coverage"}
+{"file":".trellis/tasks/11-26-core-github-preservation/research/root-wip-disposition.md","reason":"Verify preservation decisions without replaying obsolete root code"}

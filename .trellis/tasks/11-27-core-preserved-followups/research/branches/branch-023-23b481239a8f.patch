@@ -1,0 +1,86 @@
+diff --git a/test/chat_attachment_picker_workbench_test.dart b/test/chat_attachment_picker_workbench_test.dart
+index 9204710a0586b2e79ba3aa8a3cc75a094f716d28..782de0116c320cbcca90958922e1c00c1f8fe4b8 100644
+--- a/test/chat_attachment_picker_workbench_test.dart
++++ b/test/chat_attachment_picker_workbench_test.dart
+@@ -78,9 +78,12 @@ void main() {
+       await tester.pumpWidget(const SizedBox.shrink());
+       await tester.pump();
+     });
++    await tester.tap(find.text('attach'));
++    await tester.pump();
++    // Keep the route/result callback in the widget test's zone. Only directory
++    // readiness needs real async; opening there strands result delivery on its
++    // event loop when the later fake-clock tap dismisses the menu.
+     await tester.runAsync(() async {
+-      await tester.tap(find.text('attach'));
+-      await tester.pump();
+       final watch = Stopwatch()..start();
+       while (find
+               .byKey(const ValueKey('attachment-main.dart'))
+@@ -95,6 +98,14 @@ void main() {
+     await tester.pumpAndSettle();
+   }
+ 
++  // CheckboxMenuButton forwards its key to an internal MenuItemButton. Match
++  // the public control as well as its key instead of choosing an arbitrary hit.
++  Finder menuFile(String path) => find.byWidgetPredicate(
++    (widget) =>
++        widget is CheckboxMenuButton &&
++        widget.key == ValueKey('attachment-$path'),
++  );
++
+   for (final brightness in Brightness.values) {
+     testWidgets(
+       'workbench uses MenuAnchor and returns multiple paths: $brightness',
+@@ -134,9 +145,9 @@ void main() {
+         );
+         final confirm = find.byKey(const ValueKey('attachment-confirm'));
+         expect(tester.widget<MenuItemButton>(confirm).onPressed, isNull);
+-        await tester.tap(find.byKey(const ValueKey('attachment-main.dart')));
++        await tester.tap(menuFile('main.dart'));
+         await tester.pump();
+-        await tester.tap(find.byKey(const ValueKey('attachment-other.dart')));
++        await tester.tap(menuFile('other.dart'));
+         await tester.pump();
+         expect(
+           find.byType(CheckboxMenuButton),
+@@ -144,27 +155,19 @@ void main() {
+           reason: 'Selection must not close the menu.',
+         );
+         expect(
+-          tester
+-              .widget<CheckboxMenuButton>(
+-                find.byKey(const ValueKey('attachment-main.dart')),
+-              )
+-              .value,
++          tester.widget<CheckboxMenuButton>(menuFile('main.dart')).value,
+           isTrue,
+         );
+         expect(
+           tester
+-              .widget<CheckboxMenuButton>(
+-                find.byKey(const ValueKey('attachment-main.dart')),
+-              )
++              .widget<CheckboxMenuButton>(menuFile('main.dart'))
+               .style!
+               .minimumSize!
+               .resolve({})!
+               .height,
+           AppPaths.isDesktop ? 32 : 48,
+         );
+-        final rect = tester.getRect(
+-          find.byKey(const ValueKey('attachment-main.dart')),
+-        );
++        final rect = tester.getRect(menuFile('main.dart'));
+         expect(rect.left, greaterThanOrEqualTo(0));
+         expect(rect.right, lessThanOrEqualTo(1024));
+         await tester.tap(confirm);
+@@ -188,7 +191,7 @@ void main() {
+         result = value;
+       },
+     );
+-    await tester.tap(find.byKey(const ValueKey('attachment-main.dart')));
++    await tester.tap(menuFile('main.dart'));
+     await tester.pump();
+     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+     await tester.pumpAndSettle();

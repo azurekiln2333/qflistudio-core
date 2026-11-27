@@ -1,0 +1,39 @@
+diff --git a/lib/vibe_coding/vibe_skills.dart b/lib/vibe_coding/vibe_skills.dart
+index b1666ad9c4742cf33f7fc05b3f275649d5908267..bda1a63e91fbaef10b7813fb3dfeebf89944778d 100644
+--- a/lib/vibe_coding/vibe_skills.dart
++++ b/lib/vibe_coding/vibe_skills.dart
+@@ -207,9 +207,11 @@ Future<String> readVibeSkillBody(String path) async {
+   return '${body.substring(0, kVibeSkillMaxBodyChars)}\n\n（技能正文已截断）';
+ }
+ 
+-/// 只读技能文件的开头；上限足够容纳 12 KiB 正文与 frontmatter。
++/// 只读技能文件的开头。
++///
++/// UTF-8 一个字符最多 4 字节，按 4 倍上限读才能保证按字符截断时不丢内容。
+ Future<String> _readHead(File file) async {
+-  const limit = kVibeSkillMaxBodyChars * 2 + 1024;
++  const limit = kVibeSkillMaxBodyChars * 4 + 1024;
+   if (await file.length() <= limit) return file.readAsString();
+   final bytes = await file
+       .openRead(0, limit)
+@@ -427,9 +429,9 @@ class VibeSkillLibrary {
+     return skills;
+   }
+ 
+-  /// 读技能文件；正文上限的两倍足以覆盖 frontmatter。
++  /// 读技能文件；按 UTF-8 最坏情况预留 4 倍字节，避免多字节正文被静默截断。
+   Future<String> _readCapped(File file) async {
+-    const limit = kVibeSkillMaxBodyChars * 2 + 1024;
++    const limit = kVibeSkillMaxBodyChars * 4 + 1024;
+     if (!lazyBodies) {
+       final length = await file.length();
+       if (length <= limit) return file.readAsString();
+@@ -441,7 +443,7 @@ class VibeSkillLibrary {
+   }
+ 
+   /// 只读 frontmatter 时读多少字节。
+-  static const int _metadataHeadBytes = 8 * 1024;
++  static const int _metadataHeadBytes = 16 * 1024;
+ 
+   Future<List<VibeSkill>> _builtIns() async {
+     final cached = _builtInCache;

@@ -1,0 +1,2860 @@
+diff --git a/lib/pages/home_page.dart b/lib/pages/home_page.dart
+index 8c36288539b89a59fd1e6ae2c9049564c5697dca..f3325932dffeadac9877b2a4b800c869ef941941 100644
+--- a/lib/pages/home_page.dart
++++ b/lib/pages/home_page.dart
+@@ -53,6 +53,8 @@ import '../services/local_audit_service.dart';
+ import '../editor/open_performance.dart';
+ import '../services/local_stats_service.dart';
+ import '../workspace/saved_workspaces_tab.dart';
++import '../shell/workbench_explorer.dart';
++import '../services/file_service.dart';
+ import '../shell/large_screen_controller.dart';
+ 
+ /// 应用外壳：功能、教程、示例和个人页均为独立页面。
+@@ -353,6 +355,7 @@ class _HomeTabState extends State<HomeTab>
+   String _languageFilter = '';
+   int _gitRefreshRevision = 0;
+   RetainedEditorController? _retainedEditor;
++  LargeScreenController? _workbenchLayout;
+   bool _retainedEditorVisible = false;
+   String? _archiveBusyLabel;
+   final Map<int, _HomeCloneTaskState> _cloneTasks = {};
+@@ -607,6 +610,7 @@ class _HomeTabState extends State<HomeTab>
+     for (final task in _cloneTasks.values) {
+       task.cancellation.cancel();
+     }
++    _workbenchLayout?.unbindProjectActions(this);
+     _retainedEditor?.removeListener(_onRetainedEditorChanged);
+     _homeGeneration++;
+     _cloudActions.removeListener(_onCloudChanged);
+@@ -639,6 +643,9 @@ class _HomeTabState extends State<HomeTab>
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    if (widget.embedded && LargeScreenScope.maybeOf(context) != null) {
++      return _workbenchProjects(context);
++    }
+     final l10n = StudioLocalizations.of(context);
+     return Scaffold(
+       appBar: AppBar(
+@@ -829,6 +836,226 @@ class _HomeTabState extends State<HomeTab>
+     );
+   }
+ 
++  Widget _workbenchProjects(BuildContext context) {
++    final l = StudioLocalizations.of(context);
++    final layout = LargeScreenScope.maybeOf(context)!;
++    _workbenchLayout = layout;
++    // All project command entry points share Home's existing scope-aware flow.
++    layout.bindProjectActions(
++      this,
++      create: () => unawaited(_createFromCurrentScope(context)),
++      openFolder: () => unawaited(_addExistingProject()),
++      clone: () => unawaited(_cloneRepository()),
++      openRecent: (project) => unawaited(_openProject(context, project)),
++    );
++    String scopeLabel(ProjectScope scope) => switch (scope) {
++      ProjectScope.all => l.allProjects,
++      ProjectScope.history => l.historyProjects,
++      ProjectScope.favorite => l.favoriteProjects,
++      ProjectScope.workspace => l.isEnglish ? 'Workspaces' : '工作区',
++      ProjectScope.cloud => l.cloudProjects,
++      ProjectScope.github => 'GitHub',
++      ProjectScope.agents => l.agentsTab,
++    };
++    return ListenableBuilder(
++      listenable: Listenable.merge([widget.store, _projectTabs]),
++      builder: (context, _) {
++        final scope = _orderedScopes[_projectTabs.index];
++        var projects = _projectsFor(scope);
++        final query = _query.trim().toLowerCase();
++        if (query.isNotEmpty) {
++          projects = projects
++              .where(
++                (project) =>
++                    project.name.toLowerCase().contains(query) ||
++                    project.path.toLowerCase().contains(query),
++              )
++              .toList();
++        }
++        if (_languageFilter.isNotEmpty) {
++          projects = projects
++              .where((project) => project.language == _languageFilter)
++              .toList();
++        }
++        final current = _retainedEditor?.activeProject;
++        final opened = _retainedEditor?.sessionInfos;
++        final special =
++            scope == ProjectScope.workspace || scope == ProjectScope.github;
++        return WorkbenchProjectsPanel(
++          searchController: _searchController,
++          onSearchChanged: (value) => setState(() => _query = value),
++          onCreate: layout.createProject,
++          onOpenFolder: AppPaths.isDesktop ? () => layout.openFolder() : null,
++          onClone: StudioProfile.current?.offlineOnly == true
++              ? null
++              : () => layout.cloneRepository(),
++          filterItems: [
++            for (final value in _orderedScopes)
++              MenuItemButton(
++                leadingIcon: Icon(
++                  scope == value ? Icons.check : null,
++                  size: 18,
++                ),
++                onPressed: () {
++                  _projectTabs.index = _orderedScopes.indexOf(value);
++                  setState(() {});
++                },
++                child: Text(scopeLabel(value)),
++              ),
++            const Divider(),
++            MenuItemButton(
++              onPressed: () => setState(() => _languageFilter = ''),
++              child: Text(l.allLanguages),
++            ),
++            for (final language in _languageChips)
++              MenuItemButton(
++                leadingIcon: Icon(
++                  _languageFilter == language ? Icons.check : null,
++                  size: 18,
++                ),
++                onPressed: () => setState(() => _languageFilter = language),
++                child: Text(language),
++              ),
++          ],
++          moreItems: [
++            MenuItemButton(
++              onPressed: () => unawaited(_refreshProjects(scope)),
++              leadingIcon: const Icon(Icons.refresh, size: 18),
++              child: Text(l.refresh),
++            ),
++            MenuItemButton(
++              onPressed: _archiveBusyLabel == null
++                  ? () => unawaited(_importProjectArchive())
++                  : null,
++              child: Text(l.isEnglish ? 'Import project (.qsz)' : '导入项目（.qsz）'),
++            ),
++            MenuItemButton(
++              onPressed: () => unawaited(_removeMissingProjects(context)),
++              child: Text(l.removeMissingProjects),
++            ),
++          ],
++          progress: Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              if (_archiveBusyLabel case final message?)
++                Padding(padding: const EdgeInsets.all(8), child: Text(message)),
++              HomeGitCloneTasks(
++                maxHeight: 140,
++                tasks: [
++                  for (final task in _cloneTasks.values)
++                    HomeGitCloneTask(
++                      id: task.id,
++                      name: task.name,
++                      progress: task.progress,
++                      cancelling: task.cancelling,
++                      onCancel: () => _cancelClone(task.id),
++                    ),
++                ],
++              ),
++            ],
++          ),
++          body: special
++              ? _buildScopePage(context, scope)
++              : projects.isEmpty
++              ? Center(
++                  child: Text(
++                    query.isEmpty
++                        ? l.noProjects
++                        : l.isEnglish
++                        ? 'No matching projects'
++                        : '没有匹配的项目',
++                  ),
++                )
++              : ListView.builder(
++                  padding: EdgeInsets.zero,
++                  itemCount: projects.length,
++                  itemBuilder: (context, index) {
++                    final project = projects[index];
++                    return WorkbenchProjectRow(
++                      project: project,
++                      current:
++                          current != null && _sameProjectPath(current, project),
++                      opened:
++                          opened?.any(
++                            (session) =>
++                                _sameProjectPath(session.project, project),
++                          ) ??
++                          false,
++                      onOpen: () => unawaited(_openProject(context, project)),
++                      menuItems: [
++                        MenuItemButton(
++                          onPressed: () => widget.store.setFavorite(
++                            project,
++                            !project.favorite,
++                          ),
++                          child: Text(
++                            project.favorite
++                                ? (l.isEnglish ? 'Unfavorite' : '取消收藏')
++                                : l.favoriteProjects,
++                          ),
++                        ),
++                        if (AppPaths.isDesktop && !project.isCloud)
++                          MenuItemButton(
++                            onPressed: () => unawaited(
++                              FileService.revealInFileManager(project.path),
++                            ),
++                            child: Text(
++                              l.isEnglish
++                                  ? 'Show in file manager'
++                                  : '在资源管理器中显示',
++                            ),
++                          ),
++                        if (!project.isCloud)
++                          MenuItemButton(
++                            onPressed: () =>
++                                unawaited(_exportProjectArchive(project)),
++                            child: Text(
++                              l.isEnglish ? 'Export project' : '压缩导出项目',
++                            ),
++                          ),
++                        MenuItemButton(
++                          onPressed:
++                              !project.isCloud || !_cloudActions.isBusy(project)
++                              ? () => unawaited(_shareProject(project))
++                              : null,
++                          child: Text(l.shareProjectZip),
++                        ),
++                        if (project.isCloud) ...[
++                          MenuItemButton(
++                            onPressed: !_cloudActions.isBusy(project)
++                                ? () => unawaited(_cacheProject(project))
++                                : null,
++                            child: Text(l.updateProjectCache),
++                          ),
++                          MenuItemButton(
++                            onPressed: !_cloudActions.isBusy(project)
++                                ? () => unawaited(_clearProjectCache(project))
++                                : null,
++                            child: Text(l.clearProjectCache),
++                          ),
++                        ],
++                        const Divider(),
++                        MenuItemButton(
++                          onPressed:
++                              !project.isCloud ||
++                                  (!_cloudActions.isBusy(project) &&
++                                      !_deletingCloudProjects.contains(
++                                        project.id,
++                                      ))
++                              ? () =>
++                                    unawaited(_deleteProject(context, project))
++                              : null,
++                          child: Text(l.isEnglish ? 'Delete' : '删除'),
++                        ),
++                      ],
++                    );
++                  },
++                ),
++        );
++      },
++    );
++  }
++
+   Widget _buildScopePage(BuildContext context, ProjectScope scope) {
+     final key = ValueKey('home-scope-page-${scope.name}');
+     return switch (scope) {
+diff --git a/lib/shell/large_screen_controller.dart b/lib/shell/large_screen_controller.dart
+index 1c2b06f3fda256df112ac60fa9166dd2f9b9b475..7efa7ece4841ff9561b838fa0f5fc2563baec338 100644
+--- a/lib/shell/large_screen_controller.dart
++++ b/lib/shell/large_screen_controller.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
++import '../models/project.dart';
++import '../layout/breakpoints.dart';
+ import 'workbench_chrome.dart';
+ 
+ enum ExplorerPage { projects, files }
+@@ -7,12 +9,17 @@ enum ExplorerPage { projects, files }
+ /// Presentation state only. Project, editor and Agent lifetimes remain with
+ /// their existing owners. Resizing never replaces this controller.
+ class LargeScreenController extends ChangeNotifier {
++  static const double minSidebarWidth = 220;
++  static const double maxSidebarWidth = 480;
++  static const double defaultSidebarWidth = Breakpoints.sidebarWidth;
++
+   WorkbenchActivity _activity = WorkbenchActivity.explorer;
+   ExplorerPage _explorerPage = ExplorerPage.projects;
+   bool _sidebarVisible = true;
+   bool _compact = false;
+   bool _disposed = false;
+   bool _scheduled = false;
++  double _sidebarWidth = defaultSidebarWidth;
+   Object? _activeEditor;
+   final Map<Object, WidgetBuilder> _files = {};
+   WidgetBuilder? _centerOverlay;
+@@ -21,6 +28,41 @@ class LargeScreenController extends ChangeNotifier {
+   ExplorerPage get explorerPage => _explorerPage;
+   bool get sidebarVisible => _sidebarVisible;
+   bool get compact => _compact;
++  double get sidebarWidth => _sidebarWidth;
++
++  Object? _projectActionsOwner;
++  VoidCallback? _createProject;
++  VoidCallback? _openFolder;
++  VoidCallback? _cloneRepository;
++  ValueChanged<Project>? _openRecent;
++
++  // The retained project panel owns the existing dialog/clone lifetimes.
++  // Binding callbacks during its build does not notify or rebuild editors.
++  void bindProjectActions(
++    Object owner, {
++    required VoidCallback create,
++    required VoidCallback openFolder,
++    required VoidCallback clone,
++    required ValueChanged<Project> openRecent,
++  }) {
++    _projectActionsOwner = owner;
++    _createProject = create;
++    _openFolder = openFolder;
++    _cloneRepository = clone;
++    _openRecent = openRecent;
++  }
++
++  void unbindProjectActions(Object owner) {
++    if (!identical(owner, _projectActionsOwner)) return;
++    _projectActionsOwner = null;
++    _createProject = _openFolder = _cloneRepository = null;
++    _openRecent = null;
++  }
++
++  void createProject() => _createProject?.call();
++  void openFolder() => _openFolder?.call();
++  void cloneRepository() => _cloneRepository?.call();
++  void openRecent(Project project) => _openRecent?.call(project);
+   Object? get activeEditor => _activeEditor;
+   Map<Object, WidgetBuilder> get filePanels => Map.unmodifiable(_files);
+ 
+@@ -94,6 +136,22 @@ class LargeScreenController extends ChangeNotifier {
+     notifyListeners();
+   }
+ 
++  /// Updates the retained sidebar width without changing the current page.
++  void setSidebarWidth(double width) {
++    if (!width.isFinite) return;
++    final next = width.clamp(minSidebarWidth, maxSidebarWidth).toDouble();
++    if ((next - _sidebarWidth).abs() < 0.1) return;
++    _sidebarWidth = next;
++    notifyListeners();
++  }
++
++  /// Restores the IDE default width after a double-click on the divider.
++  void resetSidebarWidth() {
++    if (_sidebarWidth == defaultSidebarWidth) return;
++    _sidebarWidth = defaultSidebarWidth;
++    notifyListeners();
++  }
++
+   // Layout information is sampled by the owner during build. It does not
+   // notify or affect device-family selection.
+   void setCompact(bool value) => _compact = value;
+@@ -134,6 +192,7 @@ class LargeScreenController extends ChangeNotifier {
+   @override
+   void dispose() {
+     _disposed = true;
++    if (_projectActionsOwner case final owner?) unbindProjectActions(owner);
+     _files.clear();
+     super.dispose();
+   }
+diff --git a/lib/shell/large_screen_workbench.dart b/lib/shell/large_screen_workbench.dart
+index 5be974374f9cba161246142423aceecb5db93111..343a19c1fb1e4855a1b64e61f94047aa591328c4 100644
+--- a/lib/shell/large_screen_workbench.dart
++++ b/lib/shell/large_screen_workbench.dart
+@@ -12,6 +12,7 @@ import '../harness/hub/harness_hosts.dart';
+ import '../harness/ui/agent_session_details_page.dart';
+ import '../harness/ui/agents_entry.dart';
+ import '../harness/ui/home_agents_tab.dart';
++import '../layout/app_form_factor.dart';
+ import '../layout/breakpoints.dart';
+ import '../pages/home_page.dart';
+ import '../pages/local_content_pages.dart';
+@@ -26,7 +27,6 @@ import '../services/studio_profile.dart';
+ import '../store/auth_store.dart';
+ import '../store/project_store.dart';
+ import '../store/settings_store.dart';
+-import '../widgets/project_dialogs.dart';
+ import 'large_screen_controller.dart';
+ import 'workbench_chrome.dart';
+ import 'workbench_explorer.dart';
+@@ -73,8 +73,22 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+     _editorHost = RetainedEditorHost(
+       controller: widget.editors,
+       showRestoreControl: false,
+-      child: WorkbenchWelcome(onOpenProject: _addExisting),
++      child: ListenableBuilder(
++        listenable: widget.store,
++        builder: (context, _) => WorkbenchWelcome(
++          onOpenProject: _layout.openFolder,
++          onCreateProject: _layout.createProject,
++          onCloneRepository: StudioProfile.current?.offlineOnly == true
++              ? null
++              : _layout.cloneRepository,
++          projects: widget.store.projects
++              .where((project) => !project.isCloud)
++              .toList(),
++          onOpenRecent: _layout.openRecent,
++        ),
++      ),
+     );
++    _page(WorkbenchActivity.explorer);
+     if (Platform.isWindows) {
+       _drop = DesktopFolderDrop(
+         store: widget.store,
+@@ -141,19 +155,6 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+     }
+   }
+ 
+-  Future<void> _addExisting() async {
+-    final project = await showAddExistingDialog(context, widget.store);
+-    if (!mounted || project == null) return;
+-    widget.editors.open(
+-      project: project,
+-      auth: widget.auth,
+-      store: widget.store,
+-      settings: widget.settings,
+-    );
+-    _layout.closeCenterOverlay();
+-    _layout.showFiles();
+-  }
+-
+   Widget _agentsPanel() {
+     final hub = _agents ??= HarnessHub(
+       hosts: HarnessHosts.build(
+@@ -259,6 +260,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+     widget.editors.setRootBackHandling(true);
+     _agents?.dispose();
+     _examples.dispose();
++    _pages.clear();
+     _layout.dispose();
+     super.dispose();
+   }
+@@ -279,11 +281,24 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       child: child!,
+     ),
+     child: Theme(
+-      data: WorkbenchTheme.from(Theme.of(context)),
++      data: WorkbenchTheme.from(
++        Theme.of(context),
++        formFactor: AppPaths.isDesktop
++            ? AppFormFactor.desktop
++            : AppFormFactor.tablet,
++      ),
+       child: LargeScreenScope(
+         controller: _layout,
+         child: Shortcuts(
+           shortcuts: {
++            _shortcut(LogicalKeyboardKey.keyN, shift: true):
++                const _ProjectCommandIntent(_ProjectCommand.create),
++            _shortcut(LogicalKeyboardKey.keyO): const _ProjectCommandIntent(
++              _ProjectCommand.openFolder,
++            ),
++            if (StudioProfile.current?.offlineOnly != true)
++              _shortcut(LogicalKeyboardKey.keyG, shift: true):
++                  const _ProjectCommandIntent(_ProjectCommand.clone),
+             _shortcut(LogicalKeyboardKey.keyB): const _ToggleSidebarIntent(),
+             _shortcut(LogicalKeyboardKey.keyE, shift: true):
+                 const _SelectActivityIntent(WorkbenchActivity.explorer),
+@@ -295,6 +310,19 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+           },
+           child: Actions(
+             actions: {
++              _ProjectCommandIntent: CallbackAction<_ProjectCommandIntent>(
++                onInvoke: (intent) {
++                  switch (intent.command) {
++                    case _ProjectCommand.create:
++                      _layout.createProject();
++                    case _ProjectCommand.openFolder:
++                      _layout.openFolder();
++                    case _ProjectCommand.clone:
++                      _layout.cloneRepository();
++                  }
++                  return null;
++                },
++              ),
+               _ToggleSidebarIntent: CallbackAction<_ToggleSidebarIntent>(
+                 onInvoke: (_) {
+                   _toggleSidebar();
+@@ -314,8 +342,9 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+                 controller: widget.editors,
+                 child: ScaffoldMessenger(
+                   key: _scaffold,
+-                  child: Scaffold(
+-                    body: SafeArea(
++                  child: Material(
++                    color: Theme.of(context).colorScheme.surface,
++                    child: SafeArea(
+                       child: LayoutBuilder(
+                         builder: (context, constraints) {
+                           final compact =
+@@ -326,10 +355,19 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+                             listenable: _layout,
+                             builder: (context, _) {
+                               final workspace = _layout.showsWorkspace;
+-                              final sideWidth =
++                              final availableSidebarWidth =
+                                   (constraints.maxWidth -
+                                           WorkbenchActivityRail.width)
+-                                      .clamp(0.0, Breakpoints.sidebarWidth);
++                                      .clamp(0.0, double.infinity);
++                              final sideWidth = _layout.sidebarWidth
++                                  .clamp(
++                                    0.0,
++                                    availableSidebarWidth.clamp(
++                                      0.0,
++                                      LargeScreenController.maxSidebarWidth,
++                                    ),
++                                  )
++                                  .toDouble();
+                               final sideShown =
+                                   workspace && _layout.sidebarVisible;
+                               _page(_layout.activity);
+@@ -392,6 +430,19 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+                                             child: _sidebar(),
+                                           ),
+                                         ),
++                                        if (!compact && sideShown)
++                                          Positioned(
++                                            key: const ValueKey(
++                                              'workbench-sidebar-divider-slot',
++                                            ),
++                                            left: sideWidth - 3,
++                                            top: 0,
++                                            bottom: 0,
++                                            width: 6,
++                                            child: WorkbenchSidebarDivider(
++                                              controller: _layout,
++                                            ),
++                                          ),
+                                       ],
+                                     ),
+                                   ),
+@@ -423,34 +474,55 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+   Widget _center(bool workspace) => LayoutBuilder(
+     builder: (context, constraints) => MediaQuery(
+       data: MediaQuery.of(context).copyWith(size: constraints.biggest),
+-      child: Stack(
+-        fit: StackFit.expand,
+-        children: [
+-          _retain(
+-            key: const ValueKey('workbench-editor-host'),
+-            visible: workspace && _layout.centerOverlay == null,
+-            child: _editorHost,
++      child: Theme(
++        data: Theme.of(context).copyWith(
++          snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
++            width: (constraints.maxWidth - 32).clamp(0.0, 480.0).toDouble(),
+           ),
+-          for (final entry in _pages.entries)
+-            if (entry.key != WorkbenchActivity.explorer &&
+-                entry.key != WorkbenchActivity.agents)
++        ),
++        child: Scaffold(
++          key: const ValueKey('workbench-center-scaffold'),
++          body: Stack(
++            fit: StackFit.expand,
++            children: [
+               _retain(
+-                key: ValueKey(entry.key),
+-                visible: entry.key == _layout.activity,
+-                child: entry.value,
++                key: const ValueKey('workbench-editor-host'),
++                visible: workspace && _layout.centerOverlay == null,
++                child: _editorHost,
+               ),
+-          if (_layout.centerOverlay case final overlay?)
+-            _retain(
+-              key: const ValueKey('workbench-center-overlay'),
+-              visible: workspace,
+-              child: Builder(builder: overlay),
+-            ),
+-        ],
++              for (final entry in _pages.entries)
++                if (entry.key != WorkbenchActivity.explorer &&
++                    entry.key != WorkbenchActivity.agents)
++                  _retain(
++                    key: ValueKey(entry.key),
++                    visible: entry.key == _layout.activity,
++                    child: entry.value,
++                  ),
++              if (_layout.centerOverlay case final overlay?)
++                _retain(
++                  key: const ValueKey('workbench-center-overlay'),
++                  visible: workspace,
++                  child: Builder(builder: overlay),
++                ),
++            ],
++          ),
++        ),
+       ),
+     ),
+   );
+ 
+-  Widget _sidebar() {
++  Widget _sidebar() => Builder(
++    builder: (context) => Theme(
++      data: Theme.of(context).copyWith(
++        snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
++          width: _layout.sidebarWidth.clamp(0.0, 480.0).toDouble(),
++        ),
++      ),
++      child: _sidebarContent(),
++    ),
++  );
++
++  Widget _sidebarContent() {
+     final panels = _layout.filePanels;
+     _visitedFiles.removeWhere((owner) => !panels.containsKey(owner));
+     if (_layout.activity == WorkbenchActivity.explorer &&
+@@ -516,6 +588,13 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       );
+ }
+ 
++enum _ProjectCommand { create, openFolder, clone }
++
++class _ProjectCommandIntent extends Intent {
++  const _ProjectCommandIntent(this.command);
++  final _ProjectCommand command;
++}
++
+ class _ToggleSidebarIntent extends Intent {
+   const _ToggleSidebarIntent();
+ }
+diff --git a/lib/shell/workbench_chrome.dart b/lib/shell/workbench_chrome.dart
+index 4c466740772bbc4ee2db40609f0ccadcda5e1bf3..b67a96f0374b38a2510e9173d9d05d11fc2a245a 100644
+--- a/lib/shell/workbench_chrome.dart
++++ b/lib/shell/workbench_chrome.dart
+@@ -1,7 +1,10 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../i18n/studio_localizations.dart';
++import '../models/project.dart';
++import 'large_screen_controller.dart';
+ import 'shortcut_label.dart';
++import 'workbench_theme.dart';
+ 
+ /// 大屏工作台左侧图标导航的六个去处。
+ ///
+@@ -22,13 +25,10 @@ enum WorkbenchActivity {
+   static const files = explorer;
+ }
+ 
+-/// VS Code 式图标导航条。
++/// MD3 navigation rail for the six workbench destinations.
+ ///
+-/// 固定 52px 宽：不随文字缩放变宽，也不显示展开的文字标签，
+-/// 否则侧栏宽度会被导航条挤走。每个按钮是 44px 触控目标，
+-/// 语义标签与 tooltip 都来自本地化层，选中项用主题色高亮。
+-///
+-/// 高度不足时上半部分可滚动：底部设置与头像始终留在左下角。
++/// The four primary destinations use NavigationRail. Settings and the account
++/// avatar stay anchored at the bottom of the same 80dp rail.
+ class WorkbenchActivityRail extends StatelessWidget {
+   const WorkbenchActivityRail({
+     super.key,
+@@ -38,41 +38,31 @@ class WorkbenchActivityRail extends StatelessWidget {
+     this.accountLabel,
+   });
+ 
+-  /// 当前选中的去处。决定高亮项，也决定侧栏显示哪一块内容。
+   final WorkbenchActivity selected;
+-
+-  /// 用户点了某个图标。同一个值也会在重复点击时回调。
+   final ValueChanged<WorkbenchActivity> onSelected;
+-
+-  /// 头像图片；为空或加载失败时退回首字母或图标占位。
+   final ImageProvider? avatarImage;
+-
+-  /// 账号名，用于头像的语义标签与首字母回退。
+   final String? accountLabel;
+ 
+-  /// 导航条宽度。导出给宿主排版与测试断言。
+-  static const double width = 52;
+-
+-  /// 单个图标的触控目标边长。
+-  static const double touchTarget = 44;
+-
+-  /// 顶部的两个主要去处。
++  static const double width = 80;
++  static const double touchTarget = 48;
+   static const List<WorkbenchActivity> primary = <WorkbenchActivity>[
+     WorkbenchActivity.explorer,
+     WorkbenchActivity.agents,
+   ];
+-
+-  /// 主去处下方的辅助入口。
+   static const List<WorkbenchActivity> secondary = <WorkbenchActivity>[
+     WorkbenchActivity.tools,
+     WorkbenchActivity.tutorial,
+   ];
++  static const List<WorkbenchActivity> _railActivities = [
++    WorkbenchActivity.explorer,
++    WorkbenchActivity.agents,
++    WorkbenchActivity.tools,
++    WorkbenchActivity.tutorial,
++  ];
+ 
+-  /// 单个图标的稳定标识。侧栏宿主与测试用它定位具体入口。
+   static ValueKey<String> activityKey(WorkbenchActivity activity) =>
+       ValueKey<String>('workbench-rail-${activity.name}');
+ 
+-  /// 底部头像的稳定标识。
+   static const ValueKey<String> avatarKey = ValueKey<String>(
+     'workbench-rail-avatar',
+   );
+@@ -81,45 +71,66 @@ class WorkbenchActivityRail extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+     final l = StudioLocalizations.of(context);
++    final index = _railActivities.indexOf(selected);
+     return Container(
+       width: width,
+       decoration: BoxDecoration(
+-        color: scheme.surfaceContainerHighest,
++        color: scheme.surfaceContainerLow,
+         border: Border(right: BorderSide(color: scheme.outlineVariant)),
+       ),
+       child: SafeArea(
+         right: false,
+         child: Column(
+-          children: <Widget>[
++          children: [
+             Expanded(
+-              // 窗口很矮时可滚动，图标不会被裁掉一半。
+-              child: SingleChildScrollView(
+-                child: Column(
+-                  children: <Widget>[
+-                    for (final activity in primary)
+-                      _RailButton(
++              child: NavigationRail(
++                minWidth: width,
++                minExtendedWidth: width,
++                selectedIndex: index < 0 ? null : index,
++                onDestinationSelected: (value) =>
++                    onSelected(_railActivities[value]),
++                labelType: NavigationRailLabelType.all,
++                scrollable: true,
++                useIndicator: true,
++                indicatorColor: scheme.secondaryContainer,
++                indicatorShape: const StadiumBorder(),
++                selectedLabelTextStyle: Theme.of(context).textTheme.labelMedium,
++                unselectedLabelTextStyle: Theme.of(
++                  context,
++                ).textTheme.labelMedium,
++                groupAlignment: -0.85,
++                destinations: [
++                  for (final activity in _railActivities)
++                    NavigationRailDestination(
++                      icon: MouseRegion(
+                         key: activityKey(activity),
+-                        activity: activity,
+-                        selected: activity == selected,
+-                        onPressed: onSelected,
+-                        label: _tooltipFor(activity, l),
+-                        icon: _iconFor(activity),
++                        cursor: SystemMouseCursors.click,
++                        child: Tooltip(
++                          message: _tooltipFor(activity, l),
++                          child: Icon(_iconFor(activity), size: 24),
++                        ),
+                       ),
+-                    const SizedBox(height: 8),
+-                    for (final activity in secondary)
+-                      _RailButton(
++                      selectedIcon: MouseRegion(
+                         key: activityKey(activity),
+-                        activity: activity,
+-                        selected: activity == selected,
+-                        onPressed: onSelected,
+-                        label: _labelFor(activity, l),
+-                        icon: _iconFor(activity),
++                        cursor: SystemMouseCursors.click,
++                        child: Tooltip(
++                          message: _tooltipFor(activity, l),
++                          child: Icon(_iconFor(activity), size: 24),
++                        ),
+                       ),
+-                  ],
+-                ),
++                      label: SizedBox(
++                        width: 72,
++                        child: Text(
++                          _labelFor(activity, l),
++                          maxLines: 2,
++                          overflow: TextOverflow.ellipsis,
++                          textAlign: TextAlign.center,
++                        ),
++                      ),
++                    ),
++                ],
+               ),
+             ),
+-            // 底部固定在左下角：设置与账号。
+             _RailButton(
+               key: activityKey(WorkbenchActivity.settings),
+               activity: WorkbenchActivity.settings,
+@@ -143,27 +154,15 @@ class WorkbenchActivityRail extends StatelessWidget {
+     );
+   }
+ 
+-  static IconData _iconFor(WorkbenchActivity activity) {
+-    switch (activity) {
+-      case WorkbenchActivity.explorer:
+-        return Icons.folder_copy_outlined;
+-      case WorkbenchActivity.agents:
+-        return Icons.smart_toy_outlined;
+-      case WorkbenchActivity.tools:
+-        return Icons.handyman_outlined;
+-      case WorkbenchActivity.tutorial:
+-        return Icons.menu_book_outlined;
+-      case WorkbenchActivity.settings:
+-        return Icons.settings_outlined;
+-      case WorkbenchActivity.profile:
+-        return Icons.account_circle_outlined;
+-    }
+-  }
++  static IconData _iconFor(WorkbenchActivity activity) => switch (activity) {
++    WorkbenchActivity.explorer => Icons.folder_copy_outlined,
++    WorkbenchActivity.agents => Icons.smart_toy_outlined,
++    WorkbenchActivity.tools => Icons.handyman_outlined,
++    WorkbenchActivity.tutorial => Icons.menu_book_outlined,
++    WorkbenchActivity.settings => Icons.settings_outlined,
++    WorkbenchActivity.profile => Icons.account_circle_outlined,
++  };
+ 
+-  /// 导航条的语义标签。
+-  ///
+-  /// 复用 [StudioLocalizations] 的条目。
+-  /// 资源管理器与设置使用同一套三语文案。
+   static String _labelFor(WorkbenchActivity activity, StudioLocalizations l) {
+     switch (activity) {
+       case WorkbenchActivity.explorer:
+@@ -203,10 +202,6 @@ class WorkbenchActivityRail extends StatelessWidget {
+       : '设置';
+ }
+ 
+-/// 一个 44px 触控目标的图标按钮。
+-///
+-/// 用 [InkWell] 而不是 NavigationRailDestination：后者在展开时会加宽，
+-/// 与固定 52px 的宽度约束冲突。焦点圈交给主题的 `focusColor`。
+ class _RailButton extends StatelessWidget {
+   const _RailButton({
+     super.key,
+@@ -226,42 +221,42 @@ class _RailButton extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+-    return Semantics(
+-      button: true,
+-      selected: selected,
+-      label: label,
+-      child: Tooltip(
+-        message: label,
+-        child: SizedBox(
+-          width: WorkbenchActivityRail.width,
+-          height: WorkbenchActivityRail.touchTarget,
+-          child: Material(
+-            color: Colors.transparent,
+-            child: InkWell(
+-              onTap: () => onPressed(activity),
+-              child: Stack(
+-                alignment: Alignment.center,
+-                children: <Widget>[
+-                  // 选中指示：左侧一条主题色竖条，与 VS Code 一致。
+-                  if (selected)
+-                    Positioned(
+-                      left: 0,
+-                      top: 6,
+-                      bottom: 6,
+-                      child: Container(
+-                        width: 2,
+-                        decoration: BoxDecoration(
+-                          color: scheme.primary,
+-                          borderRadius: BorderRadius.circular(1),
+-                        ),
++    return WorkbenchFocusOutline(
++      child: Semantics(
++        button: true,
++        selected: selected,
++        label: label,
++        child: MouseRegion(
++          cursor: SystemMouseCursors.click,
++          child: Tooltip(
++            message: label,
++            child: SizedBox(
++              width: WorkbenchActivityRail.width,
++              height: WorkbenchActivityRail.touchTarget,
++              child: Material(
++                color: Colors.transparent,
++                child: InkWell(
++                  onTap: () => onPressed(activity),
++                  child: Center(
++                    child: AnimatedContainer(
++                      duration: const Duration(milliseconds: 150),
++                      width: 56,
++                      height: 32,
++                      alignment: Alignment.center,
++                      decoration: BoxDecoration(
++                        color: selected ? scheme.secondaryContainer : null,
++                        borderRadius: BorderRadius.circular(20),
++                      ),
++                      child: Icon(
++                        icon,
++                        size: 24,
++                        color: selected
++                            ? scheme.onSecondaryContainer
++                            : scheme.onSurfaceVariant,
+                       ),
+                     ),
+-                  Icon(
+-                    icon,
+-                    size: 20,
+-                    color: selected ? scheme.primary : scheme.onSurfaceVariant,
+                   ),
+-                ],
++                ),
+               ),
+             ),
+           ),
+@@ -271,6 +266,36 @@ class _RailButton extends StatelessWidget {
+   }
+ }
+ 
++/// Resizable IDE-style sidebar edge. Double-click restores the default width.
++class WorkbenchSidebarDivider extends StatelessWidget {
++  const WorkbenchSidebarDivider({super.key, required this.controller});
++
++  final LargeScreenController controller;
++
++  static const ValueKey<String> dividerKey = ValueKey<String>(
++    'workbench-sidebar-divider',
++  );
++
++  @override
++  Widget build(BuildContext context) => MouseRegion(
++    cursor: SystemMouseCursors.resizeColumn,
++    child: GestureDetector(
++      key: dividerKey,
++      behavior: HitTestBehavior.opaque,
++      onPanUpdate: (details) => controller.setSidebarWidth(
++        controller.sidebarWidth + details.delta.dx,
++      ),
++      onDoubleTap: controller.resetSidebarWidth,
++      child: Center(
++        child: Container(
++          width: 1,
++          color: Theme.of(context).colorScheme.outlineVariant,
++        ),
++      ),
++    ),
++  );
++}
++
+ /// 底部头像按钮：选中即打开账号面板。
+ ///
+ /// 图片缺失或解码失败时退回账号名首字；账号名也没有时退回图标。
+@@ -294,32 +319,37 @@ class _AvatarButton extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+     final initial = _initialOf(accountLabel);
+-    return Semantics(
+-      button: true,
+-      selected: selected,
+-      label: label,
+-      child: Tooltip(
+-        message: label,
+-        child: SizedBox(
+-          width: WorkbenchActivityRail.width,
+-          height: WorkbenchActivityRail.touchTarget,
+-          child: Material(
+-            color: Colors.transparent,
+-            child: InkWell(
+-              onTap: onPressed,
+-              child: Center(
+-                child: Container(
+-                  width: 28,
+-                  height: 28,
+-                  decoration: BoxDecoration(
+-                    shape: BoxShape.circle,
+-                    border: Border.all(
+-                      color: selected ? scheme.primary : scheme.outlineVariant,
++    return WorkbenchFocusOutline(
++      child: Semantics(
++        button: true,
++        selected: selected,
++        label: label,
++        child: Tooltip(
++          message: label,
++          child: SizedBox(
++            width: WorkbenchActivityRail.width,
++            height: WorkbenchActivityRail.touchTarget,
++            child: Material(
++              color: Colors.transparent,
++              child: InkWell(
++                mouseCursor: SystemMouseCursors.click,
++                onTap: onPressed,
++                child: Center(
++                  child: Container(
++                    width: 28,
++                    height: 28,
++                    decoration: BoxDecoration(
++                      shape: BoxShape.circle,
++                      border: Border.all(
++                        color: selected
++                            ? scheme.primary
++                            : scheme.outlineVariant,
++                      ),
++                      color: scheme.surfaceContainerHigh,
+                     ),
+-                    color: scheme.surfaceContainerHigh,
++                    clipBehavior: Clip.antiAlias,
++                    child: _avatarChild(scheme, initial),
+                   ),
+-                  clipBehavior: Clip.antiAlias,
+-                  child: _avatarChild(scheme, initial),
+                 ),
+               ),
+             ),
+@@ -365,58 +395,136 @@ class _AvatarButton extends StatelessWidget {
+   }
+ }
+ 
+-/// 空工作台的欢迎区。
+-///
+-/// 只说明当前没有打开的项目，并给一个打开项目的动作。
+-/// 不放统计数字或仪表盘：那些内容会与项目侧栏重复。
++/// The empty workbench offers existing project commands and recent projects.
+ class WorkbenchWelcome extends StatelessWidget {
+-  const WorkbenchWelcome({super.key, required this.onOpenProject});
++  const WorkbenchWelcome({
++    super.key,
++    required this.onOpenProject,
++    this.onCreateProject,
++    this.onCloneRepository,
++    this.projects = const [],
++    this.onOpenRecent,
++  });
+ 
+-  /// 用户点了「打开项目」。由宿主决定弹选择器还是登记目录。
+   final VoidCallback onOpenProject;
++  final VoidCallback? onCreateProject;
++  final VoidCallback? onCloneRepository;
++  final List<Project> projects;
++  final ValueChanged<Project>? onOpenRecent;
+ 
+   @override
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
+     final l = StudioLocalizations.of(context);
+-    return Center(
+-      child: SingleChildScrollView(
+-        padding: const EdgeInsets.all(24),
+-        child: ConstrainedBox(
+-          constraints: const BoxConstraints(maxWidth: 360),
+-          child: Column(
+-            mainAxisSize: MainAxisSize.min,
+-            children: <Widget>[
+-              Icon(
+-                Icons.space_dashboard_outlined,
+-                size: 40,
+-                color: theme.colorScheme.onSurfaceVariant,
+-              ),
+-              const SizedBox(height: 16),
+-              Text(
+-                l.noProjects,
+-                textAlign: TextAlign.center,
+-                style: theme.textTheme.titleMedium,
+-              ),
+-              const SizedBox(height: 8),
+-              Text(
+-                l.isEnglish
+-                    ? 'Choose a folder or create a project to start editing.'
+-                    : l.isTraditionalChinese
+-                    ? '選擇資料夾或建立專案後即可開始編輯。'
+-                    : '选择文件夹或新建项目后即可开始编辑。',
+-                textAlign: TextAlign.center,
+-                style: theme.textTheme.bodySmall?.copyWith(
+-                  color: theme.colorScheme.onSurfaceVariant,
++    final recent = [...projects]
++      ..sort((a, b) => b.lastOpenedAt.compareTo(a.lastOpenedAt));
++    Widget heading(String text) => Padding(
++      padding: const EdgeInsets.only(bottom: 12),
++      child: Text(text, style: theme.textTheme.titleMedium),
++    );
++    Widget action(
++      String label,
++      IconData icon,
++      String keys,
++      VoidCallback? onPressed,
++    ) => Tooltip(
++      message: '$label (${shortcutLabel(keys)})',
++      child: TextButton(
++        style: TextButton.styleFrom(alignment: Alignment.centerLeft),
++        onPressed: onPressed,
++        child: Row(
++          children: [
++            Icon(icon, size: 20),
++            const SizedBox(width: 12),
++            Expanded(child: Text(label)),
++            if (MediaQuery.sizeOf(context).width >= 600) ...[
++              const SizedBox(width: 8),
++              Text(shortcutLabel(keys), style: theme.textTheme.labelSmall),
++            ],
++          ],
++        ),
++      ),
++    );
++    final start = Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        heading(
++          l.isEnglish
++              ? 'Start'
++              : l.isTraditionalChinese
++              ? '開始'
++              : '开始',
++        ),
++        action(
++          l.createProject,
++          Icons.create_new_folder_outlined,
++          'Ctrl+Shift+N',
++          onCreateProject,
++        ),
++        action(
++          l.addExistingProject,
++          Icons.folder_open_outlined,
++          'Ctrl+O',
++          onOpenProject,
++        ),
++        if (onCloneRepository != null)
++          action(
++            l.isEnglish ? 'Clone repository' : '克隆仓库',
++            Icons.cloud_download_outlined,
++            'Ctrl+Shift+G',
++            onCloneRepository,
++          ),
++      ],
++    );
++    final history = Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        heading(
++          l.isEnglish
++              ? 'Recent projects'
++              : l.isTraditionalChinese
++              ? '最近專案'
++              : '最近项目',
++        ),
++        if (recent.isEmpty)
++          Text(l.noProjects, style: theme.textTheme.bodySmall)
++        else
++          for (final project in recent.take(8))
++            TextButton(
++              style: TextButton.styleFrom(alignment: Alignment.centerLeft),
++              onPressed: onOpenRecent == null
++                  ? null
++                  : () => onOpenRecent!(project),
++              child: Tooltip(
++                message: project.path,
++                child: Text(
++                  project.name,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
+                 ),
+               ),
+-              const SizedBox(height: 20),
+-              FilledButton.icon(
+-                onPressed: onOpenProject,
+-                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+-                label: Text(l.addExistingProject),
+-              ),
+-            ],
++            ),
++      ],
++    );
++    return LayoutBuilder(
++      builder: (context, constraints) => Center(
++        child: SingleChildScrollView(
++          padding: const EdgeInsets.all(24),
++          child: ConstrainedBox(
++            constraints: const BoxConstraints(maxWidth: 880),
++            child: constraints.maxWidth >= 600
++                ? Row(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Expanded(child: start),
++                      const SizedBox(width: 48),
++                      Expanded(child: history),
++                    ],
++                  )
++                : Column(
++                    crossAxisAlignment: CrossAxisAlignment.stretch,
++                    children: [start, const SizedBox(height: 32), history],
++                  ),
+           ),
+         ),
+       ),
+diff --git a/lib/shell/workbench_explorer.dart b/lib/shell/workbench_explorer.dart
+index 28a29e3fd10b3192ea8b284d33316c447d47b94c..67e210c38cb705fa219e52bd2f8b0ba89ea04c7d 100644
+--- a/lib/shell/workbench_explorer.dart
++++ b/lib/shell/workbench_explorer.dart
+@@ -1,6 +1,13 @@
++import 'dart:io' show Platform;
++
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
+ 
+ import '../i18n/studio_localizations.dart';
++import '../models/project.dart';
++import '../services/app_paths.dart';
++import 'shortcut_label.dart';
++import 'workbench_theme.dart';
+ import 'large_screen_controller.dart';
+ 
+ /// Two retained pages in the shell's single Explorer sidebar slot.
+@@ -108,24 +115,27 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+                 child: Column(
+                   crossAxisAlignment: CrossAxisAlignment.stretch,
+                   children: [
+-                    Row(
+-                      children: [
+-                        IconButton(
+-                          key: WorkbenchExplorer.backKey,
+-                          tooltip: projectsLabel,
+-                          onPressed: widget.controller.showProjects,
+-                          icon: const Icon(Icons.arrow_back),
+-                        ),
+-                        Expanded(
+-                          child: Text(
+-                            widget.projectName ?? '',
+-                            maxLines: 1,
+-                            overflow: TextOverflow.ellipsis,
+-                            style: Theme.of(context).textTheme.titleSmall,
++                    SizedBox(
++                      height: AppPaths.isDesktop ? 40 : 48,
++                      child: Row(
++                        children: [
++                          IconButton(
++                            key: WorkbenchExplorer.backKey,
++                            tooltip: projectsLabel,
++                            onPressed: widget.controller.showProjects,
++                            icon: const Icon(Icons.arrow_back),
+                           ),
+-                        ),
+-                        const SizedBox(width: 8),
+-                      ],
++                          Expanded(
++                            child: Text(
++                              widget.projectName ?? '',
++                              maxLines: 1,
++                              overflow: TextOverflow.ellipsis,
++                              style: Theme.of(context).textTheme.titleSmall,
++                            ),
++                          ),
++                          const SizedBox(width: 8),
++                        ],
++                      ),
+                     ),
+                     const Divider(height: 1),
+                     Expanded(child: widget.files),
+@@ -162,3 +172,296 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+     ),
+   );
+ }
++
++/// Workbench-only project chrome. Phone Home continues to render its own UI.
++class WorkbenchProjectsPanel extends StatelessWidget {
++  const WorkbenchProjectsPanel({
++    super.key,
++    required this.searchController,
++    required this.onSearchChanged,
++    required this.onCreate,
++    required this.body,
++    required this.filterItems,
++    required this.moreItems,
++    required this.progress,
++    this.onOpenFolder,
++    this.onClone,
++  });
++
++  final TextEditingController searchController;
++  final ValueChanged<String> onSearchChanged;
++  final VoidCallback onCreate;
++  final VoidCallback? onOpenFolder;
++  final VoidCallback? onClone;
++  final List<Widget> filterItems;
++  final List<Widget> moreItems;
++  final Widget body;
++  final Widget progress;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final l = StudioLocalizations.of(context);
++    final desktop = AppPaths.isDesktop;
++    final target = desktop ? 32.0 : 48.0;
++    Widget button(
++      IconData icon,
++      String label,
++      String keys,
++      VoidCallback? action,
++    ) => IconButton(
++      tooltip: '$label (${shortcutLabel(keys)})',
++      constraints: BoxConstraints.tightFor(width: target, height: target),
++      padding: EdgeInsets.zero,
++      iconSize: 18,
++      onPressed: action,
++      icon: Icon(icon),
++    );
++    MenuSerializableShortcut shortcut(
++      LogicalKeyboardKey key, {
++      bool shift = false,
++    }) => SingleActivator(
++      key,
++      control: !Platform.isMacOS,
++      meta: Platform.isMacOS,
++      shift: shift,
++    );
++    Widget menu(IconData icon, String label, List<Widget> items) => MenuAnchor(
++      menuChildren: items,
++      builder: (context, controller, _) => IconButton(
++        tooltip: label,
++        constraints: BoxConstraints.tightFor(width: target, height: target),
++        padding: EdgeInsets.zero,
++        iconSize: 18,
++        onPressed: () =>
++            controller.isOpen ? controller.close() : controller.open(),
++        icon: Icon(icon),
++      ),
++    );
++    return Material(
++      color: theme.colorScheme.surfaceContainerLow,
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          SizedBox(
++            key: const ValueKey('workbench-project-header'),
++            height: desktop ? 40 : 48,
++            child: Row(
++              children: [
++                const SizedBox(width: 12),
++                Expanded(
++                  child: Text(
++                    l.isEnglish
++                        ? 'Projects'
++                        : l.isTraditionalChinese
++                        ? '專案'
++                        : '项目',
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: theme.textTheme.titleSmall,
++                  ),
++                ),
++                button(
++                  Icons.create_new_folder_outlined,
++                  l.createProject,
++                  'Ctrl+Shift+N',
++                  onCreate,
++                ),
++                if (onOpenFolder != null)
++                  button(
++                    Icons.folder_open_outlined,
++                    l.addExistingProject,
++                    'Ctrl+O',
++                    onOpenFolder,
++                  ),
++                if (onClone != null)
++                  button(
++                    Icons.cloud_download_outlined,
++                    l.isEnglish ? 'Clone repository' : '克隆仓库',
++                    'Ctrl+Shift+G',
++                    onClone,
++                  ),
++                menu(Icons.more_vert, l.more, [
++                  MenuItemButton(
++                    shortcut: shortcut(LogicalKeyboardKey.keyN, shift: true),
++                    onPressed: onCreate,
++                    child: Text(l.createProject),
++                  ),
++                  if (onOpenFolder != null)
++                    MenuItemButton(
++                      shortcut: shortcut(LogicalKeyboardKey.keyO),
++                      onPressed: onOpenFolder,
++                      child: Text(l.addExistingProject),
++                    ),
++                  if (onClone != null)
++                    MenuItemButton(
++                      shortcut: shortcut(LogicalKeyboardKey.keyG, shift: true),
++                      onPressed: onClone,
++                      child: Text(l.isEnglish ? 'Clone repository' : '克隆仓库'),
++                    ),
++                  const Divider(),
++                  ...moreItems,
++                ]),
++              ],
++            ),
++          ),
++          Padding(
++            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
++            child: Row(
++              children: [
++                Expanded(
++                  child: SizedBox(
++                    height: desktop ? 36 : 48,
++                    child: TextField(
++                      key: const ValueKey('workbench-project-search'),
++                      controller: searchController,
++                      onChanged: onSearchChanged,
++                      style: theme.textTheme.bodySmall,
++                      decoration: InputDecoration(
++                        hintText: l.searchProjectHint,
++                        isDense: true,
++                        filled: true,
++                        fillColor: theme.colorScheme.surfaceContainerHigh,
++                        prefixIcon: const Icon(Icons.search, size: 18),
++                        prefixIconConstraints: const BoxConstraints(
++                          minWidth: 32,
++                        ),
++                        contentPadding: const EdgeInsets.symmetric(
++                          horizontal: 8,
++                          vertical: 8,
++                        ),
++                        border: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(6),
++                          borderSide: BorderSide.none,
++                        ),
++                        enabledBorder: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(6),
++                          borderSide: BorderSide.none,
++                        ),
++                        focusedBorder: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(6),
++                          borderSide: BorderSide(
++                            color: theme.colorScheme.primary,
++                          ),
++                        ),
++                      ),
++                    ),
++                  ),
++                ),
++                menu(
++                  Icons.filter_list,
++                  l.isEnglish ? 'Filter projects' : '筛选项目',
++                  filterItems,
++                ),
++              ],
++            ),
++          ),
++          progress,
++          Expanded(child: body),
++        ],
++      ),
++    );
++  }
++}
++
++/// A flat, compact row with an independent menu for project operations.
++class WorkbenchProjectRow extends StatelessWidget {
++  const WorkbenchProjectRow({
++    super.key,
++    required this.project,
++    required this.current,
++    required this.opened,
++    required this.onOpen,
++    required this.menuItems,
++  });
++
++  final Project project;
++  final bool current;
++  final bool opened;
++  final VoidCallback onOpen;
++  final List<Widget> menuItems;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final desktop = AppPaths.isDesktop;
++    final foreground = current ? scheme.onSecondaryContainer : scheme.onSurface;
++    return WorkbenchFocusOutline(
++      child: Semantics(
++        selected: current,
++        child: SizedBox(
++          key: ValueKey('workbench-project-${project.id}'),
++          height: desktop ? 32 : 48,
++          child: Material(
++            color: current
++                ? scheme.secondaryContainer
++                : scheme.surfaceContainerLow,
++            child: Row(
++              crossAxisAlignment: CrossAxisAlignment.stretch,
++              children: [
++                Expanded(
++                  child: Tooltip(
++                    message: project.path,
++                    child: InkWell(
++                      onTap: onOpen,
++                      mouseCursor: SystemMouseCursors.click,
++                      child: Padding(
++                        padding: const EdgeInsets.symmetric(horizontal: 10),
++                        child: Row(
++                          children: [
++                            Icon(
++                              project.isCloud
++                                  ? Icons.cloud_outlined
++                                  : Icons.folder_outlined,
++                              size: 18,
++                              color: foreground,
++                            ),
++                            const SizedBox(width: 8),
++                            Expanded(
++                              child: Text(
++                                project.name,
++                                maxLines: 1,
++                                overflow: TextOverflow.ellipsis,
++                                style: theme.textTheme.bodySmall?.copyWith(
++                                  color: foreground,
++                                ),
++                              ),
++                            ),
++                            if (opened)
++                              Icon(
++                                current
++                                    ? Icons.radio_button_checked
++                                    : Icons.circle_outlined,
++                                size: 12,
++                                color: foreground,
++                              ),
++                          ],
++                        ),
++                      ),
++                    ),
++                  ),
++                ),
++                MenuAnchor(
++                  menuChildren: menuItems,
++                  builder: (context, controller, _) => IconButton(
++                    tooltip: StudioLocalizations.of(context).more,
++                    constraints: BoxConstraints.tightFor(
++                      width: desktop ? 28 : 48,
++                      height: desktop ? 32 : 48,
++                    ),
++                    padding: EdgeInsets.zero,
++                    icon: Icon(Icons.more_horiz, size: 16, color: foreground),
++                    onPressed: () => controller.isOpen
++                        ? controller.close()
++                        : controller.open(),
++                  ),
++                ),
++              ],
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/shell/workbench_theme.dart b/lib/shell/workbench_theme.dart
+index e5eef6896f25cb59deaf1322998ef5f6871f7457..5cb23eb827a232a0de66370da9c029486bcf4b43 100644
+--- a/lib/shell/workbench_theme.dart
++++ b/lib/shell/workbench_theme.dart
+@@ -1,16 +1,146 @@
+ import 'package:flutter/material.dart';
+ 
++import '../layout/app_form_factor.dart';
++
+ /// Workbench presentation can evolve without changing the phone theme.
+ abstract final class WorkbenchTheme {
+-  static ThemeData from(ThemeData base) => base.copyWith(
+-    // Tablet touch targets remain as generous as phone controls.
+-    visualDensity: VisualDensity.standard,
+-    materialTapTargetSize: MaterialTapTargetSize.padded,
+-    scaffoldBackgroundColor: base.colorScheme.surface,
+-    appBarTheme: base.appBarTheme.copyWith(
+-      backgroundColor: base.colorScheme.surface,
+-      surfaceTintColor: Colors.transparent,
+-      scrolledUnderElevation: 0,
++  static ThemeData from(ThemeData base, {required AppFormFactor formFactor}) {
++    final desktop = formFactor == AppFormFactor.desktop;
++    final scheme = base.colorScheme;
++    return base.copyWith(
++      visualDensity: desktop ? VisualDensity.compact : VisualDensity.standard,
++      materialTapTargetSize: desktop
++          ? MaterialTapTargetSize.shrinkWrap
++          : MaterialTapTargetSize.padded,
++      scaffoldBackgroundColor: scheme.surface,
++      appBarTheme: base.appBarTheme.copyWith(
++        backgroundColor: scheme.surface,
++        surfaceTintColor: Colors.transparent,
++        scrolledUnderElevation: 0,
++      ),
++      navigationRailTheme: base.navigationRailTheme.copyWith(
++        backgroundColor: scheme.surfaceContainerLow,
++        indicatorColor: scheme.secondaryContainer,
++        indicatorShape: const StadiumBorder(),
++        minWidth: 80,
++        minExtendedWidth: 80,
++        labelType: NavigationRailLabelType.all,
++        useIndicator: true,
++        selectedIconTheme: IconThemeData(color: scheme.onSecondaryContainer),
++        unselectedIconTheme: IconThemeData(color: scheme.onSurfaceVariant),
++        selectedLabelTextStyle: base.textTheme.labelMedium?.copyWith(
++          color: scheme.onSurface,
++        ),
++        unselectedLabelTextStyle: base.textTheme.labelMedium?.copyWith(
++          color: scheme.onSurfaceVariant,
++        ),
++      ),
++      hoverColor: scheme.onSurface.withValues(alpha: 0.08),
++      focusColor: scheme.onSurface.withValues(alpha: 0.10),
++      highlightColor: scheme.onSurface.withValues(alpha: 0.10),
++      menuButtonTheme: MenuButtonThemeData(
++        style: ButtonStyle(
++          // Preserve exact IDE row height instead of applying compact density
++          // a second time to the explicitly sized menu items.
++          visualDensity: VisualDensity.standard,
++          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++          minimumSize: WidgetStatePropertyAll(Size(64, desktop ? 32 : 48)),
++          overlayColor: WidgetStateProperty.resolveWith((states) {
++            if (states.contains(WidgetState.pressed) ||
++                states.contains(WidgetState.focused)) {
++              return scheme.onSurface.withValues(alpha: 0.10);
++            }
++            if (states.contains(WidgetState.hovered)) {
++              return scheme.onSurface.withValues(alpha: 0.08);
++            }
++            return null;
++          }),
++          side: WidgetStateProperty.resolveWith(
++            (states) => states.contains(WidgetState.focused)
++                ? BorderSide(color: scheme.primary)
++                : BorderSide.none,
++          ),
++        ),
++      ),
++      menuTheme: MenuThemeData(
++        style: MenuStyle(
++          backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainer),
++          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
++          padding: const WidgetStatePropertyAll(
++            EdgeInsets.symmetric(vertical: 4),
++          ),
++          shape: WidgetStatePropertyAll(
++            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
++          ),
++        ),
++      ),
++      popupMenuTheme: base.popupMenuTheme.copyWith(
++        color: scheme.surfaceContainer,
++        surfaceTintColor: Colors.transparent,
++        menuPadding: const EdgeInsets.symmetric(vertical: 4),
++        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
++      ),
++      tooltipTheme: base.tooltipTheme.copyWith(
++        waitDuration: const Duration(milliseconds: 500),
++        decoration: BoxDecoration(
++          color: scheme.inverseSurface,
++          borderRadius: BorderRadius.circular(8),
++        ),
++        textStyle: base.textTheme.bodySmall?.copyWith(
++          color: scheme.onInverseSurface,
++        ),
++      ),
++      snackBarTheme: base.snackBarTheme.copyWith(
++        behavior: SnackBarBehavior.floating,
++        width: 480,
++        backgroundColor: scheme.inverseSurface,
++        contentTextStyle: base.textTheme.bodyMedium?.copyWith(
++          color: scheme.onInverseSurface,
++        ),
++        actionTextColor: scheme.inversePrimary,
++        closeIconColor: scheme.onInverseSurface,
++      ),
++    );
++  }
++}
++
++/// Outlines custom workbench controls without adding a second tab stop.
++/// Native MD3 controls keep their own focus handling and state layers.
++class WorkbenchFocusOutline extends StatefulWidget {
++  const WorkbenchFocusOutline({super.key, required this.child});
++
++  final Widget child;
++
++  @override
++  State<WorkbenchFocusOutline> createState() => _WorkbenchFocusOutlineState();
++}
++
++class _WorkbenchFocusOutlineState extends State<WorkbenchFocusOutline> {
++  bool _focused = false;
++
++  @override
++  Widget build(BuildContext context) => Focus(
++    canRequestFocus: false,
++    skipTraversal: true,
++    onFocusChange: (value) => setState(() => _focused = value),
++    child: Stack(
++      fit: StackFit.passthrough,
++      children: [
++        widget.child,
++        if (_focused)
++          Positioned.fill(
++            child: IgnorePointer(
++              child: DecoratedBox(
++                key: const ValueKey('workbench-focus-outline'),
++                decoration: BoxDecoration(
++                  border: Border.all(
++                    color: Theme.of(context).colorScheme.primary,
++                  ),
++                ),
++              ),
++            ),
++          ),
++      ],
+     ),
+   );
+ }
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index 0851ac84e8421a08571f59ced80cd5533bf9193e..9cde6f131bec3117db82def529af6467946305a0 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -192,7 +192,9 @@ void main() {
+   }
+ 
+   Future<void> project(WidgetTester tester, String name) async {
+-    await tester.tap(find.text(name).first);
++    await tester.tap(
++      find.descendant(of: find.byType(HomeTab), matching: find.text(name)),
++    );
+     for (var i = 0; i < 12; i++) {
+       await tester.runAsync(
+         () => Future<void>.delayed(const Duration(milliseconds: 10)),
+@@ -352,6 +354,72 @@ void main() {
+     expect(tester.state(find.byType(HomeTab)), same(home));
+   });
+ 
++  testWidgets(
++    'shell notices stay centered inside the central area at each width',
++    (tester) async {
++      final fixture = await mount(tester);
++      final home = tester.element(find.byType(HomeTab));
++      final messenger = ScaffoldMessenger.of(home);
++      final center = find.byKey(const ValueKey('workbench-center-scaffold'));
++      for (final width in [1200.0, 1024.0, 500.0]) {
++        tester.view.physicalSize = Size(width, 850);
++        await tester.pump();
++        fixture.layout.select(WorkbenchActivity.explorer, toggle: false);
++        await tester.pump();
++        messenger.showSnackBar(const SnackBar(content: Text('Central notice')));
++        await tester.pump();
++        await tester.pump(const Duration(milliseconds: 300));
++        final centralRect = tester.getRect(center);
++        final noticeRect = tester.getRect(find.byType(SnackBar));
++        expect(noticeRect.center.dx, closeTo(centralRect.center.dx, 1));
++        expect(noticeRect.width, lessThanOrEqualTo(480));
++        expect(noticeRect.left, greaterThanOrEqualTo(centralRect.left));
++        expect(noticeRect.right, lessThanOrEqualTo(centralRect.right));
++        messenger.removeCurrentSnackBar();
++        await tester.pump();
++      }
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets(
++    'workbench project search stays visible and filters the retained panel',
++    (tester) async {
++      await mount(tester);
++      final home = find.byType(HomeTab);
++      final field = find.descendant(
++        of: home,
++        matching: find.byKey(const ValueKey('workbench-project-search')),
++      );
++      expect(field, findsOneWidget);
++      expect(
++        find.descendant(of: home, matching: find.byType(AppBar)),
++        findsNothing,
++      );
++      expect(
++        find.descendant(of: home, matching: find.byType(TabBar)),
++        findsNothing,
++      );
++      await tester.enterText(field, 'Alpha');
++      await tester.pump();
++      expect(
++        find.descendant(of: home, matching: find.text('Alpha')),
++        findsOneWidget,
++      );
++      expect(
++        find.descendant(of: home, matching: find.text('Beta')),
++        findsNothing,
++      );
++      await tester.enterText(field, '');
++      await tester.pump();
++      expect(
++        find.descendant(of: home, matching: find.text('Beta')),
++        findsOneWidget,
++      );
++      expect(tester.takeException(), isNull);
++    },
++  );
++
+   testWidgets(
+     'shell shortcuts select rather than toggle and use platform modifier',
+     (tester) async {
+diff --git a/test/retained_editor_test.dart b/test/retained_editor_test.dart
+index f1ec2ca4c34fa9d8c4288bb511d5e05f2d8d2247..7fb2659418f201db4817f06cdeaf7f04c719e375 100644
+--- a/test/retained_editor_test.dart
++++ b/test/retained_editor_test.dart
+@@ -28,6 +28,7 @@ import 'package:qfli_studio_core/store/auth_store.dart';
+ import 'package:qfli_studio_core/store/project_store.dart';
+ import 'package:qfli_studio_core/store/settings_store.dart';
+ import 'package:qfli_studio_core/shell/large_screen_workbench.dart';
++import 'package:qfli_studio_core/shell/workbench_explorer.dart';
+ import 'package:qfli_studio_core/shell/workbench_chrome.dart';
+ import 'package:qfli_studio_core/editor/file_explorer.dart';
+ import 'package:re_editor/re_editor.dart';
+@@ -89,7 +90,8 @@ void main() {
+       await tester.pump();
+       expect(open.dirty, isTrue);
+ 
+-      await _menu(tester, 'terminal');
++      // R8/R9: use the large-screen terminal command instead of QuickBar.
++      await _workbenchTerminal(tester);
+       final terminalFinder = find.byType(TerminalPane);
+       final terminal = tester.state<TerminalPaneState>(terminalFinder);
+       final inputFinder = find.descendant(
+@@ -111,13 +113,14 @@ void main() {
+         await _pumpFrames(tester);
+       }
+ 
+-      await select(WorkbenchActivity.files);
++      // R10–R14/V2, design §11.2: one Explorer replaces Projects/Files.
++      // A project open already selects Files. Return through its back button.
+       expect(find.byType(FileExplorer), findsOneWidget);
+       final tree = tester.state(find.byType(FileExplorer));
+       await select(WorkbenchActivity.agents);
+       expect(find.byType(FileExplorer), findsNothing);
+       expect(_editor(tester), same(alpha));
+-      await select(WorkbenchActivity.projects);
++      await select(WorkbenchActivity.explorer);
+       await fixture.open(tester, 'Beta');
+       expect(rootNavigator.canPop(), isFalse);
+       expect(shell.editors.sessionInfos, hasLength(2));
+@@ -143,7 +146,7 @@ void main() {
+       );
+       expect(input.controller!.text, 'unfinished local command');
+ 
+-      await select(WorkbenchActivity.files);
++      // R13: returning from Profile restores the exact retained Files panel.
+       expect(tester.state(find.byType(FileExplorer)), same(tree));
+       tester.view.physicalSize = const Size(500, 800);
+       await _pumpFrames(tester);
+@@ -151,12 +154,12 @@ void main() {
+       expect(find.byType(HomePage), findsNothing);
+       expect(tester.state(find.byType(FileExplorer)), same(tree));
+       // Toggle the same sidebar away to interact with the narrow center.
+-      await select(WorkbenchActivity.files);
++      await select(WorkbenchActivity.explorer);
+       expect(find.byType(FileExplorer), findsNothing);
+       expect(_editor(tester), same(alpha));
+       tester.view.physicalSize = const Size(1200, 850);
+       await _pumpFrames(tester);
+-      await select(WorkbenchActivity.files);
++      await select(WorkbenchActivity.explorer);
+       expect(tester.state(find.byType(FileExplorer)), same(tree));
+       expect(shell.editors.sessionInfos, hasLength(2));
+       expect(open.controller.selection, selection);
+@@ -167,7 +170,7 @@ void main() {
+       );
+       expect(avatar.left, lessThan(WorkbenchActivityRail.width));
+       expect(avatar.bottom, greaterThan(800));
+-      await _menu(tester, 'close_editor');
++      await _workbenchClose(tester);
+       expect(find.text('有未保存的更改'), findsOneWidget);
+       await tester.tap(find.text('丢弃'));
+       await _pumpIoUntil(tester, () => !alphaState.mounted);
+@@ -803,6 +806,49 @@ EditorController _editor(WidgetTester tester) =>
+             .editor
+         as EditorController;
+ 
++Future<void> _workbenchTerminal(WidgetTester tester) async {
++  final editor = find.byType(EditorPage);
++  final panel = find.descendant(
++    of: editor,
++    matching: find.byKey(const ValueKey('workbench-panel-terminal')),
++  );
++  if (panel.evaluate().isNotEmpty) {
++    await tester.tap(panel);
++  } else {
++    // The isolated Pi A branch still has the pre-Pi B editor.
++    await tester.tap(
++      find.descendant(
++        of: editor,
++        matching: find.byKey(const ValueKey('quick-terminal')),
++      ),
++    );
++  }
++  await _pumpFrames(tester);
++}
++
++Future<void> _workbenchClose(WidgetTester tester) async {
++  final editor = find.byType(EditorPage);
++  final anchor = find.byKey(const ValueKey('workbench-editor-more'));
++  if (anchor.evaluate().isNotEmpty) {
++    await tester.tap(anchor);
++    await _pumpFrames(tester);
++    await tester.tap(find.byKey(const ValueKey('workbench-menu-close_editor')));
++  } else {
++    // Same production command, old PopupMenuButton on the isolated branch.
++    await tester.tap(
++      find.descendant(of: editor, matching: find.byTooltip('更多')),
++    );
++    await _pumpFrames(tester);
++    await tester.tap(
++      find.byWidgetPredicate(
++        (widget) =>
++            widget is PopupMenuItem<String> && widget.value == 'close_editor',
++      ),
++    );
++  }
++  await _pumpFrames(tester);
++}
++
+ Future<void> _tab(WidgetTester tester, IconData icon) async {
+   await tester.tap(find.byIcon(icon).first);
+   await _pumpFrames(tester);
+@@ -1022,7 +1068,22 @@ class _Fixture {
+   }
+ 
+   Future<void> open(WidgetTester tester, String name) async {
+-    await tester.tap(find.text(name));
++    if (find.byType(LargeScreenWorkbench).evaluate().isNotEmpty) {
++      // R12/R14, design §11.2: only large-screen fixture navigation changes.
++      final back = find.byKey(WorkbenchExplorer.backKey);
++      if (back.evaluate().isNotEmpty) {
++        await tester.tap(back);
++        await _pumpFrames(tester);
++      }
++      final projects = find.descendant(
++        of: find.byType(HomeTab),
++        matching: find.text(name),
++      );
++      await tester.ensureVisible(projects);
++      await tester.tap(projects);
++    } else {
++      await tester.tap(find.text(name));
++    }
+     final editors = find.byType(EditorPage);
+     await _pumpIoUntil(
+       tester,
+diff --git a/test/workbench_chrome_test.dart b/test/workbench_chrome_test.dart
+index 1acfc0d70f26ea102e7eef07d76b4f0fc2861010..bda4230bf9a9e9029c3346eb9d8cba25295fd1be 100644
+--- a/test/workbench_chrome_test.dart
++++ b/test/workbench_chrome_test.dart
+@@ -2,267 +2,252 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_localizations/flutter_localizations.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:qfli_studio_core/i18n/studio_localizations.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/shell/shortcut_label.dart';
+ import 'package:qfli_studio_core/shell/workbench_chrome.dart';
++import 'package:qfli_studio_core/shell/workbench_theme.dart';
+ 
+-/// 用真实主题与本地化层包住被测组件。
+-///
+-/// 导航条取值来自 [StudioLocalizations] 与 `Theme.of(context)`，
+-/// 裸 MaterialApp 也够用，但显式带上本地化委托才与线上渲染一致。
+ Widget _host(
+   Widget child, {
+   Locale locale = const Locale('en'),
+-  Size size = const Size(400, 800),
+-}) {
+-  return MaterialApp(
+-    locale: locale,
+-    localizationsDelegates: const <LocalizationsDelegate<dynamic>>[
+-      StudioLocalizations.delegate,
+-      GlobalMaterialLocalizations.delegate,
+-      GlobalWidgetsLocalizations.delegate,
+-      GlobalCupertinoLocalizations.delegate,
+-    ],
+-    supportedLocales: StudioLocalizations.supportedLocales,
+-    home: Scaffold(
+-      body: MediaQuery(
+-        data: MediaQueryData(size: size),
+-        // 真正约束尺寸：只改 MediaQuery 数据不会限制布局，
+-        // 窄高场景就测不到溢出。
+-        child: Align(
+-          alignment: Alignment.centerLeft,
+-          child: SizedBox(
+-            width: size.width,
+-            height: size.height,
+-            child: Align(alignment: Alignment.centerLeft, child: child),
+-          ),
++  Size size = const Size(800, 600),
++  double textScale = 1,
++}) => MaterialApp(
++  locale: locale,
++  localizationsDelegates: const [
++    StudioLocalizations.delegate,
++    GlobalMaterialLocalizations.delegate,
++    GlobalWidgetsLocalizations.delegate,
++    GlobalCupertinoLocalizations.delegate,
++  ],
++  supportedLocales: StudioLocalizations.supportedLocales,
++  theme: WorkbenchTheme.from(
++    ThemeData(useMaterial3: true),
++    formFactor: AppFormFactor.desktop,
++  ),
++  home: Scaffold(
++    body: MediaQuery(
++      data: MediaQueryData(
++        size: size,
++        textScaler: TextScaler.linear(textScale),
++      ),
++      child: Align(
++        alignment: Alignment.centerLeft,
++        child: SizedBox(
++          width: size.width,
++          height: size.height,
++          child: Align(alignment: Alignment.centerLeft, child: child),
+         ),
+       ),
+     ),
+-  );
+-}
++  ),
++);
+ 
+ Future<void> _pump(WidgetTester tester, Widget child) async {
+   await tester.pumpWidget(child);
+-  // StudioLocalizations loads asynchronously before the route is built.
+   await tester.pumpAndSettle();
+ }
+ 
+-/// 记录回调的轻量宿主：把点击结果收进 [tapped]，不自己改选中态。
+-class _Recorder {
+-  final List<WorkbenchActivity> tapped = <WorkbenchActivity>[];
+-
+-  void call(WorkbenchActivity activity) => tapped.add(activity);
+-}
+-
+ void main() {
+-  group('WorkbenchActivityRail', () {
+-    testWidgets('每个图标点击都回传自己的枚举值', (tester) async {
+-      final recorder = _Recorder();
++  // R10/R21, V2: migrate separate Projects/Files and 52dp legacy assertions
++  // to the single labeled 80dp MD3 Explorer destination (design §11.2).
++  group('WorkbenchActivityRail MD3', () {
++    testWidgets('four native destinations and two bottom controls dispatch', (
++      tester,
++    ) async {
++      final tapped = <WorkbenchActivity>[];
+       await _pump(
+         tester,
+         _host(
+           WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: recorder.call,
++            selected: WorkbenchActivity.explorer,
++            onSelected: tapped.add,
++            accountLabel: 'Ada',
+           ),
+         ),
+       );
+-
+-      // 顶部三块主要去处逐个点过去。
+-      for (final activity in WorkbenchActivityRail.primary) {
++      for (final activity in [
++        ...WorkbenchActivityRail.primary,
++        ...WorkbenchActivityRail.secondary,
++      ]) {
+         await tester.tap(
+           find.byKey(WorkbenchActivityRail.activityKey(activity)),
+         );
+         await tester.pump();
+       }
+-
+-      expect(recorder.tapped, <WorkbenchActivity>[
+-        WorkbenchActivity.projects,
+-        WorkbenchActivity.files,
+-        WorkbenchActivity.agents,
+-      ]);
+-    });
+-
+-    testWidgets('底部头像回传 profile，设置回传 settings', (tester) async {
+-      final recorder = _Recorder();
+-      await _pump(
+-        tester,
+-        _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: recorder.call,
+-            accountLabel: 'Ada',
+-          ),
+-        ),
+-      );
+-
+-      await tester.tap(find.byKey(WorkbenchActivityRail.avatarKey));
+-      await tester.pump();
+       await tester.tap(
+         find.byKey(
+           WorkbenchActivityRail.activityKey(WorkbenchActivity.settings),
+         ),
+       );
+-      await tester.pump();
+-
+-      expect(recorder.tapped, <WorkbenchActivity>[
+-        WorkbenchActivity.profile,
+-        WorkbenchActivity.settings,
+-      ]);
++      await tester.tap(find.byKey(WorkbenchActivityRail.avatarKey));
++      expect(tapped, WorkbenchActivity.values);
++      expect(find.byType(NavigationRail), findsOneWidget);
++      expect(WorkbenchActivity.values, hasLength(6));
++      expect(find.text('Explorer'), findsOneWidget);
++      expect(find.text('Files'), findsNothing);
++      expect(find.text('All projects'), findsNothing);
+     });
+ 
+-    testWidgets('选中项在语义树里报告 selected，其余不报告', (tester) async {
+-      final semantics = tester.ensureSemantics();
+-
+-      await _pump(
+-        tester,
+-        _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.files,
+-            onSelected: _Recorder().call,
++    testWidgets(
++      'selection follows the callback and repeating remains actionable',
++      (tester) async {
++        var selected = WorkbenchActivity.explorer;
++        var calls = 0;
++        await _pump(
++          tester,
++          _host(
++            StatefulBuilder(
++              builder: (context, setState) => WorkbenchActivityRail(
++                selected: selected,
++                onSelected: (value) => setState(() {
++                  selected = value;
++                  calls++;
++                }),
++              ),
++            ),
+           ),
+-        ),
+-      );
+-
+-      // 选中项与未选中项都用 Semantics 暴露 selected 标志。
+-      // 用 isSemantics（子集匹配）而不是完全匹配：Tooltip 与 InkWell
+-      // 会补上自己的语义条目，严格匹配会在无关字段上误报。
+-      expect(
+-        tester.getSemantics(
++        );
++        expect(
++          tester
++              .widget<NavigationRail>(find.byType(NavigationRail))
++              .selectedIndex,
++          0,
++        );
++        await tester.tap(
+           find.byKey(
+-            WorkbenchActivityRail.activityKey(WorkbenchActivity.files),
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.agents),
+           ),
+-        ),
+-        isSemantics(
+-          isButton: true,
+-          hasSelectedState: true,
+-          isSelected: true,
+-          label: 'Files',
+-        ),
+-      );
+-      expect(
+-        tester.getSemantics(
++        );
++        await tester.pumpAndSettle();
++        expect(selected, WorkbenchActivity.agents);
++        expect(
++          tester
++              .widget<NavigationRail>(find.byType(NavigationRail))
++              .selectedIndex,
++          1,
++        );
++        await tester.tap(
+           find.byKey(
+-            WorkbenchActivityRail.activityKey(WorkbenchActivity.projects),
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.agents),
+           ),
+-        ),
+-        isSemantics(
+-          isButton: true,
+-          hasSelectedState: true,
+-          isSelected: false,
+-          label: 'All projects',
+-        ),
+-      );
+-      semantics.dispose();
+-    });
+-
+-    testWidgets('宽度固定 52px，达到 44px 触控目标', (tester) async {
+-      await _pump(
+-        tester,
+-        _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: _Recorder().call,
++        );
++        await tester.pumpAndSettle();
++        expect(calls, 2);
++        await tester.tap(
++          find.byKey(
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.settings),
+           ),
+-        ),
+-      );
+-
+-      final rail = tester.getSize(find.byType(WorkbenchActivityRail));
+-      expect(rail.width, WorkbenchActivityRail.width);
+-      expect(rail.width, 52);
+-
+-      for (final activity in <WorkbenchActivity>[
+-        ...WorkbenchActivityRail.primary,
+-        ...WorkbenchActivityRail.secondary,
+-        WorkbenchActivity.settings,
+-      ]) {
+-        final size = tester.getSize(
+-          find.byKey(WorkbenchActivityRail.activityKey(activity)),
+         );
++        await tester.pumpAndSettle();
+         expect(
+-          size.height,
+-          greaterThanOrEqualTo(44),
+-          reason: '$activity 的触控高度不足 44px',
++          tester
++              .widget<NavigationRail>(find.byType(NavigationRail))
++              .selectedIndex,
++          isNull,
+         );
+-      }
+-
+-      final avatar = tester.getSize(
+-        find.byKey(WorkbenchActivityRail.avatarKey),
+-      );
+-      expect(avatar.height, greaterThanOrEqualTo(44));
+-    });
+-
+-    testWidgets('文字放大到 2.0 时导航条不变宽也不溢出', (tester) async {
+-      await _pump(
+-        tester,
+-        _host(
+-          MediaQuery(
+-            data: const MediaQueryData(
+-              size: Size(400, 800),
+-              textScaler: TextScaler.linear(2),
+-            ),
+-            child: WorkbenchActivityRail(
+-              selected: WorkbenchActivity.agents,
+-              onSelected: _Recorder().call,
+-              accountLabel: 'Ada',
++      },
++    );
++
++    testWidgets(
++      '80dp rail uses MD3 indicator, 24dp icons and shortcut tooltips',
++      (tester) async {
++        await _pump(
++          tester,
++          _host(
++            WorkbenchActivityRail(
++              selected: WorkbenchActivity.explorer,
++              onSelected: (_) {},
+             ),
+           ),
+-        ),
+-      );
+-
+-      expect(tester.takeException(), isNull);
+-      expect(
+-        tester.getSize(find.byType(WorkbenchActivityRail)).width,
+-        WorkbenchActivityRail.width,
+-      );
+-    });
+-
+-    testWidgets('高度只有 240px 时不溢出，底部头像仍可点', (tester) async {
+-      final recorder = _Recorder();
+-      await _pump(
+-        tester,
+-        _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: recorder.call,
+-          ),
+-          size: const Size(400, 240),
+-        ),
++        );
++        final rail = tester.widget<NavigationRail>(find.byType(NavigationRail));
++        expect(tester.getSize(find.byType(WorkbenchActivityRail)).width, 80);
++        expect(rail.labelType, NavigationRailLabelType.all);
++        expect(rail.useIndicator, isTrue);
++        expect(rail.indicatorShape, isA<StadiumBorder>());
++        final context = tester.element(find.byType(NavigationRail));
++        expect(
++          rail.indicatorColor,
++          Theme.of(context).colorScheme.secondaryContainer,
++        );
++        for (final destination in rail.destinations) {
++          final icon = (destination.icon as MouseRegion).child! as Tooltip;
++          expect((icon.child! as Icon).size, 24);
++        }
++        expect(
++          find.byTooltip('Explorer (${shortcutLabel('Ctrl+Shift+E')})'),
++          findsOneWidget,
++        );
++        expect(
++          find.byTooltip('Agents (${shortcutLabel('Ctrl+Shift+A')})'),
++          findsOneWidget,
++        );
++        expect(
++          tester.getSize(find.byKey(WorkbenchActivityRail.avatarKey)).height,
++          greaterThanOrEqualTo(48),
++        );
++        expect(
++          tester
++              .getSize(
++                find.byKey(
++                  WorkbenchActivityRail.activityKey(WorkbenchActivity.settings),
++                ),
++              )
++              .height,
++          greaterThanOrEqualTo(48),
++        );
++      },
++    );
++
++    for (final scale in [1.0, 2.0]) {
++      testWidgets(
++        'short rail scrolls and keeps bottom avatar reachable at $scale text',
++        (tester) async {
++          final tapped = <WorkbenchActivity>[];
++          await _pump(
++            tester,
++            _host(
++              WorkbenchActivityRail(
++                selected: WorkbenchActivity.explorer,
++                onSelected: tapped.add,
++              ),
++              size: const Size(400, 240),
++              textScale: scale,
++            ),
++          );
++          expect(tester.takeException(), isNull);
++          expect(tester.getSize(find.byType(WorkbenchActivityRail)).width, 80);
++          await tester.tap(find.byKey(WorkbenchActivityRail.avatarKey));
++          expect(tapped, [WorkbenchActivity.profile]);
++        },
+       );
++    }
+ 
+-      expect(tester.takeException(), isNull);
+-      // 上半部分滚动，底部两项固定：头像必须还在可视区内。
+-      expect(find.byKey(WorkbenchActivityRail.avatarKey), findsOneWidget);
+-      await tester.tap(find.byKey(WorkbenchActivityRail.avatarKey));
+-      await tester.pump();
+-      expect(recorder.tapped, <WorkbenchActivity>[WorkbenchActivity.profile]);
+-    });
+-
+-    testWidgets('账号名首字作为头像回退', (tester) async {
++    testWidgets('avatar retains initial and missing-account fallback', (
++      tester,
++    ) async {
+       await _pump(
+         tester,
+         _host(
+           WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: _Recorder().call,
++            selected: WorkbenchActivity.profile,
++            onSelected: (_) {},
+             accountLabel: 'ada',
+           ),
+         ),
+       );
+-
+       expect(find.text('A'), findsOneWidget);
+-    });
+-
+-    testWidgets('没有账号名时退回图标占位', (tester) async {
+       await _pump(
+         tester,
+         _host(
+           WorkbenchActivityRail(
+-            selected: WorkbenchActivity.projects,
+-            onSelected: _Recorder().call,
++            selected: WorkbenchActivity.profile,
++            onSelected: (_) {},
+           ),
+         ),
+       );
+-
+       expect(
+         find.descendant(
+           of: find.byKey(WorkbenchActivityRail.avatarKey),
+@@ -272,80 +257,98 @@ void main() {
+       );
+     });
+ 
+-    testWidgets('中文界面使用中文标签', (tester) async {
+-      final semantics = tester.ensureSemantics();
++    testWidgets(
++      'Chinese label is Explorer rather than the removed Files item',
++      (tester) async {
++        await _pump(
++          tester,
++          _host(
++            WorkbenchActivityRail(
++              selected: WorkbenchActivity.explorer,
++              onSelected: (_) {},
++            ),
++            locale: const Locale('zh', 'CN'),
++          ),
++        );
++        expect(find.text('资源管理器'), findsOneWidget);
++        expect(find.text('文件'), findsNothing);
++      },
++    );
++  });
+ 
++  // R21/V9: replace one empty-state button with Start and Recent projects.
++  group('WorkbenchWelcome', () {
++    testWidgets('start actions dispatch and show platform shortcuts', (
++      tester,
++    ) async {
++      var opens = 0;
++      var creates = 0;
++      var clones = 0;
+       await _pump(
+         tester,
+         _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.files,
+-            onSelected: _Recorder().call,
++          WorkbenchWelcome(
++            onOpenProject: () => opens++,
++            onCreateProject: () => creates++,
++            onCloneRepository: () => clones++,
+           ),
+-          locale: const Locale('zh', 'CN'),
+         ),
+       );
+-
+-      expect(
+-        tester.getSemantics(
+-          find.byKey(
+-            WorkbenchActivityRail.activityKey(WorkbenchActivity.files),
+-          ),
+-        ),
+-        isSemantics(
+-          isButton: true,
+-          hasSelectedState: true,
+-          isSelected: true,
+-          label: '文件',
+-        ),
++      await tester.tap(
++        find.byTooltip('Add existing project (${shortcutLabel('Ctrl+O')})'),
+       );
+-      semantics.dispose();
+-    });
+-  });
+-
+-  group('WorkbenchWelcome', () {
+-    testWidgets('打开项目按钮回调一次', (tester) async {
+-      var opens = 0;
+-      await _pump(
+-        tester,
+-        _host(WorkbenchWelcome(onOpenProject: () => opens++)),
++      await tester.tap(
++        find.byTooltip('New project (${shortcutLabel('Ctrl+Shift+N')})'),
+       );
+-
+       await tester.tap(
+-        find.byWidgetPredicate((widget) => widget is FilledButton),
++        find.byTooltip('Clone repository (${shortcutLabel('Ctrl+Shift+G')})'),
+       );
+-      await tester.pump();
+-
+-      expect(opens, 1);
++      expect((opens, creates, clones), (1, 1, 1));
++      expect(find.text('Start'), findsOneWidget);
++      expect(find.text('Recent projects'), findsOneWidget);
+     });
+ 
+-    testWidgets('只说明空状态，不出现统计数字', (tester) async {
+-      await _pump(tester, _host(WorkbenchWelcome(onOpenProject: () {})));
+-
+-      expect(find.text('No projects yet'), findsOneWidget);
+-      // 欢迎区不画指标卡：没有卡片与图表类组件。
+-      expect(find.byType(Card), findsNothing);
+-      expect(find.byType(DataTable), findsNothing);
+-    });
+-
+-    testWidgets('窄而矮的容器里不溢出', (tester) async {
++    testWidgets(
++      'recent projects are ordered and dispatch their project identity',
++      (tester) async {
++        final earlier = Project.create(name: 'Earlier', path: '/earlier')
++          ..lastOpenedAt = DateTime(2025);
++        final latest = Project.create(name: 'Latest', path: '/latest')
++          ..lastOpenedAt = DateTime(2026);
++        Project? opened;
++        await _pump(
++          tester,
++          _host(
++            WorkbenchWelcome(
++              onOpenProject: () {},
++              projects: [earlier, latest],
++              onOpenRecent: (value) => opened = value,
++            ),
++          ),
++        );
++        expect(
++          tester.getTopLeft(find.text('Latest')).dy,
++          lessThan(tester.getTopLeft(find.text('Earlier')).dy),
++        );
++        await tester.tap(find.text('Latest'));
++        expect(opened, same(latest));
++        expect(find.byType(Card), findsNothing);
++        expect(find.byType(DataTable), findsNothing);
++      },
++    );
++
++    testWidgets('narrow short welcome scrolls without overflow', (
++      tester,
++    ) async {
+       await _pump(
+         tester,
+         _host(
+-          SizedBox(
+-            width: 200,
+-            height: 180,
+-            child: WorkbenchWelcome(onOpenProject: () {}),
+-          ),
++          WorkbenchWelcome(onOpenProject: () {}),
+           size: const Size(200, 180),
+         ),
+       );
+-
+       expect(tester.takeException(), isNull);
+-      expect(
+-        find.byWidgetPredicate((widget) => widget is FilledButton),
+-        findsOneWidget,
+-      );
++      expect(find.byType(SingleChildScrollView), findsOneWidget);
+     });
+   });
+ }
+diff --git a/test/workbench_density_test.dart b/test/workbench_density_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b531947f5cc072027deff42132c577828cb2b13d
+--- /dev/null
++++ b/test/workbench_density_test.dart
+@@ -0,0 +1,286 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/workbench_chrome.dart';
++import 'package:qfli_studio_core/shell/workbench_explorer.dart';
++import 'package:qfli_studio_core/shell/workbench_theme.dart';
++
++void main() {
++  // R21/V1: device family changes density, not a window-width heuristic.
++  for (final brightness in Brightness.values) {
++    for (final factor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
++      testWidgets('$brightness $factor scopes density, menus and notices', (
++        tester,
++      ) async {
++        final base = ThemeData(useMaterial3: true, brightness: brightness);
++        final theme = WorkbenchTheme.from(base, formFactor: factor);
++        ThemeData? actual;
++        await tester.pumpWidget(
++          MaterialApp(
++            theme: base,
++            home: Theme(
++              data: theme,
++              child: Builder(
++                builder: (context) {
++                  actual = Theme.of(context);
++                  return const Scaffold(body: Text('Workbench'));
++                },
++              ),
++            ),
++          ),
++        );
++        final desktop = factor == AppFormFactor.desktop;
++        expect(
++          actual!.visualDensity,
++          desktop ? VisualDensity.compact : VisualDensity.standard,
++        );
++        expect(
++          actual!.materialTapTargetSize,
++          desktop
++              ? MaterialTapTargetSize.shrinkWrap
++              : MaterialTapTargetSize.padded,
++        );
++        expect(
++          actual!.tooltipTheme.waitDuration,
++          const Duration(milliseconds: 500),
++        );
++        expect(actual!.snackBarTheme.behavior, SnackBarBehavior.floating);
++        expect(actual!.snackBarTheme.width, lessThanOrEqualTo(480));
++        expect(
++          actual!.navigationRailTheme.indicatorColor,
++          base.colorScheme.secondaryContainer,
++        );
++        expect(
++          actual!.menuButtonTheme.style!.minimumSize!.resolve({})!.height,
++          desktop ? 32 : 48,
++        );
++        final overlay = actual!.menuButtonTheme.style!.overlayColor!;
++        expect(
++          overlay.resolve({WidgetState.hovered}),
++          base.colorScheme.onSurface.withValues(alpha: 0.08),
++        );
++        expect(
++          overlay.resolve({WidgetState.pressed}),
++          base.colorScheme.onSurface.withValues(alpha: 0.10),
++        );
++        expect(
++          overlay.resolve({WidgetState.focused}),
++          base.colorScheme.onSurface.withValues(alpha: 0.10),
++        );
++        expect(
++          actual!.menuButtonTheme.style!.side!.resolve({
++            WidgetState.focused,
++          })!.color,
++          base.colorScheme.primary,
++        );
++        // The shared phone theme was not mutated by the scoped copy.
++        expect(base.visualDensity, VisualDensity.standard);
++        expect(base.materialTapTargetSize, MaterialTapTargetSize.padded);
++      });
++    }
++  }
++
++  testWidgets(
++    'custom controls add a focus ring without an extra focus target',
++    (tester) async {
++      final node = FocusNode();
++      addTearDown(node.dispose);
++      await tester.pumpWidget(
++        MaterialApp(
++          home: Scaffold(
++            body: WorkbenchFocusOutline(
++              child: TextButton(
++                focusNode: node,
++                onPressed: () {},
++                child: const Text('Focusable'),
++              ),
++            ),
++          ),
++        ),
++      );
++      expect(
++        find.byKey(const ValueKey('workbench-focus-outline')),
++        findsNothing,
++      );
++      node.requestFocus();
++      await tester.pump();
++      expect(
++        find.byKey(const ValueKey('workbench-focus-outline')),
++        findsOneWidget,
++      );
++      node.unfocus();
++      await tester.pump();
++      expect(
++        find.byKey(const ValueKey('workbench-focus-outline')),
++        findsNothing,
++      );
++    },
++  );
++
++  // R23/V7: drag the real gesture target past each bound, then double-click.
++  testWidgets('sidebar divider clamps drag, keeps presentation and resets', (
++    tester,
++  ) async {
++    final controller = LargeScreenController();
++    addTearDown(controller.dispose);
++    final owner = Object();
++    controller.activateFiles(owner);
++    controller.showFiles();
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: Align(
++            alignment: Alignment.topLeft,
++            child: SizedBox(
++              width: 800,
++              height: 400,
++              child: ListenableBuilder(
++                listenable: controller,
++                builder: (context, _) => Stack(
++                  children: [
++                    Positioned(
++                      left: controller.sidebarWidth - 3,
++                      top: 0,
++                      bottom: 0,
++                      width: 6,
++                      child: WorkbenchSidebarDivider(controller: controller),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++    final divider = find.byKey(WorkbenchSidebarDivider.dividerKey);
++    final region = find
++        .ancestor(of: divider, matching: find.byType(MouseRegion))
++        .first;
++    expect(
++      tester.widget<MouseRegion>(region).cursor,
++      SystemMouseCursors.resizeColumn,
++    );
++    await tester.drag(divider, const Offset(1000, 0));
++    await tester.pump();
++    expect(controller.sidebarWidth, 480);
++    await tester.drag(divider, const Offset(-1000, 0));
++    await tester.pump();
++    expect(controller.sidebarWidth, 220);
++    expect(controller.explorerPage, ExplorerPage.files);
++    expect(controller.activeEditor, same(owner));
++    await tester.tap(divider);
++    await tester.pump(const Duration(milliseconds: 50));
++    await tester.tap(divider);
++    await tester.pump(const Duration(milliseconds: 350));
++    expect(controller.sidebarWidth, 300);
++    controller.setSidebarWidth(double.nan);
++    controller.setSidebarWidth(double.infinity);
++    expect(controller.sidebarWidth, 300);
++  });
++
++  testWidgets('project panel has permanent compact search and menu shortcuts', (
++    tester,
++  ) async {
++    final search = TextEditingController();
++    addTearDown(search.dispose);
++    String? query;
++    var creates = 0;
++    final project = Project.create(name: 'Current project', path: '/current');
++    final theme = WorkbenchTheme.from(
++      ThemeData(useMaterial3: true),
++      formFactor: AppFormFactor.desktop,
++    );
++    await tester.pumpWidget(
++      MaterialApp(
++        theme: theme,
++        home: Scaffold(
++          body: SizedBox(
++            width: 300,
++            child: WorkbenchProjectsPanel(
++              searchController: search,
++              onSearchChanged: (value) => query = value,
++              onCreate: () => creates++,
++              onOpenFolder: () {},
++              onClone: () {},
++              filterItems: [
++                MenuItemButton(
++                  onPressed: () {},
++                  child: const Text('All projects'),
++                ),
++              ],
++              moreItems: [
++                MenuItemButton(
++                  onPressed: () {},
++                  shortcut: const SingleActivator(
++                    LogicalKeyboardKey.keyN,
++                    control: true,
++                    shift: true,
++                  ),
++                  child: const Text('New project command'),
++                ),
++              ],
++              progress: const SizedBox.shrink(),
++              body: ListView(
++                children: [
++                  WorkbenchProjectRow(
++                    project: project,
++                    current: true,
++                    opened: true,
++                    onOpen: () {},
++                    menuItems: const [],
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++    expect(find.byType(AppBar), findsNothing);
++    expect(find.byType(TabBar), findsNothing);
++    expect(
++      tester
++          .getSize(find.byKey(const ValueKey('workbench-project-header')))
++          .height,
++      40,
++    );
++    expect(
++      tester
++          .getSize(find.byKey(const ValueKey('workbench-project-search')))
++          .height,
++      36,
++    );
++    final row = find.byKey(ValueKey('workbench-project-${project.id}'));
++    expect(tester.getSize(row).height, 32);
++    final material = tester.widget<Material>(
++      find.descendant(of: row, matching: find.byType(Material)).first,
++    );
++    expect(material.color, theme.colorScheme.secondaryContainer);
++    expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
++    await tester.enterText(
++      find.byKey(const ValueKey('workbench-project-search')),
++      'alpha',
++    );
++    expect(query, 'alpha');
++    await tester.tap(find.byIcon(Icons.create_new_folder_outlined));
++    expect(creates, 1);
++    await tester.tap(find.byIcon(Icons.more_vert));
++    await tester.pumpAndSettle();
++    expect(find.text('New project command'), findsOneWidget);
++    final menu = tester.widget<MenuItemButton>(
++      find.byWidgetPredicate(
++        (widget) =>
++            widget is MenuItemButton &&
++            widget.child is Text &&
++            (widget.child! as Text).data == '新建项目',
++      ),
++    );
++    expect(menu.shortcut, isA<SingleActivator>());
++    expect(find.textContaining('Ctrl'), findsWidgets);
++    expect(tester.takeException(), isNull);
++  });
++}

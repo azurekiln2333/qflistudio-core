@@ -1,0 +1,992 @@
+diff --git a/lib/app.dart b/lib/app.dart
+index 5ac94fe4a6b2d7a2d0f8a52b3225d96a08ed2ee4..26152b1818554eeb1566a071fc2433f8dcb41b2a 100644
+--- a/lib/app.dart
++++ b/lib/app.dart
+@@ -19,6 +19,7 @@ import 'services/app_restore_gate.dart';
+ import 'services/studio_profile.dart';
+ import 'services/runner_service.dart';
+ import 'shell/large_screen_workbench.dart';
++import 'shell/ui_zoom.dart';
+ import 'splash_screen.dart';
+ import 'store/auth_store.dart';
+ import 'store/project_store.dart';
+@@ -195,11 +196,16 @@ class _QfliAppState extends State<QfliApp> {
+       builder: (context, appearance, _) => MaterialApp(
+         navigatorKey: widget.navigatorKey,
+         navigatorObservers: [_editors.navigatorObserver],
+-        builder: (context, child) => GitHubScope(
+-          controller: _github,
+-          child: _formFactor == AppFormFactor.phone
+-              ? RetainedEditorHost(controller: _editors, child: child!)
+-              : child!,
++        builder: (context, child) => UiZoom(
++          settings: settings,
++          enabled: _formFactor != null && _formFactor != AppFormFactor.phone,
++          mouseWheelEnabled: _formFactor == AppFormFactor.desktop,
++          child: GitHubScope(
++            controller: _github,
++            child: _formFactor == AppFormFactor.phone
++                ? RetainedEditorHost(controller: _editors, child: child!)
++                : child!,
++          ),
+         ),
+         title:
+             StudioProfile.current?.appTitle ?? StudioProductCatalog.qfliStudio,
+diff --git a/lib/pages/settings_page.dart b/lib/pages/settings_page.dart
+index 3ba0236d67e1248ce28b69e6107f5268495d7e6b..69ca8497d9c2042501a20faa2ca817535e21ef4f 100644
+--- a/lib/pages/settings_page.dart
++++ b/lib/pages/settings_page.dart
+@@ -13,6 +13,8 @@ import '../services/app_paths.dart';
+ import '../services/file_backup.dart';
+ import '../services/picker_service.dart';
+ import '../services/studio_profile.dart';
++import '../shell/large_screen_controller.dart';
++import '../shell/shortcut_label.dart';
+ import '../store/auth_store.dart';
+ import '../store/settings_store.dart';
+ import '../store/project_store.dart';
+@@ -260,6 +262,7 @@ class _SettingsPageState extends State<SettingsPage> {
+ 
+   @override
+   Widget build(BuildContext context) {
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+     return Scaffold(
+       appBar: AppBar(title: const Text('设置')),
+       body: ListenableBuilder(
+@@ -285,6 +288,7 @@ class _SettingsPageState extends State<SettingsPage> {
+                       trailing: const Icon(Icons.chevron_right),
+                       onTap: _pickThemeMode,
+                     ),
++                    if (largeScreen) _zoomSetting(),
+                     ListTile(
+                       leading: const Icon(Icons.palette_outlined),
+                       title: const Text('代码高亮'),
+@@ -316,6 +320,15 @@ class _SettingsPageState extends State<SettingsPage> {
+                         ),
+                       ),
+                     ),
++                    if (largeScreen)
++                      SwitchListTile(
++                        key: const ValueKey('settings-large-screen-symbols'),
++                        secondary: const Icon(Icons.keyboard_outlined),
++                        title: const Text('大屏显示符号栏'),
++                        subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
++                        value: settings.largeScreenSymbolBar,
++                        onChanged: settings.setLargeScreenSymbolBar,
++                      ),
+                     SwitchListTile(
+                       secondary: const Icon(Icons.map_outlined),
+                       title: const Text('代码鸟瞰图'),
+@@ -346,6 +359,7 @@ class _SettingsPageState extends State<SettingsPage> {
+                     ),
+                   ],
+                 ),
++                if (largeScreen) _shortcutSection(),
+                 if (widget.showAi && _customAiEndpointAllowed)
+                   SettingsSection(
+                     title: 'AI 助手',
+@@ -436,6 +450,76 @@ class _SettingsPageState extends State<SettingsPage> {
+     );
+   }
+ 
++  Widget _zoomSetting() => ListTile(
++    key: const ValueKey('settings-ui-zoom'),
++    leading: const Icon(Icons.zoom_in_outlined),
++    title: const Text('界面缩放'),
++    subtitle: Wrap(
++      spacing: 8,
++      crossAxisAlignment: WrapCrossAlignment.center,
++      children: [
++        Text('${(settings.uiScale * 100).round()}%'),
++        IconButton(
++          key: const ValueKey('settings-ui-zoom-out'),
++          tooltip: '缩小界面 (${shortcutLabel('Ctrl+-')})',
++          onPressed: settings.uiScale > SettingsStore.minUiScale
++              ? () => settings.setUiScale(settings.uiScale - 0.1)
++              : null,
++          icon: const Icon(Icons.remove),
++        ),
++        IconButton(
++          key: const ValueKey('settings-ui-zoom-in'),
++          tooltip: '放大界面 (${shortcutLabel('Ctrl+= / Ctrl++')})',
++          onPressed: settings.uiScale < SettingsStore.maxUiScale
++              ? () => settings.setUiScale(settings.uiScale + 0.1)
++              : null,
++          icon: const Icon(Icons.add),
++        ),
++        Tooltip(
++          message: '复原界面缩放 (${shortcutLabel('Ctrl+0')})',
++          child: TextButton(
++            key: const ValueKey('settings-ui-zoom-reset'),
++            onPressed: settings.uiScale == 1
++                ? null
++                : () => settings.setUiScale(1),
++            child: const Text('复原'),
++          ),
++        ),
++      ],
++    ),
++  );
++
++  Widget _shortcutSection() => SettingsSection(
++    title: '快捷键',
++    children: [
++      const ListTile(subtitle: Text('终端获得焦点时，关闭标签、底部面板和 Agent 栏的快捷键交给终端。')),
++      for (final entry in const [
++        ('放大界面', 'Ctrl+= / Ctrl++ / Ctrl+NumpadAdd', '全局'),
++        ('缩小界面', 'Ctrl+- / Ctrl+NumpadSubtract', '全局'),
++        ('复原界面缩放', 'Ctrl+0 / Ctrl+Numpad0', '全局'),
++        ('显示或收起侧栏', 'Ctrl+B', '工作台'),
++        ('资源管理器', 'Ctrl+Shift+E', '工作台'),
++        ('Agents 列表', 'Ctrl+Shift+A', '工作台'),
++        ('设置', 'Ctrl+,', '工作台'),
++        ('显示或收起终端', 'Ctrl+`', '编辑器'),
++        ('显示或收起底部面板', 'Ctrl+J', '编辑器'),
++        ('显示或收起 Agent 栏', 'Ctrl+L', '编辑器'),
++        ('关闭当前文件标签', 'Ctrl+W', '编辑器'),
++        ('下一个 / 上一个文件标签', 'Ctrl+Tab / Ctrl+Shift+Tab', '编辑器'),
++        ('新建文件', 'Ctrl+N', '编辑器'),
++        ('运行', 'F5', '编辑器'),
++        ('保存', 'Ctrl+S', '编辑器'),
++        ('查找', 'Ctrl+F', '编辑器'),
++        ('跳行', 'Ctrl+G', '编辑器'),
++        ('格式化', 'Ctrl+I', '编辑器'),
++      ])
++        ListTile(
++          title: Text(entry.$1),
++          subtitle: Text('${shortcutLabel(entry.$2)} · ${entry.$3}'),
++        ),
++    ],
++  );
++
+   Future<void> _pickThemeMode() async {
+     final picked = await showDialog<String>(
+       context: context,
+diff --git a/lib/shell/ui_zoom.dart b/lib/shell/ui_zoom.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..5911c9072b535c7e86035c3c5d242a54198145ce
+--- /dev/null
++++ b/lib/shell/ui_zoom.dart
+@@ -0,0 +1,263 @@
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++import 'package:flutter/gestures.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++
++import '../store/settings_store.dart';
++
++/// Scales the entire navigator, including routes, menus and dialogs.
++/// Phone callers disable this layer rather than inheriting a saved desktop zoom.
++class UiZoom extends StatefulWidget {
++  const UiZoom({
++    super.key,
++    required this.settings,
++    required this.child,
++    this.enabled = true,
++    this.mouseWheelEnabled = false,
++  });
++
++  final SettingsStore settings;
++  final Widget child;
++  final bool enabled;
++  final bool mouseWheelEnabled;
++
++  @override
++  State<UiZoom> createState() => _UiZoomState();
++}
++
++class _UiZoomState extends State<UiZoom> {
++  // Reparent the same navigator when adding/removing the non-identity transform.
++  final _contentKey = GlobalKey();
++  Timer? _feedbackTimer;
++  bool _showFeedback = false;
++  late double _scale;
++
++  bool get _macOS => defaultTargetPlatform == TargetPlatform.macOS;
++
++  bool get _primaryModifier {
++    final keyboard = HardwareKeyboard.instance;
++    return !keyboard.isAltPressed &&
++        (_macOS
++            ? keyboard.isMetaPressed && !keyboard.isControlPressed
++            : keyboard.isControlPressed && !keyboard.isMetaPressed);
++  }
++
++  @override
++  void initState() {
++    super.initState();
++    _scale = widget.settings.uiScale;
++    widget.settings.addListener(_settingsChanged);
++    // Ancestor Shortcuts run too late when an editor consumes the key first.
++    FocusManager.instance.addEarlyKeyEventHandler(_handleKey);
++  }
++
++  @override
++  void didUpdateWidget(covariant UiZoom oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.settings != widget.settings) {
++      oldWidget.settings.removeListener(_settingsChanged);
++      widget.settings.addListener(_settingsChanged);
++    }
++    _scale = widget.settings.uiScale;
++    if (!widget.enabled) {
++      _feedbackTimer?.cancel();
++      _showFeedback = false;
++    }
++  }
++
++  void _settingsChanged() {
++    final next = widget.settings.uiScale;
++    if (_scale == next) return;
++    _feedbackTimer?.cancel();
++    setState(() {
++      _scale = next;
++      _showFeedback = widget.enabled;
++    });
++    if (widget.enabled) {
++      _feedbackTimer = Timer(const Duration(seconds: 1), () {
++        if (mounted) setState(() => _showFeedback = false);
++      });
++    }
++  }
++
++  void _changeScale(double delta) {
++    unawaited(widget.settings.setUiScale(widget.settings.uiScale + delta));
++  }
++
++  KeyEventResult _handleKey(KeyEvent event) {
++    if (!widget.enabled || !_primaryModifier) return KeyEventResult.ignored;
++    final key = event.logicalKey;
++    final zoomIn =
++        key == LogicalKeyboardKey.equal ||
++        key == LogicalKeyboardKey.add ||
++        key == LogicalKeyboardKey.numpadAdd;
++    final zoomOut =
++        key == LogicalKeyboardKey.minus ||
++        key == LogicalKeyboardKey.numpadSubtract;
++    final reset =
++        key == LogicalKeyboardKey.digit0 || key == LogicalKeyboardKey.numpad0;
++    if ((!zoomIn && !zoomOut && !reset) ||
++        (!zoomIn && HardwareKeyboard.instance.isShiftPressed)) {
++      return KeyEventResult.ignored;
++    }
++    if (event is KeyDownEvent || event is KeyRepeatEvent) {
++      if (reset) {
++        unawaited(widget.settings.setUiScale(1));
++      } else {
++        _changeScale(zoomIn ? 0.1 : -0.1);
++      }
++    }
++    return KeyEventResult.handled;
++  }
++
++  void _handlePointerSignal(PointerSignalEvent event) {
++    if (!widget.enabled ||
++        !widget.mouseWheelEnabled ||
++        !_primaryModifier ||
++        event is! PointerScrollEvent ||
++        event.kind != PointerDeviceKind.mouse ||
++        event.scrollDelta.dy == 0) {
++      return;
++    }
++    // Register before descendant scrollables so zoom does not also scroll them.
++    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
++      _changeScale(event.scrollDelta.dy < 0 ? 0.1 : -0.1);
++    });
++  }
++
++  @override
++  void dispose() {
++    _feedbackTimer?.cancel();
++    widget.settings.removeListener(_settingsChanged);
++    FocusManager.instance.removeEarlyKeyEventHandler(_handleKey);
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (!widget.enabled) return widget.child;
++    final media = MediaQuery.of(context);
++    return _ZoomWheelRegion(
++      onPointerSignal: _handlePointerSignal,
++      child: LayoutBuilder(
++        builder: (context, constraints) {
++          final size = constraints.biggest / _scale;
++          final content = SizedBox(
++            key: _contentKey,
++            width: size.width,
++            height: size.height,
++            child: Stack(
++              fit: StackFit.expand,
++              children: [
++                widget.child,
++                if (_showFeedback)
++                  Positioned.fill(
++                    child: IgnorePointer(
++                      child: SafeArea(
++                        child: Align(
++                          alignment: Alignment.bottomCenter,
++                          child: Padding(
++                            padding: const EdgeInsets.all(16),
++                            child: Semantics(
++                              liveRegion: true,
++                              child: Material(
++                                borderRadius: BorderRadius.circular(8),
++                                color: Theme.of(
++                                  context,
++                                ).colorScheme.inverseSurface,
++                                child: Padding(
++                                  padding: const EdgeInsets.symmetric(
++                                    horizontal: 16,
++                                    vertical: 8,
++                                  ),
++                                  child: Text(
++                                    '界面缩放 ${(_scale * 100).round()}%',
++                                    key: const ValueKey('ui-zoom-feedback'),
++                                    style: TextStyle(
++                                      color: Theme.of(
++                                        context,
++                                      ).colorScheme.onInverseSurface,
++                                    ),
++                                  ),
++                                ),
++                              ),
++                            ),
++                          ),
++                        ),
++                      ),
++                    ),
++                  ),
++              ],
++            ),
++          );
++          return MediaQuery(
++            data: media.copyWith(
++              size: media.size / _scale,
++              padding: media.padding / _scale,
++              viewPadding: media.viewPadding / _scale,
++              viewInsets: media.viewInsets / _scale,
++              systemGestureInsets: media.systemGestureInsets / _scale,
++            ),
++            child: OverflowBox(
++              alignment: Alignment.topLeft,
++              minWidth: size.width,
++              maxWidth: size.width,
++              minHeight: size.height,
++              maxHeight: size.height,
++              child: _scale == 1
++                  ? content
++                  : Transform.scale(
++                      key: const ValueKey('ui-zoom-transform'),
++                      scale: _scale,
++                      alignment: Alignment.topLeft,
++                      child: content,
++                    ),
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++/// First in the hit path, but claims only modified desktop wheel signals.
++/// Ordinary scrolls, taps, drags and selection keep their normal targets.
++class _ZoomWheelRegion extends SingleChildRenderObjectWidget {
++  const _ZoomWheelRegion({required this.onPointerSignal, required super.child});
++
++  final PointerSignalEventListener onPointerSignal;
++
++  @override
++  RenderObject createRenderObject(BuildContext context) =>
++      _RenderZoomWheelRegion(onPointerSignal);
++
++  @override
++  void updateRenderObject(
++    BuildContext context,
++    covariant _RenderZoomWheelRegion renderObject,
++  ) {
++    renderObject.onPointerSignal = onPointerSignal;
++  }
++}
++
++class _RenderZoomWheelRegion extends RenderProxyBox {
++  _RenderZoomWheelRegion(this.onPointerSignal);
++
++  PointerSignalEventListener onPointerSignal;
++
++  @override
++  bool hitTest(BoxHitTestResult result, {required Offset position}) {
++    if (!size.contains(position)) return false;
++    result.add(BoxHitTestEntry(this, position));
++    hitTestChildren(result, position: position);
++    return true;
++  }
++
++  @override
++  void handleEvent(PointerEvent event, HitTestEntry entry) {
++    if (event is PointerSignalEvent) onPointerSignal(event);
++  }
++}
+diff --git a/test/settings_page_workbench_test.dart b/test/settings_page_workbench_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..4649627ea35e8d2221ed538b0d79231015e04451
+--- /dev/null
++++ b/test/settings_page_workbench_test.dart
+@@ -0,0 +1,193 @@
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:qfli_studio_core/pages/settings_page.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/shortcut_label.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  late Directory root;
++  late PathProviderPlatform previousPaths;
++
++  setUpAll(() async {
++    root = await Directory.systemTemp.createTemp('workbench-settings-');
++    previousPaths = PathProviderPlatform.instance;
++    PathProviderPlatform.instance = _Paths(root.path);
++    await AppPaths.storageDirectory();
++  });
++
++  tearDownAll(() async {
++    PathProviderPlatform.instance = previousPaths;
++    await root.delete(recursive: true);
++  });
++
++  testWidgets('phone settings keep existing controls without workbench items', (
++    tester,
++  ) async {
++    final settings = SettingsStore();
++    await tester.pumpWidget(
++      MaterialApp(home: SettingsPage(settings: settings, showAi: false)),
++    );
++    await tester.pumpAndSettle();
++    expect(find.text('外观与体验'), findsOneWidget);
++    expect(find.text('界面缩放'), findsNothing);
++    expect(
++      find.byKey(const ValueKey('settings-large-screen-symbols')),
++      findsNothing,
++    );
++    expect(find.text('快捷键'), findsNothing);
++    await tester.drag(find.byType(Scrollable).first, const Offset(0, -600));
++    await tester.pumpAndSettle();
++    expect(
++      find.byKey(const ValueKey('settings-large-screen-symbols')),
++      findsNothing,
++    );
++    expect(find.text('快捷键'), findsNothing);
++    await tester.pumpWidget(const SizedBox());
++    settings.dispose();
++  });
++
++  testWidgets('workbench zoom buttons, bounds, reset and tooltips', (
++    tester,
++  ) async {
++    final settings = SettingsStore();
++    final shell = LargeScreenController();
++    await tester.pumpWidget(_app(settings, shell));
++    await tester.pumpAndSettle();
++    final zoomIn = find.byKey(const ValueKey('settings-ui-zoom-in'));
++    final zoomOut = find.byKey(const ValueKey('settings-ui-zoom-out'));
++    final reset = find.byKey(const ValueKey('settings-ui-zoom-reset'));
++    expect(find.text('100%'), findsOneWidget);
++    expect(tester.widget<TextButton>(reset).onPressed, isNull);
++    expect(
++      tester.widget<IconButton>(zoomIn).tooltip,
++      '放大界面 (${shortcutLabel('Ctrl+= / Ctrl++')})',
++    );
++    expect(
++      tester.widget<IconButton>(zoomOut).tooltip,
++      '缩小界面 (${shortcutLabel('Ctrl+-')})',
++    );
++    for (var i = 0; i < 3; i++) {
++      await tester.tap(zoomIn);
++      await tester.pump();
++    }
++    expect(settings.uiScale, 1.3);
++    expect(find.text('130%'), findsOneWidget);
++    await tester.tap(zoomOut);
++    await tester.pump();
++    expect(settings.uiScale, 1.2);
++    await tester.tap(reset);
++    await tester.pump();
++    expect(settings.uiScale, 1);
++    await settings.setUiScale(2);
++    await tester.pump();
++    expect(tester.widget<IconButton>(zoomIn).onPressed, isNull);
++    await settings.setUiScale(0.5);
++    await tester.pump();
++    expect(tester.widget<IconButton>(zoomOut).onPressed, isNull);
++    await tester.pumpWidget(const SizedBox());
++    shell.dispose();
++    settings.dispose();
++  });
++
++  testWidgets('symbols default off and update through the real switch', (
++    tester,
++  ) async {
++    final settings = SettingsStore();
++    final shell = LargeScreenController();
++    await tester.pumpWidget(_app(settings, shell));
++    await tester.pumpAndSettle();
++    final toggle = find.byKey(const ValueKey('settings-large-screen-symbols'));
++    await tester.scrollUntilVisible(
++      toggle,
++      160,
++      scrollable: find.byType(Scrollable).first,
++    );
++    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
++    await tester.tap(toggle);
++    await tester.pump();
++    expect(settings.largeScreenSymbolBar, isTrue);
++    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
++    await tester.tap(toggle);
++    await tester.pump();
++    expect(settings.largeScreenSymbolBar, isFalse);
++    await tester.pump();
++    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
++    await tester.pumpWidget(const SizedBox());
++    shell.dispose();
++    settings.dispose();
++  });
++
++  testWidgets('read-only shortcut reference covers every PRD binding', (
++    tester,
++  ) async {
++    tester.view.physicalSize = const Size(1100, 3400);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.reset);
++    final settings = SettingsStore();
++    final shell = LargeScreenController();
++    await tester.pumpWidget(_app(settings, shell));
++    await tester.pumpAndSettle();
++    await tester.scrollUntilVisible(
++      find.text('快捷键'),
++      200,
++      scrollable: find.byType(Scrollable).first,
++    );
++    final expected = [
++      'Ctrl+= / Ctrl++ / Ctrl+NumpadAdd',
++      'Ctrl+- / Ctrl+NumpadSubtract',
++      'Ctrl+0 / Ctrl+Numpad0',
++      'Ctrl+B',
++      'Ctrl+Shift+E',
++      'Ctrl+Shift+A',
++      'Ctrl+,',
++      'Ctrl+`',
++      'Ctrl+J',
++      'Ctrl+L',
++      'Ctrl+W',
++      'Ctrl+Tab / Ctrl+Shift+Tab',
++      'Ctrl+N',
++      'F5',
++      'Ctrl+S',
++      'Ctrl+F',
++      'Ctrl+G',
++      'Ctrl+I',
++    ];
++    for (final key in expected) {
++      final text = find.textContaining('${shortcutLabel(key)} ·');
++      await tester.ensureVisible(text);
++      final tile = tester.widget<ListTile>(
++        find.ancestor(of: text, matching: find.byType(ListTile)),
++      );
++      expect(tile.onTap, isNull, reason: '$key must be read-only');
++    }
++    expect(find.text('终端获得焦点时，关闭标签、底部面板和 Agent 栏的快捷键交给终端。'), findsOneWidget);
++    await tester.pumpWidget(const SizedBox());
++    shell.dispose();
++    settings.dispose();
++  });
++}
++
++Widget _app(SettingsStore settings, LargeScreenController shell) => MaterialApp(
++  home: LargeScreenScope(
++    controller: shell,
++    child: SettingsPage(settings: settings, showAi: false),
++  ),
++);
++
++class _Paths extends PathProviderPlatform {
++  _Paths(this.root);
++
++  final String root;
++
++  @override
++  Future<String?> getApplicationSupportPath() async => root;
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => root;
++}
+diff --git a/test/ui_zoom_test.dart b/test/ui_zoom_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..77df0f66b7d2969279e05822722ce553c9268bb5
+--- /dev/null
++++ b/test/ui_zoom_test.dart
+@@ -0,0 +1,354 @@
++import 'dart:io';
++
++import 'package:flutter/foundation.dart';
++import 'package:flutter/gestures.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/shell/ui_zoom.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++const _transform = ValueKey('ui-zoom-transform');
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  test('scale clamps, steps and survives reloading settings', () async {
++    final directory = await Directory.systemTemp.createTemp('ui-zoom-');
++    final file = File('${directory.path}/settings.json');
++    final settings = SettingsStore(storageFile: file);
++    final restored = SettingsStore(storageFile: file);
++    try {
++      await settings.load();
++      for (var i = 0; i < 3; i++) {
++        await settings.setUiScale(settings.uiScale + 0.1);
++      }
++      expect(settings.uiScale, 1.3);
++      await restored.load();
++      expect(restored.uiScale, 1.3);
++      await settings.setLargeScreenSymbolBar(true);
++      await restored.load();
++      expect(restored.largeScreenSymbolBar, isTrue);
++      await settings.setUiScale(5);
++      expect(settings.uiScale, 2);
++      await settings.setUiScale(-1);
++      expect(settings.uiScale, 0.5);
++      await settings.setUiScale(1);
++      expect(settings.uiScale, 1);
++    } finally {
++      settings.dispose();
++      restored.dispose();
++      await directory.delete(recursive: true);
++    }
++  });
++
++  for (final platform in [TargetPlatform.windows, TargetPlatform.macOS]) {
++    testWidgets('$platform zoom wins over a consuming editor focus handler', (
++      tester,
++    ) async {
++      debugDefaultTargetPlatformOverride = platform;
++      addTearDown(() => debugDefaultTargetPlatformOverride = null);
++      final settings = SettingsStore();
++      final node = FocusNode();
++      var swallowed = 0;
++      await tester.pumpWidget(
++        _app(
++          settings,
++          Focus(
++            focusNode: node,
++            onKeyEvent: (_, _) {
++              swallowed++;
++              return KeyEventResult.handled;
++            },
++            child: const SizedBox.expand(),
++          ),
++        ),
++      );
++      node.requestFocus();
++      await tester.pump();
++      final modifier = platform == TargetPlatform.macOS
++          ? LogicalKeyboardKey.metaLeft
++          : LogicalKeyboardKey.controlLeft;
++      for (var i = 0; i < 3; i++) {
++        await _key(tester, LogicalKeyboardKey.equal, modifier: modifier);
++      }
++      expect(settings.uiScale, 1.3);
++      expect(find.text('界面缩放 130%'), findsOneWidget);
++      await tester.sendKeyDownEvent(modifier);
++      final afterModifier = swallowed;
++      await tester.sendKeyEvent(LogicalKeyboardKey.minus);
++      expect(swallowed, afterModifier);
++      await tester.sendKeyUpEvent(modifier);
++      expect(settings.uiScale, 1.2);
++      await _key(tester, LogicalKeyboardKey.numpadAdd, modifier: modifier);
++      await _key(tester, LogicalKeyboardKey.add, modifier: modifier);
++      expect(settings.uiScale, 1.4);
++      await _key(
++        tester,
++        LogicalKeyboardKey.equal,
++        modifier: modifier,
++        shift: true,
++      );
++      expect(settings.uiScale, 1.5);
++      await _key(tester, LogicalKeyboardKey.numpadSubtract, modifier: modifier);
++      expect(settings.uiScale, 1.4);
++      await _key(tester, LogicalKeyboardKey.numpad0, modifier: modifier);
++      expect(settings.uiScale, 1);
++      expect(find.byKey(_transform), findsNothing);
++      await _key(tester, LogicalKeyboardKey.equal, modifier: modifier);
++      await _key(tester, LogicalKeyboardKey.digit0, modifier: modifier);
++      expect(settings.uiScale, 1);
++      await tester.pump(const Duration(seconds: 1));
++      expect(find.byKey(const ValueKey('ui-zoom-feedback')), findsNothing);
++      await tester.pumpWidget(const SizedBox());
++      node.dispose();
++      // The early global handler must not outlive the widget.
++      await _key(tester, LogicalKeyboardKey.equal, modifier: modifier);
++      expect(settings.uiScale, 1);
++      settings.dispose();
++    });
++  }
++
++  testWidgets('scales layout and every inset without scaling text twice', (
++    tester,
++  ) async {
++    final settings = SettingsStore()..uiScale = 2;
++    late MediaQueryData actual;
++    await tester.pumpWidget(
++      MaterialApp(
++        builder: (_, child) => MediaQuery(
++          data: const MediaQueryData(
++            size: Size(800, 600),
++            padding: EdgeInsets.all(20),
++            viewPadding: EdgeInsets.all(24),
++            viewInsets: EdgeInsets.only(bottom: 200),
++            systemGestureInsets: EdgeInsets.all(16),
++            textScaler: TextScaler.linear(1.25),
++          ),
++          child: UiZoom(settings: settings, child: child!),
++        ),
++        home: Builder(
++          builder: (context) {
++            actual = MediaQuery.of(context);
++            return const SizedBox.expand(key: ValueKey('zoom-layout'));
++          },
++        ),
++      ),
++    );
++    expect(actual.size, const Size(400, 300));
++    expect(actual.padding, const EdgeInsets.all(10));
++    expect(actual.viewPadding, const EdgeInsets.all(12));
++    expect(actual.viewInsets.bottom, 100);
++    expect(actual.systemGestureInsets, const EdgeInsets.all(8));
++    expect(actual.textScaler.scale(12), 15);
++    final box = tester.renderObject<RenderBox>(
++      find.byKey(const ValueKey('zoom-layout')),
++    );
++    expect(box.size, const Size(400, 300));
++    expect(box.localToGlobal(const Offset(50, 50)), const Offset(100, 100));
++    await tester.pumpWidget(const SizedBox());
++    settings.dispose();
++  });
++
++  for (final scale in [0.5, 2.0]) {
++    testWidgets('scaled clicks, drags and text-selection hit tests at $scale', (
++      tester,
++    ) async {
++      final settings = SettingsStore()..uiScale = scale;
++      var taps = 0;
++      var drag = 0.0;
++      final field = TextEditingController(text: 'abcdefghijklmnop');
++      await tester.pumpWidget(
++        _app(
++          settings,
++          Scaffold(
++            body: Column(
++              children: [
++                GestureDetector(
++                  key: const ValueKey('zoom-target'),
++                  behavior: HitTestBehavior.opaque,
++                  onTap: () => taps++,
++                  onHorizontalDragUpdate: (event) => drag += event.delta.dx,
++                  child: const SizedBox(width: 160, height: 60),
++                ),
++                TextField(controller: field),
++              ],
++            ),
++          ),
++        ),
++      );
++      final target = find.byKey(const ValueKey('zoom-target'));
++      final center = tester.getCenter(target);
++      await tester.tapAt(center);
++      expect(taps, 1);
++      await tester.dragFrom(center, Offset(60 * scale, 0));
++      expect(drag, greaterThan(0));
++      final editable = find.byType(EditableText);
++      await tester.tap(editable);
++      await tester.pump();
++      final render = tester.state<EditableTextState>(editable).renderEditable;
++      final point =
++          tester.getTopLeft(editable) + Offset(50 * scale, 10 * scale);
++      final selectedPosition = render.getPositionForPoint(point);
++      // Finish the first tap's double-tap window before testing a new caret.
++      await tester.pump(const Duration(milliseconds: 400));
++      await tester.tapAt(point);
++      await tester.pump();
++      expect(field.selection.isValid, isTrue);
++      expect(field.selection.baseOffset, selectedPosition.offset);
++      await tester.pumpWidget(const SizedBox());
++      field.dispose();
++      settings.dispose();
++    });
++  }
++
++  testWidgets(
++    'navigator/dialog and focused child state survive 100% boundary',
++    (tester) async {
++      final settings = SettingsStore();
++      final navigator = GlobalKey<NavigatorState>();
++      await tester.pumpWidget(
++        MaterialApp(
++          navigatorKey: navigator,
++          builder: (_, child) => UiZoom(settings: settings, child: child!),
++          home: const Scaffold(body: TextField()),
++        ),
++      );
++      await tester.enterText(find.byType(TextField), 'retained');
++      final original = navigator.currentState;
++      final editable = tester.state<EditableTextState>(
++        find.byType(EditableText),
++      );
++      await settings.setUiScale(1.1);
++      await tester.pump();
++      expect(navigator.currentState, same(original));
++      expect(tester.state(find.byType(EditableText)), same(editable));
++      expect(find.text('retained'), findsOneWidget);
++      expect(editable.widget.focusNode.hasFocus, isTrue);
++      showDialog<void>(
++        context: editable.context,
++        builder: (_) => const AlertDialog(content: Text('scaled dialog')),
++      );
++      await tester.pumpAndSettle();
++      expect(
++        find.ancestor(
++          of: find.text('scaled dialog'),
++          matching: find.byKey(_transform),
++        ),
++        findsOneWidget,
++      );
++      await _key(tester, LogicalKeyboardKey.digit0);
++      expect(find.byKey(_transform), findsNothing);
++      expect(find.text('scaled dialog'), findsOneWidget);
++      expect(navigator.currentState, same(original));
++      await tester.pumpWidget(const SizedBox());
++      settings.dispose();
++    },
++  );
++
++  testWidgets('desktop modified wheel zooms without scrolling descendants', (
++    tester,
++  ) async {
++    final settings = SettingsStore();
++    final scroll = ScrollController();
++    await tester.pumpWidget(
++      _app(
++        settings,
++        ListView(
++          controller: scroll,
++          children: List.generate(
++            100,
++            (i) => SizedBox(height: 60, child: Text('$i')),
++          ),
++        ),
++        wheel: true,
++      ),
++    );
++    Future<void> wheel(double delta) async {
++      tester.binding.handlePointerEvent(
++        PointerScrollEvent(
++          position: const Offset(200, 200),
++          kind: PointerDeviceKind.mouse,
++          scrollDelta: Offset(0, delta),
++        ),
++      );
++      await tester.pump();
++    }
++
++    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
++    await wheel(-40);
++    expect(settings.uiScale, 1.1);
++    expect(scroll.offset, 0);
++    await wheel(40);
++    expect(settings.uiScale, 1);
++    expect(scroll.offset, 0);
++    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
++    await wheel(40);
++    expect(settings.uiScale, 1);
++    expect(scroll.offset, greaterThan(0));
++    await tester.pumpWidget(const SizedBox());
++    scroll.dispose();
++    settings.dispose();
++  });
++
++  testWidgets('tablet ignores wheel and disabled phone ignores saved zoom', (
++    tester,
++  ) async {
++    final settings = SettingsStore()..uiScale = 1.5;
++    await tester.pumpWidget(_app(settings, const SizedBox.expand()));
++    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
++    tester.binding.handlePointerEvent(
++      const PointerScrollEvent(
++        position: Offset(100, 100),
++        kind: PointerDeviceKind.mouse,
++        scrollDelta: Offset(0, -40),
++      ),
++    );
++    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
++    expect(settings.uiScale, 1.5);
++    await tester.pumpWidget(
++      _app(settings, const Text('phone'), enabled: false, wheel: true),
++    );
++    expect(find.byKey(_transform), findsNothing);
++    await _key(tester, LogicalKeyboardKey.equal);
++    tester.binding.handlePointerEvent(
++      const PointerScrollEvent(
++        position: Offset(100, 100),
++        kind: PointerDeviceKind.mouse,
++        scrollDelta: Offset(0, -40),
++      ),
++    );
++    expect(settings.uiScale, 1.5);
++    await tester.pumpWidget(const SizedBox());
++    settings.dispose();
++  });
++}
++
++Widget _app(
++  SettingsStore settings,
++  Widget child, {
++  bool enabled = true,
++  bool wheel = false,
++}) => MaterialApp(
++  builder: (_, navigator) => UiZoom(
++    settings: settings,
++    enabled: enabled,
++    mouseWheelEnabled: wheel,
++    child: navigator!,
++  ),
++  home: child,
++);
++
++Future<void> _key(
++  WidgetTester tester,
++  LogicalKeyboardKey key, {
++  LogicalKeyboardKey modifier = LogicalKeyboardKey.controlLeft,
++  bool shift = false,
++}) async {
++  await tester.sendKeyDownEvent(modifier);
++  if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
++  await tester.sendKeyEvent(key);
++  if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
++  await tester.sendKeyUpEvent(modifier);
++  await tester.pump();
++}

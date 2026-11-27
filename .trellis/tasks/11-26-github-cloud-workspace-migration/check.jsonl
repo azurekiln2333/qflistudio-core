@@ -1,0 +1,9 @@
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/audit-baseline.md","reason":"Observed preservation gaps, active-owner gates, target directory and CI compatibility contract"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Coordinate path/CI/runtime contracts across core and product repositories"}
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/ci-baseline.md","reason":"Existing cloud evidence, six-platform signing gaps and app-owned SDK/path contract"}
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/java-core-work-review.md","reason":"Check every Java-held core source disposition and retain unresolved semantic/history claims; static evidence is not cloud validation"}
+{"file":".trellis/tasks/11-26-core-target-handoff/cleanup-plan.md","reason":"Verify no old path or WSL registration is declared removable before preservation, cloud and handoff gates"}
+{"file":".trellis/tasks/11-26-core-github-preservation/research/ignored-source-disposition.md","reason":"Check ignored-source recovery limits and avoid publishing intermediate checkpoint copies"}
+{"file":".trellis/tasks/11-26-core-github-preservation/research/publication-review.md","reason":"Final bounded static publication signoff, frozen identities and core-last hold; hosted validation still pending"}
+{"file":".trellis/tasks/11-26-core-cloud-ci-policy/research/portability-review.md","reason":"Frozen source/CI review and exact hosted matrix gates"}
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/python-example-contract.md","reason":"Consumer fixture identity clarification without speculative core catalog changes"}

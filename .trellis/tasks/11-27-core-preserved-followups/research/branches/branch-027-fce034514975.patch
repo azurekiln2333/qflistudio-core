@@ -1,0 +1,4522 @@
+diff --git a/lib/editor/agent/session_list_view.dart b/lib/editor/agent/session_list_view.dart
+index 334745986504571cc773fb39316fc22bc3e9a3cf..338ed1cdc4233ee6c2af8ca5db27200cdb603760 100644
+--- a/lib/editor/agent/session_list_view.dart
++++ b/lib/editor/agent/session_list_view.dart
+@@ -17,6 +17,7 @@ class SessionListView extends StatelessWidget {
+     this.onSelect,
+     this.onCreate,
+     this.embedded = false,
++    this.extra,
+   });
+ 
+   final AgentRuntime runtime;
+@@ -38,6 +39,11 @@ class SessionListView extends StatelessWidget {
+   /// 新建和「全部停止」，两种主体共用一套外框。
+   final bool embedded;
+ 
++  /// 追加在会话行之后的额外内容（其它主机的会话）。
++  ///
++  /// 用同一个滚动区，侧边栏里内置会话和外部会话看起来是一份列表。
++  final Widget? extra;
++
+   @override
+   Widget build(BuildContext context) {
+     return AnimatedBuilder(
+@@ -49,21 +55,26 @@ class SessionListView extends StatelessWidget {
+           children: [
+             if (!embedded) ...[_buildHeader(context), const Divider(height: 1)],
+             Expanded(
+-              child: sessions.isEmpty
++              child: sessions.isEmpty && extra == null
+                   ? _buildEmpty(context)
+                   : ListView.builder(
+                       // 与文件树同一套纵向节奏：上下各 8，行间不加分隔。
+                       padding: const EdgeInsets.symmetric(vertical: 8),
+-                      itemCount: sessions.length,
+-                      itemBuilder: (context, index) => _SessionRow(
+-                        meta: sessions[index],
+-                        status: runtime.statusOf(sessions[index].id),
+-                        selected: sessions[index].id == state.sessionId,
+-                        onSelect: onSelect,
+-                        onRename: (title) =>
+-                            runtime.sessions.rename(sessions[index].id, title),
+-                        onDelete: () => _delete(sessions[index]),
+-                      ),
++                      itemCount: sessions.length + (extra == null ? 0 : 1),
++                      itemBuilder: (context, index) {
++                        if (index >= sessions.length) return extra!;
++                        return _SessionRow(
++                          meta: sessions[index],
++                          status: runtime.statusOf(sessions[index].id),
++                          selected: sessions[index].id == state.sessionId,
++                          onSelect: onSelect,
++                          onRename: (title) => runtime.sessions.rename(
++                            sessions[index].id,
++                            title,
++                          ),
++                          onDelete: () => _delete(sessions[index]),
++                        );
++                      },
+                     ),
+             ),
+           ],
+diff --git a/lib/editor/editor_page.dart b/lib/editor/editor_page.dart
+index bf25031b4c6ac1c88e62f356ab1f866caa1b1ecc..af82d104458ddad0ce0d9258ec0048a083822e76 100644
+--- a/lib/editor/editor_page.dart
++++ b/lib/editor/editor_page.dart
+@@ -78,6 +78,12 @@ import 'agent/agent_pane_switcher.dart';
+ import 'agent/editor_agent_host.dart';
+ import 'agent/editor_sidebar_tabs.dart';
+ import 'agent/session_list_view.dart';
++import '../harness/harness_host.dart';
++import '../harness/hub/harness_hub.dart';
++import '../harness/hub/harness_hosts.dart';
++import '../harness/ui/hub_agents_surface.dart';
++import '../harness/ui/hub_session_list.dart';
++import '../pages/devices_remote_page.dart';
+ 
+ enum _BottomPanel {
+   none,
+@@ -165,6 +171,7 @@ class EditorPage extends StatefulWidget {
+     required this.settings,
+     this.initialOpenPath,
+     this.openRequest = 0,
++    this.agentPaneRequest = 0,
+     this.onMinimize,
+     this.onClose,
+     this.retainedVisibility,
+@@ -191,6 +198,12 @@ class EditorPage extends StatefulWidget {
+   /// A new request also opens a file when this page is already mounted. Existing
+   /// open files are selected through EditorController without replacing text.
+   final int openRequest;
++
++  /// 每次递增都把 Agent 面板切到前台。
++  ///
++  /// 从「工具 → 远程电脑」旧入口跳进来时用它直接落在 Agents 面板上，
++  /// 而不是先落在编辑器里让人再找按钮。
++  final int agentPaneRequest;
+   final VoidCallback? onMinimize;
+   final VoidCallback? onClose;
+   final ValueListenable<bool>? retainedVisibility;
+@@ -310,6 +323,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   /// 离线产品为 null，页面上不出现任何 agent 控件。
+   EditorAgentHost? _agentHost;
+ 
++  /// harness hub：本机、Herdr、已绑定电脑和内置 Agent 的主机池。
++  ///
++  /// 和 agent 宿主同级：主机由 [HarnessHosts] 装配，没有注册时为空，
++  /// 面板只显示内置 Agent 的原生会话。
++  HarnessHub? _harnessHub;
++
+   /// agent 文件变更事件的订阅；换运行时或销毁时摘掉。
+   StreamSubscription<AgentFileChange>? _agentFileSub;
+ 
+@@ -432,8 +451,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+       host.addListener(_onAgentHostChanged);
+       _agentHost = host;
+       _lastMainPane = host.state.mainPane;
++      _harnessHub = harnessHubFor(
++        auth: widget.auth,
++        store: widget.store,
++        settings: widget.settings,
++        projectRoot: widget.project.path,
++      );
+       // 注入的运行时已就绪：现在就订阅它的文件变更事件。
+       _syncAgentFileEvents();
++      if (widget.agentPaneRequest > 0) {
++        // 旧「远程电脑」入口跳进来：首帧之后直接落在 Agents 面板上。
++        WidgetsBinding.instance.addPostFrameCallback((_) {
++          if (mounted) _revealAgentPane();
++        });
++      }
+     }
+     OpenPerformance.mark('EditorPage initState');
+     _editor.addListener(_syncTabController);
+@@ -508,6 +539,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+         )) {
+       _reconcileWorkspaceMembers();
+     }
++    if (oldWidget.agentPaneRequest != widget.agentPaneRequest) {
++      _revealAgentPane();
++    }
++  }
++
++  /// 把 Agent 面板切到前台，并把右栏展开。
++  ///
++  /// 宽屏展开对话流；中窄屏切到 Agent 分段。没有 agent 的离线产品直接忽略。
++  void _revealAgentPane() {
++    final host = _agentHost;
++    if (host == null) return;
++    host.activate();
++    host.state.setAgentPaneCollapsed(false);
++    host.state.showMainPane(MainPane.agent);
+   }
+ 
+   static bool _sameWorkspaceMembers(List<Project> a, List<Project> b) {
+@@ -882,6 +927,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     _agentHost?.removeListener(_onAgentHostChanged);
+     _agentHost?.dispose();
+     _agentHost = null;
++    _harnessHub?.dispose();
++    _harnessHub = null;
+     _hiddenViews.clear();
+     // TEMP-DIAG (remove after device verification).
+     FocusManager.instance.removeListener(_diagFocus);
+@@ -1762,6 +1809,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   void _selectAgentSession(String sessionId) {
+     final host = _agentHost;
+     if (host == null) return;
++    // 选内置 Agent 的会话时先摘掉外部主机视图，两个面板不会同时占着右栅。
++    unawaited(_harnessHub?.closeActiveSession());
+     host.selectSession(sessionId);
+     final layout = layoutOf(MediaQuery.sizeOf(context).width);
+     if (layout == WorkbenchLayout.wide) {
+@@ -1900,6 +1949,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                 onSelect: _selectAgentSession,
+                 onCreate: _createAgentSession,
+                 embedded: true,
++                // 同一个卡片里接着列其它主机的会话：用户看到的是一份列表，
++                // 内置 Agent 的会话仍在上面原有的位置。
++                extra: _harnessHub == null
++                    ? null
++                    : HubSessionListSection(
++                        hub: _harnessHub!,
++                        cwd: widget.project.path,
++                        onSelect: _openHubSession,
++                      ),
+               ),
+         onNewSession: _createAgentSession,
+         onStopAllSessions: () => _stopAllAgentSessions(runtime),
+@@ -1911,25 +1969,60 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   ///
+   /// 外面包 [LoginGateScope]：输入卡片的登录门控需要一个能读到登录态的
+   /// 作用域，编辑器页现在是唯一的提供者。
+-  Widget _buildAgentPane(EditorAgentHost host, {required bool active}) =>
+-      LoginGateScope(
+-        auth: widget.auth,
+-        child: EditorAgentPane(
+-          key: _agentPaneKey,
+-          project: widget.project,
+-          runtime: host.runtime,
+-          auth: widget.auth,
+-          settings: widget.settings,
+-          sessionId: host.state.sessionId,
+-          onSessionOpened: _selectAgentSession,
+-          error: host.error,
+-          onRetry: host.activate,
+-          composerDefaults: _composerDefaults,
+-          onOpenFile: _openAgentFile,
+-          fileExists: _agentFileExists,
+-          active: active,
+-        ),
+-      );
++  ///
++  /// [HarnessHub] 有主机时，顶部多一条主机选择器；选中外部主机的会话后
++  /// 面板换成该会话的对话/终端视图，内置 Agent 的原有面板作为默认内容
++  /// 原样传下去，不重建也不改它自己的逻辑。
++  Widget _buildAgentPane(EditorAgentHost host, {required bool active}) {
++    final studioPane = EditorAgentPane(
++      key: _agentPaneKey,
++      project: widget.project,
++      runtime: host.runtime,
++      auth: widget.auth,
++      settings: widget.settings,
++      sessionId: host.state.sessionId,
++      onSessionOpened: _selectAgentSession,
++      error: host.error,
++      onRetry: host.activate,
++      composerDefaults: _composerDefaults,
++      onOpenFile: _openAgentFile,
++      fileExists: _agentFileExists,
++      active: active,
++    );
++    final hub = _harnessHub;
++    return LoginGateScope(
++      auth: widget.auth,
++      child: hub == null
++          ? studioPane
++          : HubAgentsSurface(
++              hub: hub,
++              studioPane: studioPane,
++              projectRoot: widget.project.path,
++              compact:
++                  layoutOf(MediaQuery.sizeOf(context).width) ==
++                  WorkbenchLayout.narrow,
++              onAddComputer: () =>
++                  openDevicesRemotePage(context, auth: widget.auth),
++            ),
++    );
++  }
++
++  /// 打开一个外部主机的会话，并把面板切到对话流。
++  Future<void> _openHubSession(HarnessSessionInfo session) async {
++    final hub = _harnessHub;
++    if (hub == null) return;
++    final host = _agentHost;
++    if (host != null) {
++      // 外部会话在对话流里看；窄屏先切到 Agent 分段，宽屏展开右栏。
++      host.state.showMainPane(MainPane.agent);
++      host.state.setAgentPaneCollapsed(false);
++    }
++    try {
++      await hub.openSession(session);
++    } on Object catch (error) {
++      if (mounted) _showSnack('打不开这个会话：$error');
++    }
++  }
+ 
+   /// 相对项目根的路径现在是否还是一个文件。文件卡片据此决定可不可点。
+   bool _agentFileExists(String relativePath) {
+diff --git a/lib/editor/retained_editor_host.dart b/lib/editor/retained_editor_host.dart
+index 3aaf1f5c9256767e9f3727c364fbee3942ae51a5..c7b743212da67337d2fe3235977c71fae1dd1252 100644
+--- a/lib/editor/retained_editor_host.dart
++++ b/lib/editor/retained_editor_host.dart
+@@ -29,6 +29,7 @@ Future<void> openEditorPage(
+   SavedWorkspace? workspace,
+   List<Project>? workspaceProjects,
+   WorkspaceStore? workspaceStore,
++  bool revealAgentPane = false,
+ }) async {
+   final controller = RetainedEditorScope.maybeOf(context);
+   if (controller != null) {
+@@ -41,6 +42,7 @@ Future<void> openEditorPage(
+       workspace: workspace,
+       workspaceProjects: workspaceProjects,
+       workspaceStore: workspaceStore,
++      revealAgentPane: revealAgentPane,
+     );
+     return;
+   }
+@@ -55,6 +57,7 @@ Future<void> openEditorPage(
+         workspace: workspace,
+         workspaceMembers: workspaceProjects ?? const [],
+         workspaceStore: workspaceStore,
++        agentPaneRequest: revealAgentPane ? 1 : 0,
+         // agent 是否嵌入由宿主按产品策略决定，见 design.md §11.2。
+         agentEnabled: StudioProfile.current?.offlineOnly != true,
+       ),
+@@ -153,6 +156,7 @@ class RetainedEditorController extends ChangeNotifier {
+     SavedWorkspace? workspace,
+     List<Project>? workspaceProjects,
+     WorkspaceStore? workspaceStore,
++    bool revealAgentPane = false,
+   }) {
+     final key = _resolveOpenKey(project, workspace);
+     final session = _sessions.putIfAbsent(
+@@ -167,6 +171,7 @@ class RetainedEditorController extends ChangeNotifier {
+         workspaceStore: workspaceStore,
+       ),
+     );
++    if (revealAgentPane) session.agentPaneRequest++;
+     if (workspace != null) {
+       // Re-opening a saved workspace re-resolves its members. The effective
+       // primary may have changed (missing primary → survivor); keep the live
+@@ -185,7 +190,8 @@ class RetainedEditorController extends ChangeNotifier {
+         session.workspaceRevision++;
+         changed = true;
+       }
+-      if (workspaceStore != null && !identical(session.workspaceStore, workspaceStore)) {
++      if (workspaceStore != null &&
++          !identical(session.workspaceStore, workspaceStore)) {
+         session.workspaceStore = workspaceStore;
+         changed = true;
+       }
+@@ -230,10 +236,7 @@ class RetainedEditorController extends ChangeNotifier {
+   }
+ 
+   /// Attaches a newly saved workspace to the active session (test/UI helper).
+-  void attachActiveWorkspace(
+-    SavedWorkspace workspace,
+-    List<Project> members,
+-  ) {
++  void attachActiveWorkspace(SavedWorkspace workspace, List<Project> members) {
+     final key = _active;
+     if (key == null) return;
+     attachWorkspace(key, workspace, members);
+@@ -349,6 +352,9 @@ class _EditorSession {
+   String? initialOpenPath;
+   int openRequest = 0;
+ 
++  /// 递增即让页面把 Agent 面板切到前台。与 [openRequest] 同一套追增语义。
++  int agentPaneRequest = 0;
++
+   String get label => workspace?.name ?? project.name;
+ }
+ 
+@@ -594,10 +600,7 @@ class _RetainedEditorHostState extends State<RetainedEditorHost>
+         position: RelativeRect.fromRect(rect, Offset.zero & overlayBox.size),
+         items: [
+           for (final entry in controller._sessions.entries)
+-            PopupMenuItem(
+-              value: entry.key,
+-              child: Text(entry.value.label),
+-            ),
++            PopupMenuItem(value: entry.key, child: Text(entry.value.label)),
+         ],
+       );
+     } finally {
+@@ -676,6 +679,7 @@ class _SessionEditor extends StatelessWidget {
+       settings: session.settings,
+       initialOpenPath: session.initialOpenPath,
+       openRequest: session.openRequest,
++      agentPaneRequest: session.agentPaneRequest,
+       retainedVisibility: session.visible,
+       workspace: session.workspace,
+       workspaceMembers: session.workspaceProjects,
+diff --git a/lib/harness/hub/harness_hosts.dart b/lib/harness/hub/harness_hosts.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b72b061fb280ab72022b6b7e9ec818f56de6890f
+--- /dev/null
++++ b/lib/harness/hub/harness_hosts.dart
+@@ -0,0 +1,92 @@
++// hub 的主机装配点。
++//
++// 本任务把界面和 hub 建在同一分支上，四类主机由并行任务提供：
++//   * StudioAgentHost（内置 Agent，studio）
++//   * LocalHarnessHost（本机 PTY 与日志，local）
++//   * HerdrHost（Herdr 窗格，local）
++//   * RemoteHarnessHost（已绑定电脑，remote）
++// 它们分别位于 lib/harness/{local,herdr,remote,studio}/，本文件不直接引用，
++// 这样 Pi-C 分支可以先合并而不带上别人的实现。集成时用
++// [HarnessHosts.registerDefault] 注册一个工厂即可，编辑器页无需再改。
++
++import '../harness_host.dart';
++import '../../services/app_paths.dart';
++import 'harness_hub.dart';
++
++/// 装配主机时能从编辑器页拿到的依赖。
++///
++/// 只放各家主机真正需要的东西：登录态、项目仓库、设置、当前项目根。
++class HubHostContext {
++  const HubHostContext({
++    required this.auth,
++    required this.projectStore,
++    required this.settings,
++    required this.projectRoot,
++  });
++
++  final Object auth;
++  final Object projectStore;
++  final Object settings;
++
++  /// 当前打开项目的绝对路径，可作为新会话的默认工作目录。
++  final String projectRoot;
++}
++
++/// 返回主机列表的工厂。返回顺序就是界面上的顺序。
++typedef HarnessHostsFactory =
++    List<HarnessHost> Function(HubHostContext context);
++
++/// 主机工厂注册表。
++///
++/// 没有注册时 hub 是空的：Agents 面板仍可打开，只显示「暂无可用主机」，
++/// 内置 Agent 的原生会话列表照常工作。
++abstract final class HarnessHosts {
++  static HarnessHostsFactory? _default;
++  static HarnessHostsFactory? _override;
++
++  /// 集成方注册真实主机。后注册的覆盖先注册的。
++  static void registerDefault(HarnessHostsFactory factory) {
++    _default = factory;
++  }
++
++  /// 测试和预览注入假主机，优先于 [registerDefault]。
++  static void overrideForTesting(HarnessHostsFactory? factory) {
++    _override = factory;
++  }
++
++  /// 是否有任何工厂可用；界面据此决定要不要显示主机选择器。
++  static bool get hasFactory => _override != null || _default != null;
++
++  static List<HarnessHost> build(HubHostContext context) {
++    final factory = _override ?? _default;
++    if (factory == null) return const <HarnessHost>[];
++    try {
++      return factory(context);
++    } on Object {
++      // 某台主机的构造失败不应该连带让整个 Agents 面板打不开。
++      return const <HarnessHost>[];
++    }
++  }
++}
++
++/// 编辑器页用的便捷构造：装配主机并交给 hub。
++///
++/// 手机端只保留已绑定电脑和内置 Agent，与 [HarnessHub.hostVisibleOnPlatform]
++/// 一致；[desktop] 只在测试里覆盖平台判定。
++HarnessHub harnessHubFor({
++  required Object auth,
++  required Object store,
++  required Object settings,
++  required String projectRoot,
++  bool? desktop,
++}) {
++  final hosts = HarnessHosts.build(
++    HubHostContext(
++      auth: auth,
++      projectStore: store,
++      settings: settings,
++      projectRoot: projectRoot,
++    ),
++  );
++  return HarnessHub(hosts: hosts, desktop: desktop ?? AppPaths.isDesktop);
++}
+diff --git a/lib/harness/hub/harness_hub.dart b/lib/harness/hub/harness_hub.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca111c2261fd3cd4d3db7086b84d5433d903f21f
+--- /dev/null
++++ b/lib/harness/hub/harness_hub.dart
+@@ -0,0 +1,447 @@
++// Harness Hub：把每台能跑 harness 的电脑抽象成一份主机列表，界面只读这里。
++//
++// 契约在 `lib/harness/harness_host.dart`，本文件不改它。主机由外部注入：
++// 编辑器页按平台策略组出来，测试和预览用假主机，见 harness_hosts.dart。
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../harness_host.dart';
++
++/// 主机可选能力：装不上或平台不支持时给界面的一句说明。
++///
++/// 契约里没有安装提示字段，所以用这个可选接口传，避免改动共享契约。
++abstract class HarnessHostHint {
++  /// 例如「未检测到 Herdr，请先安装」。
++  String? get installHint;
++}
++
++/// 一个主机里同一 provider 的会话。
++@immutable
++class HubProviderGroup {
++  const HubProviderGroup({
++    required this.providerId,
++    required this.label,
++    required this.sessions,
++  });
++
++  final String providerId;
++
++  /// 界面上显示的 provider 名称；没有 provider 信息时退回 id。
++  final String label;
++  final List<HarnessSessionInfo> sessions;
++}
++
++/// 玩家可读的 provider 名称：先查 [labels]，再退回 id。
++String hubProviderLabel(String providerId, Map<String, String> labels) {
++  final label = labels[providerId];
++  if (label != null && label.trim().isNotEmpty) return label;
++  return providerId;
++}
++
++/// 按 provider 分组，组内按更新时间倒序，组间按名称排序。
++///
++/// 纯函数，方便列表和测试共用同一套顺序。
++List<HubProviderGroup> groupSessionsByProvider(
++  List<HarnessSessionInfo> sessions, {
++  Map<String, String> labels = const <String, String>{},
++}) {
++  final grouped = <String, List<HarnessSessionInfo>>{};
++  for (final session in sessions) {
++    grouped
++        .putIfAbsent(session.providerId, () => <HarnessSessionInfo>[])
++        .add(session);
++  }
++  final groups = <HubProviderGroup>[
++    for (final entry in grouped.entries)
++      HubProviderGroup(
++        providerId: entry.key,
++        label: hubProviderLabel(entry.key, labels),
++        sessions: [...entry.value]
++          ..sort((a, b) {
++            final at = a.updatedAt;
++            final bt = b.updatedAt;
++            if (at == null && bt == null) return a.title.compareTo(b.title);
++            if (at == null) return 1;
++            if (bt == null) return -1;
++            return bt.compareTo(at);
++          }),
++      ),
++  ];
++  groups.sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
++  return groups;
++}
++
++/// hub 层拒绝请求时抛出的错误：主机不存在、会话已被别处移除等。
++class HarnessHubException implements Exception {
++  const HarnessHubException(this.message);
++
++  final String message;
++
++  @override
++  String toString() => message;
++}
++
++/// 主机池、当前主机与合并后的会话列表。
++///
++/// 界面只依赖这里和契约类型：
++///
++/// * [hosts] 已按平台策略过滤，手机端只有已绑定电脑和内置 Agent；
++/// * [currentSessions] 是当前主机的会话，[groupsOf] 已按 provider 分好组；
++/// * [activeSession] 是正在看的会话，[activeHandle] 是它打开的视图，
++///   关闭视图时调用 [closeActiveSession] 释放，不结束会话。
++class HarnessHub extends ChangeNotifier {
++  HarnessHub({
++    required List<HarnessHost> hosts,
++    required bool desktop,
++    String? initialHostId,
++  }) : _desktop = desktop,
++       _hosts = List<HarnessHost>.unmodifiable(
++         hosts.where(
++           (host) => hostVisibleOnPlatform(host.kind, desktop: desktop),
++         ),
++       ) {
++    for (final host in _hosts) {
++      _states[host.id] = host.state.value;
++      void onState() => _onHostState(host);
++      _stateListeners[host.id] = onState;
++      host.state.addListener(onState);
++      _listen(host);
++    }
++    _currentHostId = _pickInitialHost(initialHostId);
++  }
++
++  /// 平台策略：桌面版能用本机和 Herdr，手机端只能用已绑定电脑和内置 Agent。
++  ///
++  /// 手机上没有 PTY，也没有本机 Herdr，所以这两类主机不上列表，
++  /// 而不是上一个点了会失败的空壳。
++  static bool hostVisibleOnPlatform(
++    HarnessHostKind kind, {
++    required bool desktop,
++  }) {
++    if (desktop) return true;
++    return kind == HarnessHostKind.remote || kind == HarnessHostKind.studio;
++  }
++
++  final bool _desktop;
++  final List<HarnessHost> _hosts;
++  final Map<String, HarnessHostState> _states = <String, HarnessHostState>{};
++  final Map<String, VoidCallback> _stateListeners = <String, VoidCallback>{};
++  final Map<String, List<HarnessSessionInfo>> _sessions =
++      <String, List<HarnessSessionInfo>>{};
++  final Map<String, StreamSubscription<List<HarnessSessionInfo>>> _subs =
++      <String, StreamSubscription<List<HarnessSessionInfo>>>{};
++  final Map<String, List<HarnessProviderInfo>> _providers =
++      <String, List<HarnessProviderInfo>>{};
++  final Map<String, Object> _sessionErrors = <String, Object>{};
++
++  String? _currentHostId;
++  HarnessSessionInfo? _activeSession;
++  HarnessSessionHandle? _activeHandle;
++  bool _opening = false;
++  bool _disposed = false;
++
++  /// 平台是否按桌面版处理，测试可注入。
++  bool get isDesktop => _desktop;
++
++  /// 已按平台过滤的主机，顺序即界面顺序。
++  List<HarnessHost> get hosts => _hosts;
++
++  HarnessHost? hostById(String id) {
++    for (final host in _hosts) {
++      if (host.id == id) return host;
++    }
++    return null;
++  }
++
++  /// 当前主机；没有任何可用主机时为 null。
++  HarnessHost? get currentHost =>
++      _currentHostId == null ? null : hostById(_currentHostId!);
++
++  String? get currentHostId => _currentHostId;
++
++  /// 切换主机。切换会先释放当前会话视图（只释放视图，不结束会话）。
++  void selectHost(String id) {
++    if (_disposed || id == _currentHostId) return;
++    if (hostById(id) == null) return;
++    unawaited(closeActiveSession());
++    _currentHostId = id;
++    notifyListeners();
++  }
++
++  /// 主机状态；没有该主机时按 unsupported 处理，界面不会因为缺一项就崩。
++  HarnessHostState stateOf(String hostId) =>
++      _states[hostId] ?? HarnessHostState.unsupported;
++
++  /// 主机状态的监听句柄，供选择器画在线点。
++  ValueListenable<HarnessHostState> stateListenableOf(String hostId) {
++    final host = hostById(hostId);
++    return host?.state ?? _missingState;
++  }
++
++  /// 没有该主机时共用的只读占位，避免每帧新建一个 notifier。
++  static final ValueNotifier<HarnessHostState> _missingState =
++      ValueNotifier<HarnessHostState>(HarnessHostState.unsupported);
++
++  /// 主机自带的安装/修复说明；没有时为 null。
++  String? hintOf(String hostId) {
++    final host = hostById(hostId);
++    if (host is HarnessHostHint) return (host as HarnessHostHint).installHint;
++    return null;
++  }
++
++  /// 该主机最近一次会话列表读取失败的原因。
++  Object? sessionErrorOf(String hostId) => _sessionErrors[hostId];
++
++  /// 某台主机的会话，顺序沿用主机给的顺序。
++  List<HarnessSessionInfo> sessionsOf(String hostId) =>
++      List<HarnessSessionInfo>.unmodifiable(
++        _sessions[hostId] ?? const <HarnessSessionInfo>[],
++      );
++
++  /// 当前主机的会话。
++  List<HarnessSessionInfo> get currentSessions {
++    final host = currentHost;
++    return host == null ? const <HarnessSessionInfo>[] : sessionsOf(host.id);
++  }
++
++  /// 所有主机的会话合并，带主机 id，界面据此区分来源。
++  List<HarnessSessionInfo> get allSessions => <HarnessSessionInfo>[
++    for (final host in _hosts) ...sessionsOf(host.id),
++  ];
++
++  /// 某台主机按 provider 分好的组。
++  List<HubProviderGroup> groupsOf(String hostId) => groupSessionsByProvider(
++    sessionsOf(hostId),
++    labels: providerLabelsOf(hostId),
++  );
++
++  /// 当前主机的分组。
++  List<HubProviderGroup> get currentGroups {
++    final host = currentHost;
++    return host == null ? const <HubProviderGroup>[] : groupsOf(host.id);
++  }
++
++  /// 已知的 provider 名称，未读取过时为空。
++  Map<String, String> providerLabelsOf(String hostId) {
++    final list = _providers[hostId];
++    if (list == null) return const <String, String>{};
++    return <String, String>{
++      for (final provider in list) provider.id: provider.label,
++    };
++  }
++
++  /// 读取某台主机能启动的 harness，并缓存名称。
++  ///
++  /// 读不到时返回空列表，不抛给界面：启动菜单为空只需要提示一句。
++  Future<List<HarnessProviderInfo>> providersOf(
++    String hostId, {
++    bool refresh = false,
++  }) async {
++    final cached = _providers[hostId];
++    if (cached != null && !refresh) return cached;
++    final host = hostById(hostId);
++    if (host == null) return const <HarnessProviderInfo>[];
++    try {
++      final providers = await host.providers();
++      if (_disposed) return providers;
++      _providers[hostId] = List<HarnessProviderInfo>.unmodifiable(providers);
++      notifyListeners();
++      return _providers[hostId]!;
++    } on Object {
++      if (_disposed) return const <HarnessProviderInfo>[];
++      _providers[hostId] = const <HarnessProviderInfo>[];
++      notifyListeners();
++      return _providers[hostId]!;
++    }
++  }
++
++  /// 当前主机的“新建会话”菜单项。
++  Future<List<HarnessProviderInfo>> launchMenu() async {
++    final host = currentHost;
++    if (host == null) return const <HarnessProviderInfo>[];
++    return providersOf(host.id);
++  }
++
++  /// 正在看的会话；没有打开会话时为 null。
++  HarnessSessionInfo? get activeSession => _activeSession;
++
++  /// 正在看的会话视图；为 null 表示还没打开。
++  HarnessSessionHandle? get activeHandle => _activeHandle;
++
++  /// 会话列表是否已至少收到一次。
++  bool get hasLoadedSessions => _sessions.isNotEmpty;
++
++  /// 选中并打开一个会话。
++  ///
++  /// 同一个会话重复调用返回同一个视图；换会话会先释放旧的视图。
++  Future<HarnessSessionHandle> openSession(
++    HarnessSessionInfo info, {
++    String? hostId,
++  }) async {
++    final targetHostId = hostId ?? info.hostId;
++    final host = hostById(targetHostId);
++    if (host == null) {
++      throw HarnessHubException('找不到主机 ${info.hostId}，请刷新后重试');
++    }
++    final existing = _activeHandle;
++    if (_activeSession?.id == info.id &&
++        _activeSession?.hostId == info.hostId &&
++        existing != null) {
++      return existing;
++    }
++    if (_opening) {
++      throw const HarnessHubException('上一个会话还没打开，请稍后再试');
++    }
++    _opening = true;
++    try {
++      await closeActiveSession();
++      final handle = await host.open(info.id);
++      if (_disposed) {
++        await handle.detach();
++        return handle;
++      }
++      _activeSession = handle.info;
++      _activeHandle = handle;
++      if (_currentHostId != targetHostId) _currentHostId = targetHostId;
++      notifyListeners();
++      return handle;
++    } finally {
++      _opening = false;
++    }
++  }
++
++  /// 在当前主机上启动一个 harness，并把它设为正在看的会话。
++  Future<HarnessSessionHandle> launch(
++    HarnessLaunchRequest request, {
++    String? hostId,
++  }) async {
++    final host = hostById(hostId ?? _currentHostId ?? '');
++    if (host == null) {
++      throw const HarnessHubException('当前没有可用的主机');
++    }
++    if (_opening) {
++      throw const HarnessHubException('上一个会话还没打开，请稍后再试');
++    }
++    _opening = true;
++    try {
++      await closeActiveSession();
++      final handle = await host.launch(request);
++      if (_disposed) {
++        await handle.detach();
++        return handle;
++      }
++      _activeSession = handle.info;
++      _activeHandle = handle;
++      notifyListeners();
++      return handle;
++    } finally {
++      _opening = false;
++    }
++  }
++
++  /// 只释放当前会话视图。会话照常在主机上跑，再次打开就重新接上。
++  Future<void> closeActiveSession() async {
++    final handle = _activeHandle;
++    _activeHandle = null;
++    _activeSession = null;
++    if (!_disposed) notifyListeners();
++    if (handle != null) {
++      try {
++        await handle.detach();
++      } on Object {
++        // 释放视图失败不该挡住界面退出；会话本身仍在主机上。
++      }
++    }
++  }
++
++  /// 重新订阅所有主机的会话列表，并丢弃 provider 缓存。
++  ///
++  /// 主机离线时订阅可能只是空表，用户点「刷新」就再要一次。
++  Future<void> refresh() async {
++    if (_disposed) return;
++    _providers.clear();
++    for (final host in _hosts) {
++      await _subs.remove(host.id)?.cancel();
++      _listen(host);
++      unawaited(
++        host.providers().then<void>((providers) {
++          if (_disposed) return;
++          _providers[host.id] = List<HarnessProviderInfo>.unmodifiable(
++            providers,
++          );
++          notifyListeners();
++        }, onError: (Object _) {}),
++      );
++    }
++    notifyListeners();
++  }
++
++  void _listen(HarnessHost host) {
++    _sessionErrors.remove(host.id);
++    _subs[host.id] = host.watchSessions().listen(
++      (sessions) {
++        if (_disposed) return;
++        _sessions[host.id] = List<HarnessSessionInfo>.unmodifiable(sessions);
++        _sessionErrors.remove(host.id);
++        // 正在看的会话被主机移除（自己退出或被删掉）：只摘掉视图，
++        // 不再对它发任何请求。
++        final active = _activeSession;
++        if (active != null &&
++            active.hostId == host.id &&
++            !sessions.any((session) => session.id == active.id)) {
++          unawaited(closeActiveSession());
++        }
++        notifyListeners();
++      },
++      onError: (Object error) {
++        if (_disposed) return;
++        _sessionErrors[host.id] = error;
++        notifyListeners();
++      },
++    );
++  }
++
++  void _onHostState(HarnessHost host) {
++    if (_disposed) return;
++    final state = host.state.value;
++    if (_states[host.id] == state) return;
++    _states[host.id] = state;
++    notifyListeners();
++  }
++
++  String? _pickInitialHost(String? initialHostId) {
++    if (initialHostId != null && hostById(initialHostId) != null) {
++      return initialHostId;
++    }
++    if (_hosts.isEmpty) return null;
++    // 桌面版默认停在「本机」，手机端默认停在第一台已绑定电脑。
++    for (final host in _hosts) {
++      if (host.kind == HarnessHostKind.local && _desktop) return host.id;
++    }
++    for (final host in _hosts) {
++      if (host.kind == HarnessHostKind.remote) return host.id;
++    }
++    return _hosts.first.id;
++  }
++
++  @override
++  void dispose() {
++    _disposed = true;
++    for (final entry in _subs.entries) {
++      unawaited(entry.value.cancel());
++    }
++    _subs.clear();
++    for (final host in _hosts) {
++      final listener = _stateListeners.remove(host.id);
++      if (listener != null) host.state.removeListener(listener);
++      unawaited(host.dispose());
++    }
++    final handle = _activeHandle;
++    _activeHandle = null;
++    _activeSession = null;
++    if (handle != null) unawaited(handle.detach());
++    super.dispose();
++  }
++}
+diff --git a/lib/harness/ui/agents_entry.dart b/lib/harness/ui/agents_entry.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..a632c30175a891074f89fd0afae22c011907ca44
+--- /dev/null
++++ b/lib/harness/ui/agents_entry.dart
+@@ -0,0 +1,62 @@
++// 旧「远程电脑」入口的落点：编辑器页的 Agents 面板。
++//
++// 远程会话管理已经并入 Agents 面板，独立首页只剩配对设置（设备与远程）。
++// 工具页的旧卡片改为调用这里：挑一个本地项目，打开编辑器，并让页面首帧就
++// 落在 Agents 面板上。没有项目时给出说明，而不是推一个空页面。
++
++import 'package:flutter/material.dart';
++
++import '../../editor/retained_editor_host.dart';
++import '../../store/auth_store.dart';
++import '../../store/project_store.dart';
++import '../../store/settings_store.dart';
++import '../../models/project.dart';
++
++/// 打开 Agents 面板。
++///
++/// [project] 为空时用项目仓库里最近的一个本地项目；一个都没有时提示先建项目。
++Future<void> openAgentsSurface(
++  BuildContext context, {
++  required AuthStore auth,
++  required ProjectStore store,
++  required SettingsStore settings,
++  Project? project,
++}) async {
++  final target = project ?? _pickLocalProject(store);
++  if (target == null) {
++    if (!context.mounted) return;
++    await showDialog<void>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('先打开一个项目'),
++        content: const Text(
++          'Agents 面板在编辑器里。新建或打开一个项目后，'
++          '右侧的 Agent 面板就能看到本机、Herdr 和已绑定电脑的会话。',
++        ),
++        actions: [
++          TextButton(
++            onPressed: () => Navigator.of(dialogContext).pop(),
++            child: const Text('知道了'),
++          ),
++        ],
++      ),
++    );
++    return;
++  }
++  await openEditorPage(
++    context,
++    project: target,
++    auth: auth,
++    store: store,
++    settings: settings,
++    revealAgentPane: true,
++  );
++}
++
++/// 最近更新的本地项目。云端项目没有本地目录，不拿来当工作目录。
++Project? _pickLocalProject(ProjectStore store) {
++  final locals = store.projects.where((project) => !project.isCloud).toList();
++  if (locals.isEmpty) return null;
++  locals.sort((a, b) => b.createdAt.compareTo(a.createdAt));
++  return locals.first;
++}
+diff --git a/lib/harness/ui/hub_agents_surface.dart b/lib/harness/ui/hub_agents_surface.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..6043714e53df8479876fea60907af27900c63c48
+--- /dev/null
++++ b/lib/harness/ui/hub_agents_surface.dart
+@@ -0,0 +1,273 @@
++// Agents 面板的 hub 部分：顶部主机条 + 会话视图，嵌在编辑器页原有面板里。
++//
++// 内置 Agent 的原生对话面板作为 [studioPane] 传入：当前主机是内置 Agent 或
++// 没有可用主机时原样显示，外部主机的会话则在这里换成 [HubSessionView]。
++// 不新开页面，也不另起一套应用外壳。
++
++import 'package:flutter/material.dart';
++
++import '../harness_host.dart';
++import '../hub/harness_hub.dart';
++import 'hub_host_switcher.dart';
++import 'hub_session_list.dart';
++import 'hub_session_view.dart';
++
++/// Agents 面板上方的 hub 容器。
++class HubAgentsSurface extends StatelessWidget {
++  const HubAgentsSurface({
++    super.key,
++    required this.hub,
++    required this.studioPane,
++    required this.projectRoot,
++    this.onAddComputer,
++    this.compact = false,
++  });
++
++  final HarnessHub hub;
++
++  /// 内置 Agent 的对话面板，保持原有行为。
++  final Widget studioPane;
++
++  /// 新会话的默认工作目录。
++  final String projectRoot;
++
++  /// 打开设备与远程（配对）。为空时不显示添加入口。
++  final VoidCallback? onAddComputer;
++
++  /// 手机端：会话视图带返回键和终端按键栏。
++  final bool compact;
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedBuilder(
++      animation: hub,
++      builder: (context, _) {
++        final host = hub.currentHost;
++        final active = hub.activeSession;
++        final showsHubSession =
++            active != null &&
++            host != null &&
++            host.kind != HarnessHostKind.studio;
++        return Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            if (host != null)
++              _HostHeader(
++                hub: hub,
++                host: host,
++                onAddComputer: onAddComputer,
++                compact: compact,
++                projectRoot: projectRoot,
++              ),
++            Expanded(
++              child: showsHubSession
++                  ? HubSessionView(
++                      key: ValueKey('hub-view-${active.hostId}-${active.id}'),
++                      hub: hub,
++                      session: active,
++                      compact: compact,
++                    )
++                  : host == null || host.kind == HarnessHostKind.studio
++                  ? studioPane
++                  : _HostEmptyState(
++                      hub: hub,
++                      host: host,
++                      projectRoot: projectRoot,
++                    ),
++            ),
++          ],
++        );
++      },
++    );
++  }
++}
++
++/// 主机条：选择器、连接状态说明、新建会话和刷新。
++class _HostHeader extends StatelessWidget {
++  const _HostHeader({
++    required this.hub,
++    required this.host,
++    required this.onAddComputer,
++    required this.compact,
++    required this.projectRoot,
++  });
++
++  final HarnessHub hub;
++  final HarnessHost host;
++  final VoidCallback? onAddComputer;
++  final bool compact;
++  final String projectRoot;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final state = hub.stateOf(host.id);
++    final hint = hub.hintOf(host.id);
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        _SwitcherRow(
++          hub: hub,
++          host: host,
++          onAddComputer: onAddComputer,
++          compact: compact,
++          projectRoot: projectRoot,
++        ),
++        if (hint != null && hint.isNotEmpty)
++          Container(
++            key: const ValueKey('hub-host-hint'),
++            width: double.infinity,
++            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
++            color: scheme.tertiaryContainer.withValues(alpha: 0.35),
++            child: Text(
++              hint,
++              style: theme.textTheme.labelSmall?.copyWith(
++                color: scheme.onTertiaryContainer,
++              ),
++            ),
++          )
++        else if (state == HarnessHostState.offline ||
++            state == HarnessHostState.connecting)
++          Container(
++            width: double.infinity,
++            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
++            color: scheme.surfaceContainerHighest,
++            child: Text(
++              state == HarnessHostState.connecting
++                  ? '正在连接…'
++                  : '电脑未连接，恢复后会话会自动同步。',
++              style: theme.textTheme.labelSmall?.copyWith(
++                color: scheme.onSurfaceVariant,
++              ),
++            ),
++          ),
++      ],
++    );
++  }
++}
++
++class _SwitcherRow extends StatelessWidget {
++  const _SwitcherRow({
++    required this.hub,
++    required this.host,
++    required this.onAddComputer,
++    required this.compact,
++    required this.projectRoot,
++  });
++
++  final HarnessHub hub;
++  final HarnessHost host;
++  final VoidCallback? onAddComputer;
++  final bool compact;
++  final String projectRoot;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return Row(
++      children: [
++        Expanded(
++          child: _HostChips(
++            hub: hub,
++            onAddComputer: onAddComputer,
++            compact: compact,
++          ),
++        ),
++        IconButton(
++          key: const ValueKey('hub-sessions-refresh'),
++          tooltip: '刷新会话',
++          iconSize: 18,
++          padding: EdgeInsets.zero,
++          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
++          onPressed: hub.refresh,
++          icon: const Icon(Icons.refresh),
++        ),
++        SizedBox(width: 2),
++        Container(width: 1, height: 20, color: scheme.outlineVariant),
++        SizedBox(width: 2),
++        HubNewSessionButton(hub: hub, cwd: projectRoot, dense: true),
++      ],
++    );
++  }
++}
++
++/// 主机选择条：直接复用 [HubHostSwitcher]，这里只是一个不滚动的窄容器。
++class _HostChips extends StatelessWidget {
++  const _HostChips({
++    required this.hub,
++    required this.onAddComputer,
++    required this.compact,
++  });
++
++  final HarnessHub hub;
++  final VoidCallback? onAddComputer;
++  final bool compact;
++
++  @override
++  Widget build(BuildContext context) =>
++      HubHostSwitcher(hub: hub, onAddComputer: onAddComputer, dense: compact);
++}
++
++/// 当前主机没有会话时的说明与启动入口。
++class _HostEmptyState extends StatelessWidget {
++  const _HostEmptyState({
++    required this.hub,
++    required this.host,
++    required this.projectRoot,
++  });
++
++  final HarnessHub hub;
++  final HarnessHost host;
++  final String projectRoot;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final state = hub.stateOf(host.id);
++    final unsupported = state == HarnessHostState.unsupported;
++    final hasSessions = hub.sessionsOf(host.id).isNotEmpty;
++    return Center(
++      child: Padding(
++        padding: const EdgeInsets.all(16),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Icon(
++              unsupported ? Icons.link_off : Icons.dns_outlined,
++              size: 32,
++              color: unsupported ? scheme.error : scheme.outline,
++            ),
++            const SizedBox(height: 8),
++            Text(
++              unsupported
++                  ? '${host.label} 暂不可用'
++                  : hasSessions
++                  ? '选择一个会话'
++                  : '${host.label} 还没有会话',
++              style: theme.textTheme.titleSmall,
++              textAlign: TextAlign.center,
++            ),
++            const SizedBox(height: 4),
++            Text(
++              unsupported
++                  ? (hub.hintOf(host.id) ?? '检查这台电脑上是否已安装对应程序。')
++                  : hasSessions
++                  ? '从左侧会话列表选一个，或新建会话。'
++                  : '从右上角的新建会话启动一个 harness，或先刷新。',
++              textAlign: TextAlign.center,
++              style: theme.textTheme.bodySmall?.copyWith(
++                color: scheme.onSurfaceVariant,
++              ),
++            ),
++            if (!unsupported) ...[
++              const SizedBox(height: 12),
++              HubNewSessionButton(hub: hub, cwd: projectRoot),
++            ],
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/harness/ui/hub_chat_view.dart b/lib/harness/ui/hub_chat_view.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd6522c49d313f5194f7638ef7b496ece3444104
+--- /dev/null
++++ b/lib/harness/ui/hub_chat_view.dart
+@@ -0,0 +1,413 @@
++// 会话的「对话」标签：结构化对话记录、审批/提问回复和输入卡片。
++//
++// 消息气泡复用 Studio 的 ChatMessageTile，输入卡片复用 ComposerState 的
++// 草稿状态；权限和模型选择器属于内置 Agent 的模型范围，hub 会话没有对应
++// 契约字段，所以这里只保留发送与停止。
++
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../../chat/chat_transcript.dart';
++import '../../chat/composer_state.dart';
++import '../../vibe_coding/vibe_agent_facade.dart' show AgentMessageView;
++import '../harness_host.dart';
++
++/// 对话记录上限：超过这个条数只保留最近部分，界面不会被长会话拖慢。
++const int kHubTranscriptLimit = 400;
++
++/// 契约的会话角色换成 ChatMessageTile 认的角色名。
++String hubRoleName(TranscriptRole role) => switch (role) {
++  TranscriptRole.user => 'user',
++  TranscriptRole.assistant => 'assistant',
++  TranscriptRole.tool => 'tool',
++  // 系统提示按助手正文渲染：它同样是给用户看的正文，不是工具调用。
++  TranscriptRole.system => 'assistant',
++};
++
++/// 一个 hub 会话的对话视图。
++class HubChatView extends StatefulWidget {
++  const HubChatView({
++    super.key,
++    required this.handle,
++    this.emptyTitle = '还没有对话记录',
++    this.emptyHint = '在下面的输入框里描述要它做什么。',
++  });
++
++  final HarnessSessionHandle handle;
++  final String emptyTitle;
++  final String emptyHint;
++
++  @override
++  State<HubChatView> createState() => _HubChatViewState();
++}
++
++class _HubChatViewState extends State<HubChatView> {
++  final List<TranscriptEvent> _events = <TranscriptEvent>[];
++  final Set<String> _answered = <String>{};
++  final ScrollController _scroll = ScrollController();
++  late final ComposerState _composer = ComposerState();
++  StreamSubscription<TranscriptEvent>? _sub;
++  bool _sending = false;
++  String? _error;
++
++  @override
++  void initState() {
++    super.initState();
++    _bind();
++  }
++
++  void _bind() {
++    unawaited(_sub?.cancel());
++    final stream = widget.handle.transcript;
++    if (stream == null) return;
++    _sub = stream.listen(
++      (event) {
++        if (!mounted) return;
++        setState(() {
++          _events.add(event);
++          if (_events.length > kHubTranscriptLimit) {
++            _events.removeRange(0, _events.length - kHubTranscriptLimit);
++          }
++        });
++        _scrollToEnd();
++      },
++      onError: (Object error) {
++        if (mounted) setState(() => _error = '对话记录中断：$error');
++      },
++    );
++  }
++
++  void _scrollToEnd() {
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (!_scroll.hasClients) return;
++      _scroll.jumpTo(_scroll.position.maxScrollExtent);
++    });
++  }
++
++  Future<bool> _send(String text, List<String> attachments) async {
++    final body = text.trim();
++    if (body.isEmpty || _sending) return false;
++    setState(() {
++      _sending = true;
++      _error = null;
++    });
++    try {
++      await widget.handle.sendPrompt(body);
++      _composer.clearInput();
++      return true;
++    } on Object catch (error) {
++      if (mounted) setState(() => _error = '这一条没有发出去：$error');
++      return false;
++    } finally {
++      if (mounted) setState(() => _sending = false);
++    }
++  }
++
++  Future<void> _reply(TranscriptEvent event, String choice) async {
++    final requestId = event.requestId;
++    if (requestId == null || _answered.contains(requestId)) return;
++    setState(() => _answered.add(requestId));
++    try {
++      await widget.handle.reply(
++        HarnessReply(requestId: requestId, choice: choice),
++      );
++    } on Object catch (error) {
++      if (!mounted) return;
++      setState(() {
++        _answered.remove(requestId);
++        _error = '回复没有送出去：$error';
++      });
++    }
++  }
++
++  @override
++  void dispose() {
++    unawaited(_sub?.cancel());
++    _scroll.dispose();
++    _composer.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: [
++        if (_error != null)
++          MaterialBanner(
++            content: Text(_error!),
++            actions: [
++              TextButton(
++                onPressed: () => setState(() => _error = null),
++                child: const Text('知道了'),
++              ),
++            ],
++          ),
++        Expanded(
++          child: _events.isEmpty
++              ? _empty(context)
++              : ListView.builder(
++                  key: const ValueKey('hub-chat-list'),
++                  controller: _scroll,
++                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
++                  itemCount: _events.length,
++                  itemBuilder: (context, index) {
++                    final event = _events[index];
++                    return Column(
++                      crossAxisAlignment: CrossAxisAlignment.stretch,
++                      children: [
++                        ChatMessageTile(
++                          message: AgentMessageView(
++                            id: event.id,
++                            role: hubRoleName(event.role),
++                            text: event.text,
++                          ),
++                        ),
++                        if (event.requestId != null &&
++                            !_answered.contains(event.requestId))
++                          HubRequestCard(
++                            event: event,
++                            onReply: (choice) => _reply(event, choice),
++                          ),
++                      ],
++                    );
++                  },
++                ),
++        ),
++        HubComposer(
++          state: _composer,
++          onSend: _send,
++          sending: _sending,
++          onStop: () => widget.handle.stop(),
++          enabled: true,
++        ),
++      ],
++    );
++  }
++
++  Widget _empty(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    return Center(
++      child: Padding(
++        padding: const EdgeInsets.all(16),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Icon(Icons.forum_outlined, size: 30, color: scheme.outline),
++            const SizedBox(height: 8),
++            Text(widget.emptyTitle, style: theme.textTheme.titleSmall),
++            const SizedBox(height: 4),
++            Text(
++              widget.emptyHint,
++              textAlign: TextAlign.center,
++              style: theme.textTheme.bodySmall?.copyWith(
++                color: scheme.onSurfaceVariant,
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// 审批或提问卡片：每个选项一个按钮，点了就把 requestId 和选择回给主机。
++class HubRequestCard extends StatelessWidget {
++  const HubRequestCard({super.key, required this.event, required this.onReply});
++
++  final TranscriptEvent event;
++  final ValueChanged<String> onReply;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final options = event.options;
++    return Container(
++      key: ValueKey('hub-request-${event.requestId}'),
++      margin: const EdgeInsets.only(bottom: 10),
++      padding: const EdgeInsets.all(12),
++      decoration: BoxDecoration(
++        color: scheme.tertiaryContainer.withValues(alpha: 0.35),
++        borderRadius: BorderRadius.circular(12),
++        border: Border.all(color: scheme.tertiary.withValues(alpha: 0.4)),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              Icon(Icons.shield_outlined, size: 16, color: scheme.tertiary),
++              const SizedBox(width: 6),
++              Text(
++                '需要你确认或回答',
++                style: theme.textTheme.labelLarge?.copyWith(
++                  color: scheme.onTertiaryContainer,
++                ),
++              ),
++            ],
++          ),
++          const SizedBox(height: 6),
++          Text(event.text, style: theme.textTheme.bodySmall),
++          if (options.isNotEmpty) ...[
++            const SizedBox(height: 8),
++            Wrap(
++              spacing: 8,
++              runSpacing: 6,
++              children: [
++                for (final option in options)
++                  FilledButton.tonal(
++                    key: ValueKey(
++                      'hub-request-option-${event.requestId}-$option',
++                    ),
++                    onPressed: () => onReply(option),
++                    child: Text(option),
++                  ),
++              ],
++            ),
++          ],
++        ],
++      ),
++    );
++  }
++}
++
++/// hub 会话的输入卡片。
++///
++/// 外观与 Studio 的输入卡片一致（同一套圆角、描边和间距），但不含权限与
++/// 模型选择器：那两项描述的是内置 Agent 的模型，外部 harness 没有这些字段。
++class HubComposer extends StatefulWidget {
++  const HubComposer({
++    super.key,
++    required this.state,
++    required this.onSend,
++    this.onStop,
++    this.sending = false,
++    this.enabled = true,
++    this.hintText = '给这个会话发一条消息…',
++  });
++
++  final ComposerState state;
++  final Future<bool> Function(String text, List<String> attachments) onSend;
++  final VoidCallback? onStop;
++  final bool sending;
++  final bool enabled;
++  final String hintText;
++
++  @override
++  State<HubComposer> createState() => _HubComposerState();
++}
++
++class _HubComposerState extends State<HubComposer> {
++  final TextEditingController _input = TextEditingController();
++  final FocusNode _focus = FocusNode();
++
++  @override
++  void initState() {
++    super.initState();
++    _input.text = widget.state.text;
++    widget.state.addListener(_onStateChanged);
++  }
++
++  @override
++  void didUpdateWidget(HubComposer oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (!identical(oldWidget.state, widget.state)) {
++      oldWidget.state.removeListener(_onStateChanged);
++      widget.state.addListener(_onStateChanged);
++      _input.text = widget.state.text;
++    }
++  }
++
++  void _onStateChanged() {
++    if (!mounted) return;
++    if (_input.text != widget.state.text) _input.text = widget.state.text;
++    setState(() {});
++  }
++
++  void _onChanged(String value) {
++    widget.state.text = value;
++  }
++
++  Future<void> _submit() async {
++    if (widget.sending) return;
++    final text = _input.text.trim();
++    if (text.isEmpty) return;
++    final ok = await widget.onSend(text, const <String>[]);
++    if (ok && mounted) _focus.requestFocus();
++  }
++
++  @override
++  void dispose() {
++    widget.state.removeListener(_onStateChanged);
++    _input.dispose();
++    _focus.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final canSend = _input.text.trim().isNotEmpty && widget.enabled;
++    return SafeArea(
++      top: false,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
++        child: Container(
++          decoration: BoxDecoration(
++            color: scheme.surfaceContainerHigh,
++            borderRadius: BorderRadius.circular(16),
++            border: Border.all(color: scheme.outlineVariant),
++          ),
++          padding: const EdgeInsets.fromLTRB(10, 8, 8, 6),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++              TextField(
++                key: const ValueKey('hub-composer-input'),
++                controller: _input,
++                focusNode: _focus,
++                enabled: widget.enabled,
++                minLines: 1,
++                maxLines: 5,
++                textInputAction: TextInputAction.newline,
++                decoration: InputDecoration(
++                  hintText: widget.hintText,
++                  border: InputBorder.none,
++                  isCollapsed: true,
++                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
++                ),
++                onChanged: _onChanged,
++              ),
++              const SizedBox(height: 4),
++              Row(
++                children: [
++                  const Spacer(),
++                  SizedBox(
++                    width: 36,
++                    height: 36,
++                    child: widget.sending
++                        ? IconButton.filled(
++                            key: const ValueKey('hub-composer-stop'),
++                            tooltip: '停止',
++                            onPressed: widget.onStop,
++                            icon: const Icon(Icons.stop, size: 20),
++                          )
++                        : IconButton.filled(
++                            key: const ValueKey('hub-composer-send'),
++                            tooltip: '发送',
++                            onPressed: canSend ? _submit : null,
++                            icon: const Icon(Icons.arrow_upward, size: 20),
++                          ),
++                  ),
++                ],
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/harness/ui/hub_host_switcher.dart b/lib/harness/ui/hub_host_switcher.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..8eb2563bd9cef593ef8eb7936906c709b57a2471
+--- /dev/null
++++ b/lib/harness/ui/hub_host_switcher.dart
+@@ -0,0 +1,230 @@
++// 主机切换器：本机、Herdr、已绑定电脑（带在线点）、添加电脑。
++//
++// 只画 hub 里已按平台过滤过的主机；手机端因此不会出现本机和 Herdr。
++
++import 'package:flutter/material.dart';
++
++import '../harness_host.dart';
++import '../hub/harness_hub.dart';
++
++/// 顶部主机条。选中项高亮，不可用的主机仍可见但带说明。
++class HubHostSwitcher extends StatelessWidget {
++  const HubHostSwitcher({
++    super.key,
++    required this.hub,
++    this.onAddComputer,
++    this.dense = false,
++  });
++
++  final HarnessHub hub;
++
++  /// 打开设备与远程（配对）。为空时不显示添加入口。
++  final VoidCallback? onAddComputer;
++
++  /// 窄屏会话视图里用更紧的高度。
++  final bool dense;
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedBuilder(
++      animation: hub,
++      builder: (context, _) {
++        final hosts = hub.hosts;
++        if (hosts.isEmpty && onAddComputer == null) {
++          return const SizedBox.shrink();
++        }
++        final scheme = Theme.of(context).colorScheme;
++        return Container(
++          key: const ValueKey('hub-host-switcher'),
++          decoration: BoxDecoration(
++            color: scheme.surfaceContainerLow,
++            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
++          ),
++          child: SingleChildScrollView(
++            scrollDirection: Axis.horizontal,
++            padding: EdgeInsets.symmetric(
++              horizontal: 8,
++              vertical: dense ? 4 : 6,
++            ),
++            child: Row(
++              children: [
++                for (final host in hosts) ...[
++                  _HostChip(
++                    key: ValueKey('hub-host-${host.id}'),
++                    label: host.label,
++                    icon: _iconFor(host.kind),
++                    selected: host.id == hub.currentHostId,
++                    state: hub.stateOf(host.id),
++                    hint: hub.hintOf(host.id),
++                    dense: dense,
++                    onTap: () => hub.selectHost(host.id),
++                  ),
++                  const SizedBox(width: 6),
++                ],
++                if (onAddComputer != null)
++                  _AddComputerChip(dense: dense, onTap: onAddComputer!),
++              ],
++            ),
++          ),
++        );
++      },
++    );
++  }
++
++  static IconData _iconFor(HarnessHostKind kind) => switch (kind) {
++    HarnessHostKind.local => Icons.computer_outlined,
++    HarnessHostKind.remote => Icons.devices_other_outlined,
++    HarnessHostKind.studio => Icons.smart_toy_outlined,
++  };
++}
++
++/// 主机状态的在线点：在线实心，连接中半亮，离线空心，不支持画叉。
++class HubHostOnlineDot extends StatelessWidget {
++  const HubHostOnlineDot({super.key, required this.state, this.size = 8});
++
++  final HarnessHostState state;
++  final double size;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    final color = switch (state) {
++      HarnessHostState.online => const Color(0xFF2E7D32),
++      HarnessHostState.connecting => scheme.tertiary,
++      HarnessHostState.offline => scheme.outline,
++      HarnessHostState.unsupported => scheme.error,
++    };
++    return Container(
++      key: ValueKey('hub-host-dot-${state.name}'),
++      width: size,
++      height: size,
++      decoration: BoxDecoration(
++        shape: BoxShape.circle,
++        color: state == HarnessHostState.offline
++            ? Colors.transparent
++            : color.withValues(alpha: 0.85),
++        border: Border.all(color: color, width: 1.2),
++      ),
++    );
++  }
++}
++
++class _HostChip extends StatelessWidget {
++  const _HostChip({
++    super.key,
++    required this.label,
++    required this.icon,
++    required this.selected,
++    required this.state,
++    required this.hint,
++    required this.dense,
++    required this.onTap,
++  });
++
++  final String label;
++  final IconData icon;
++  final bool selected;
++  final HarnessHostState state;
++  final String? hint;
++  final bool dense;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final content = InkWell(
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(999),
++      child: Container(
++        padding: EdgeInsets.symmetric(
++          horizontal: dense ? 8 : 10,
++          vertical: dense ? 4 : 6,
++        ),
++        decoration: BoxDecoration(
++          color: selected
++              ? scheme.secondaryContainer
++              : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
++          borderRadius: BorderRadius.circular(999),
++          border: Border.all(
++            color: selected ? scheme.primary : scheme.outlineVariant,
++          ),
++        ),
++        child: Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Icon(
++              icon,
++              size: dense ? 14 : 16,
++              color: selected
++                  ? scheme.onSecondaryContainer
++                  : scheme.onSurfaceVariant,
++            ),
++            const SizedBox(width: 6),
++            Text(
++              label,
++              style:
++                  (dense
++                          ? theme.textTheme.labelMedium
++                          : theme.textTheme.labelLarge)
++                      ?.copyWith(
++                        color: selected
++                            ? scheme.onSecondaryContainer
++                            : scheme.onSurfaceVariant,
++                      ),
++            ),
++            const SizedBox(width: 6),
++            HubHostOnlineDot(state: state),
++          ],
++        ),
++      ),
++    );
++    final text = hint?.trim();
++    if (text == null || text.isEmpty) return content;
++    // 不支持或未安装：把说明挂在悬浮提示上，不额外占一行。
++    return Tooltip(message: text, child: content);
++  }
++}
++
++class _AddComputerChip extends StatelessWidget {
++  const _AddComputerChip({required this.dense, required this.onTap});
++
++  final bool dense;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    return InkWell(
++      key: const ValueKey('hub-add-computer'),
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(999),
++      child: Container(
++        padding: EdgeInsets.symmetric(
++          horizontal: dense ? 8 : 10,
++          vertical: dense ? 4 : 6,
++        ),
++        decoration: BoxDecoration(
++          borderRadius: BorderRadius.circular(999),
++          border: Border.all(color: scheme.outlineVariant),
++        ),
++        child: Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Icon(Icons.add_link, size: dense ? 14 : 16, color: scheme.primary),
++            const SizedBox(width: 4),
++            Text(
++              '添加电脑',
++              style:
++                  (dense
++                          ? theme.textTheme.labelMedium
++                          : theme.textTheme.labelLarge)
++                      ?.copyWith(color: scheme.primary),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/harness/ui/hub_session_list.dart b/lib/harness/ui/hub_session_list.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d05d7fef5c8120d1c8b822540841535ae881148
+--- /dev/null
++++ b/lib/harness/ui/hub_session_list.dart
+@@ -0,0 +1,446 @@
++// 会话列表：按 harness 分组，显示状态标签和工作目录。
++//
++// 列表只读 hub，不自己订阅主机；选中一行交给 hub.openSession。
++
++import 'package:flutter/material.dart';
++
++import '../harness_host.dart';
++import '../hub/harness_hub.dart';
++import 'hub_status.dart';
++
++/// 「新建会话」菜单：列出当前主机检测到的 harness。
++///
++/// 未安装的 provider 仍然列出但不可点，用户能看到缺什么，而不是菜单里
++/// 凭空少一项。
++class HubNewSessionButton extends StatefulWidget {
++  const HubNewSessionButton({
++    super.key,
++    required this.hub,
++    required this.cwd,
++    this.onLaunched,
++    this.onError,
++    this.dense = false,
++  });
++
++  final HarnessHub hub;
++
++  /// 新会话的工作目录；通常是当前打开的项目根。
++  final String cwd;
++
++  final void Function(HarnessSessionHandle handle)? onLaunched;
++  final void Function(Object error)? onError;
++  final bool dense;
++
++  @override
++  State<HubNewSessionButton> createState() => _HubNewSessionButtonState();
++}
++
++class _HubNewSessionButtonState extends State<HubNewSessionButton> {
++  /// 菜单项的 future 只建一次：每帧新建会让 FutureBuilder 反复完成、反复重建。
++  Future<List<HarnessProviderInfo>>? _providers;
++  String? _hostId;
++
++  @override
++  void initState() {
++    super.initState();
++    _bind();
++    widget.hub.addListener(_onHubChanged);
++  }
++
++  @override
++  void didUpdateWidget(HubNewSessionButton oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (!identical(oldWidget.hub, widget.hub)) {
++      oldWidget.hub.removeListener(_onHubChanged);
++      widget.hub.addListener(_onHubChanged);
++      _bind();
++    }
++  }
++
++  @override
++  void dispose() {
++    widget.hub.removeListener(_onHubChanged);
++    super.dispose();
++  }
++
++  void _onHubChanged() {
++    if (widget.hub.currentHostId != _hostId) _bind();
++  }
++
++  void _bind() {
++    _hostId = widget.hub.currentHostId;
++    _providers = widget.hub.launchMenu();
++  }
++
++  Future<void> _launch(BuildContext context, String providerId) async {
++    try {
++      final handle = await widget.hub.launch(
++        HarnessLaunchRequest(providerId: providerId, cwd: widget.cwd),
++      );
++      widget.onLaunched?.call(handle);
++    } on Object catch (error) {
++      widget.onError?.call(error);
++      if (context.mounted) {
++        ScaffoldMessenger.maybeOf(
++          context,
++        )?.showSnackBar(SnackBar(content: Text('启动失败：$error')));
++      }
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return FutureBuilder<List<HarnessProviderInfo>>(
++      future: _providers,
++      builder: (context, snapshot) {
++        final providers = snapshot.data ?? const <HarnessProviderInfo>[];
++        final menu = PopupMenuButton<String>(
++          key: const ValueKey('hub-new-session'),
++          tooltip: '新建会话',
++          iconSize: 20,
++          padding: EdgeInsets.zero,
++          constraints: BoxConstraints.tightFor(
++            width: widget.dense ? 32 : 44,
++            height: widget.dense ? 32 : 44,
++          ),
++          icon: const Icon(Icons.add_comment_outlined),
++          itemBuilder: (context) => [
++            if (providers.isEmpty)
++              const PopupMenuItem<String>(
++                value: '__none__',
++                enabled: false,
++                height: 44,
++                child: Text('没有检测到可启动的 harness'),
++              ),
++            for (final provider in providers)
++              PopupMenuItem<String>(
++                value: provider.id,
++                enabled: provider.available,
++                height: 44,
++                child: Row(
++                  children: [
++                    Expanded(
++                      child: Text(
++                        provider.label,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                      ),
++                    ),
++                    if (!provider.available)
++                      Text(
++                        '未安装',
++                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
++                          color: Theme.of(context).colorScheme.onSurfaceVariant,
++                        ),
++                      ),
++                  ],
++                ),
++              ),
++          ],
++          onSelected: (value) {
++            if (value == '__none__') return;
++            _launch(context, value);
++          },
++        );
++        return menu;
++      },
++    );
++  }
++}
++
++/// 一行会话：状态标签、标题、provider、工作目录和更新时间。
++class HubSessionRow extends StatelessWidget {
++  const HubSessionRow({
++    super.key,
++    required this.session,
++    required this.providerLabel,
++    required this.selected,
++    this.onTap,
++    this.showHostLabel = false,
++    this.hostLabel,
++  });
++
++  final HarnessSessionInfo session;
++  final String providerLabel;
++  final bool selected;
++  final VoidCallback? onTap;
++
++  /// 合并列表里要标注会话在哪台电脑上。
++  final bool showHostLabel;
++  final String? hostLabel;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final cwd = session.cwd?.trim();
++    final updated = session.updatedAt;
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 4),
++      child: Ink(
++        decoration: BoxDecoration(
++          color: selected
++              ? scheme.surfaceContainerHighest.withValues(alpha: 0.6)
++              : null,
++          borderRadius: BorderRadius.circular(8),
++        ),
++        child: InkWell(
++          key: ValueKey('hub-session-${session.hostId}-${session.id}'),
++          borderRadius: BorderRadius.circular(8),
++          onTap: onTap,
++          child: ConstrainedBox(
++            constraints: const BoxConstraints(minHeight: 40),
++            child: Padding(
++              padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Row(
++                    children: [
++                      Expanded(
++                        child: Text(
++                          session.title.trim().isEmpty
++                              ? '(未命名会话)'
++                              : session.title,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: theme.textTheme.bodyMedium?.copyWith(
++                            color: selected
++                                ? scheme.onSurface
++                                : scheme.onSurfaceVariant,
++                          ),
++                        ),
++                      ),
++                      const SizedBox(width: 6),
++                      HarnessStatusChip(status: session.status, dense: true),
++                    ],
++                  ),
++                  const SizedBox(height: 2),
++                  Row(
++                    children: [
++                      if (showHostLabel &&
++                          (hostLabel?.isNotEmpty ?? false)) ...[
++                        Icon(
++                          Icons.computer_outlined,
++                          size: 11,
++                          color: scheme.onSurfaceVariant,
++                        ),
++                        const SizedBox(width: 2),
++                        Text(
++                          hostLabel!,
++                          style: theme.textTheme.labelSmall?.copyWith(
++                            color: scheme.onSurfaceVariant,
++                          ),
++                        ),
++                        const SizedBox(width: 6),
++                      ],
++                      Expanded(
++                        child: Text(
++                          cwd == null || cwd.isEmpty ? providerLabel : cwd,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: theme.textTheme.labelSmall?.copyWith(
++                            color: scheme.onSurfaceVariant,
++                          ),
++                        ),
++                      ),
++                      if (updated != null) ...[
++                        const SizedBox(width: 6),
++                        Text(
++                          harnessRelativeTime(updated),
++                          style: theme.textTheme.labelSmall?.copyWith(
++                            color: scheme.onSurfaceVariant,
++                          ),
++                        ),
++                      ],
++                    ],
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// 分组列表主体，不带滚动：既给侧边栏内嵌，也给独立列表用。
++class HubSessionGroups extends StatelessWidget {
++  const HubSessionGroups({
++    super.key,
++    required this.hub,
++    this.hostId,
++    this.onSelect,
++    this.showHostLabel = false,
++  });
++
++  final HarnessHub hub;
++
++  /// 为空时用当前主机。
++  final String? hostId;
++
++  final void Function(HarnessSessionInfo session)? onSelect;
++  final bool showHostLabel;
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedBuilder(
++      animation: hub,
++      builder: (context, _) {
++        final target = hostId ?? hub.currentHostId;
++        if (target == null) return const SizedBox.shrink();
++        final groups = hub.groupsOf(target);
++        if (groups.isEmpty) return const SizedBox.shrink();
++        final host = hub.hostById(target);
++        final theme = Theme.of(context);
++        final scheme = theme.colorScheme;
++        return Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            for (final group in groups) ...[
++              Padding(
++                key: ValueKey('hub-provider-group-${group.providerId}'),
++                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
++                child: Row(
++                  children: [
++                    Text(
++                      group.label,
++                      style: theme.textTheme.labelSmall?.copyWith(
++                        color: scheme.onSurfaceVariant,
++                        letterSpacing: 0.4,
++                      ),
++                    ),
++                    const SizedBox(width: 6),
++                    Text(
++                      '${group.sessions.length}',
++                      style: theme.textTheme.labelSmall?.copyWith(
++                        color: scheme.outline,
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++              for (final session in group.sessions)
++                HubSessionRow(
++                  session: session,
++                  providerLabel: group.label,
++                  selected:
++                      hub.activeSession?.id == session.id &&
++                      hub.activeSession?.hostId == session.hostId,
++                  showHostLabel: showHostLabel,
++                  hostLabel: host?.label,
++                  onTap: onSelect == null ? null : () => onSelect!(session),
++                ),
++            ],
++          ],
++        );
++      },
++    );
++  }
++}
++
++/// 侧边栏里的“外部会话”分段：标题行带新建菜单，正文按 provider 分组。
++///
++/// 内置 Agent 的会话仍在上面原有的会话列表里，这里只列其它主机，
++/// 同一个卡片内两类会话都在，用户看到的就是一份列表。
++class HubSessionListSection extends StatelessWidget {
++  const HubSessionListSection({
++    super.key,
++    required this.hub,
++    required this.cwd,
++    this.onSelect,
++    this.onLaunched,
++  });
++
++  final HarnessHub hub;
++
++  /// 新建会话的工作目录。
++  final String cwd;
++
++  final Future<void> Function(HarnessSessionInfo session)? onSelect;
++  final ValueChanged<HarnessSessionHandle>? onLaunched;
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedBuilder(
++      animation: hub,
++      builder: (context, _) {
++        final host = hub.currentHost;
++        if (host == null) return const SizedBox.shrink();
++        final groups = hub.groupsOf(host.id);
++        final theme = Theme.of(context);
++        final scheme = theme.colorScheme;
++        final error = hub.sessionErrorOf(host.id);
++        return Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            const Divider(height: 1),
++            ConstrainedBox(
++              constraints: const BoxConstraints(minHeight: 40),
++              child: Padding(
++                padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
++                child: Row(
++                  children: [
++                    Expanded(
++                      child: Text(
++                        '外部会话 · ${host.label}',
++                        key: const ValueKey('hub-session-section-title'),
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: theme.textTheme.labelSmall?.copyWith(
++                          color: scheme.onSurfaceVariant,
++                        ),
++                      ),
++                    ),
++                    HubNewSessionButton(
++                      hub: hub,
++                      cwd: cwd,
++                      dense: true,
++                      onLaunched: onLaunched,
++                    ),
++                  ],
++                ),
++              ),
++            ),
++            if (error != null)
++              Padding(
++                padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
++                child: Text(
++                  '会话列表暂时取不到，稍后刷新。',
++                  style: theme.textTheme.labelSmall?.copyWith(
++                    color: scheme.error,
++                  ),
++                ),
++              ),
++            if (groups.isEmpty)
++              Padding(
++                padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
++                child: Text(
++                  _emptyHint(hub.stateOf(host.id)),
++                  style: theme.textTheme.labelSmall?.copyWith(
++                    color: scheme.onSurfaceVariant,
++                  ),
++                ),
++              )
++            else
++              HubSessionGroups(
++                hub: hub,
++                hostId: host.id,
++                onSelect: onSelect == null
++                    ? null
++                    : (session) => onSelect!(session),
++              ),
++          ],
++        );
++      },
++    );
++  }
++
++  static String _emptyHint(HarnessHostState state) => switch (state) {
++    HarnessHostState.unsupported => '这台电脑暂不可用，检查是否已安装对应程序。',
++    HarnessHostState.connecting => '正在连接…',
++    HarnessHostState.offline => '电脑未连接，恢复后会话会重新出现。',
++    HarnessHostState.online => '还没有会话，用右上角的新建按钮启动一个 harness。',
++  };
++}
+diff --git a/lib/harness/ui/hub_session_view.dart b/lib/harness/ui/hub_session_view.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e23f15cc2db27badb810e887597c4c06fcbf7ec9
+--- /dev/null
++++ b/lib/harness/ui/hub_session_view.dart
+@@ -0,0 +1,321 @@
++// 一个 hub 会话的详情：标题、状态、对话与终端两个标签。
++//
++// 关闭视图只调用 detach()，会话继续在主机上跑；结束会话要在这里先让用户
++// 确认（AC5）。
++
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../harness_host.dart';
++import '../hub/harness_hub.dart';
++import 'hub_chat_view.dart';
++import 'hub_status.dart';
++import 'hub_terminal_view.dart';
++
++/// 会话详情视图。
++class HubSessionView extends StatefulWidget {
++  const HubSessionView({
++    super.key,
++    required this.hub,
++    required this.session,
++    this.compact = false,
++    this.onClose,
++  });
++
++  final HarnessHub hub;
++  final HarnessSessionInfo session;
++
++  /// 手机端：顶部显示返回、终端底部显示按键栏。
++  final bool compact;
++
++  /// 关闭视图后通知外层（例如把面板切回列表）。
++  final VoidCallback? onClose;
++
++  @override
++  State<HubSessionView> createState() => _HubSessionViewState();
++}
++
++class _HubSessionViewState extends State<HubSessionView> {
++  HarnessSessionHandle? _handle;
++  Object? _error;
++  int _openToken = 0;
++  int _tab = 0;
++  bool _busy = false;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_open());
++  }
++
++  @override
++  void didUpdateWidget(HubSessionView oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.session.id != widget.session.id ||
++        oldWidget.session.hostId != widget.session.hostId) {
++      _tab = 0;
++      unawaited(_open());
++    }
++  }
++
++  Future<void> _open() async {
++    final token = ++_openToken;
++    setState(() {
++      _error = null;
++      _handle = null;
++    });
++    try {
++      final handle = await widget.hub.openSession(widget.session);
++      if (!mounted || token != _openToken) return;
++      setState(() => _handle = handle);
++    } on Object catch (error) {
++      if (!mounted || token != _openToken) return;
++      setState(() => _error = error);
++    }
++  }
++
++  @override
++  void dispose() {
++    // 只释放视图。会话本身留在主机上，重新打开能接上。
++    //
++    // 放到微任务里：dispose 期间不能触发上层重建。
++    final active = widget.hub.activeSession;
++    if (active != null &&
++        active.id == widget.session.id &&
++        active.hostId == widget.session.hostId) {
++      scheduleMicrotask(() => widget.hub.closeActiveSession());
++    }
++    super.dispose();
++  }
++
++  Future<void> _close() async {
++    await widget.hub.closeActiveSession();
++    widget.onClose?.call();
++  }
++
++  /// 结束会话前必须确认。按钮文案说明后果，默认动作是取消。
++  Future<void> _confirmStop() async {
++    final handle = _handle;
++    if (handle == null || _busy) return;
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        key: const ValueKey('hub-stop-dialog'),
++        title: const Text('结束会话'),
++        content: Text('「${handle.info.title}」会在这台电脑上结束，正在运行的任务会被终止。'),
++        actions: [
++          TextButton(
++            key: const ValueKey('hub-stop-cancel'),
++            onPressed: () => Navigator.of(dialogContext).pop(false),
++            child: const Text('取消'),
++          ),
++          FilledButton(
++            key: const ValueKey('hub-stop-confirm'),
++            style: FilledButton.styleFrom(
++              backgroundColor: Theme.of(context).colorScheme.error,
++              foregroundColor: Theme.of(context).colorScheme.onError,
++            ),
++            onPressed: () => Navigator.of(dialogContext).pop(true),
++            child: const Text('结束会话'),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true || !mounted) return;
++    setState(() => _busy = true);
++    try {
++      await handle.stop();
++      await widget.hub.closeActiveSession();
++      widget.onClose?.call();
++    } on Object catch (error) {
++      if (!mounted) return;
++      setState(() => _error = error);
++    } finally {
++      if (mounted) setState(() => _busy = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final handle = _handle;
++    final error = _error;
++    if (handle == null) {
++      return Center(
++        child: error == null
++            ? const SizedBox.square(
++                dimension: 24,
++                child: CircularProgressIndicator(strokeWidth: 2),
++              )
++            : Padding(
++                padding: const EdgeInsets.all(16),
++                child: Column(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Icon(
++                      Icons.error_outline,
++                      color: Theme.of(context).colorScheme.error,
++                    ),
++                    const SizedBox(height: 8),
++                    Text(
++                      '打不开这个会话：$error',
++                      textAlign: TextAlign.center,
++                      style: Theme.of(context).textTheme.bodySmall,
++                    ),
++                    const SizedBox(height: 12),
++                    FilledButton.tonal(
++                      key: const ValueKey('hub-session-retry'),
++                      onPressed: _open,
++                      child: const Text('重试'),
++                    ),
++                  ],
++                ),
++              ),
++      );
++    }
++    final hasTranscript = handle.transcript != null;
++    final hasTerminal = handle.terminal != null;
++    // 标签和内容是同一份列表，索引不会错位。
++    final pages = <({String label, Widget body})>[
++      if (hasTranscript) (label: '对话', body: HubChatView(handle: handle)),
++      if (hasTerminal)
++        (
++          label: '终端',
++          body: HubTerminalView(
++            channel: handle.terminal!,
++            compact: widget.compact,
++          ),
++        ),
++    ];
++    final index = pages.isEmpty ? 0 : _tab.clamp(0, pages.length - 1);
++    return ValueListenableBuilder<HarnessSessionStatus>(
++      valueListenable: handle.status,
++      builder: (context, status, _) {
++        return Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            _header(context, handle, status),
++            if (pages.length > 1)
++              _tabBar([
++                for (var i = 0; i < pages.length; i++)
++                  _tabButton(pages[i].label, i),
++              ]),
++            Expanded(
++              child: pages.isEmpty
++                  ? Center(
++                      child: Text(
++                        '这个会话没有可显示的对话或终端。',
++                        style: Theme.of(context).textTheme.bodySmall,
++                      ),
++                    )
++                  : IndexedStack(
++                      index: index,
++                      children: [for (final page in pages) page.body],
++                    ),
++            ),
++          ],
++        );
++      },
++    );
++  }
++
++  Widget _header(
++    BuildContext context,
++    HarnessSessionHandle handle,
++    HarnessSessionStatus status,
++  ) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final cwd = handle.info.cwd?.trim();
++    final canStop = handle.info.capabilities.contains(HarnessCapability.stop);
++    return Material(
++      color: scheme.surfaceContainerLow,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
++        child: Row(
++          children: [
++            if (widget.compact)
++              IconButton(
++                key: const ValueKey('hub-session-back'),
++                tooltip: '返回会话列表',
++                onPressed: _close,
++                icon: const Icon(Icons.arrow_back),
++              ),
++            const SizedBox(width: 4),
++            Expanded(
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                mainAxisSize: MainAxisSize.min,
++                children: [
++                  Row(
++                    children: [
++                      Flexible(
++                        child: Text(
++                          handle.info.title,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: theme.textTheme.titleSmall,
++                        ),
++                      ),
++                      const SizedBox(width: 8),
++                      HarnessStatusChip(status: status),
++                    ],
++                  ),
++                  if (cwd != null && cwd.isNotEmpty)
++                    Text(
++                      cwd,
++                      maxLines: 1,
++                      overflow: TextOverflow.ellipsis,
++                      style: theme.textTheme.labelSmall?.copyWith(
++                        color: scheme.onSurfaceVariant,
++                      ),
++                    ),
++                ],
++              ),
++            ),
++            if (canStop)
++              IconButton(
++                key: const ValueKey('hub-session-stop'),
++                tooltip: '结束会话',
++                onPressed: _busy ? null : _confirmStop,
++                icon: const Icon(Icons.stop_circle_outlined),
++              ),
++            IconButton(
++              key: const ValueKey('hub-session-close'),
++              tooltip: '关闭视图（会话继续运行）',
++              onPressed: _close,
++              icon: const Icon(Icons.close),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Widget _tabButton(String label, int index) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 2),
++      child: TextButton(
++        key: ValueKey('hub-tab-$index'),
++        onPressed: () => setState(() => _tab = index),
++        style: TextButton.styleFrom(
++          foregroundColor: _tab == index
++              ? Theme.of(context).colorScheme.primary
++              : Theme.of(context).colorScheme.onSurfaceVariant,
++          minimumSize: const Size(64, 36),
++        ),
++        child: Text(label),
++      ),
++    );
++  }
++
++  Widget _tabBar(List<Widget> tabs) {
++    final scheme = Theme.of(context).colorScheme;
++    return Container(
++      decoration: BoxDecoration(
++        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
++      ),
++      child: Row(children: tabs),
++    );
++  }
++}
+diff --git a/lib/harness/ui/hub_status.dart b/lib/harness/ui/hub_status.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e67534c08c2eafa40f410d5a8dadb3b7100a6e32
+--- /dev/null
++++ b/lib/harness/ui/hub_status.dart
+@@ -0,0 +1,95 @@
++// Agents 面板里会话状态的统一说法与配色。
++//
++// 契约的 HarnessSessionStatus 只有一个来源，列表、会话视图和测试都从这里取
++// 文案，避免三处各写一套。
++
++import 'package:flutter/material.dart';
++
++import '../harness_host.dart';
++
++/// 状态的中文说法。
++String harnessStatusLabel(HarnessSessionStatus status) => switch (status) {
++  HarnessSessionStatus.working => '运行中',
++  HarnessSessionStatus.idle => '空闲',
++  HarnessSessionStatus.done => '已完成',
++  HarnessSessionStatus.blocked => '待确认',
++  HarnessSessionStatus.exited => '已结束',
++  HarnessSessionStatus.unknown => '未知',
++};
++
++/// 状态色。与 Studio 会话列表的语义一致：运行中强调色、待确认第三色、
++/// 失败/结束用错误色、其余用弱化文字色。
++Color harnessStatusColor(ColorScheme scheme, HarnessSessionStatus status) =>
++    switch (status) {
++      HarnessSessionStatus.working => scheme.primary,
++      HarnessSessionStatus.blocked => scheme.tertiary,
++      HarnessSessionStatus.exited => scheme.error,
++      HarnessSessionStatus.done => scheme.primary,
++      HarnessSessionStatus.idle => scheme.onSurfaceVariant,
++      HarnessSessionStatus.unknown => scheme.onSurfaceVariant,
++    };
++
++/// 一行状态标签：运行中转圈，其余用文字胶囊。
++class HarnessStatusChip extends StatelessWidget {
++  const HarnessStatusChip({
++    super.key,
++    required this.status,
++    this.dense = false,
++  });
++
++  final HarnessSessionStatus status;
++
++  /// 列表行里的紧凑版本：只占一行高度。
++  final bool dense;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final color = harnessStatusColor(scheme, status);
++    final label = harnessStatusLabel(status);
++    final spinner = status == HarnessSessionStatus.working;
++    return Container(
++      key: ValueKey('harness-status-${status.name}'),
++      padding: EdgeInsets.symmetric(
++        horizontal: dense ? 6 : 8,
++        vertical: dense ? 1 : 2,
++      ),
++      decoration: BoxDecoration(
++        color: color.withValues(alpha: 0.12),
++        borderRadius: BorderRadius.circular(999),
++        border: Border.all(color: color.withValues(alpha: 0.35)),
++      ),
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          if (spinner) ...[
++            SizedBox.square(
++              dimension: dense ? 8 : 10,
++              child: CircularProgressIndicator(strokeWidth: 1.6, color: color),
++            ),
++            SizedBox(width: dense ? 4 : 6),
++          ],
++          Text(
++            label,
++            style:
++                (dense
++                        ? theme.textTheme.labelSmall
++                        : theme.textTheme.labelMedium)
++                    ?.copyWith(color: color),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++/// 相对时间：刚打开会话时给「刚刚」，更早给日期。
++String harnessRelativeTime(DateTime time) {
++  final delta = DateTime.now().difference(time);
++  if (delta.inMinutes < 1) return '刚刚';
++  if (delta.inHours < 1) return '${delta.inMinutes} 分钟前';
++  if (delta.inDays < 1) return '${delta.inHours} 小时前';
++  String two(int value) => value.toString().padLeft(2, '0');
++  return '${time.year}-${two(time.month)}-${two(time.day)}';
++}
+diff --git a/lib/harness/ui/hub_terminal_key_bar.dart b/lib/harness/ui/hub_terminal_key_bar.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f163ca24b9b9937ee4a5efdb243a8a9ca5d410a
+--- /dev/null
++++ b/lib/harness/ui/hub_terminal_key_bar.dart
+@@ -0,0 +1,115 @@
++// 手机端终端按键栏：Esc、Tab、Ctrl、Alt、方向键和粘贴。
++//
++// 从远程电脑模块（lib/remote_control/widgets/remote_terminal_pane.dart）的
++// 底部按键行移植，并补上 Ctrl/Alt 两个修饰键开关：手机键盘没有它们，
++// 而 tmux、vim 和 shell 行编辑都离不开。
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:xterm/xterm.dart';
++
++/// 按键栏。修饰键是粘滞开关：打开后一直生效，再点一次关闭。
++///
++/// [onKey] 收到的是逻辑键和当前修饰键状态，由调用方交给 xterm 的
++/// `Terminal.keyInput`。
++class HubTerminalKeyBar extends StatefulWidget {
++  const HubTerminalKeyBar({
++    super.key,
++    required this.onKey,
++    required this.onPaste,
++    this.enabled = true,
++  });
++
++  final void Function(TerminalKey key, {required bool ctrl, required bool alt})
++  onKey;
++
++  /// 粘贴文本。按键栏自己从剪贴板取内容。
++  final void Function(String text) onPaste;
++
++  final bool enabled;
++
++  @override
++  State<HubTerminalKeyBar> createState() => _HubTerminalKeyBarState();
++}
++
++class _HubTerminalKeyBarState extends State<HubTerminalKeyBar> {
++  bool _ctrl = false;
++  bool _alt = false;
++
++  void _key(TerminalKey key) {
++    if (!widget.enabled) return;
++    widget.onKey(key, ctrl: _ctrl, alt: _alt);
++  }
++
++  Future<void> _paste() async {
++    if (!widget.enabled) return;
++    final data = await Clipboard.getData(Clipboard.kTextPlain);
++    final text = data?.text;
++    if (text == null || text.isEmpty) return;
++    widget.onPaste(text);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return SafeArea(
++      top: false,
++      child: Container(
++        key: const ValueKey('hub-terminal-key-bar'),
++        decoration: BoxDecoration(
++          color: scheme.surfaceContainerLow,
++          border: Border(top: BorderSide(color: scheme.outlineVariant)),
++        ),
++        child: SingleChildScrollView(
++          scrollDirection: Axis.horizontal,
++          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
++          child: Row(
++            children: [
++              _button('Esc', () => _key(TerminalKey.escape), key: 'esc'),
++              _button('Tab', () => _key(TerminalKey.tab), key: 'tab'),
++              _button(
++                'Ctrl',
++                () => setState(() => _ctrl = !_ctrl),
++                key: 'ctrl',
++                active: _ctrl,
++              ),
++              _button(
++                'Alt',
++                () => setState(() => _alt = !_alt),
++                key: 'alt',
++                active: _alt,
++              ),
++              _button('←', () => _key(TerminalKey.arrowLeft), key: 'left'),
++              _button('↑', () => _key(TerminalKey.arrowUp), key: 'up'),
++              _button('↓', () => _key(TerminalKey.arrowDown), key: 'down'),
++              _button('→', () => _key(TerminalKey.arrowRight), key: 'right'),
++              _button('粘贴', _paste, key: 'paste'),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  Widget _button(
++    String label,
++    VoidCallback onTap, {
++    required String key,
++    bool active = false,
++  }) {
++    final scheme = Theme.of(context).colorScheme;
++    return TextButton(
++      key: ValueKey('hub-key-$key'),
++      onPressed: widget.enabled ? onTap : null,
++      style: TextButton.styleFrom(
++        minimumSize: const Size(44, 36),
++        padding: const EdgeInsets.symmetric(horizontal: 8),
++        foregroundColor: active ? scheme.primary : scheme.onSurfaceVariant,
++        backgroundColor: active
++            ? scheme.primary.withValues(alpha: 0.12)
++            : Colors.transparent,
++      ),
++      child: Text(label),
++    );
++  }
++}
+diff --git a/lib/harness/ui/hub_terminal_view.dart b/lib/harness/ui/hub_terminal_view.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..0eeb74c3c730a46f3111d5e6a4e1b7ce31b1e3f0
+--- /dev/null
++++ b/lib/harness/ui/hub_terminal_view.dart
+@@ -0,0 +1,165 @@
++// 会话的终端标签：把 hub 的原始字节通道接到 xterm。
++//
++// 渲染与输入层沿用远程电脑迁入的那一套（vendor/xterm + RemoteTheme 的
++// 终端样式），远端与 Herdr 会话因此和手机端远程终端看起来一样。
++
++import 'dart:async';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter/material.dart';
++import 'package:xterm/xterm.dart';
++
++import '../../remote_control/theme/remote_theme.dart';
++import '../harness_host.dart';
++import 'hub_terminal_key_bar.dart';
++
++/// 把解码出来的文本交给终端，并在流结束时报告一次。
++class _TerminalSink implements Sink<String> {
++  _TerminalSink({required this.onText, required this.onDone});
++
++  final void Function(String text) onText;
++  final VoidCallback onDone;
++
++  @override
++  void add(String data) => onText(data);
++
++  @override
++  void close() => onDone();
++}
++
++/// 一个 hub 会话的终端视图。
++///
++/// 通道由 [HarnessSessionHandle.terminal] 提供，本组件只负责字节与 xterm 之间
++/// 的搬运，不自己起进程。
++class HubTerminalView extends StatefulWidget {
++  const HubTerminalView({
++    super.key,
++    required this.channel,
++    this.compact = false,
++    this.onClosed,
++  });
++
++  final HarnessTerminalChannel channel;
++
++  /// 手机端：底部显示按键栏。
++  final bool compact;
++
++  /// 通道结束时的回调（主机报告会话退出）。
++  final VoidCallback? onClosed;
++
++  @override
++  State<HubTerminalView> createState() => _HubTerminalViewState();
++}
++
++class _HubTerminalViewState extends State<HubTerminalView> {
++  /// 滚动回看行数上限：终端输出可能很长，界面只保留最近的一段。
++  static const int _maxLines = 5000;
++
++  late final Terminal _terminal = Terminal(maxLines: _maxLines);
++  StreamSubscription<String>? _output;
++  StreamSubscription<Uint8List>? _raw;
++  String? _error;
++
++  @override
++  void initState() {
++    super.initState();
++    _terminal.onOutput = _write;
++    _terminal.onResize = _resize;
++    _bind(widget.channel);
++  }
++
++  void _bind(HarnessTerminalChannel channel) {
++    unawaited(_output?.cancel());
++    unawaited(_raw?.cancel());
++    // 自己拼 UTF-8：被拆在两个数据块里的多字节字符也要能完整解出来，
++    // 所以用带状态的 chunked 解码器而不是每块单独 convert。
++    final decoder = const Utf8Decoder(allowMalformed: true)
++        .startChunkedConversion(
++          _TerminalSink(
++            onText: (text) {
++              if (mounted) _terminal.write(text);
++            },
++            onDone: () => widget.onClosed?.call(),
++          ),
++        );
++    _raw = channel.output.listen(
++      (bytes) {
++        try {
++          decoder.add(bytes);
++        } on Object catch (error) {
++          if (!mounted) return;
++          setState(() => _error = '终端输出中断：$error');
++        }
++      },
++      onError: (Object error) {
++        if (!mounted) return;
++        setState(() => _error = '终端输出中断：$error');
++        widget.onClosed?.call();
++      },
++      onDone: () {
++        decoder.close();
++      },
++      cancelOnError: false,
++    );
++  }
++
++  void _write(String data) {
++    try {
++      widget.channel.write(utf8.encode(data));
++      if (_error != null && mounted) setState(() => _error = null);
++    } on Object catch (error) {
++      if (mounted) setState(() => _error = '输入没有送出去：$error');
++    }
++  }
++
++  void _resize(int columns, int rows, int pixelWidth, int pixelHeight) {
++    try {
++      widget.channel.resize(columns, rows);
++    } on Object {
++      // 通道已经关闭时忽略尺寸变化：界面重建不该把错误顶到用户脸上。
++    }
++  }
++
++  @override
++  void dispose() {
++    unawaited(_raw?.cancel());
++    unawaited(_output?.cancel());
++    _raw = null;
++    _output = null;
++    if (_terminal.onOutput == _write) _terminal.onOutput = null;
++    if (_terminal.onResize == _resize) _terminal.onResize = null;
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return Column(
++      children: [
++        if (_error != null)
++          Container(
++            width: double.infinity,
++            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
++            color: scheme.secondaryContainer,
++            child: Text(_error!),
++          ),
++        Expanded(
++          child: TerminalView(
++            _terminal,
++            key: ObjectKey(_terminal),
++            deleteDetection: true,
++            textStyle: RemoteTheme.terminalStyle(fontSize: 13),
++            padding: const EdgeInsets.all(8),
++          ),
++        ),
++        if (widget.compact)
++          HubTerminalKeyBar(
++            onKey: (key, {required ctrl, required alt}) =>
++                _terminal.keyInput(key, ctrl: ctrl, alt: alt),
++            onPaste: _terminal.paste,
++          ),
++      ],
++    );
++  }
++}
+diff --git a/lib/pages/devices_remote_page.dart b/lib/pages/devices_remote_page.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f595a11cef83e34208b69cf17f10135a23bdad2
+--- /dev/null
++++ b/lib/pages/devices_remote_page.dart
+@@ -0,0 +1,407 @@
++// 设置页的「设备与远程」：配对、查看已绑定电脑、撤销配对。
++//
++// 旧版把配对和会话管理放在独立的“远程电脑”首页（RemoteComputerPage）。
++// 会话已经并入编辑器页的 Agents 面板，配对与撤销搬到这里；远程电脑模块的
++// 内部实现（RemoteStore / RemoteController / 协议）保持不变，其它主机仍可
++// 直接使用。
++//
++// 所有权与 RemoteComputerPage 一致：外部注入的 controller/store 由调用方
++// 释放，本页只释放自己创建的那一个。
++
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../remote_control/pages/pair_screen.dart';
++import '../remote_control/remote_computer_page.dart';
++import '../remote_control/state/remote_controller.dart';
++import '../remote_control/state/remote_store.dart';
++import '../store/auth_store.dart';
++import '../widgets/settings_section.dart';
++
++/// 打开「设备与远程」。
++Future<void> openDevicesRemotePage(
++  BuildContext context, {
++  AuthStore? auth,
++  RemoteController? controller,
++}) {
++  return Navigator.of(context).push(
++    MaterialPageRoute<void>(
++      builder: (_) => DevicesRemotePage(auth: auth, controller: controller),
++    ),
++  );
++}
++
++class DevicesRemotePage extends StatefulWidget {
++  const DevicesRemotePage({super.key, this.auth, this.store, this.controller});
++
++  /// 当前登录账号。为空时账号分组只说明本机状态。
++  final AuthStore? auth;
++
++  /// 预打开的存储；测试注入内存实现。
++  final RemoteStore? store;
++
++  /// 预构造的控制器；给出时本页不释放它。
++  final RemoteController? controller;
++
++  @override
++  State<DevicesRemotePage> createState() => _DevicesRemotePageState();
++}
++
++class _DevicesRemotePageState extends State<DevicesRemotePage> {
++  RemoteController? _controller;
++  RemoteStore? _store;
++  bool _ownsController = false;
++  Object? _bootError;
++  bool _booting = true;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_boot());
++  }
++
++  Future<void> _boot() async {
++    if (!RemoteComputerPage.isSupported) {
++      if (mounted) setState(() => _booting = false);
++      return;
++    }
++    try {
++      final provided = widget.controller;
++      if (provided != null) {
++        _controller = provided;
++        _store = widget.store;
++        _ownsController = false;
++      } else {
++        final store = widget.store ?? await RemoteStore.open();
++        _store = store;
++        _controller = RemoteController(store: store)..connect();
++        _ownsController = true;
++      }
++    } on Object catch (error) {
++      _bootError = error;
++    }
++    if (mounted) setState(() => _booting = false);
++  }
++
++  @override
++  void dispose() {
++    if (_ownsController) _controller?.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      appBar: AppBar(title: const Text('设备与远程')),
++      body: ListenableBuilder(
++        listenable: Listenable.merge([?_controller, ?widget.auth]),
++        builder: (context, _) {
++          final controller = _controller;
++          final pairing = controller?.pairing;
++          return ListView(
++            padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
++            children: [
++              if (!RemoteComputerPage.isSupported)
++                const _UnsupportedNotice()
++              else if (_booting)
++                const Padding(
++                  padding: EdgeInsets.symmetric(vertical: 24),
++                  child: Center(child: CircularProgressIndicator()),
++                )
++              else if (_bootError != null)
++                _BootFailure(error: _bootError!)
++              else ...[
++                SettingsSection(
++                  title: '已绑定电脑',
++                  children: [
++                    if (pairing == null)
++                      const ListTile(
++                        leading: Icon(Icons.link_off),
++                        title: Text('还没有绑定电脑'),
++                        subtitle: Text('在电脑上启动伴侣程序，用配对码把手机连上它。'),
++                      )
++                    else
++                      ListTile(
++                        key: const ValueKey('devices-paired-computer'),
++                        leading: _OnlineDot(
++                          online: controller?.isOnline ?? false,
++                        ),
++                        title: Text(controller?.agentName ?? '我的电脑'),
++                        subtitle: Text(
++                          '${pairing.relayUrl} · ${pairing.agentId}',
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                        ),
++                        trailing: TextButton(
++                          key: const ValueKey('devices-revoke'),
++                          onPressed: () => _revoke(controller!),
++                          child: const Text('撤销'),
++                        ),
++                      ),
++                    ListTile(
++                      key: const ValueKey('devices-add-computer'),
++                      leading: const Icon(Icons.add_link),
++                      title: const Text('添加电脑'),
++                      subtitle: Text(
++                        pairing == null
++                            ? '用配对码或配对链接连接一台电脑'
++                            : '换绑另一台电脑（会先解除当前配对）',
++                      ),
++                      trailing: const Icon(Icons.chevron_right),
++                      onTap: () => _addComputer(controller!),
++                    ),
++                  ],
++                ),
++                SettingsSection(
++                  title: '账号',
++                  children: [
++                    ListTile(
++                      key: const ValueKey('devices-account'),
++                      leading: const Icon(Icons.account_circle_outlined),
++                      title: Text(_accountTitle(widget.auth)),
++                      subtitle: Text(_accountSubtitle(widget.auth)),
++                    ),
++                  ],
++                ),
++                Padding(
++                  padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
++                  child: Text(
++                    '会话列表在编辑器页的 Agents 面板里：本机、Herdr 和已绑定电脑都在同一处，'
++                    '关闭会话视图不会结束电脑上的会话。',
++                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
++                      color: Theme.of(context).colorScheme.onSurfaceVariant,
++                    ),
++                  ),
++                ),
++              ],
++            ],
++          );
++        },
++      ),
++    );
++  }
++
++  static String _accountTitle(AuthStore? auth) {
++    if (auth == null) return '未接入账号';
++    return auth.isLoggedIn ? '已登录' : '未登录';
++  }
++
++  static String _accountSubtitle(AuthStore? auth) {
++    if (auth == null) {
++      return '当前产品不提供账号，配对信息只保存在这台设备上。';
++    }
++    if (!auth.isLoggedIn) {
++      return '登录后可以把配对状态同步到账号；未登录时配对只保存在本机。';
++    }
++    return '配对信息与账号分开保存，撤销配对不会退出登录。';
++  }
++
++  /// 撤销配对：先确认，再清掉本机保存的密钥。
++  Future<void> _revoke(RemoteController controller) async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        key: const ValueKey('devices-revoke-dialog'),
++        scrollable: true,
++        title: const Text('撤销这台电脑的配对'),
++        content: const Text(
++          '撤销后这台设备不再能连接该电脑，密钥会从本机删除。'
++          '电脑上的会话不受影响，重新配对即可再次连接。',
++        ),
++        actions: [
++          TextButton(
++            key: const ValueKey('devices-revoke-cancel'),
++            onPressed: () => Navigator.of(dialogContext).pop(false),
++            child: const Text('取消'),
++          ),
++          FilledButton(
++            key: const ValueKey('devices-revoke-confirm'),
++            style: FilledButton.styleFrom(
++              backgroundColor: Theme.of(context).colorScheme.error,
++              foregroundColor: Theme.of(context).colorScheme.onError,
++            ),
++            onPressed: () => Navigator.of(dialogContext).pop(true),
++            child: const Text('撤销'),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true) return;
++    await controller.unpair();
++    if (!mounted) return;
++    ScaffoldMessenger.maybeOf(
++      context,
++    )?.showSnackBar(const SnackBar(content: Text('已撤销配对')));
++  }
++
++  /// 添加电脑：复用远程模块原有的配对页，配对成功后回到本页。
++  Future<void> _addComputer(RemoteController controller) async {
++    final pair = controller.pairing;
++    if (pair != null) {
++      final replace = await showDialog<bool>(
++        context: context,
++        builder: (dialogContext) => AlertDialog(
++          title: const Text('换绑另一台电脑'),
++          content: const Text('当前已绑定一台电脑。继续会先解除现有配对，再进入配对流程。'),
++          actions: [
++            TextButton(
++              onPressed: () => Navigator.of(dialogContext).pop(false),
++              child: const Text('取消'),
++            ),
++            FilledButton(
++              onPressed: () => Navigator.of(dialogContext).pop(true),
++              child: const Text('继续'),
++            ),
++          ],
++        ),
++      );
++      if (replace != true) return;
++      await controller.unpair();
++      if (!mounted) return;
++    }
++    await Navigator.of(context).push(
++      MaterialPageRoute<void>(
++        builder: (_) => _PairRoute(
++          controller: controller,
++          initialRelay: _store?.lastRelayUrl,
++        ),
++      ),
++    );
++  }
++}
++
++/// 单独的配对路由：配对成功后自己退出，回到设备列表。
++class _PairRoute extends StatefulWidget {
++  const _PairRoute({required this.controller, this.initialRelay});
++
++  final RemoteController controller;
++  final String? initialRelay;
++
++  @override
++  State<_PairRoute> createState() => _PairRouteState();
++}
++
++class _PairRouteState extends State<_PairRoute> {
++  bool _paired = false;
++
++  @override
++  void initState() {
++    super.initState();
++    widget.controller.addListener(_onChanged);
++  }
++
++  @override
++  void dispose() {
++    widget.controller.removeListener(_onChanged);
++    super.dispose();
++  }
++
++  void _onChanged() {
++    if (_paired) return;
++    if (widget.controller.pairing == null) return;
++    _paired = true;
++    // 配对完成立刻退回设备列表：配对页本身没有“完成”按钮。
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (!mounted) return;
++      Navigator.of(context).pop();
++    });
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      appBar: AppBar(title: const Text('添加电脑')),
++      body: ListenableBuilder(
++        listenable: widget.controller,
++        builder: (context, _) => PairScreen(
++          controller: widget.controller,
++          initialRelay: widget.initialRelay,
++          onExit: () => Navigator.of(context).maybePop(),
++        ),
++      ),
++    );
++  }
++}
++
++class _OnlineDot extends StatelessWidget {
++  const _OnlineDot({required this.online});
++
++  final bool online;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return SizedBox.square(
++      dimension: 32,
++      child: Center(
++        child: Container(
++          key: ValueKey(online ? 'devices-dot-online' : 'devices-dot-offline'),
++          width: 10,
++          height: 10,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            color: online ? const Color(0xFF2E7D32) : scheme.outline,
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++class _UnsupportedNotice extends StatelessWidget {
++  const _UnsupportedNotice();
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 24),
++      child: Column(
++        children: [
++          Icon(Icons.devices_other_rounded, size: 40, color: scheme.outline),
++          const SizedBox(height: 12),
++          Text('当前平台不支持远程电脑', style: theme.textTheme.titleMedium),
++          const SizedBox(height: 8),
++          Text(
++            '远程电脑需要原生应用提供的 WebSocket 连接与本地私有存储，'
++            '浏览器版两者都没有实现。',
++            textAlign: TextAlign.center,
++            style: theme.textTheme.bodySmall?.copyWith(
++              color: scheme.onSurfaceVariant,
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _BootFailure extends StatelessWidget {
++  const _BootFailure({required this.error});
++
++  final Object error;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    return Padding(
++      padding: const EdgeInsets.all(16),
++      child: Column(
++        children: [
++          Icon(Icons.sd_card_alert_outlined, color: scheme.error, size: 36),
++          const SizedBox(height: 8),
++          Text('无法读取本机的配对信息', style: theme.textTheme.titleSmall),
++          const SizedBox(height: 6),
++          SelectableText(
++            '$error',
++            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
++            textAlign: TextAlign.center,
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/pages/settings_page.dart b/lib/pages/settings_page.dart
+index 272a8e673f6ce81f43082a3cf9eedd73705b8106..3ba0236d67e1248ce28b69e6107f5268495d7e6b 100644
+--- a/lib/pages/settings_page.dart
++++ b/lib/pages/settings_page.dart
+@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
+ 
+ import '../config/agreement_config.dart';
+ import '../editor/ai_panel.dart';
++import '../remote_control/remote_computer_page.dart';
+ import '../services/account_erasure_service.dart';
+ import '../services/app_backup_service.dart';
+ import '../services/app_paths.dart';
+@@ -17,6 +18,7 @@ import '../store/settings_store.dart';
+ import '../store/project_store.dart';
+ import '../widgets/settings_section.dart';
+ import 'auth/agreement_page.dart';
++import 'devices_remote_page.dart';
+ import 'highlight_settings_page.dart';
+ import 'editor_font_settings_page.dart';
+ import '../editor/editor_fonts.dart';
+@@ -119,6 +121,23 @@ class _SettingsPageState extends State<SettingsPage> {
+     );
+   }
+ 
++  /// 「设备与远程」：配对、已绑定电脑和撤销。
++  ///
++  /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
++  Widget _devicesSection(BuildContext context) => SettingsSection(
++    title: '设备与远程',
++    children: [
++      ListTile(
++        key: const ValueKey('settings-devices-remote'),
++        leading: const Icon(Icons.devices_other_outlined),
++        title: const Text('设备与远程'),
++        subtitle: const Text('配对电脑、查看绑定状态、撤销访问权限'),
++        trailing: const Icon(Icons.chevron_right),
++        onTap: () => openDevicesRemotePage(context, auth: widget.auth),
++      ),
++    ],
++  );
++
+   void _openAgreement(String title, String url) {
+     Navigator.of(context).push(
+       MaterialPageRoute<void>(
+@@ -357,6 +376,7 @@ class _SettingsPageState extends State<SettingsPage> {
+                     ],
+                   ),
+                 if (_showsAccountSection) _accountSection(context),
++                if (RemoteComputerPage.isSupported) _devicesSection(context),
+                 SettingsSection(
+                   title: '数据与存储',
+                   children: [
+diff --git a/test/harness/harness_hub_test.dart b/test/harness/harness_hub_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..c21543395dab84ce3a5a87dd9fba6ca1c0d8d31d
+--- /dev/null
++++ b/test/harness/harness_hub_test.dart
+@@ -0,0 +1,322 @@
++// HarnessHub 的状态测试：主机注册、平台过滤、当前主机、合并会话列表、
++// 启动菜单、打开/释放视图与刷新。
++//
++// 本地不跑测试（brief 规定），这些用例交给云端 CI。
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++
++import '../support/fake_harness_host.dart';
++
++void main() {
++  late FakeHarnessHost local;
++  late FakeHarnessHost herdr;
++  late FakeHarnessHost remote;
++  late FakeHarnessHost studio;
++
++  setUp(() {
++    local = FakeHarnessHost(
++      id: 'local',
++      label: '本机',
++      kind: HarnessHostKind.local,
++      initialSessions: [
++        fakeSession(
++          hostId: 'local',
++          id: 'l1',
++          providerId: 'claude',
++          title: 'Claude 会话',
++        ),
++        fakeSession(
++          hostId: 'local',
++          id: 'l2',
++          providerId: 'codex',
++          title: 'Codex 会话',
++        ),
++      ],
++      providerList: const [
++        HarnessProviderInfo(
++          id: 'claude',
++          label: 'Claude Code',
++          available: true,
++        ),
++        HarnessProviderInfo(id: 'codex', label: 'Codex', available: false),
++      ],
++    );
++    herdr = FakeHarnessHost(
++      id: 'herdr',
++      label: 'Herdr',
++      kind: HarnessHostKind.local,
++      initialSessions: [
++        fakeSession(
++          hostId: 'herdr',
++          id: 'h1',
++          providerId: 'herdr',
++          title: '窗格 1',
++        ),
++      ],
++      initialState: HarnessHostState.unsupported,
++      hint: '未检测到 Herdr，请先安装。',
++    );
++    remote = FakeHarnessHost(
++      id: 'remote-pc',
++      label: '我的电脑',
++      kind: HarnessHostKind.remote,
++      initialSessions: [
++        fakeSession(
++          hostId: 'remote-pc',
++          id: 'r1',
++          providerId: 'claude',
++          title: '远程 Claude',
++        ),
++      ],
++    );
++    studio = FakeHarnessHost(
++      id: 'studio',
++      label: '内置 Agent',
++      kind: HarnessHostKind.studio,
++    );
++  });
++
++  tearDown(() async {
++    await local.dispose();
++    await herdr.dispose();
++    await remote.dispose();
++    await studio.dispose();
++  });
++
++  HarnessHub buildHub({bool desktop = true, String? initialHostId}) =>
++      HarnessHub(
++        hosts: [studio, local, herdr, remote],
++        desktop: desktop,
++        initialHostId: initialHostId,
++      );
++
++  test('desktop keeps every host and defaults to the local one', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++
++    expect(hub.hosts.map((host) => host.id), [
++      'studio',
++      'local',
++      'herdr',
++      'remote-pc',
++    ]);
++    expect(hub.currentHostId, 'local');
++    expect(hub.isDesktop, isTrue);
++    hub.dispose();
++  });
++
++  test('mobile hides local and herdr hosts', () async {
++    final hub = buildHub(desktop: false);
++    await pumpEventQueue();
++
++    expect(hub.hosts.map((host) => host.id), ['studio', 'remote-pc']);
++    expect(hub.currentHostId, 'remote-pc');
++    hub.dispose();
++  });
++
++  test('merged sessions come from every host with their host id', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++
++    expect(hub.allSessions.map((session) => session.id), [
++      'l1',
++      'l2',
++      'h1',
++      'r1',
++    ]);
++    expect(hub.currentSessions.map((session) => session.id), ['l1', 'l2']);
++    expect(hub.sessionsOf('remote-pc').single.hostId, 'remote-pc');
++    hub.dispose();
++  });
++
++  test(
++    'current groups label providers and sort sessions by update time',
++    () async {
++      local.emitSessions([
++        fakeSession(
++          hostId: 'local',
++          id: 'old',
++          providerId: 'claude',
++          updatedAt: DateTime(2026, 1, 1),
++        ),
++        fakeSession(
++          hostId: 'local',
++          id: 'new',
++          providerId: 'claude',
++          updatedAt: DateTime(2026, 2, 1),
++        ),
++        fakeSession(hostId: 'local', id: 'codex-1', providerId: 'codex'),
++      ]);
++      final hub = buildHub();
++      await pumpEventQueue();
++      await hub.providersOf('local');
++      await pumpEventQueue();
++
++      final groups = hub.currentGroups;
++      expect(groups.map((group) => group.providerId), ['claude', 'codex']);
++      expect(groups.first.label, 'Claude Code');
++      expect(groups.first.sessions.map((session) => session.id), [
++        'new',
++        'old',
++      ]);
++      hub.dispose();
++    },
++  );
++
++  test('launch menu comes from the current host providers', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++
++    final menu = await hub.launchMenu();
++    expect(menu.map((provider) => provider.id), ['claude', 'codex']);
++    expect(menu.last.available, isFalse);
++    hub.dispose();
++  });
++
++  test('host state and install hint are exposed to the UI', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++
++    expect(hub.stateOf('herdr'), HarnessHostState.unsupported);
++    expect(hub.hintOf('herdr'), contains('Herdr'));
++    herdr.setState(HarnessHostState.online);
++    await pumpEventQueue();
++    expect(hub.stateOf('herdr'), HarnessHostState.online);
++    expect(hub.hintOf('local'), isNull);
++    hub.dispose();
++  });
++
++  test(
++    'selecting a host switches its session list and releases the view',
++    () async {
++      final hub = buildHub();
++      await pumpEventQueue();
++      final session = hub.sessionsOf('local').first;
++      final handle = await hub.openSession(session);
++      expect(hub.activeSession?.id, 'l1');
++
++      hub.selectHost('remote-pc');
++      await pumpEventQueue();
++
++      expect(hub.currentHostId, 'remote-pc');
++      expect(hub.activeSession, isNull);
++      expect((handle as FakeSessionHandle).detachCount, 1);
++      hub.dispose();
++    },
++  );
++
++  test('opening the same session twice reuses one handle', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    final session = hub.sessionsOf('local').first;
++
++    final first = await hub.openSession(session);
++    final second = await hub.openSession(session);
++
++    expect(identical(first, second), isTrue);
++    expect(local.opened, ['l1']);
++    hub.dispose();
++  });
++
++  test('closing the view detaches without stopping the session', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    final handle = await hub.openSession(hub.sessionsOf('local').first);
++
++    await hub.closeActiveSession();
++
++    expect(hub.activeSession, isNull);
++    expect(hub.activeHandle, isNull);
++    expect((handle as FakeSessionHandle).detachCount, 1);
++    expect(handle.stopCount, 0);
++    hub.dispose();
++  });
++
++  test('a session removed by the host closes its view', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    final handle = await hub.openSession(hub.sessionsOf('local').first);
++
++    local.emitSessions([
++      fakeSession(hostId: 'local', id: 'l2', providerId: 'codex'),
++    ]);
++    await pumpEventQueue();
++
++    expect(hub.activeSession, isNull);
++    expect((handle as FakeSessionHandle).detachCount, 1);
++    hub.dispose();
++  });
++
++  test('launch adds the new session and selects it', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++
++    final handle = await hub.launch(
++      const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp/project'),
++    );
++    await pumpEventQueue();
++
++    expect(handle.info.providerId, 'claude');
++    expect(hub.activeSession?.id, handle.info.id);
++    expect(
++      hub.sessionsOf('local').map((session) => session.id),
++      contains(handle.info.id),
++    );
++    hub.dispose();
++  });
++
++  test('launching without a host reports a readable error', () async {
++    final hub = HarnessHub(hosts: const [], desktop: true);
++    await pumpEventQueue();
++
++    expect(hub.currentHost, isNull);
++    expect(hub.launchMenu(), completion(isEmpty));
++    await expectLater(
++      hub.launch(const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp')),
++      throwsA(isA<HarnessHubException>()),
++    );
++    hub.dispose();
++  });
++
++  test('refresh re-subscribes and picks up new sessions', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    expect(hub.currentSessions, hasLength(2));
++
++    local.emitSessions([
++      fakeSession(hostId: 'local', id: 'l3', providerId: 'pi', title: 'Pi'),
++    ]);
++    await hub.refresh();
++    await pumpEventQueue();
++
++    expect(hub.currentSessions.map((session) => session.id), ['l3']);
++    hub.dispose();
++  });
++
++  test('dispose detaches the view and disposes every host once', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    final handle = await hub.openSession(hub.sessionsOf('local').first);
++
++    hub.dispose();
++    await pumpEventQueue();
++
++    expect((handle as FakeSessionHandle).detachCount, 1);
++    expect(local.disposeCount, 1);
++    expect(remote.disposeCount, 1);
++  });
++
++  test('groupSessionsByProvider keeps unknown providers under their id', () {
++    final groups = groupSessionsByProvider(
++      [
++        fakeSession(hostId: 'x', id: 'a', providerId: 'mystery'),
++        fakeSession(hostId: 'x', id: 'b', providerId: 'claude'),
++      ],
++      labels: const {'claude': 'Claude Code'},
++    );
++
++    expect(groups.map((group) => group.label), ['Claude Code', 'mystery']);
++  });
++}
+diff --git a/test/harness/hub_ui_test.dart b/test/harness/hub_ui_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..454bb2a0ac4d18f1659de534866a246fd6333c3d
+--- /dev/null
++++ b/test/harness/hub_ui_test.dart
+@@ -0,0 +1,392 @@
++// Agents 界面的 widget 测试：主机切换、会话分组与状态标签、结束会话前的
++// 确认、关闭视图只 detach、手机端按键栏。
++//
++// 本地不执行测试（brief 规定），这些用例交给云端 CI。
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/harness/ui/hub_agents_surface.dart';
++import 'package:qfli_studio_core/harness/ui/hub_host_switcher.dart';
++import 'package:qfli_studio_core/harness/ui/hub_session_list.dart';
++import 'package:qfli_studio_core/harness/ui/hub_session_view.dart';
++import 'package:qfli_studio_core/harness/ui/hub_terminal_key_bar.dart';
++import 'package:xterm/xterm.dart';
++
++import '../support/fake_harness_host.dart';
++
++Widget _wrap(Widget child) => MaterialApp(
++  theme: ThemeData(useMaterial3: true),
++  home: Scaffold(body: child),
++);
++
++void main() {
++  late FakeHarnessHost local;
++  late FakeHarnessHost remote;
++
++  setUp(() {
++    local = FakeHarnessHost(
++      id: 'local',
++      label: '本机',
++      kind: HarnessHostKind.local,
++      initialSessions: [
++        fakeSession(
++          hostId: 'local',
++          id: 'l1',
++          providerId: 'claude',
++          title: 'Claude 会话',
++          status: HarnessSessionStatus.working,
++          cwd: 'D:/proj/alpha',
++          updatedAt: DateTime(2026, 11, 22, 10),
++        ),
++        fakeSession(
++          hostId: 'local',
++          id: 'l2',
++          providerId: 'codex',
++          title: 'Codex 会话',
++          status: HarnessSessionStatus.blocked,
++          cwd: 'D:/proj/beta',
++        ),
++      ],
++      providerList: const [
++        HarnessProviderInfo(
++          id: 'claude',
++          label: 'Claude Code',
++          available: true,
++        ),
++        HarnessProviderInfo(id: 'codex', label: 'Codex', available: true),
++      ],
++    );
++    remote = FakeHarnessHost(
++      id: 'remote-pc',
++      label: '我的电脑',
++      kind: HarnessHostKind.remote,
++      initialState: HarnessHostState.offline,
++      initialSessions: [
++        fakeSession(hostId: 'remote-pc', id: 'r1', title: '远程会话'),
++      ],
++    );
++  });
++
++  tearDown(() async {
++    await local.dispose();
++    await remote.dispose();
++  });
++
++  HarnessHub buildHub({String? initialHostId}) => HarnessHub(
++    hosts: [local, remote],
++    desktop: true,
++    initialHostId: initialHostId,
++  );
++
++  testWidgets('host switcher lists hosts, shows the online dot and switches', (
++    tester,
++  ) async {
++    final hub = buildHub();
++    await tester.pumpWidget(_wrap(HubHostSwitcher(hub: hub)));
++    await tester.pump();
++
++    expect(find.text('本机'), findsOneWidget);
++    expect(find.text('我的电脑'), findsOneWidget);
++    expect(find.byKey(const ValueKey('hub-host-dot-online')), findsOneWidget);
++    expect(find.byKey(const ValueKey('hub-host-dot-offline')), findsOneWidget);
++
++    await tester.tap(find.text('我的电脑'));
++    await tester.pump();
++
++    expect(hub.currentHostId, 'remote-pc');
++    hub.dispose();
++  });
++
++  testWidgets('add computer entry calls back', (tester) async {
++    final hub = buildHub();
++    var tapped = 0;
++    await tester.pumpWidget(
++      _wrap(HubHostSwitcher(hub: hub, onAddComputer: () => tapped++)),
++    );
++    await tester.pump();
++
++    await tester.tap(find.byKey(const ValueKey('hub-add-computer')));
++    await tester.pump();
++
++    expect(tapped, 1);
++    hub.dispose();
++  });
++
++  testWidgets('session list groups by provider and shows status and cwd', (
++    tester,
++  ) async {
++    final hub = buildHub();
++    await tester.pumpWidget(
++      _wrap(
++        SingleChildScrollView(
++          child: HubSessionGroups(hub: hub, hostId: 'local'),
++        ),
++      ),
++    );
++    await tester.pump();
++    await hub.providersOf('local');
++    await tester.pump();
++
++    expect(
++      find.byKey(const ValueKey('hub-provider-group-claude')),
++      findsOneWidget,
++    );
++    expect(
++      find.byKey(const ValueKey('hub-provider-group-codex')),
++      findsOneWidget,
++    );
++    expect(find.text('Claude Code'), findsOneWidget);
++    expect(find.text('D:/proj/alpha'), findsOneWidget);
++    expect(find.text('运行中'), findsOneWidget);
++    expect(find.text('待确认'), findsOneWidget);
++    hub.dispose();
++  });
++
++  testWidgets('tapping a session row opens it through the hub', (tester) async {
++    final hub = buildHub();
++    HarnessSessionInfo? selected;
++    await tester.pumpWidget(
++      _wrap(
++        SingleChildScrollView(
++          child: HubSessionGroups(
++            hub: hub,
++            hostId: 'local',
++            onSelect: (session) => selected = session,
++          ),
++        ),
++      ),
++    );
++    await tester.pump();
++
++    await tester.tap(find.byKey(const ValueKey('hub-session-local-l2')));
++    await tester.pump();
++
++    expect(selected?.id, 'l2');
++    hub.dispose();
++  });
++
++  testWidgets('stopping a session asks for confirmation first', (tester) async {
++    final hub = buildHub();
++    final handle = await hub.openSession(hub.sessionsOf('local').first);
++    await tester.pumpWidget(
++      _wrap(HubSessionView(hub: hub, session: handle.info)),
++    );
++    await tester.pumpAndSettle();
++
++    await tester.tap(find.byKey(const ValueKey('hub-session-stop')));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('hub-stop-dialog')), findsOneWidget);
++
++    await tester.tap(find.byKey(const ValueKey('hub-stop-cancel')));
++    await tester.pumpAndSettle();
++    expect((handle as FakeSessionHandle).stopCount, 0);
++
++    await tester.tap(find.byKey(const ValueKey('hub-session-stop')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('hub-stop-confirm')));
++    await tester.pumpAndSettle();
++
++    expect(handle.stopCount, 1);
++    hub.dispose();
++  });
++
++  testWidgets('closing the view detaches and keeps the session running', (
++    tester,
++  ) async {
++    final hub = buildHub();
++    final handle = await hub.openSession(hub.sessionsOf('local').first);
++    var closed = 0;
++    await tester.pumpWidget(
++      _wrap(
++        HubSessionView(hub: hub, session: handle.info, onClose: () => closed++),
++      ),
++    );
++    await tester.pumpAndSettle();
++
++    await tester.tap(find.byKey(const ValueKey('hub-session-close')));
++    await tester.pumpAndSettle();
++
++    expect(closed, 1);
++    expect((handle as FakeSessionHandle).detachCount, 1);
++    expect(handle.stopCount, 0);
++    expect(hub.activeSession, isNull);
++    hub.dispose();
++  });
++
++  testWidgets('chat tab sends prompts through the handle', (tester) async {
++    final hub = buildHub();
++    final handle =
++        await hub.openSession(hub.sessionsOf('local').first)
++            as FakeSessionHandle;
++    await tester.pumpWidget(
++      _wrap(HubSessionView(hub: hub, session: handle.info)),
++    );
++    await tester.pumpAndSettle();
++
++    await tester.enterText(
++      find.byKey(const ValueKey('hub-composer-input')),
++      '跑一下测试',
++    );
++    await tester.pump();
++    await tester.tap(find.byKey(const ValueKey('hub-composer-send')));
++    await tester.pumpAndSettle();
++
++    expect(handle.prompts, ['跑一下测试']);
++    hub.dispose();
++  });
++
++  testWidgets('approval options reply with the request id', (tester) async {
++    final hub = buildHub();
++    final handle =
++        await hub.openSession(hub.sessionsOf('local').first)
++            as FakeSessionHandle;
++    await tester.pumpWidget(
++      _wrap(HubSessionView(hub: hub, session: handle.info)),
++    );
++    await tester.pumpAndSettle();
++
++    handle.addEvent(
++      const TranscriptEvent(
++        id: 'e1',
++        role: TranscriptRole.assistant,
++        text: '要执行 rm -rf build 吗？',
++        requestId: 'req-1',
++        options: ['允许', '拒绝'],
++      ),
++    );
++    await tester.pumpAndSettle();
++
++    await tester.tap(find.text('允许'));
++    await tester.pumpAndSettle();
++
++    expect(handle.replies.single.requestId, 'req-1');
++    expect(handle.replies.single.choice, '允许');
++    hub.dispose();
++  });
++
++  testWidgets(
++    'agents surface keeps the studio pane until an external host is chosen',
++    (tester) async {
++      final studio = FakeHarnessHost(
++        id: 'studio',
++        label: '内置 Agent',
++        kind: HarnessHostKind.studio,
++      );
++      final hub = HarnessHub(
++        hosts: [studio, local, remote],
++        desktop: true,
++        initialHostId: 'studio',
++      );
++      await tester.pumpWidget(
++        _wrap(
++          HubAgentsSurface(
++            hub: hub,
++            studioPane: const Center(child: Text('STUDIO-PANE')),
++            projectRoot: 'D:/proj/alpha',
++          ),
++        ),
++      );
++      await tester.pump();
++
++      expect(find.text('STUDIO-PANE'), findsOneWidget);
++
++      await tester.tap(find.text('本机'));
++      await tester.pump();
++
++      expect(find.text('STUDIO-PANE'), findsNothing);
++      expect(find.text('选择一个会话'), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('hub-session-local-l1')));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Claude 会话'), findsOneWidget);
++      expect(find.byKey(const ValueKey('hub-tab-0')), findsOneWidget);
++
++      hub.dispose();
++      await studio.dispose();
++    },
++  );
++
++  testWidgets('terminal key bar sends control keys with modifiers', (
++    tester,
++  ) async {
++    final sent = <(TerminalKey, bool, bool)>[];
++    final pasted = <String>[];
++    await tester.pumpWidget(
++      _wrap(
++        HubTerminalKeyBar(
++          onKey: (key, {required ctrl, required alt}) =>
++              sent.add((key, ctrl, alt)),
++          onPaste: pasted.add,
++        ),
++      ),
++    );
++
++    await tester.tap(find.byKey(const ValueKey('hub-key-esc')));
++    await tester.tap(find.byKey(const ValueKey('hub-key-tab')));
++    await tester.tap(find.byKey(const ValueKey('hub-key-right')));
++    await tester.pump();
++
++    expect(sent.map((entry) => entry.$1), [
++      TerminalKey.escape,
++      TerminalKey.tab,
++      TerminalKey.arrowRight,
++    ]);
++    expect(sent.every((entry) => !entry.$2 && !entry.$3), isTrue);
++
++    // Ctrl 是粘滞开关：打开后方向键带 ctrl 一起发。
++    await tester.tap(find.byKey(const ValueKey('hub-key-ctrl')));
++    await tester.pump();
++    await tester.tap(find.byKey(const ValueKey('hub-key-left')));
++    await tester.pump();
++
++    expect(sent.last.$1, TerminalKey.arrowLeft);
++    expect(sent.last.$2, isTrue);
++    expect(sent.last.$3, isFalse);
++
++    await tester.tap(find.byKey(const ValueKey('hub-key-ctrl')));
++    await tester.tap(find.byKey(const ValueKey('hub-key-alt')));
++    await tester.pump();
++    await tester.tap(find.byKey(const ValueKey('hub-key-up')));
++    await tester.pump();
++
++    expect(sent.last.$2, isFalse);
++    expect(sent.last.$3, isTrue);
++  });
++
++  testWidgets('terminal key bar pastes clipboard text', (tester) async {
++    final pasted = <String>[];
++    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
++      SystemChannels.platform,
++      (call) async {
++        if (call.method == 'Clipboard.getData') {
++          return <String, dynamic>{'text': 'ls -la'};
++        }
++        return null;
++      },
++    );
++    addTearDown(
++      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
++        SystemChannels.platform,
++        null,
++      ),
++    );
++
++    await tester.pumpWidget(
++      _wrap(
++        HubTerminalKeyBar(
++          onKey: (key, {required ctrl, required alt}) {},
++          onPaste: pasted.add,
++        ),
++      ),
++    );
++
++    await tester.tap(find.byKey(const ValueKey('hub-key-paste')));
++    await tester.pumpAndSettle();
++
++    expect(pasted, ['ls -la']);
++  });
++}
+diff --git a/test/support/fake_harness_host.dart b/test/support/fake_harness_host.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..6423a1329b107e4ad2cb7f5529907c89aa5fb271
+--- /dev/null
++++ b/test/support/fake_harness_host.dart
+@@ -0,0 +1,235 @@
++// 假主机：hub 和 Agents 界面的测试与预览共用。
++//
++// 只实现契约里的行为，不碰 PTY、日志或网络。会话列表由测试直接推进，
++// 打开会话返回的 handle 记下 detach/stop 次数，用来验证「关闭视图只
++// detach、结束会话要先确认」。
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++
++/// 假的终端通道：记录写入的字节，测试可以用 [emit] 喂输出。
++class FakeTerminalChannel implements HarnessTerminalChannel {
++  FakeTerminalChannel();
++
++  final StreamController<Uint8List> _out =
++      StreamController<Uint8List>.broadcast();
++  final List<Uint8List> writes = <Uint8List>[];
++  final List<(int, int)> resizes = <(int, int)>[];
++
++  @override
++  Stream<Uint8List> get output => _out.stream;
++
++  @override
++  void write(Uint8List data) => writes.add(data);
++
++  @override
++  void resize(int columns, int rows) => resizes.add((columns, rows));
++
++  void emit(String text) => _out.add(Uint8List.fromList(text.codeUnits));
++
++  Future<void> close() => _out.close();
++}
++
++/// 假会话视图。
++class FakeSessionHandle implements HarnessSessionHandle {
++  FakeSessionHandle({required this.info, this.terminal, bool transcript = true})
++    : status = ValueNotifier<HarnessSessionStatus>(info.status),
++      _transcript = transcript
++          ? StreamController<TranscriptEvent>.broadcast()
++          : null;
++
++  @override
++  final HarnessSessionInfo info;
++
++  @override
++  final HarnessTerminalChannel? terminal;
++
++  @override
++  final ValueNotifier<HarnessSessionStatus> status;
++
++  final StreamController<TranscriptEvent>? _transcript;
++
++  final List<String> prompts = <String>[];
++  final List<HarnessReply> replies = <HarnessReply>[];
++  int detachCount = 0;
++  int stopCount = 0;
++
++  /// 结束后从终端拿到的状态。
++  HarnessSessionStatus? lastStatus;
++
++  @override
++  Stream<TranscriptEvent>? get transcript => _transcript?.stream;
++
++  void addEvent(TranscriptEvent event) => _transcript?.add(event);
++
++  @override
++  Future<void> sendPrompt(String text) async => prompts.add(text);
++
++  @override
++  Future<void> reply(HarnessReply reply) async => replies.add(reply);
++
++  @override
++  Future<void> detach() async => detachCount++;
++
++  @override
++  Future<void> stop() async {
++    stopCount++;
++    status.value = HarnessSessionStatus.exited;
++    lastStatus = HarnessSessionStatus.exited;
++  }
++}
++
++/// 假主机：一个可变的会话列表和固定的 provider 列表。
++class FakeHarnessHost implements HarnessHost, HarnessHostHint {
++  FakeHarnessHost({
++    required this.id,
++    required this.label,
++    required this.kind,
++    List<HarnessSessionInfo> initialSessions = const <HarnessSessionInfo>[],
++    this.providerList = const <HarnessProviderInfo>[],
++    HarnessHostState initialState = HarnessHostState.online,
++    this.hint,
++    this.openHandler,
++    this.launchHandler,
++  }) : _current = initialSessions {
++    state = ValueNotifier<HarnessHostState>(initialState);
++  }
++
++  @override
++  final String id;
++
++  @override
++  final String label;
++
++  @override
++  final HarnessHostKind kind;
++
++  final List<HarnessProviderInfo> providerList;
++
++  final String? hint;
++
++  @override
++  String? get installHint => hint;
++
++  @override
++  late final ValueNotifier<HarnessHostState> state;
++
++  /// 打开与会话的钩子，默认返回一个带对话和终端的假 handle。
++  final Future<HarnessSessionHandle> Function(String sessionId)? openHandler;
++  final Future<HarnessSessionHandle> Function(HarnessLaunchRequest request)?
++  launchHandler;
++
++  final List<StreamController<List<HarnessSessionInfo>>> _controllers =
++      <StreamController<List<HarnessSessionInfo>>>[];
++  List<HarnessSessionInfo> _current;
++  final List<String> opened = <String>[];
++  int disposeCount = 0;
++
++  List<HarnessSessionInfo> get sessions => _current;
++
++  /// 推进会话列表（测试用）。
++  void emitSessions(List<HarnessSessionInfo> sessions) {
++    _current = sessions;
++    for (final controller in _controllers) {
++      controller.add(sessions);
++    }
++  }
++
++  void setState(HarnessHostState next) => state.value = next;
++
++  @override
++  Stream<List<HarnessSessionInfo>> watchSessions() {
++    // 每个订阅者一个 controller：hub 刷新会重新订阅，广播 controller 在
++    // 没有监听者时不会缓存上一帧，重新订阅时要先把当前列表发一次。
++    late final StreamController<List<HarnessSessionInfo>> controller;
++    controller = StreamController<List<HarnessSessionInfo>>.broadcast(
++      onListen: () => controller.add(_current),
++    );
++    _controllers.add(controller);
++    controller.onCancel = () => _controllers.remove(controller);
++    return controller.stream;
++  }
++
++  @override
++  Future<List<HarnessProviderInfo>> providers() async => providerList;
++
++  @override
++  Future<HarnessSessionHandle> open(String sessionId) async {
++    opened.add(sessionId);
++    final handler = openHandler;
++    if (handler != null) return handler(sessionId);
++    return FakeSessionHandle(
++      info: _infoFor(sessionId),
++      terminal: FakeTerminalChannel(),
++    );
++  }
++
++  HarnessSessionInfo _infoFor(String sessionId) {
++    for (final session in _current) {
++      if (session.id == sessionId) return session;
++    }
++    return fakeSession(hostId: id, id: sessionId, title: sessionId);
++  }
++
++  @override
++  Future<HarnessSessionHandle> launch(HarnessLaunchRequest request) async {
++    final handler = launchHandler;
++    if (handler != null) return handler(request);
++    final info = HarnessSessionInfo(
++      id: '$id-new-${opened.length + 1}',
++      hostId: id,
++      providerId: request.providerId,
++      title: request.title ?? '新会话',
++      status: HarnessSessionStatus.working,
++      capabilities: const {
++        HarnessCapability.transcript,
++        HarnessCapability.terminal,
++        HarnessCapability.prompt,
++        HarnessCapability.stop,
++      },
++      cwd: request.cwd,
++    );
++    emitSessions(<HarnessSessionInfo>[..._current, info]);
++    return FakeSessionHandle(info: info, terminal: FakeTerminalChannel());
++  }
++
++  @override
++  Future<void> dispose() async {
++    disposeCount++;
++    for (final controller in [..._controllers]) {
++      await controller.close();
++    }
++    _controllers.clear();
++  }
++}
++
++/// 常用的会话信息。
++HarnessSessionInfo fakeSession({
++  required String hostId,
++  required String id,
++  String providerId = 'claude',
++  String title = '会话',
++  HarnessSessionStatus status = HarnessSessionStatus.idle,
++  String? cwd,
++  DateTime? updatedAt,
++  Set<HarnessCapability> capabilities = const {
++    HarnessCapability.transcript,
++    HarnessCapability.terminal,
++    HarnessCapability.prompt,
++    HarnessCapability.stop,
++  },
++}) {
++  return HarnessSessionInfo(
++    id: id,
++    hostId: hostId,
++    providerId: providerId,
++    title: title,
++    status: status,
++    cwd: cwd,
++    updatedAt: updatedAt,
++    capabilities: capabilities,
++  );
++}

@@ -1,0 +1,174 @@
+diff --git a/test/screenshots/workbench_screenshots_test.dart b/test/screenshots/workbench_screenshots_test.dart
+index 15c415f35f2837b730a705eff7f017b60ae7a029..459c3a5a8a9d22521a7fb64eee689444a1971ddc 100644
+--- a/test/screenshots/workbench_screenshots_test.dart
++++ b/test/screenshots/workbench_screenshots_test.dart
+@@ -14,6 +14,7 @@ import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
+ import 'package:qfli_studio_core/editor/editor_controller.dart';
+ import 'package:qfli_studio_core/editor/editor_page.dart';
+ import 'package:qfli_studio_core/editor/file_explorer.dart';
++import 'package:qfli_studio_core/content/content_repository.dart';
+ import 'package:qfli_studio_core/github/github_auth_controller.dart';
+ import 'package:qfli_studio_core/github/github_credential_store.dart';
+ import 'package:qfli_studio_core/harness/harness_host.dart';
+@@ -23,6 +24,9 @@ import 'package:qfli_studio_core/harness/hub/harness_hosts.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
+ import 'package:qfli_studio_core/layout/app_form_factor.dart';
+ import 'package:qfli_studio_core/pages/home_page.dart';
++import 'package:qfli_studio_core/pages/local_content_pages.dart';
++import 'package:qfli_studio_core/pages/profile_page.dart';
++import 'package:qfli_studio_core/pages/quick_tools_page.dart';
+ import 'package:qfli_studio_core/pages/settings_page.dart';
+ import 'package:qfli_studio_core/services/app_paths.dart';
+ import 'package:qfli_studio_core/services/studio_profile.dart';
+@@ -37,8 +41,10 @@ import 'package:qfli_studio_core/store/auth_store.dart';
+ import 'package:qfli_studio_core/store/project_store.dart';
+ import 'package:qfli_studio_core/store/settings_store.dart';
+ import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++import 'package:qfli_studio_core/widgets/tools_browser.dart';
+ import 'package:re_editor/re_editor.dart';
+ 
++import '../support/content_catalog_fixture.dart';
+ import '../support/fake_harness_host.dart';
+ 
+ final bool _enabled = Platform.environment['QFLI_SCREENSHOTS'] == '1';
+@@ -56,15 +62,35 @@ void main() {
+     previousProfile = StudioProfile.current;
+     PathProviderPlatform.instance = _Paths(root!.path);
+     StudioProfile.current = const StudioProfile(
+-      id: 'screenshots',
++      id: 'java',
+       appTitle: 'QFLI Studio',
+       templates: [],
+       supportedFileExtensions: ['.dart'],
+       entryFileNames: ['main.dart'],
+       productKey: StudioProductCatalog.qfliStudioKey,
++      contentRepositoryFactory: _screenshotContentRepository,
++    );
++    // Use deterministic fake hosts and the real shell/editor without PTY discovery.
++    HarnessHosts.overrideForTesting(
++      (_) => [
++        FakeHarnessHost(
++          id: 'screenshot-local',
++          label: 'Screenshot host',
++          kind: HarnessHostKind.local,
++          initialSessions: [
++            HarnessSessionInfo(
++              id: 'agents-list',
++              hostId: 'screenshot-local',
++              providerId: 'pi',
++              title: 'Screenshot Agent session',
++              status: HarnessSessionStatus.idle,
++              capabilities: const {HarnessCapability.transcript},
++              cwd: root!.path,
++            ),
++          ],
++        ),
++      ],
+     );
+-    // Use the real shell/editor with deterministic hosts and no PTY discovery.
+-    HarnessHosts.overrideForTesting((_) => []);
+     await AppPaths.storageDirectory();
+     await TaskActivityService.instance.initialize();
+     await _loadRealFonts();
+@@ -208,6 +234,34 @@ Future<void> _configuration(
+     expect(find.byType(CodeEditor), findsOneWidget);
+     await _capture(tester, '$stem-explorer-files-editor.png');
+ 
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.agents)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.agents &&
++          find.byKey(const ValueKey('agents-list')).evaluate().length == 1 &&
++          find.text('Screenshot Agent session').evaluate().length == 1,
++      '$stem Agents list',
++    );
++    expect(
++      find.byKey(const ValueKey('agents-workbench-search')),
++      findsOneWidget,
++    );
++    expect(find.text('Screenshot Agent session'), findsOneWidget);
++    await _capture(tester, '$stem-agents-list.png');
++    await _tap(tester, explorer);
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.explorer &&
++          find.byType(FileExplorer).evaluate().length == 1 &&
++          find.text('main.dart').evaluate().length == 1,
++      '$stem restored Explorer after Agents list',
++    );
++
+     // Resolve the lazy built-in runtime before opening the fake external
+     // session. AgentDock insertion changes the conversation's ancestors.
+     layout.toggleSidebar();
+@@ -316,6 +370,56 @@ Future<void> _configuration(
+     expect(find.byKey(const ValueKey('settings-ui-zoom')), findsOneWidget);
+     await _capture(tester, '$stem-settings.png');
+ 
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.tools)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.tools &&
++          find.byType(FunctionsTab).evaluate().length == 1 &&
++          find.byType(ToolsBrowser).evaluate().length == 1,
++      '$stem Tools page',
++    );
++    expect(find.byType(ToolsBrowser), findsOneWidget);
++    expect(
++      find.byKey(const PageStorageKey<String>('tools-scroll')),
++      findsOneWidget,
++    );
++    await _capture(tester, '$stem-tools.png');
++
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.tutorial)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.tutorial &&
++          find.byType(TutorialCenterPage).evaluate().length == 1 &&
++          find.byKey(TutorialCenterPage.tutorialSectionKey).evaluate().length ==
++              1 &&
++          find.text('Java lesson 0-0').evaluate().length == 1,
++      '$stem Tutorial page',
++    );
++    expect(find.byKey(TutorialCenterPage.tutorialSectionKey), findsOneWidget);
++    expect(find.text('Java lesson 0-0'), findsOneWidget);
++    await _capture(tester, '$stem-tutorial.png');
++
++    await _tap(tester, find.byKey(WorkbenchActivityRail.avatarKey));
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.profile &&
++          find.byType(ProfileTab).evaluate().length == 1 &&
++          find.text('我的').evaluate().length == 1,
++      '$stem Profile page',
++    );
++    expect(find.byType(ProfileTab), findsOneWidget);
++    expect(find.text('我的'), findsOneWidget);
++    await _capture(tester, '$stem-profile.png');
++
+     await _tap(tester, explorer);
+     if (layout.sidebarVisible) layout.toggleSidebar();
+     await _settle(tester);
+@@ -435,6 +539,9 @@ Future<void> _capture(WidgetTester tester, String name) async {
+   });
+ }
+ 
++ContentRepository _screenshotContentRepository() =>
++    FixtureContentRepository(fixtureCatalog());
++
+ Future<_Fixture> _fixture(Directory root, String theme) async {
+   final directory = await root.createTemp('scene-');
+   final sample = Directory(p.join(directory.path, 'Screenshot Sample'));

@@ -1,0 +1,41 @@
+diff --git a/test/workbench_session_view_test.dart b/test/workbench_session_view_test.dart
+index 65a7ae7806f4ee1e58ff18dde5dee373c7336aa9..325e94a684ca0d50ae1b5d5f623febeb1056aa31 100644
+--- a/test/workbench_session_view_test.dart
++++ b/test/workbench_session_view_test.dart
+@@ -72,6 +72,9 @@ void main() {
+         text: 'Real transcript',
+       ),
+     );
++    // The async transcript stream schedules its rebuild during the first pump.
++    // Draw that frame before checking the rendered selectable message.
++    await tester.pump();
+     await tester.pump();
+     expect(find.text('Real transcript'), findsOneWidget);
+     await tester.tap(find.byKey(const ValueKey('workbench-session-close')));
+@@ -372,6 +375,8 @@ void main() {
+           text: 'Previous transcript',
+         ),
+       );
++      // Deliver the async stream event, then draw its scheduled chat frame.
++      await tester.pump();
+       await tester.pump();
+       expect(find.text('Previous transcript'), findsOneWidget);
+       await mount(
+@@ -390,6 +395,17 @@ void main() {
+         same(second),
+       );
+       expect(first.detachCount, 1);
++      second.addEvent(
++        const TranscriptEvent(
++          id: 'new',
++          role: TranscriptRole.assistant,
++          text: 'Replacement transcript',
++        ),
++      );
++      await tester.pump();
++      await tester.pump();
++      expect(find.text('Replacement transcript'), findsOneWidget);
++      expect(find.text('Previous transcript'), findsNothing);
+       await tester.pumpWidget(const SizedBox.shrink());
+       await tester.pump();
+       await hub.shutdown();

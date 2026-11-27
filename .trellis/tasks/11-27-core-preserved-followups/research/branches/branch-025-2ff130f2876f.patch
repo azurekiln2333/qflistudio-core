@@ -1,0 +1,2036 @@
+diff --git a/lib/pages/local_content_pages.dart b/lib/pages/local_content_pages.dart
+index 44da9be75c4f6a10991f0d876498b1e17e671de8..44e5df2b41ce2fe94cae3f66cd26970dc549fedf 100644
+--- a/lib/pages/local_content_pages.dart
++++ b/lib/pages/local_content_pages.dart
+@@ -8,6 +8,7 @@ import '../content/local_content_adapter.dart';
+ import '../i18n/studio_localizations.dart';
+ import '../models/tutorial.dart';
+ import '../services/studio_profile.dart';
++import '../shell/large_screen_controller.dart';
+ import '../store/auth_store.dart';
+ import '../store/project_store.dart';
+ import '../store/settings_store.dart';
+@@ -68,35 +69,38 @@ class _LocalTutorialsTabState extends State<LocalTutorialsTab> {
+   @override
+   Widget build(BuildContext context) {
+     final l10n = StudioLocalizations.of(context);
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
++    final content = FutureBuilder<Tutorial?>(
++      future: _tutorial,
++      builder: (context, snapshot) {
++        if (snapshot.connectionState != ConnectionState.done) {
++          return const Center(child: CircularProgressIndicator());
++        }
++        final tutorial = snapshot.data;
++        if (tutorial == null) {
++          return _LocalContentError(message: l10n.localTutorialMissing);
++        }
++        return _TutorialList(
++          tutorial: tutorial,
++          store: widget.store,
++          auth: widget.auth,
++          settings: widget.settings,
++        );
++      },
++    );
+     return Scaffold(
+-      appBar: AppBar(
+-        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
+-        centerTitle: false,
+-        title: Text(
+-          l10n.tutorial,
+-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+-            color: Theme.of(context).colorScheme.primary,
+-          ),
+-        ),
+-      ),
+-      body: FutureBuilder<Tutorial?>(
+-        future: _tutorial,
+-        builder: (context, snapshot) {
+-          if (snapshot.connectionState != ConnectionState.done) {
+-            return const Center(child: CircularProgressIndicator());
+-          }
+-          final tutorial = snapshot.data;
+-          if (tutorial == null) {
+-            return _LocalContentError(message: l10n.localTutorialMissing);
+-          }
+-          return _TutorialList(
+-            tutorial: tutorial,
+-            store: widget.store,
+-            auth: widget.auth,
+-            settings: widget.settings,
+-          );
+-        },
+-      ),
++      appBar: largeScreen
++          ? null
++          : AppBar(
++              centerTitle: false,
++              title: Text(
++                l10n.tutorial,
++                style: Theme.of(context).textTheme.titleLarge?.copyWith(
++                  color: Theme.of(context).colorScheme.primary,
++                ),
++              ),
++            ),
++      body: _largeScreenPageBody(context, l10n.tutorial, content),
+     );
+   }
+ }
+@@ -233,78 +237,116 @@ class _TutorialCenterPageState extends State<TutorialCenterPage>
+ 
+   @override
+   Widget build(BuildContext context) {
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+     final l10n = StudioLocalizations.of(context);
+     final labels = _ContentLabels(context);
+-    return Scaffold(
+-      appBar: AppBar(
+-        // 与主页相同的折叠搜索：折叠时只有一个放大镜图标。
+-        toolbarHeight: _searchOpen
+-            ? collapsedSearchToolbarHeight(context)
+-            : null,
+-        leading: _searchOpen
+-            ? IconButton(
++    final content = Column(
++      children: [
++        TabBar(
++          key: const ValueKey('tutorial-center-sections'),
++          controller: _sections,
++          onTap: _selectSection,
++          isScrollable: true,
++          tabAlignment: TabAlignment.start,
++          dividerColor: Colors.transparent,
++          labelPadding: const EdgeInsets.symmetric(horizontal: 12),
++          tabs: [
++            Tab(
++              key: TutorialCenterPage.tutorialSectionKey,
++              height: 36,
++              child: Center(child: Text(l10n.tutorial)),
++            ),
++            Tab(
++              key: TutorialCenterPage.examplesSectionKey,
++              height: 36,
++              child: Center(child: Text(l10n.examples)),
++            ),
++          ],
++        ),
++        Expanded(
++          child: _sections.index == TutorialCenterSection.tutorial.index
++              ? _buildTutorialSection()
++              : _buildExamplesSection(),
++        ),
++      ],
++    );
++    final searchControl = _searchOpen
++        ? Row(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              SizedBox(
++                width: 320,
++                child: CollapsedSearchField(
++                  fieldKey: const ValueKey('content-query'),
++                  controller: _filter.query,
++                  label: l10n.searchContent,
++                  clearTooltip: labels.clear,
++                  onChanged: (_) => setState(() {}),
++                ),
++              ),
++              IconButton(
+                 tooltip: l10n.exitSearch,
+-                icon: const Icon(Icons.arrow_back),
+                 onPressed: _closeSearch,
+-              )
+-            : null,
+-        automaticallyImplyLeading: false,
+-        // 与主页面栏对齐：标题靠左，不居中，也不放发布动作。
+-        centerTitle: false,
+-        title: _searchOpen
+-            ? CollapsedSearchField(
+-                fieldKey: const ValueKey('content-query'),
+-                controller: _filter.query,
+-                label: l10n.searchContent,
+-                clearTooltip: labels.clear,
+-                onChanged: (_) => setState(() {}),
+-              )
+-            : Text(
+-                l10n.tutorial,
+-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+-                  color: Theme.of(context).colorScheme.primary,
+-                ),
++                icon: const Icon(Icons.close),
+               ),
+-        actions: _searchOpen
+-            ? const [SizedBox(width: 8)]
+-            : [
+-                CollapsedSearchButton(
+-                  tooltip: l10n.searchContent,
+-                  onPressed: _openSearch,
++            ],
++          )
++        : IconButton(
++            tooltip: l10n.searchContent,
++            onPressed: _openSearch,
++            icon: const Icon(Icons.search),
++          );
++    return Scaffold(
++      appBar: largeScreen
++          ? null
++          : AppBar(
++              toolbarHeight: _searchOpen
++                  ? collapsedSearchToolbarHeight(context)
++                  : null,
++              leading: _searchOpen
++                  ? IconButton(
++                      tooltip: l10n.exitSearch,
++                      icon: const Icon(Icons.arrow_back),
++                      onPressed: _closeSearch,
++                    )
++                  : null,
++              automaticallyImplyLeading: false,
++              centerTitle: false,
++              title: _searchOpen
++                  ? CollapsedSearchField(
++                      fieldKey: const ValueKey('content-query'),
++                      controller: _filter.query,
++                      label: l10n.searchContent,
++                      clearTooltip: labels.clear,
++                      onChanged: (_) => setState(() {}),
++                    )
++                  : Text(
++                      l10n.tutorial,
++                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
++                        color: Theme.of(context).colorScheme.primary,
++                      ),
++                    ),
++              actions: _searchOpen
++                  ? const [SizedBox(width: 8)]
++                  : [
++                      CollapsedSearchButton(
++                        tooltip: l10n.searchContent,
++                        onPressed: _openSearch,
++                      ),
++                      const SizedBox(width: 8),
++                    ],
++            ),
++      body: largeScreen
++          ? Column(
++              children: [
++                _LargeScreenPageHeader(
++                  title: l10n.tutorial,
++                  actions: [searchControl],
+                 ),
+-                const SizedBox(width: 8),
++                Expanded(child: content),
+               ],
+-      ),
+-      body: Column(
+-        children: [
+-          TabBar(
+-            key: const ValueKey('tutorial-center-sections'),
+-            controller: _sections,
+-            onTap: _selectSection,
+-            isScrollable: true,
+-            tabAlignment: TabAlignment.start,
+-            dividerColor: Colors.transparent,
+-            labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+-            tabs: [
+-              Tab(
+-                key: TutorialCenterPage.tutorialSectionKey,
+-                height: 36,
+-                child: Center(child: Text(l10n.tutorial)),
+-              ),
+-              Tab(
+-                key: TutorialCenterPage.examplesSectionKey,
+-                height: 36,
+-                child: Center(child: Text(l10n.examples)),
+-              ),
+-            ],
+-          ),
+-          Expanded(
+-            child: _sections.index == TutorialCenterSection.tutorial.index
+-                ? _buildTutorialSection()
+-                : _buildExamplesSection(),
+-          ),
+-        ],
+-      ),
++            )
++          : content,
+     );
+   }
+ 
+@@ -419,35 +461,39 @@ class _ExampleCodeTabState extends State<ExampleCodeTab> {
+   @override
+   Widget build(BuildContext context) {
+     final l10n = StudioLocalizations.of(context);
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
++    final content = FutureBuilder<List<ExampleCode>>(
++      future: _examples,
++      builder: (context, snapshot) {
++        if (snapshot.connectionState != ConnectionState.done) {
++          return const Center(child: CircularProgressIndicator());
++        }
++        final examples = snapshot.data;
++        if (examples == null || examples.isEmpty) {
++          return _LocalContentError(message: l10n.localExamplesMissing);
++        }
++        return _ExampleCodeList(
++          items: examples,
++          store: widget.store,
++          auth: widget.auth,
++          settings: widget.settings,
++          examples: widget.examples,
++        );
++      },
++    );
+     return Scaffold(
+-      appBar: AppBar(
+-        centerTitle: false,
+-        title: Text(
+-          l10n.examples,
+-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+-            color: Theme.of(context).colorScheme.primary,
+-          ),
+-        ),
+-      ),
+-      body: FutureBuilder<List<ExampleCode>>(
+-        future: _examples,
+-        builder: (context, snapshot) {
+-          if (snapshot.connectionState != ConnectionState.done) {
+-            return const Center(child: CircularProgressIndicator());
+-          }
+-          final examples = snapshot.data;
+-          if (examples == null || examples.isEmpty) {
+-            return _LocalContentError(message: l10n.localExamplesMissing);
+-          }
+-          return _ExampleCodeList(
+-            items: examples,
+-            store: widget.store,
+-            auth: widget.auth,
+-            settings: widget.settings,
+-            examples: widget.examples,
+-          );
+-        },
+-      ),
++      appBar: largeScreen
++          ? null
++          : AppBar(
++              centerTitle: false,
++              title: Text(
++                l10n.examples,
++                style: Theme.of(context).textTheme.titleLarge?.copyWith(
++                  color: Theme.of(context).colorScheme.primary,
++                ),
++              ),
++            ),
++      body: _largeScreenPageBody(context, l10n.examples, content),
+     );
+   }
+ }
+@@ -505,6 +551,84 @@ class _TutorialListState extends State<_TutorialList> {
+     ];
+     final labels = _ContentLabels(context);
+     final count = rows.where((row) => row.lesson != null).length;
++    if (LargeScreenScope.maybeOf(context) != null) {
++      final chapterEntries =
++          <({TutorialChapter chapter, List<TutorialLesson> lessons})>[
++            for (final chapter in widget.tutorial.chapters)
++              if (chapter.lessons.any((lesson) => _matches(chapter, lesson)))
++                (
++                  chapter: chapter,
++                  lessons: chapter.lessons
++                      .where((lesson) => _matches(chapter, lesson))
++                      .toList(growable: false),
++                ),
++          ];
++      return _LargeScreenContentList(
++        slivers: [
++          SliverPadding(
++            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
++            sliver: SliverToBoxAdapter(
++              child: _ContentFilterBar(
++                selection: _filter,
++                languages: [
++                  for (final lesson in lessons)
++                    _contentLanguage(lesson.type, lesson.language),
++                ],
++                levels: [for (final lesson in lessons) lesson.level],
++                resultLabel: labels.lessonCount(count),
++                onChanged: () => setState(() {}),
++                searchInToolbar: widget.searchInToolbar,
++              ),
++            ),
++          ),
++          if (chapterEntries.isEmpty)
++            SliverFillRemaining(
++              hasScrollBody: false,
++              child: _emptyResults(context),
++            )
++          else
++            for (final entry in chapterEntries) ...[
++              SliverToBoxAdapter(
++                child: Padding(
++                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
++                  child: Text(
++                    entry.chapter.title,
++                    style: theme.textTheme.titleSmall?.copyWith(
++                      color: theme.colorScheme.primary,
++                    ),
++                  ),
++                ),
++              ),
++              SliverPadding(
++                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
++                sliver: _largeScreenCardGrid(
++                  itemCount: entry.lessons.length,
++                  itemBuilder: (context, index) {
++                    final lesson = entry.lessons[index];
++                    return _LargeScreenContentGridCard(
++                      key: ValueKey(lesson.id),
++                      icon: Icons.menu_book_outlined,
++                      title: lesson.title,
++                      language: _contentLanguage(lesson.type, lesson.language),
++                      summary: lesson.summary,
++                      onTap: () => Navigator.of(context).push(
++                        MaterialPageRoute(
++                          builder: (_) => _LessonPage(
++                            lesson: lesson,
++                            store: widget.store,
++                            auth: widget.auth,
++                            settings: widget.settings,
++                          ),
++                        ),
++                      ),
++                    );
++                  },
++                ),
++              ),
++            ],
++        ],
++      );
++    }
+     return _ContentList.builder(
+       padding: const EdgeInsets.only(top: 8, bottom: 32),
+       itemCount: rows.isEmpty ? 2 : rows.length + 1,
+@@ -627,6 +751,61 @@ class _ExampleCodeListState extends State<_ExampleCodeList> {
+           ),
+         )
+         .toList(growable: false);
++    if (LargeScreenScope.maybeOf(context) != null) {
++      return _LargeScreenContentList(
++        slivers: [
++          SliverPadding(
++            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
++            sliver: SliverToBoxAdapter(
++              child: _ContentFilterBar(
++                selection: _filter,
++                languages: [
++                  for (final example in widget.items)
++                    _contentLanguage(example.type, example.language),
++                ],
++                levels: [for (final example in widget.items) example.level],
++                resultLabel: l10n.examplesCount(items.length),
++                onChanged: () => setState(() {}),
++                searchInToolbar: widget.searchInToolbar,
++              ),
++            ),
++          ),
++          if (items.isEmpty)
++            SliverFillRemaining(
++              hasScrollBody: false,
++              child: _emptyResults(context),
++            )
++          else
++            SliverPadding(
++              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
++              sliver: _largeScreenCardGrid(
++                itemCount: items.length,
++                itemBuilder: (context, index) {
++                  final example = items[index];
++                  return _LargeScreenContentGridCard(
++                    key: ValueKey(example.id),
++                    icon: Icons.code_outlined,
++                    title: example.title,
++                    language: _contentLanguage(example.type, example.language),
++                    summary: example.summary,
++                    onTap: () => Navigator.of(context).push(
++                      MaterialPageRoute(
++                        builder: (_) => ExampleDetailPage(
++                          example: example,
++                          store: widget.store,
++                          auth: widget.auth,
++                          settings: widget.settings,
++                          examples: widget.examples,
++                        ),
++                      ),
++                    ),
++                  );
++                },
++              ),
++            ),
++        ],
++      );
++    }
+     return _ContentList.builder(
+       padding: const EdgeInsets.only(top: 8, bottom: 32),
+       itemCount: items.isEmpty ? 2 : items.length + 1,
+@@ -740,9 +919,7 @@ Future<_ExampleCatalog> _loadExampleCatalog({
+ void _showSavedExamplesUnavailable(BuildContext context) =>
+     ScaffoldMessenger.of(context).showSnackBar(
+       SnackBar(
+-        content: Text(
+-          StudioLocalizations.of(context).savedExamplesUnavailable,
+-        ),
++        content: Text(StudioLocalizations.of(context).savedExamplesUnavailable),
+       ),
+     );
+ 
+@@ -1236,6 +1413,146 @@ class _BulletLine extends StatelessWidget {
+   }
+ }
+ 
++Widget _largeScreenCardGrid({
++  required int itemCount,
++  required IndexedWidgetBuilder itemBuilder,
++}) => SliverLayoutBuilder(
++  builder: (context, constraints) {
++    const minCardWidth = 280.0;
++    const spacing = 16.0;
++    final crossAxisCount =
++        ((constraints.crossAxisExtent + spacing) / (minCardWidth + spacing))
++            .floor()
++            .clamp(1, 4)
++            .toInt();
++    return SliverGrid(
++      delegate: SliverChildBuilderDelegate(itemBuilder, childCount: itemCount),
++      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
++        crossAxisCount: crossAxisCount,
++        mainAxisExtent: 144,
++        crossAxisSpacing: spacing,
++        mainAxisSpacing: spacing,
++      ),
++    );
++  },
++);
++
++Widget _largeScreenPageBody(BuildContext context, String title, Widget child) {
++  if (LargeScreenScope.maybeOf(context) == null) return child;
++  return Column(
++    children: [
++      _LargeScreenPageHeader(title: title),
++      Expanded(child: child),
++    ],
++  );
++}
++
++class _LargeScreenPageHeader extends StatelessWidget {
++  const _LargeScreenPageHeader({required this.title, this.actions = const []});
++
++  final String title;
++  final List<Widget> actions;
++
++  @override
++  Widget build(BuildContext context) => Padding(
++    padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
++    child: Row(
++      children: [
++        Expanded(
++          child: Text(title, style: Theme.of(context).textTheme.headlineSmall),
++        ),
++        ...actions,
++      ],
++    ),
++  );
++}
++
++class _LargeScreenContentList extends StatelessWidget {
++  const _LargeScreenContentList({required this.slivers});
++
++  final List<Widget> slivers;
++
++  @override
++  Widget build(BuildContext context) => Align(
++    alignment: Alignment.topCenter,
++    child: ConstrainedBox(
++      constraints: const BoxConstraints(maxWidth: 1100),
++      child: CustomScrollView(slivers: slivers),
++    ),
++  );
++}
++
++class _LargeScreenContentGridCard extends StatelessWidget {
++  const _LargeScreenContentGridCard({
++    super.key,
++    required this.icon,
++    required this.title,
++    required this.language,
++    required this.summary,
++    required this.onTap,
++  });
++
++  final IconData icon;
++  final String title;
++  final String language;
++  final String summary;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Card.filled(
++      color: theme.colorScheme.surfaceContainerLow,
++      clipBehavior: Clip.antiAlias,
++      child: InkWell(
++        onTap: onTap,
++        child: Padding(
++          padding: const EdgeInsets.all(16),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Row(
++                children: [
++                  Icon(icon, color: theme.colorScheme.primary),
++                  const SizedBox(width: 8),
++                  Expanded(
++                    child: Text(
++                      languageLabel(language),
++                      style: theme.textTheme.labelMedium?.copyWith(
++                        color: theme.colorScheme.onSurfaceVariant,
++                      ),
++                    ),
++                  ),
++                  Icon(
++                    Icons.arrow_forward,
++                    color: theme.colorScheme.onSurfaceVariant,
++                  ),
++                ],
++              ),
++              const Spacer(),
++              Text(
++                title,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: theme.textTheme.titleMedium,
++              ),
++              const SizedBox(height: 4),
++              Text(
++                summary,
++                maxLines: 2,
++                overflow: TextOverflow.ellipsis,
++                style: theme.textTheme.bodySmall?.copyWith(
++                  color: theme.colorScheme.onSurfaceVariant,
++                ),
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
+ class _ContentList extends StatelessWidget {
+   const _ContentList({required this.padding, required this.children})
+     : itemCount = null,
+diff --git a/lib/pages/profile_page.dart b/lib/pages/profile_page.dart
+index b00c7c7a94a1e3d42c4d867712332cad2ce382fc..8dfed35a17edfc7c44163d567405e3063378cee6 100644
+--- a/lib/pages/profile_page.dart
++++ b/lib/pages/profile_page.dart
+@@ -7,6 +7,7 @@ import '../i18n/studio_localizations.dart';
+ import '../services/api_client.dart';
+ import '../services/recovery_service.dart';
+ import '../services/studio_profile.dart';
++import '../shell/large_screen_controller.dart';
+ import '../store/auth_store.dart';
+ import '../store/settings_store.dart';
+ import '../store/project_store.dart';
+@@ -91,16 +92,19 @@ class _ProfileTabState extends State<ProfileTab> {
+     // section is omitted: the login entry, the account header/stats and the
+     // sign-out button. The local-only sections (recovery, settings, about) stay.
+     final offlineOnly = StudioProfile.current?.offlineOnly == true;
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
+     final github = offlineOnly ? null : GitHubScope.maybeOf(context);
+     return Scaffold(
+-      appBar: AppBar(
+-        title: Text(
+-          StudioLocalizations.of(context).profile,
+-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+-            color: Theme.of(context).colorScheme.primary,
+-          ),
+-        ),
+-      ),
++      appBar: largeScreen
++          ? null
++          : AppBar(
++              title: Text(
++                StudioLocalizations.of(context).profile,
++                style: Theme.of(context).textTheme.titleLarge?.copyWith(
++                  color: Theme.of(context).colorScheme.primary,
++                ),
++              ),
++            ),
+       body: SafeArea(
+         bottom: false,
+         child: ListenableBuilder(
+@@ -108,13 +112,26 @@ class _ProfileTabState extends State<ProfileTab> {
+           builder: (context, _) => Align(
+             alignment: Alignment.topCenter,
+             child: ConstrainedBox(
+-              constraints: const BoxConstraints(maxWidth: 840),
++              constraints: BoxConstraints(maxWidth: largeScreen ? 720 : 840),
+               child: RefreshIndicator(
+                 onRefresh: _refresh,
+                 child: ListView(
+                   physics: const AlwaysScrollableScrollPhysics(),
+-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
++                  padding: EdgeInsets.fromLTRB(
++                    largeScreen ? 24 : 16,
++                    largeScreen ? 20 : 8,
++                    largeScreen ? 24 : 16,
++                    32,
++                  ),
+                   children: [
++                    if (largeScreen)
++                      Padding(
++                        padding: const EdgeInsets.only(bottom: 24),
++                        child: Text(
++                          StudioLocalizations.of(context).profile,
++                          style: Theme.of(context).textTheme.headlineSmall,
++                        ),
++                      ),
+                     if (!offlineOnly) _profileHeader(context),
+                     if (!offlineOnly) const SizedBox(height: 16),
+                     if (!offlineOnly && widget.auth.isLoggedIn) ...[
+diff --git a/lib/pages/quick_tools_page.dart b/lib/pages/quick_tools_page.dart
+index e57f065ac99bc0ad455ebf97fb13ba8f929cfdd1..d763be2077dc6807936bda7b84f04f26ebf8afc4 100644
+--- a/lib/pages/quick_tools_page.dart
++++ b/lib/pages/quick_tools_page.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ 
+ import '../i18n/studio_localizations.dart';
+ import '../services/studio_profile.dart';
++import '../shell/large_screen_controller.dart';
+ import '../store/project_store.dart';
+ import 'content_tools_pages.dart';
+ import 'terminax_terminal_page.dart';
+@@ -36,61 +37,71 @@ class FunctionsTab extends StatelessWidget {
+       inlineTools == null || store != null,
+       'FunctionsTab requires a ProjectStore when toolsTabBuilder is provided.',
+     );
+-    // 共享工具页（netrix 风格）对所有产品开放：两种显示密度对语言 App 的
+-    // 现有工具同样生效。移植来的 netrix 工具由可见范围过滤，语言 App 下
+-    // 一个都不显示（见 ToolAudience）。
++    final largeScreen = LargeScreenScope.maybeOf(context) != null;
++    final body = inlineTools != null
++        ? inlineTools(store!, onOpenTerminal)
++        : ToolsGrid(
++            onOpenTerminal: onOpenTerminal,
++            sections: [
++              if (onOpenContentTool != null)
++                ToolSection(
++                  title: '专用',
++                  icon: Icons.build_outlined,
++                  tools: [
++                    ToolDefinition(
++                      icon: switch (StudioProfile.current?.productKey) {
++                        StudioProductCatalog.webForgeKey => Icons.language,
++                        StudioProductCatalog.jsonKey => Icons.data_object,
++                        StudioProductCatalog.noteKey => Icons.article_outlined,
++                        StudioProductCatalog.sqlabKey => Icons.storage_outlined,
++                        _ => Icons.build_outlined,
++                      },
++                      title: switch (StudioProfile.current?.productKey) {
++                        StudioProductCatalog.webForgeKey => 'Web 工具',
++                        StudioProductCatalog.jsonKey => l10n.jsonTools,
++                        StudioProductCatalog.noteKey => l10n.markdownTools,
++                        StudioProductCatalog.sqlabKey => l10n.sqlTools,
++                        _ => l10n.functions,
++                      },
++                      description: switch (StudioProfile.current?.productKey) {
++                        StudioProductCatalog.webForgeKey => '本地服务、HTTP 请求与编解码',
++                        StudioProductCatalog.jsonKey => l10n.jsonStructure,
++                        StudioProductCatalog.noteKey => l10n.markdownPreview,
++                        StudioProductCatalog.sqlabKey => l10n.executeQuery,
++                        _ => l10n.functions,
++                      },
++                      onTap: onOpenContentTool!,
++                    ),
++                  ],
++                ),
++            ],
++          );
+     return Scaffold(
+-      appBar: AppBar(
+-        title: Text(
+-          l10n.tools,
+-          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+-            color: Theme.of(context).colorScheme.primary,
+-          ),
+-        ),
+-      ),
+-      body: inlineTools != null
+-          ? inlineTools(store!, onOpenTerminal)
+-          : ToolsGrid(
+-              onOpenTerminal: onOpenTerminal,
+-              sections: [
+-                if (onOpenContentTool != null)
+-                  ToolSection(
+-                    title: '专用',
+-                    icon: Icons.build_outlined,
+-                    tools: [
+-                      ToolDefinition(
+-                        icon: switch (StudioProfile.current?.productKey) {
+-                          StudioProductCatalog.webForgeKey => Icons.language,
+-                          StudioProductCatalog.jsonKey => Icons.data_object,
+-                          StudioProductCatalog.noteKey =>
+-                            Icons.article_outlined,
+-                          StudioProductCatalog.sqlabKey =>
+-                            Icons.storage_outlined,
+-                          _ => Icons.build_outlined,
+-                        },
+-                        title: switch (StudioProfile.current?.productKey) {
+-                          StudioProductCatalog.webForgeKey => 'Web 工具',
+-                          StudioProductCatalog.jsonKey => l10n.jsonTools,
+-                          StudioProductCatalog.noteKey => l10n.markdownTools,
+-                          StudioProductCatalog.sqlabKey => l10n.sqlTools,
+-                          _ => l10n.functions,
+-                        },
+-                        description: switch (StudioProfile
+-                            .current
+-                            ?.productKey) {
+-                          StudioProductCatalog.webForgeKey =>
+-                            '本地服务、HTTP 请求与编解码',
+-                          StudioProductCatalog.jsonKey => l10n.jsonStructure,
+-                          StudioProductCatalog.noteKey => l10n.markdownPreview,
+-                          StudioProductCatalog.sqlabKey => l10n.executeQuery,
+-                          _ => l10n.functions,
+-                        },
+-                        onTap: onOpenContentTool!,
+-                      ),
+-                    ],
++      appBar: largeScreen
++          ? null
++          : AppBar(
++              title: Text(
++                l10n.tools,
++                style: Theme.of(context).textTheme.titleLarge?.copyWith(
++                  color: Theme.of(context).colorScheme.primary,
++                ),
++              ),
++            ),
++      body: largeScreen
++          ? Column(
++              crossAxisAlignment: CrossAxisAlignment.stretch,
++              children: [
++                Padding(
++                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
++                  child: Text(
++                    l10n.tools,
++                    style: Theme.of(context).textTheme.headlineSmall,
+                   ),
++                ),
++                Expanded(child: body),
+               ],
+-            ),
++            )
++          : body,
+     );
+   }
+ }
+diff --git a/lib/pages/settings_page.dart b/lib/pages/settings_page.dart
+index 69ca8497d9c2042501a20faa2ca817535e21ef4f..7ab7b51a55a27eddd1ad290e4d5c491cb2cfee89 100644
+--- a/lib/pages/settings_page.dart
++++ b/lib/pages/settings_page.dart
+@@ -55,6 +55,8 @@ class _SettingsPageState extends State<SettingsPage> {
+ 
+   /// Set in [dispose]; guards every post-await `setState` / context use.
+   bool _disposed = false;
++  final _sectionKeys = List<GlobalKey>.generate(7, (_) => GlobalKey());
++  int _selectedCategory = 0;
+ 
+   SettingsStore get settings => widget.settings;
+ 
+@@ -78,9 +80,10 @@ class _SettingsPageState extends State<SettingsPage> {
+   ///
+   /// 从主界面进入不超过 4 次点击：主界面 → 我的 → 设置 → 本分组，
+   /// 所以三个入口都在这一屏直接可见，不再嵌二级页面。
+-  Widget _accountSection(BuildContext context) {
++  Widget _accountSection(BuildContext context, {Key? key}) {
+     final auth = _auth!;
+     return SettingsSection(
++      key: key,
+       title: '账户与隐私',
+       children: [
+         ListTile(
+@@ -126,7 +129,8 @@ class _SettingsPageState extends State<SettingsPage> {
+   /// 「设备与远程」：配对、已绑定电脑和撤销。
+   ///
+   /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
+-  Widget _devicesSection(BuildContext context) => SettingsSection(
++  Widget _devicesSection(BuildContext context, {Key? key}) => SettingsSection(
++    key: key,
+     title: '设备与远程',
+     children: [
+       ListTile(
+@@ -263,188 +267,297 @@ class _SettingsPageState extends State<SettingsPage> {
+   @override
+   Widget build(BuildContext context) {
+     final largeScreen = LargeScreenScope.maybeOf(context) != null;
++    bool showCategory(int index) => !largeScreen || _selectedCategory == index;
+     return Scaffold(
+-      appBar: AppBar(title: const Text('设置')),
++      appBar: largeScreen ? null : AppBar(title: const Text('设置')),
+       body: ListenableBuilder(
+         listenable: settings,
+-        builder: (context, _) => Align(
+-          alignment: Alignment.topCenter,
+-          child: ConstrainedBox(
+-            constraints: const BoxConstraints(maxWidth: 840),
+-            child: ListView(
+-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+-              children: [
+-                SettingsSection(
+-                  title: '外观与体验',
+-                  children: [
+-                    ListTile(
+-                      leading: const Icon(Icons.brightness_6_outlined),
+-                      title: const Text('外观'),
+-                      subtitle: Text(switch (settings.themeMode) {
+-                        'light' => '浅色',
+-                        'dark' => '深色',
+-                        _ => '跟随系统',
+-                      }),
+-                      trailing: const Icon(Icons.chevron_right),
+-                      onTap: _pickThemeMode,
++        builder: (context, _) => Row(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            if (largeScreen) _settingsCategoryRail(context),
++            Expanded(
++              child: Align(
++                alignment: Alignment.topCenter,
++                child: ConstrainedBox(
++                  constraints: BoxConstraints(
++                    maxWidth: largeScreen ? 720 : 840,
++                  ),
++                  child: ListView(
++                    padding: EdgeInsets.fromLTRB(
++                      largeScreen ? 24 : 16,
++                      largeScreen ? 20 : 12,
++                      largeScreen ? 24 : 16,
++                      32,
+                     ),
+-                    if (largeScreen) _zoomSetting(),
+-                    ListTile(
+-                      leading: const Icon(Icons.palette_outlined),
+-                      title: const Text('代码高亮'),
+-                      subtitle: const Text('配色、TextMate 与自定义语法'),
+-                      trailing: const Icon(Icons.chevron_right),
+-                      onTap: () => Navigator.of(context).push(
+-                        MaterialPageRoute(
+-                          builder: (_) =>
+-                              HighlightSettingsPage(settings: settings),
++                    children: [
++                      if (largeScreen)
++                        Padding(
++                          padding: const EdgeInsets.only(bottom: 24),
++                          child: Text(
++                            '设置',
++                            style: Theme.of(context).textTheme.headlineSmall,
++                          ),
+                         ),
+-                      ),
+-                    ),
+-                  ],
+-                ),
+-                SettingsSection(
+-                  title: '编辑器',
+-                  children: [
+-                    ListTile(
+-                      leading: const Icon(Icons.text_fields),
+-                      title: const Text('编辑器字体'),
+-                      subtitle: Text(
+-                        '${EditorFonts.choices[settings.editorFont]} · ${settings.editorFontSize.toStringAsFixed(1)}',
+-                      ),
+-                      trailing: const Icon(Icons.chevron_right),
+-                      onTap: () => Navigator.of(context).push(
+-                        MaterialPageRoute(
+-                          builder: (_) =>
+-                              EditorFontSettingsPage(settings: settings),
++                      if (showCategory(0))
++                        SettingsSection(
++                          key: _sectionKeys[0],
++                          title: '外观与体验',
++                          children: [
++                            ListTile(
++                              leading: const Icon(Icons.brightness_6_outlined),
++                              title: const Text('外观'),
++                              subtitle: Text(switch (settings.themeMode) {
++                                'light' => '浅色',
++                                'dark' => '深色',
++                                _ => '跟随系统',
++                              }),
++                              trailing: const Icon(Icons.chevron_right),
++                              onTap: _pickThemeMode,
++                            ),
++                            if (largeScreen) _zoomSetting(),
++                            ListTile(
++                              leading: const Icon(Icons.palette_outlined),
++                              title: const Text('代码高亮'),
++                              subtitle: const Text('配色、TextMate 与自定义语法'),
++                              trailing: const Icon(Icons.chevron_right),
++                              onTap: () => Navigator.of(context).push(
++                                MaterialPageRoute(
++                                  builder: (_) =>
++                                      HighlightSettingsPage(settings: settings),
++                                ),
++                              ),
++                            ),
++                          ],
+                         ),
+-                      ),
+-                    ),
+-                    if (largeScreen)
+-                      SwitchListTile(
+-                        key: const ValueKey('settings-large-screen-symbols'),
+-                        secondary: const Icon(Icons.keyboard_outlined),
+-                        title: const Text('大屏显示符号栏'),
+-                        subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
+-                        value: settings.largeScreenSymbolBar,
+-                        onChanged: settings.setLargeScreenSymbolBar,
+-                      ),
+-                    SwitchListTile(
+-                      secondary: const Icon(Icons.map_outlined),
+-                      title: const Text('代码鸟瞰图'),
+-                      subtitle: const Text('在编辑器右侧快速定位代码'),
+-                      value: settings.minimap,
+-                      onChanged: settings.setMinimap,
+-                    ),
+-                    SwitchListTile(
+-                      secondary: const Icon(Icons.tab_outlined),
+-                      title: const Text('文件标签栏'),
+-                      subtitle: const Text('在编辑器顶部显示已打开的文件'),
+-                      value: settings.showEditorTabs,
+-                      onChanged: settings.setShowEditorTabs,
+-                    ),
+-                    SwitchListTile(
+-                      secondary: const Icon(Icons.autorenew_outlined),
+-                      title: const Text('自动保存'),
+-                      subtitle: const Text('每次修改后立即保存'),
+-                      value: settings.autoSave,
+-                      onChanged: settings.setAutoSave,
+-                    ),
+-                    SwitchListTile(
+-                      secondary: const Icon(Icons.history_outlined),
+-                      title: const Text('历史版本备份'),
+-                      subtitle: const Text('自动保存和云同步覆盖文件前保留上一版本'),
+-                      value: settings.backupEnabled,
+-                      onChanged: settings.setBackupEnabled,
+-                    ),
+-                  ],
+-                ),
+-                if (largeScreen) _shortcutSection(),
+-                if (widget.showAi && _customAiEndpointAllowed)
+-                  SettingsSection(
+-                    title: 'AI 助手',
+-                    children: [
+-                      ListTile(
+-                        leading: const Icon(Icons.auto_awesome_outlined),
+-                        title: const Text('个人 AI 接口'),
+-                        subtitle: Text(
+-                          settings.aiModel.isEmpty
+-                              ? '连接你自己的 AI 服务与密钥'
+-                              : '${settings.aiModel} · ${settings.aiProtocol.label}',
++                      if (showCategory(1))
++                        SettingsSection(
++                          key: _sectionKeys[1],
++                          title: '编辑器',
++                          children: [
++                            ListTile(
++                              leading: const Icon(Icons.text_fields),
++                              title: const Text('编辑器字体'),
++                              subtitle: Text(
++                                '${EditorFonts.choices[settings.editorFont]} · ${settings.editorFontSize.toStringAsFixed(1)}',
++                              ),
++                              trailing: const Icon(Icons.chevron_right),
++                              onTap: () => Navigator.of(context).push(
++                                MaterialPageRoute(
++                                  builder: (_) => EditorFontSettingsPage(
++                                    settings: settings,
++                                  ),
++                                ),
++                              ),
++                            ),
++                            if (largeScreen)
++                              SwitchListTile(
++                                key: const ValueKey(
++                                  'settings-large-screen-symbols',
++                                ),
++                                secondary: const Icon(Icons.keyboard_outlined),
++                                title: const Text('大屏显示符号栏'),
++                                subtitle: const Text('在平板和桌面编辑器中显示符号栏'),
++                                value: settings.largeScreenSymbolBar,
++                                onChanged: settings.setLargeScreenSymbolBar,
++                              ),
++                            SwitchListTile(
++                              secondary: const Icon(Icons.map_outlined),
++                              title: const Text('代码鸟瞰图'),
++                              subtitle: const Text('在编辑器右侧快速定位代码'),
++                              value: settings.minimap,
++                              onChanged: settings.setMinimap,
++                            ),
++                            SwitchListTile(
++                              secondary: const Icon(Icons.tab_outlined),
++                              title: const Text('文件标签栏'),
++                              subtitle: const Text('在编辑器顶部显示已打开的文件'),
++                              value: settings.showEditorTabs,
++                              onChanged: settings.setShowEditorTabs,
++                            ),
++                            SwitchListTile(
++                              secondary: const Icon(Icons.autorenew_outlined),
++                              title: const Text('自动保存'),
++                              subtitle: const Text('每次修改后立即保存'),
++                              value: settings.autoSave,
++                              onChanged: settings.setAutoSave,
++                            ),
++                            SwitchListTile(
++                              secondary: const Icon(Icons.history_outlined),
++                              title: const Text('历史版本备份'),
++                              subtitle: const Text('自动保存和云同步覆盖文件前保留上一版本'),
++                              value: settings.backupEnabled,
++                              onChanged: settings.setBackupEnabled,
++                            ),
++                          ],
++                        ),
++                      if (largeScreen && showCategory(2))
++                        _shortcutSection(key: _sectionKeys[2]),
++                      if (showCategory(3) &&
++                          widget.showAi &&
++                          _customAiEndpointAllowed)
++                        SettingsSection(
++                          key: _sectionKeys[3],
++                          title: 'AI 助手',
++                          children: [
++                            ListTile(
++                              leading: const Icon(Icons.auto_awesome_outlined),
++                              title: const Text('个人 AI 接口'),
++                              subtitle: Text(
++                                settings.aiModel.isEmpty
++                                    ? '连接你自己的 AI 服务与密钥'
++                                    : '${settings.aiModel} · ${settings.aiProtocol.label}',
++                              ),
++                              trailing: const Icon(Icons.chevron_right),
++                              onTap: () => editAiSettings(context, settings),
++                            ),
++                            // 只影响直连的 Responses 与 Messages 请求字段
++                            // （design §4.4：默认关闭，不支持思考的模型会返回 400）。
++                            SwitchListTile(
++                              key: const ValueKey('settings-ai-thinking'),
++                              secondary: const Icon(Icons.psychology_outlined),
++                              title: const Text('请求思考过程'),
++                              subtitle: const Text(
++                                '只对 Responses 与 Messages 协议生效。模型不支持思考时请关闭。',
++                              ),
++                              value: settings.aiThinking,
++                              onChanged: settings.setAiThinking,
++                            ),
++                          ],
+                         ),
+-                        trailing: const Icon(Icons.chevron_right),
+-                        onTap: () => editAiSettings(context, settings),
+-                      ),
+-                      // 只影响直连的 Responses 与 Messages 请求字段
+-                      // （design §4.4：默认关闭，不支持思考的模型会返回 400）。
+-                      SwitchListTile(
+-                        key: const ValueKey('settings-ai-thinking'),
+-                        secondary: const Icon(Icons.psychology_outlined),
+-                        title: const Text('请求思考过程'),
+-                        subtitle: const Text(
+-                          '只对 Responses 与 Messages 协议生效。模型不支持思考时请关闭。',
++                      if (showCategory(4) && _showsAccountSection)
++                        _accountSection(context, key: _sectionKeys[4]),
++                      if (showCategory(5) && RemoteComputerPage.isSupported)
++                        _devicesSection(context, key: _sectionKeys[5]),
++                      if (showCategory(6))
++                        SettingsSection(
++                          key: _sectionKeys[6],
++                          title: '数据与存储',
++                          children: [
++                            FutureBuilder<String?>(
++                              future: _backupDirectory,
++                              builder: (context, snapshot) => ListTile(
++                                leading: const Icon(Icons.folder_copy_outlined),
++                                title: const Text('历史备份目录'),
++                                subtitle: Text(
++                                  snapshot.data ??
++                                      (snapshot.connectionState ==
++                                              ConnectionState.done
++                                          ? '暂时无法读取目录'
++                                          : '正在读取…'),
++                                ),
++                              ),
++                            ),
++                            const ListTile(
++                              leading: Icon(Icons.delete_sweep_outlined),
++                              title: Text('项目回收站'),
++                              subtitle: Text(
++                                '删除的项目会保存在应用数据目录的 recyclebin/projects_bin 中',
++                              ),
++                            ),
++                            ListTile(
++                              leading: const Icon(Icons.file_upload_outlined),
++                              title: const Text('导出全部数据'),
++                              subtitle: const Text(
++                                '打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份',
++                              ),
++                              trailing: const Icon(Icons.chevron_right),
++                              enabled: _busyLabel == null,
++                              onTap: _busyLabel == null ? _exportAllData : null,
++                            ),
++                            ListTile(
++                              leading: const Icon(Icons.file_download_outlined),
++                              title: const Text('导入全部数据'),
++                              subtitle: const Text('校验后暂存，下次启动应用时替换当前数据（不可撤销）'),
++                              trailing: const Icon(Icons.chevron_right),
++                              enabled: _busyLabel == null,
++                              onTap: _busyLabel == null ? _importAllData : null,
++                            ),
++                            if (_busyLabel != null)
++                              ListTile(
++                                leading: const SizedBox(
++                                  width: 24,
++                                  height: 24,
++                                  child: CircularProgressIndicator(
++                                    strokeWidth: 2.5,
++                                  ),
++                                ),
++                                title: Text(_busyLabel!),
++                                subtitle: const LinearProgressIndicator(
++                                  minHeight: 3,
++                                ),
++                              ),
++                          ],
+                         ),
+-                        value: settings.aiThinking,
+-                        onChanged: settings.setAiThinking,
+-                      ),
+                     ],
+                   ),
+-                if (_showsAccountSection) _accountSection(context),
+-                if (RemoteComputerPage.isSupported) _devicesSection(context),
+-                SettingsSection(
+-                  title: '数据与存储',
+-                  children: [
+-                    FutureBuilder<String?>(
+-                      future: _backupDirectory,
+-                      builder: (context, snapshot) => ListTile(
+-                        leading: const Icon(Icons.folder_copy_outlined),
+-                        title: const Text('历史备份目录'),
+-                        subtitle: Text(
+-                          snapshot.data ??
+-                              (snapshot.connectionState == ConnectionState.done
+-                                  ? '暂时无法读取目录'
+-                                  : '正在读取…'),
+-                        ),
+-                      ),
+-                    ),
+-                    const ListTile(
+-                      leading: Icon(Icons.delete_sweep_outlined),
+-                      title: Text('项目回收站'),
+-                      subtitle: Text(
+-                        '删除的项目会保存在应用数据目录的 recyclebin/projects_bin 中',
+-                      ),
+-                    ),
+-                    ListTile(
+-                      leading: const Icon(Icons.file_upload_outlined),
+-                      title: const Text('导出全部数据'),
+-                      subtitle: const Text('打包设置、项目（含二进制资源）、索引与缓存为 .qfliz 备份'),
+-                      trailing: const Icon(Icons.chevron_right),
+-                      enabled: _busyLabel == null,
+-                      onTap: _busyLabel == null ? _exportAllData : null,
+-                    ),
+-                    ListTile(
+-                      leading: const Icon(Icons.file_download_outlined),
+-                      title: const Text('导入全部数据'),
+-                      subtitle: const Text('校验后暂存，下次启动应用时替换当前数据（不可撤销）'),
+-                      trailing: const Icon(Icons.chevron_right),
+-                      enabled: _busyLabel == null,
+-                      onTap: _busyLabel == null ? _importAllData : null,
+-                    ),
+-                    if (_busyLabel != null)
+-                      ListTile(
+-                        leading: const SizedBox(
+-                          width: 24,
+-                          height: 24,
+-                          child: CircularProgressIndicator(strokeWidth: 2.5),
+-                        ),
+-                        title: Text(_busyLabel!),
+-                        subtitle: const LinearProgressIndicator(minHeight: 3),
+-                      ),
+-                  ],
+                 ),
+-              ],
++              ),
+             ),
+-          ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Widget _settingsCategoryRail(BuildContext context) {
++    final theme = Theme.of(context);
++    final entries = <(String, IconData, int)>[
++      ('外观与体验', Icons.palette_outlined, 0),
++      ('编辑器', Icons.code_outlined, 1),
++      if (LargeScreenScope.maybeOf(context) != null)
++        ('快捷键', Icons.keyboard_command_key_outlined, 2),
++      if (widget.showAi && _customAiEndpointAllowed)
++        ('AI 助手', Icons.auto_awesome_outlined, 3),
++      if (_showsAccountSection) ('账户与隐私', Icons.privacy_tip_outlined, 4),
++      if (RemoteComputerPage.isSupported)
++        ('设备与远程', Icons.devices_other_outlined, 5),
++      ('数据与存储', Icons.storage_outlined, 6),
++    ];
++    return SizedBox(
++      width: 240,
++      child: Material(
++        color: theme.colorScheme.surfaceContainerLow,
++        child: ListView(
++          padding: const EdgeInsets.fromLTRB(12, 20, 12, 16),
++          children: [
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: 12),
++              child: Text('设置', style: theme.textTheme.titleLarge),
++            ),
++            const SizedBox(height: 16),
++            for (final entry in entries)
++              Padding(
++                padding: const EdgeInsets.only(bottom: 4),
++                child: ListTile(
++                  dense: true,
++                  selected: _selectedCategory == entry.$3,
++                  selectedTileColor: theme.colorScheme.secondaryContainer,
++                  leading: Icon(
++                    entry.$2,
++                    size: 20,
++                    color: _selectedCategory == entry.$3
++                        ? theme.colorScheme.onSecondaryContainer
++                        : null,
++                  ),
++                  title: Text(
++                    entry.$1,
++                    style: _selectedCategory == entry.$3
++                        ? TextStyle(
++                            color: theme.colorScheme.onSecondaryContainer,
++                          )
++                        : null,
++                  ),
++                  shape: RoundedRectangleBorder(
++                    borderRadius: BorderRadius.circular(28),
++                  ),
++                  onTap: () {
++                    if (_selectedCategory == entry.$3) return;
++                    setState(() => _selectedCategory = entry.$3);
++                  },
++                ),
++              ),
++          ],
+         ),
+       ),
+     );
+@@ -489,7 +602,8 @@ class _SettingsPageState extends State<SettingsPage> {
+     ),
+   );
+ 
+-  Widget _shortcutSection() => SettingsSection(
++  Widget _shortcutSection({Key? key}) => SettingsSection(
++    key: key,
+     title: '快捷键',
+     children: [
+       const ListTile(subtitle: Text('终端获得焦点时，关闭标签、底部面板和 Agent 栏的快捷键交给终端。')),
+diff --git a/lib/widgets/tools_browser.dart b/lib/widgets/tools_browser.dart
+index adb0182161ff51dc93af3ef6581e60e221014304..a3fcf8f6fdc6ac99bcc325af2b2eee647c339127 100644
+--- a/lib/widgets/tools_browser.dart
++++ b/lib/widgets/tools_browser.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../shell/large_screen_controller.dart';
+ import '../tools/ported/models.dart' as netrix;
+ import '../tools/ported/netrix_localizations.dart';
+ import '../tools/ported/netrix_tool_page.dart';
+@@ -210,9 +211,10 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
+       if (!_filtering)
+         for (final id in _state.recent) ?byId[id],
+     ];
+-    final horizontal = ToolsTheme.horizontalPadding(
+-      MediaQuery.sizeOf(context).width,
+-    );
++    final workbench = LargeScreenScope.maybeOf(context) != null;
++    final horizontal = workbench
++        ? 24.0
++        : ToolsTheme.horizontalPadding(MediaQuery.sizeOf(context).width);
+ 
+     return CustomScrollView(
+       key: const PageStorageKey<String>('tools-scroll'),
+@@ -229,6 +231,7 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
+               onCategoryChanged: (value) => setState(() => _category = value),
+               onDensityChanged: _state.setDensity,
+               onCardColumnsChanged: _state.setCardColumns,
++              automaticGrid: workbench,
+               strings: strings,
+             ),
+           ),
+@@ -302,13 +305,15 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
+   ) {
+     return SliverPadding(
+       padding: EdgeInsets.fromLTRB(horizontal, 0, horizontal, bottom),
+-      sliver: _state.density == ToolCardDensity.compact
++      sliver:
++          LargeScreenScope.maybeOf(context) == null &&
++              _state.density == ToolCardDensity.compact
+           ? _rowsSliver(entries)
+           : _cardsSliver(entries),
+     );
+   }
+ 
+-  /// 宽松显示：按用户选择固定为一列或两列。
++  /// Workbench cards reflow automatically; phone cards retain saved columns.
+   Widget _cardsSliver(List<ToolsBrowserEntry> entries) {
+     final strings = NetrixLocalizations.of(context);
+     final textTheme = Theme.of(context).textTheme;
+@@ -316,23 +321,44 @@ class _ToolsBrowserState extends State<ToolsBrowser> {
+     final extraTextHeight =
+         _extraLineHeight(scaler, textTheme.titleMedium, 16) +
+         2 * _extraLineHeight(scaler, textTheme.bodySmall, 12);
++    final workbench = LargeScreenScope.maybeOf(context) != null;
++    final delegate = SliverChildBuilderDelegate((context, index) {
++      final entry = entries[index];
++      final isFavorite = _state.favorites.contains(entry.id);
++      return ToolCard(
++        icon: entry.icon,
++        title: entry.title,
++        description: entry.description,
++        onTap: () => _open(context, entry),
++        isFavorite: isFavorite,
++        onToggleFavorite: () => _state.toggleFavorite(entry.id),
++        favoriteTooltip: isFavorite
++            ? strings.removeFavorite
++            : strings.addFavorite,
++        openTooltip: strings.openTool,
++      );
++    }, childCount: entries.length);
++    if (workbench) {
++      return SliverLayoutBuilder(
++        builder: (context, constraints) {
++          // V10: layout only. Never overwrite the phone's saved preferences.
++          final columns = ((constraints.crossAxisExtent + 16) / (280 + 16))
++              .floor()
++              .clamp(1, 1000);
++          return SliverGrid(
++            delegate: delegate,
++            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
++              crossAxisCount: columns,
++              mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
++              crossAxisSpacing: 16,
++              mainAxisSpacing: 16,
++            ),
++          );
++        },
++      );
++    }
+     return SliverGrid(
+-      delegate: SliverChildBuilderDelegate((context, index) {
+-        final entry = entries[index];
+-        final isFavorite = _state.favorites.contains(entry.id);
+-        return ToolCard(
+-          icon: entry.icon,
+-          title: entry.title,
+-          description: entry.description,
+-          onTap: () => _open(context, entry),
+-          isFavorite: isFavorite,
+-          onToggleFavorite: () => _state.toggleFavorite(entry.id),
+-          favoriteTooltip: isFavorite
+-              ? strings.removeFavorite
+-              : strings.addFavorite,
+-          openTooltip: strings.openTool,
+-        );
+-      }, childCount: entries.length),
++      delegate: delegate,
+       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+         crossAxisCount: _state.cardColumns,
+         mainAxisExtent: ToolsTheme.cardHeight + extraTextHeight,
+@@ -408,6 +434,7 @@ class _ToolsBrowserHeader extends StatelessWidget {
+     required this.onCategoryChanged,
+     required this.onDensityChanged,
+     required this.onCardColumnsChanged,
++    required this.automaticGrid,
+     required this.strings,
+   });
+ 
+@@ -419,6 +446,7 @@ class _ToolsBrowserHeader extends StatelessWidget {
+   final ValueChanged<netrix.ToolCategory?> onCategoryChanged;
+   final ValueChanged<ToolCardDensity> onDensityChanged;
+   final ValueChanged<int> onCardColumnsChanged;
++  final bool automaticGrid;
+   final NetrixLocalizations strings;
+ 
+   @override
+@@ -458,62 +486,66 @@ class _ToolsBrowserHeader extends StatelessWidget {
+             ),
+           ),
+         ],
+-        const SizedBox(height: 12),
+-        Align(
+-          alignment: Alignment.centerRight,
+-          child: Wrap(
+-            alignment: WrapAlignment.end,
+-            spacing: 8,
+-            runSpacing: 8,
+-            children: <Widget>[
+-              SingleChildScrollView(
+-                scrollDirection: Axis.horizontal,
+-                child: SegmentedButton<ToolCardDensity>(
+-                  segments: <ButtonSegment<ToolCardDensity>>[
+-                    ButtonSegment<ToolCardDensity>(
+-                      value: ToolCardDensity.standard,
+-                      icon: const Icon(Icons.view_agenda_outlined),
+-                      label: Text(strings.standard),
+-                    ),
+-                    ButtonSegment<ToolCardDensity>(
+-                      value: ToolCardDensity.compact,
+-                      icon: const Icon(Icons.view_compact_outlined),
+-                      label: Text(strings.compact),
+-                    ),
+-                  ],
+-                  selected: <ToolCardDensity>{density},
+-                  showSelectedIcon: false,
+-                  onSelectionChanged: (values) {
+-                    if (values.isNotEmpty) onDensityChanged(values.first);
+-                  },
+-                ),
+-              ),
+-              if (density == ToolCardDensity.standard)
++        if (!automaticGrid) ...<Widget>[
++          const SizedBox(height: 12),
++          Align(
++            alignment: Alignment.centerRight,
++            child: Wrap(
++              alignment: WrapAlignment.end,
++              spacing: 8,
++              runSpacing: 8,
++              children: <Widget>[
+                 SingleChildScrollView(
+                   scrollDirection: Axis.horizontal,
+-                  child: SegmentedButton<int>(
+-                    segments: <ButtonSegment<int>>[
+-                      ButtonSegment<int>(
+-                        value: 1,
++                  child: SegmentedButton<ToolCardDensity>(
++                    segments: <ButtonSegment<ToolCardDensity>>[
++                      ButtonSegment<ToolCardDensity>(
++                        value: ToolCardDensity.standard,
+                         icon: const Icon(Icons.view_agenda_outlined),
+-                        label: Text(strings.oneColumn),
++                        label: Text(strings.standard),
+                       ),
+-                      ButtonSegment<int>(
+-                        value: 2,
+-                        icon: const Icon(Icons.view_column_outlined),
+-                        label: Text(strings.twoColumns),
++                      ButtonSegment<ToolCardDensity>(
++                        value: ToolCardDensity.compact,
++                        icon: const Icon(Icons.view_compact_outlined),
++                        label: Text(strings.compact),
+                       ),
+                     ],
+-                    selected: <int>{cardColumns},
++                    selected: <ToolCardDensity>{density},
+                     showSelectedIcon: false,
+                     onSelectionChanged: (values) {
+-                      if (values.isNotEmpty) onCardColumnsChanged(values.first);
++                      if (values.isNotEmpty) onDensityChanged(values.first);
+                     },
+                   ),
+                 ),
+-            ],
++                if (density == ToolCardDensity.standard)
++                  SingleChildScrollView(
++                    scrollDirection: Axis.horizontal,
++                    child: SegmentedButton<int>(
++                      segments: <ButtonSegment<int>>[
++                        ButtonSegment<int>(
++                          value: 1,
++                          icon: const Icon(Icons.view_agenda_outlined),
++                          label: Text(strings.oneColumn),
++                        ),
++                        ButtonSegment<int>(
++                          value: 2,
++                          icon: const Icon(Icons.view_column_outlined),
++                          label: Text(strings.twoColumns),
++                        ),
++                      ],
++                      selected: <int>{cardColumns},
++                      showSelectedIcon: false,
++                      onSelectionChanged: (values) {
++                        if (values.isNotEmpty) {
++                          onCardColumnsChanged(values.first);
++                        }
++                      },
++                    ),
++                  ),
++              ],
++            ),
+           ),
+-        ),
++        ],
+       ],
+     );
+   }
+diff --git a/test/pi_d_ui_workbench_test.dart b/test/pi_d_ui_workbench_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b28bd31016acd448061166d43723739b8ce15f96
+--- /dev/null
++++ b/test/pi_d_ui_workbench_test.dart
+@@ -0,0 +1,305 @@
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_localizations/flutter_localizations.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:qfli_studio_core/i18n/studio_localizations.dart';
++import 'package:qfli_studio_core/pages/local_content_pages.dart';
++import 'package:qfli_studio_core/pages/profile_page.dart';
++import 'package:qfli_studio_core/pages/quick_tools_page.dart';
++import 'package:qfli_studio_core/pages/settings_page.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++import 'support/content_catalog_fixture.dart';
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  late Directory root;
++  late PathProviderPlatform originalPaths;
++  StudioProfile? originalProfile;
++
++  setUpAll(() async {
++    root = await Directory.systemTemp.createTemp('pi-d-ui-');
++    originalPaths = PathProviderPlatform.instance;
++    PathProviderPlatform.instance = _Paths(root.path);
++    await AppPaths.storageDirectory();
++  });
++
++  tearDownAll(() async {
++    PathProviderPlatform.instance = originalPaths;
++    await root.delete(recursive: true);
++  });
++
++  setUp(() {
++    originalProfile = StudioProfile.current;
++    StudioProfile.current = null;
++  });
++
++  tearDown(() => StudioProfile.current = originalProfile);
++
++  testWidgets('settings uses a 240dp category rail and 720dp detail column', (
++    tester,
++  ) async {
++    tester.view.physicalSize = const Size(1440, 900);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    final settings = SettingsStore(
++      storageFile: File('${root.path}/settings.json'),
++    );
++    final shell = LargeScreenController();
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      shell.dispose();
++      settings.dispose();
++    });
++
++    await tester.pumpWidget(
++      _app(
++        LargeScreenScope(
++          controller: shell,
++          child: SettingsPage(settings: settings, showAi: false),
++        ),
++      ),
++    );
++    await tester.pumpAndSettle();
++
++    final rail = find.ancestor(
++      of: find.text('外观与体验').first,
++      matching: find.byType(ListView),
++    );
++    expect(rail, findsWidgets);
++    expect(find.byType(AppBar), findsNothing);
++    // 设置 repeats on a large screen: rail heading, page heading, and one
++    // shortcut row title. Assert the rail heading specifically, since a bare
++    // text count would pin unrelated shortcut content.
++    expect(
++      find.descendant(
++        of: find.byType(ListTile).first,
++        matching: find.text('外观与体验'),
++      ),
++      findsOneWidget,
++    );
++    expect(
++      tester.getSize(find.byKey(const ValueKey('settings-ui-zoom'))).width,
++      lessThanOrEqualTo(720),
++    );
++    expect(find.text('外观'), findsOneWidget);
++    expect(find.text('项目回收站'), findsNothing);
++
++    final editorCategory = find.ancestor(
++      of: find.text('编辑器').first,
++      matching: find.byType(ListTile),
++    );
++    await tester.tap(editorCategory.first);
++    await tester.pumpAndSettle();
++    expect(find.text('外观'), findsNothing);
++    expect(find.text('编辑器字体'), findsOneWidget);
++
++    final dataCategory = find.ancestor(
++      of: find.text('数据与存储').first,
++      matching: find.byType(ListTile),
++    );
++    await tester.tap(dataCategory.first);
++    await tester.pumpAndSettle();
++    expect(find.text('项目回收站').hitTestable(), findsOneWidget);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets(
++    'large-screen profile and tools use page headings without AppBars',
++    (tester) async {
++      tester.view.physicalSize = const Size(1440, 900);
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.resetPhysicalSize);
++      addTearDown(tester.view.resetDevicePixelRatio);
++      final shell = LargeScreenController();
++      final auth = AuthStore(storageFile: File('${root.path}/auth.json'));
++      final settings = SettingsStore(
++        storageFile: File('${root.path}/settings.json'),
++      );
++      final store = ProjectStore(
++        storageFile: File('${root.path}/projects.json'),
++      );
++      addTearDown(() async {
++        await tester.pumpWidget(const SizedBox.shrink());
++        shell.dispose();
++        auth.dispose();
++        settings.dispose();
++        store.dispose();
++      });
++
++      await tester.pumpWidget(
++        _app(
++          LargeScreenScope(
++            controller: shell,
++            child: ProfileTab(auth: auth, settings: settings, store: store),
++          ),
++        ),
++      );
++      await tester.pumpAndSettle();
++      expect(find.byType(AppBar), findsNothing);
++      expect(find.text('我的'), findsOneWidget);
++
++      await tester.pumpWidget(
++        _app(
++          LargeScreenScope(
++            controller: shell,
++            child: FunctionsTab(onOpenTerminal: () {}),
++          ),
++        ),
++      );
++      await tester.pumpAndSettle();
++      expect(find.byType(AppBar), findsNothing);
++      expect(find.text('工具'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets('phone keeps the AppBar, flat list, and no category rail', (
++    tester,
++  ) async {
++    tester.view.physicalSize = const Size(420, 900);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    final settings = SettingsStore(
++      storageFile: File('${root.path}/phone-settings.json'),
++    );
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      settings.dispose();
++    });
++
++    // No LargeScreenScope here: this is the untouched phone path.
++    await tester.pumpWidget(
++      _app(SettingsPage(settings: settings, showAi: false)),
++    );
++    await tester.pumpAndSettle();
++
++    expect(find.byType(AppBar), findsOneWidget);
++    expect(find.text('设置'), findsOneWidget);
++    // The 240dp category rail and the zoom row are large-screen only.
++    expect(find.byKey(const ValueKey('settings-ui-zoom')), findsNothing);
++
++    await tester.pumpWidget(_app(const FunctionsTab(onOpenTerminal: _noop)));
++    await tester.pumpAndSettle();
++    expect(find.byType(AppBar), findsOneWidget);
++    expect(find.text('工具'), findsOneWidget);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('phone tutorial keeps its original AppBar title style', (
++    tester,
++  ) async {
++    final shell = LargeScreenController();
++    addTearDown(() => shell.dispose());
++
++    await tester.pumpWidget(
++      _app(
++        TutorialCenterPage(
++          language: 'java',
++          repository: FixtureContentRepository(fixtureCatalog()),
++        ),
++      ),
++    );
++    await tester.pumpAndSettle();
++
++    final appBar = tester.widget<AppBar>(find.byType(AppBar));
++    final title = appBar.title! as Text;
++    final context = tester.element(find.byType(AppBar));
++    final theme = Theme.of(context);
++    expect(
++      title.style,
++      theme.textTheme.titleLarge?.copyWith(color: theme.colorScheme.primary),
++    );
++    await tester.pumpWidget(const SizedBox.shrink());
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('large-screen tutorial content uses a responsive card grid', (
++    tester,
++  ) async {
++    tester.view.physicalSize = const Size(1440, 1000);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    final shell = LargeScreenController();
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      shell.dispose();
++    });
++
++    await tester.pumpWidget(
++      _app(
++        LargeScreenScope(
++          controller: shell,
++          child: TutorialCenterPage(
++            language: 'java',
++            repository: FixtureContentRepository(fixtureCatalog()),
++          ),
++        ),
++      ),
++    );
++    await tester.pumpAndSettle();
++
++    expect(find.byType(AppBar), findsNothing);
++    expect(find.byType(Card), findsWidgets);
++    await tester.tap(find.byTooltip('搜索标题、简介或知识点'));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('content-query')), findsOneWidget);
++    expect(find.byTooltip('退出搜索'), findsOneWidget);
++    await tester.tap(find.byTooltip('退出搜索'));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('content-query')), findsNothing);
++
++    final first = tester.getRect(find.text('Java lesson 0-0'));
++    final second = tester.getRect(find.text('Java lesson 0-1'));
++    expect(first.top, closeTo(second.top, 1));
++    expect(first.left, isNot(second.left));
++
++    tester.view.physicalSize = const Size(620, 1000);
++    await tester.pumpAndSettle();
++    expect(
++      tester.getSize(find.byType(Card).first).width,
++      greaterThanOrEqualTo(280),
++    );
++    expect(tester.takeException(), isNull);
++  });
++}
++
++void _noop() {}
++
++Widget _app(Widget home) => MaterialApp(
++  locale: const Locale('zh', 'CN'),
++  supportedLocales: StudioLocalizations.supportedLocales,
++  localizationsDelegates: const [
++    StudioLocalizations.delegate,
++    GlobalMaterialLocalizations.delegate,
++    GlobalWidgetsLocalizations.delegate,
++    GlobalCupertinoLocalizations.delegate,
++  ],
++  theme: ThemeData(
++    useMaterial3: true,
++    colorSchemeSeed: const Color(0xFF6750A4),
++  ),
++  home: home,
++);
++
++class _Paths extends PathProviderPlatform {
++  _Paths(this.root);
++
++  final String root;
++
++  @override
++  Future<String?> getApplicationSupportPath() async => root;
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => root;
++}
+diff --git a/test/settings_page_workbench_test.dart b/test/settings_page_workbench_test.dart
+index 4649627ea35e8d2221ed538b0d79231015e04451..6c70796799ea859cf6b94e0422d315741b878709 100644
+--- a/test/settings_page_workbench_test.dart
++++ b/test/settings_page_workbench_test.dart
+@@ -102,12 +102,11 @@ void main() {
+     final shell = LargeScreenController();
+     await tester.pumpWidget(_app(settings, shell));
+     await tester.pumpAndSettle();
++    // R21/V10: the MD3 settings rail replaces scrolling the full settings list.
++    await tester.tap(find.widgetWithText(ListTile, '编辑器'));
++    await tester.pumpAndSettle();
+     final toggle = find.byKey(const ValueKey('settings-large-screen-symbols'));
+-    await tester.scrollUntilVisible(
+-      toggle,
+-      160,
+-      scrollable: find.byType(Scrollable).first,
+-    );
++    await tester.ensureVisible(toggle);
+     expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+     await tester.tap(toggle);
+     await tester.pump();
+@@ -133,11 +132,9 @@ void main() {
+     final shell = LargeScreenController();
+     await tester.pumpWidget(_app(settings, shell));
+     await tester.pumpAndSettle();
+-    await tester.scrollUntilVisible(
+-      find.text('快捷键'),
+-      200,
+-      scrollable: find.byType(Scrollable).first,
+-    );
++    // R21/V10: select the shortcut detail rather than scrolling the rail.
++    await tester.tap(find.widgetWithText(ListTile, '快捷键'));
++    await tester.pumpAndSettle();
+     final expected = [
+       'Ctrl+= / Ctrl++ / Ctrl+NumpadAdd',
+       'Ctrl+- / Ctrl+NumpadSubtract',
+diff --git a/test/tools_browser_workbench_test.dart b/test/tools_browser_workbench_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf6b0dfd125c918c2628fa7be3c09d3a46f2a992
+--- /dev/null
++++ b/test/tools_browser_workbench_test.dart
+@@ -0,0 +1,92 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/services/local_store_backend.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/tools/tool_state_store.dart';
++import 'package:qfli_studio_core/widgets/tool_widgets.dart';
++import 'package:qfli_studio_core/widgets/tools_browser.dart';
++
++void main() {
++  testWidgets(
++    'R22/V10 workbench reflows cards without changing phone preferences',
++    (tester) async {
++      final store = ToolStateStore(backend: LocalMemoryBackend());
++      final shell = LargeScreenController();
++      await store.setDensity(ToolCardDensity.compact);
++      await store.setCardColumns(2);
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.reset);
++      addTearDown(() async {
++        await tester.pumpWidget(const SizedBox.shrink());
++        await store.settled();
++        store.dispose();
++        shell.dispose();
++      });
++      Widget browser() => ToolsBrowser(
++        state: store,
++        isMainApp: false,
++        sections: [
++          ToolsBrowserSection(
++            title: 'Grid fixtures',
++            icon: Icons.build,
++            entries: [
++              for (var i = 0; i < 6; i++)
++                ToolsBrowserEntry(
++                  id: 'fixture-$i',
++                  icon: Icons.code,
++                  title: 'Tool $i',
++                  subtitle: 'Fixture',
++                  description: 'Offline fixture',
++                  onTap: () {},
++                ),
++            ],
++          ),
++        ],
++      );
++      Future<void> mount(double width, {required bool workbench}) async {
++        tester.view.physicalSize = Size(width, 1200);
++        await tester.pumpWidget(
++          MaterialApp(
++            home: Scaffold(
++              body: workbench
++                  ? LargeScreenScope(controller: shell, child: browser())
++                  : browser(),
++            ),
++          ),
++        );
++        await tester.pump();
++      }
++
++      for (final width in [1200.0, 950.0, 620.0]) {
++        await mount(width, workbench: true);
++        final first = tester.getRect(find.widgetWithText(ToolCard, 'Tool 0'));
++        final second = tester.getRect(find.widgetWithText(ToolCard, 'Tool 1'));
++        expect(first.width, greaterThanOrEqualTo(280));
++        if (width >= 640) {
++          expect(second.top, closeTo(first.top, 0.1));
++          expect(second.left - first.right, closeTo(16, 0.1));
++        } else {
++          expect(second.left, closeTo(first.left, 0.1));
++          expect(second.top - first.bottom, closeTo(16, 0.1));
++        }
++        expect(find.byType(SegmentedButton<ToolCardDensity>), findsNothing);
++        expect(store.density, ToolCardDensity.compact);
++        expect(store.cardColumns, 2);
++      }
++      await mount(420, workbench: false);
++      expect(find.byType(ToolRow), findsWidgets);
++      expect(find.byType(ToolCard), findsNothing);
++      expect(find.byType(SegmentedButton<ToolCardDensity>), findsOneWidget);
++      await store.setDensity(ToolCardDensity.standard);
++      await tester.pump();
++      final grid = tester.widget<SliverGrid>(find.byType(SliverGrid).first);
++      expect(
++        (grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount)
++            .crossAxisCount,
++        2,
++      );
++      expect(store.cardColumns, 2);
++      expect(tester.takeException(), isNull);
++    },
++  );
++}

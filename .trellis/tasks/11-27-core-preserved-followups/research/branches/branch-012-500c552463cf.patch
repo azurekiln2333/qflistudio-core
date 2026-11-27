@@ -1,0 +1,204 @@
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index e00b94f3a91ce17aaa08a3a1b8927fde69a2ae7e..9e4a549cc7ff7a21f56e506ae9c0ce1156e2731b 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -55,6 +55,11 @@ class _Paths extends PathProviderPlatform {
+   Future<String?> getTemporaryPath() async => root;
+ }
+ 
++Finder _projectLabel(String name) => find.descendant(
++  of: find.byType(WorkbenchProjectRow),
++  matching: find.text(name),
++);
++
+ Future<void> _finishExplorerTransition(WidgetTester tester) async {
+   await tester.pump();
+   // The interpolation simulation finishes strictly after its duration.
+@@ -206,9 +211,7 @@ void main() {
+   }
+ 
+   Future<void> project(WidgetTester tester, String name) async {
+-    await tester.tap(
+-      find.descendant(of: find.byType(HomeTab), matching: find.text(name)),
+-    );
++    await tester.tap(_projectLabel(name));
+     for (var i = 0; i < 12; i++) {
+       await tester.runAsync(
+         () => Future<void>.delayed(const Duration(milliseconds: 10)),
+@@ -465,22 +468,46 @@ void main() {
+       final home = tester.element(find.byType(HomeTab));
+       final messenger = ScaffoldMessenger.of(home);
+       final center = find.byKey(const ValueKey('workbench-center-scaffold'));
+-      for (final width in [1200.0, 1024.0, 500.0]) {
++      for (final width in [1440.0, 1200.0, 1024.0, 500.0]) {
+         tester.view.physicalSize = Size(width, 850);
+         await tester.pump();
+-        fixture.layout.select(WorkbenchActivity.explorer, toggle: false);
+-        await tester.pump();
+-        messenger.showSnackBar(const SnackBar(content: Text('Central notice')));
+-        await tester.pump();
+-        await tester.pump(const Duration(milliseconds: 300));
+-        final centralRect = tester.getRect(center);
+-        final noticeRect = tester.getRect(find.byType(SnackBar));
+-        expect(noticeRect.center.dx, closeTo(centralRect.center.dx, 1));
+-        expect(noticeRect.width, lessThanOrEqualTo(480));
+-        expect(noticeRect.left, greaterThanOrEqualTo(centralRect.left));
+-        expect(noticeRect.right, lessThanOrEqualTo(centralRect.right));
+-        messenger.removeCurrentSnackBar();
+-        await tester.pump();
++        for (final sidebarVisible in [true, false]) {
++          fixture.layout.select(WorkbenchActivity.explorer, toggle: false);
++          if (!sidebarVisible) fixture.layout.toggleSidebar();
++          await tester.pump();
++          messenger.showSnackBar(
++            const SnackBar(content: Text('Central notice')),
++          );
++          await tester.pump();
++          await tester.pump(const Duration(milliseconds: 300));
++          // V11 concerns the painted surface, not MD3's expanding Align.
++          final notice = find.descendant(
++            of: find.byType(SnackBar),
++            matching: find.byType(Material),
++          );
++          expect(notice, findsOneWidget);
++          expect(
++            Scaffold.of(tester.element(notice)),
++            same(tester.state<ScaffoldState>(center)),
++          );
++          expect(ScaffoldMessenger.of(tester.element(notice)), same(messenger));
++          final centralRect = tester.getRect(center);
++          final centerLeft =
++              WorkbenchActivityRail.width +
++              (!fixture.layout.compact && sidebarVisible
++                  ? fixture.layout.sidebarWidth
++                  : 0);
++          expect(centralRect.left, closeTo(centerLeft, 1));
++          expect(centralRect.right, closeTo(width, 1));
++          final noticeRect = tester.getRect(notice);
++          expect(noticeRect.center.dx, closeTo(centralRect.center.dx, 1));
++          expect(noticeRect.width, greaterThan(0));
++          expect(noticeRect.width, lessThanOrEqualTo(480));
++          expect(noticeRect.left, greaterThanOrEqualTo(centralRect.left));
++          expect(noticeRect.right, lessThanOrEqualTo(centralRect.right));
++          messenger.removeCurrentSnackBar();
++          await tester.pump();
++        }
+       }
+       expect(tester.takeException(), isNull);
+     },
+@@ -506,20 +533,13 @@ void main() {
+       );
+       await tester.enterText(field, 'Alpha');
+       await tester.pump();
+-      expect(
+-        find.descendant(of: home, matching: find.text('Alpha')),
+-        findsOneWidget,
+-      );
+-      expect(
+-        find.descendant(of: home, matching: find.text('Beta')),
+-        findsNothing,
+-      );
++      // The query also appears in EditableText. Check project row labels.
++      expect(_projectLabel('Alpha'), findsOneWidget);
++      expect(_projectLabel('Beta'), findsNothing);
+       await tester.enterText(field, '');
+       await tester.pump();
+-      expect(
+-        find.descendant(of: home, matching: find.text('Beta')),
+-        findsOneWidget,
+-      );
++      expect(_projectLabel('Alpha'), findsOneWidget);
++      expect(_projectLabel('Beta'), findsOneWidget);
+       expect(tester.takeException(), isNull);
+     },
+   );
+diff --git a/test/workbench_chrome_test.dart b/test/workbench_chrome_test.dart
+index 8c5b0975663cbe3be876d3e5d4520d57515ffeab..5082dfcaf99f35d3237a58aa7869964f6d3522f8 100644
+--- a/test/workbench_chrome_test.dart
++++ b/test/workbench_chrome_test.dart
+@@ -154,33 +154,59 @@ void main() {
+       tester,
+     ) async {
+       final semantics = tester.ensureSemantics();
+-      await _pump(
+-        tester,
+-        _host(
+-          WorkbenchActivityRail(
+-            selected: WorkbenchActivity.explorer,
+-            onSelected: (_) {},
+-          ),
+-        ),
+-      );
+-      expect(
+-        tester.getSemantics(
+-          find.byKey(
+-            WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
+-          ),
+-        ),
+-        isSemantics(isButton: true, hasSelectedState: true, isSelected: true),
+-      );
+-      expect(
+-        tester.getSemantics(
+-          find.byKey(
+-            WorkbenchActivityRail.activityKey(WorkbenchActivity.agents),
++      try {
++        await _pump(
++          tester,
++          _host(
++            WorkbenchActivityRail(
++              selected: WorkbenchActivity.explorer,
++              onSelected: (_) {},
++            ),
+           ),
+-        ),
+-        isSemantics(isButton: true, hasSelectedState: true, isSelected: false),
+-      );
+-      expect(find.bySemanticsLabel('Files'), findsNothing);
+-      semantics.dispose();
++        );
++        final context = tester.element(find.byType(NavigationRail));
++        final l = StudioLocalizations.of(context);
++        final material = MaterialLocalizations.of(context);
++        final destinations = [
++          (WorkbenchActivity.explorer, 'Explorer'),
++          (WorkbenchActivity.agents, l.agentsTab),
++          (WorkbenchActivity.tools, l.tools),
++          (WorkbenchActivity.tutorial, l.tutorial),
++        ];
++        // R21/V2: native rail destinations expose tabs, not button semantics.
++        for (var index = 0; index < destinations.length; index++) {
++          final (activity, label) = destinations[index];
++          final ordinal = material.tabLabel(
++            tabIndex: index + 1,
++            tabCount: destinations.length,
++          );
++          expect(
++            tester.getSemantics(
++              find.byKey(WorkbenchActivityRail.activityKey(activity)),
++            ),
++            isSemantics(
++              label: '$label\n$ordinal',
++              isButton: false,
++              hasSelectedState: true,
++              isSelected: activity == WorkbenchActivity.explorer,
++              isFocusable: true,
++              hasTapAction: true,
++            ),
++          );
++        }
++        for (final control in [
++          WorkbenchActivityRail.activityKey(WorkbenchActivity.settings),
++          WorkbenchActivityRail.avatarKey,
++        ]) {
++          expect(
++            tester.getSemantics(find.byKey(control)),
++            isSemantics(isButton: true, hasTapAction: true),
++          );
++        }
++        expect(find.bySemanticsLabel('Files'), findsNothing);
++      } finally {
++        semantics.dispose();
++      }
+     });
+ 
+     testWidgets(

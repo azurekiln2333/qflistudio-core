@@ -1,0 +1,419 @@
+diff --git a/test/screenshots/workbench_screenshots_test.dart b/test/screenshots/workbench_screenshots_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..af6d1e59199032d737daff0c9ecf11988c0df207
+--- /dev/null
++++ b/test/screenshots/workbench_screenshots_test.dart
+@@ -0,0 +1,413 @@
++// Opt-in screenshot harness for the large-screen workbench.
++// Run only in CI with QFLI_SCREENSHOTS=1; ordinary core-check skips this suite.
++import 'dart:io';
++import 'dart:ui' as ui;
++
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/app.dart';
++import 'package:qfli_studio_core/github/github_auth_controller.dart';
++import 'package:qfli_studio_core/github/github_credential_store.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++final bool _enabled = Platform.environment['QFLI_SCREENSHOTS'] == '1';
++const _screenshotRoot = ValueKey<String>('workbench-screenshot-root');
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  setUpAll(() async {
++    if (_enabled) await _loadRealFonts();
++  });
++
++  testWidgets(
++    'capture desktop and tablet workbench scenes in light and dark themes',
++    (tester) async {
++      const configurations =
++          <({Size size, String sizeName, AppFormFactor formFactor})>[
++            (
++              size: Size(1440, 900),
++              sizeName: '1440x900',
++              formFactor: AppFormFactor.desktop,
++            ),
++            (
++              size: Size(1024, 768),
++              sizeName: '1024x768',
++              formFactor: AppFormFactor.desktop,
++            ),
++            (
++              size: Size(1180, 820),
++              sizeName: '1180x820',
++              formFactor: AppFormFactor.tablet,
++            ),
++          ];
++
++      tester.platformDispatcher.localeTestValue = const Locale('zh', 'CN');
++      addTearDown(tester.platformDispatcher.clearLocaleTestValue);
++      for (final configuration in configurations) {
++        for (final theme in const ['light', 'dark']) {
++          await _captureConfiguration(tester, configuration, theme);
++        }
++      }
++    },
++    skip: !_enabled,
++  );
++}
++
++Future<void> _captureConfiguration(
++  WidgetTester tester,
++  ({Size size, String sizeName, AppFormFactor formFactor}) configuration,
++  String theme,
++) async {
++  tester.view.devicePixelRatio = 1;
++  tester.view.physicalSize = configuration.size;
++
++  final fixture = await tester.runAsync(() => _createFixture(theme));
++  if (fixture == null) {
++    throw StateError('QFLI_SCREENSHOTS: fixture setup did not complete');
++  }
++
++  await tester.pumpWidget(
++    RepaintBoundary(
++      key: _screenshotRoot,
++      child: QfliApp(
++        store: fixture.store,
++        auth: fixture.auth,
++        settings: fixture.settings,
++        formFactor: configuration.formFactor,
++        githubController: fixture.github,
++      ),
++    ),
++  );
++  await _settle(tester);
++
++  final stem = '${configuration.sizeName}-$theme';
++  await _capture(tester, '$stem-welcome.png');
++
++  final added = await tester.runAsync(
++    () => fixture.store.addExisting(fixture.sample.path),
++  );
++  if (added?.project == null) {
++    throw StateError(added?.error ?? 'Unable to register screenshot project');
++  }
++  await _settle(tester);
++  await _capture(tester, '$stem-explorer-projects.png');
++
++  await _tapText(tester, 'Screenshot Sample', 'open sample project');
++  await _waitForProjectOpen(tester);
++  // The base branch exposes Files. The integrated Explorer entry is tried too.
++  var filesOpened = await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('workbench-rail-files'),
++    'open file tree through Files',
++  );
++  if (!filesOpened) {
++    filesOpened = await _tapKeyIfPresent(
++      tester,
++      const ValueKey<String>('workbench-rail-explorer'),
++      'open file tree through Explorer',
++    );
++  }
++  await _settle(tester);
++  await _capture(tester, '$stem-explorer-files-editor.png');
++
++  // Close the Projects sidebar on wide windows so the real editor and Agent
++  // pane can both be seen. On narrower widths the optional action can be absent.
++  await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('workbench-rail-projects'),
++    'show Projects pane before closing it',
++  );
++  await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('workbench-rail-projects'),
++    'hide Projects pane before opening Agent',
++  );
++  // Let the real editor activate its Agent host. Scene capture continues even
++  // if an integrated branch renames or removes this optional entry.
++  final agentOpened = await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('editor-agent-toggle'),
++    'open Agent pane',
++    settle: false,
++  );
++  if (agentOpened) await tester.pump();
++  await _capture(tester, '$stem-editor-agent.png');
++
++  await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('workbench-rail-settings'),
++    'open settings',
++  );
++  await _settle(tester);
++  await _capture(tester, '$stem-settings.png');
++
++  // Returning to the workspace restores the retained editor before opening More.
++  var returned = await _tapKeyIfPresent(
++    tester,
++    const ValueKey<String>('workbench-rail-files'),
++    'return to editor through Files',
++  );
++  if (!returned) {
++    returned = await _tapKeyIfPresent(
++      tester,
++      const ValueKey<String>('workbench-rail-explorer'),
++      'return to editor through Explorer',
++    );
++  }
++  if (returned) await _settle(tester);
++  final more = find.byTooltip('更多');
++  if (tester.any(more)) {
++    try {
++      await tester.tap(more.last);
++      await _settle(tester);
++    } on Object catch (error) {
++      debugPrint('QFLI_SCREENSHOTS: more-menu step continued: $error');
++    }
++  } else {
++    debugPrint(
++      'QFLI_SCREENSHOTS: more-menu entry missing; capturing current UI',
++    );
++  }
++  await _capture(tester, '$stem-more-menu.png');
++
++  await tester.pumpWidget(const SizedBox.shrink());
++  await tester.pump();
++  fixture.github.dispose();
++  fixture.settings.dispose();
++  fixture.auth.dispose();
++  fixture.store.dispose();
++  await tester.runAsync(() => fixture.directory.delete(recursive: true));
++  tester.view.resetPhysicalSize();
++  tester.view.resetDevicePixelRatio();
++}
++
++Future<void> _settle(WidgetTester tester) async {
++  // Avoid pumpAndSettle: the real Agent pane may contain a progress indicator.
++  await tester.pump();
++  await tester.pump(const Duration(milliseconds: 250));
++  await tester.pump();
++}
++
++Future<void> _waitForProjectOpen(WidgetTester tester) async {
++  // Project opening checks the real directory asynchronously.
++  await tester.runAsync(
++    () => Future<void>.delayed(const Duration(milliseconds: 100)),
++  );
++  await _settle(tester);
++}
++
++Future<bool> _tapText(
++  WidgetTester tester,
++  String text,
++  String description,
++) async {
++  final finder = find.text(text);
++  if (!tester.any(finder)) {
++    debugPrint('QFLI_SCREENSHOTS: $description step missing; continuing');
++    return false;
++  }
++  try {
++    await tester.tap(finder.first);
++    await tester.pump();
++    return true;
++  } on Object catch (error) {
++    debugPrint('QFLI_SCREENSHOTS: $description step continued: $error');
++    return false;
++  }
++}
++
++Future<bool> _tapKeyIfPresent(
++  WidgetTester tester,
++  Key key,
++  String description, {
++  bool settle = true,
++}) async {
++  final finder = find.byKey(key);
++  if (!tester.any(finder)) {
++    debugPrint('QFLI_SCREENSHOTS: $description key missing; continuing');
++    return false;
++  }
++  try {
++    await tester.tap(finder.first);
++    await tester.pump();
++    if (settle) await _settle(tester);
++    return true;
++  } on Object catch (error) {
++    debugPrint('QFLI_SCREENSHOTS: $description step continued: $error');
++    return false;
++  }
++}
++
++Future<void> _capture(WidgetTester tester, String fileName) async {
++  final boundary = tester.renderObject<RenderRepaintBoundary>(
++    find.byKey(_screenshotRoot),
++  );
++  final image = await boundary.toImage(
++    pixelRatio: tester.view.devicePixelRatio,
++  );
++  final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++  image.dispose();
++  if (bytes == null) {
++    throw StateError('QFLI_SCREENSHOTS: $fileName had no encoded image data');
++  }
++  final target = File(p.join('build', 'screenshots', fileName));
++  await tester.runAsync(() async {
++    await target.parent.create(recursive: true);
++    await target.writeAsBytes(
++      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
++    );
++  });
++}
++
++Future<_Fixture> _createFixture(String theme) async {
++  final directory = await Directory.systemTemp.createTemp(
++    'qfli-workbench-screenshot-',
++  );
++  final sample = Directory(p.join(directory.path, 'Screenshot Sample'));
++  await Directory(p.join(sample.path, 'lib')).create(recursive: true);
++  await File(
++    p.join(sample.path, 'lib', 'main.dart'),
++  ).writeAsString("void main() {\n  print('QFLI screenshot sample');\n}\n");
++
++  final store = ProjectStore(
++    storageFile: File(p.join(directory.path, 'projects.json')),
++  );
++  final settings = SettingsStore(
++    storageFile: File(p.join(directory.path, 'settings.json')),
++  );
++  final auth = AuthStore(
++    storageFile: File(p.join(directory.path, 'auth.json')),
++  );
++  await store.load();
++  await settings.load();
++  await auth.load();
++  await settings.setThemeMode(theme);
++  return _Fixture(
++    directory: directory,
++    sample: sample,
++    store: store,
++    settings: settings,
++    auth: auth,
++    github: GitHubAuthController(credentialStore: _EmptyCredentialStore()),
++  );
++}
++
++// Loads the repository's real RobotoMono, SDK MaterialIcons, and the optional
++// Noto Sans CJK font installed on the Ubuntu runner.
++class _Fixture {
++  const _Fixture({
++    required this.directory,
++    required this.sample,
++    required this.store,
++    required this.settings,
++    required this.auth,
++    required this.github,
++  });
++
++  final Directory directory;
++  final Directory sample;
++  final ProjectStore store;
++  final SettingsStore settings;
++  final AuthStore auth;
++  final GitHubAuthController github;
++}
++
++class _EmptyCredentialStore implements GitHubCredentialStore {
++  @override
++  bool get isAvailable => true;
++
++  @override
++  Future<String?> readAccessToken() async => null;
++
++  @override
++  Future<void> writeAccessToken(String token) async {}
++
++  @override
++  Future<void> deleteAccessToken() async {}
++}
++
++Future<void> _loadRealFonts() async {
++  final robotoMono = await _loadFirstAsset(const [
++    'assets/fonts/roboto_mono/static/RobotoMono-Regular.ttf',
++    'packages/qfli_studio_core/assets/fonts/roboto_mono/static/RobotoMono-Regular.ttf',
++  ]);
++  final robotoLoader = FontLoader('packages/qfli_studio_core/RobotoMono')
++    ..addFont(Future.value(robotoMono));
++  await robotoLoader.load();
++
++  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
++  final sdkRoot = flutterRoot == null || flutterRoot.isEmpty
++      ? _inferredFlutterRoot()
++      : flutterRoot;
++  final materialIcons = File(
++    p.join(
++      sdkRoot,
++      'bin',
++      'cache',
++      'artifacts',
++      'material_fonts',
++      'materialicons-regular.otf',
++    ),
++  );
++  if (!await materialIcons.exists()) {
++    throw FileSystemException(
++      'Flutter MaterialIcons font is missing',
++      materialIcons.path,
++    );
++  }
++  await _loadFontFile('MaterialIcons', materialIcons);
++
++  final notoRoot = Directory('/usr/share/fonts');
++  if (await notoRoot.exists()) {
++    final candidates = await notoRoot
++        .list(recursive: true, followLinks: false)
++        .where((entity) => entity is File)
++        .cast<File>()
++        .where((file) {
++          final name = p.basename(file.path).toLowerCase();
++          return name.contains('notosanscjk') &&
++              (name.contains('regular') || name.contains('sc')) &&
++              (name.endsWith('.ttf') ||
++                  name.endsWith('.otf') ||
++                  name.endsWith('.ttc'));
++        })
++        .toList();
++    if (candidates.isNotEmpty) {
++      await _loadFontFile('NotoSansCJK', candidates.first);
++    }
++  }
++}
++
++Future<ByteData> _loadFirstAsset(List<String> candidates) async {
++  Object? lastError;
++  for (final asset in candidates) {
++    try {
++      return await rootBundle.load(asset);
++    } on Object catch (error) {
++      lastError = error;
++    }
++  }
++  throw StateError('Unable to load bundled RobotoMono font: $lastError');
++}
++
++Future<void> _loadFontFile(String family, File file) async {
++  final data = await file.readAsBytes();
++  final loader = FontLoader(family)
++    ..addFont(Future.value(ByteData.sublistView(Uint8List.fromList(data))));
++  await loader.load();
++}
++
++String _inferredFlutterRoot() {
++  var directory = File(Platform.resolvedExecutable).parent;
++  for (var i = 0; i < 4; i++) {
++    directory = directory.parent;
++  }
++  return directory.path;
++}

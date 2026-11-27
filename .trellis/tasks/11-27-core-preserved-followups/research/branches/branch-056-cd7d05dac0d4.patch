@@ -1,0 +1,415 @@
+diff --git a/lib/pages/settings_page.dart b/lib/pages/settings_page.dart
+index 7ab7b51a55a27eddd1ad290e4d5c491cb2cfee89..63e1a08bdc9e337eb6694fa0c9437f83a3f9b73d 100644
+--- a/lib/pages/settings_page.dart
++++ b/lib/pages/settings_page.dart
+@@ -82,7 +82,8 @@ class _SettingsPageState extends State<SettingsPage> {
+   /// 所以三个入口都在这一屏直接可见，不再嵌二级页面。
+   Widget _accountSection(BuildContext context, {Key? key}) {
+     final auth = _auth!;
+-    return SettingsSection(
++    return _categorySection(
++      context,
+       key: key,
+       title: '账户与隐私',
+       children: [
+@@ -129,7 +130,8 @@ class _SettingsPageState extends State<SettingsPage> {
+   /// 「设备与远程」：配对、已绑定电脑和撤销。
+   ///
+   /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
+-  Widget _devicesSection(BuildContext context, {Key? key}) => SettingsSection(
++  Widget _devicesSection(BuildContext context, {Key? key}) => _categorySection(
++    context,
+     key: key,
+     title: '设备与远程',
+     children: [
+@@ -278,16 +280,21 @@ class _SettingsPageState extends State<SettingsPage> {
+             if (largeScreen) _settingsCategoryRail(context),
+             Expanded(
+               child: Align(
+-                alignment: Alignment.topCenter,
++                alignment: largeScreen
++                    ? Alignment.topLeft
++                    : Alignment.topCenter,
+                 child: ConstrainedBox(
++                  key: largeScreen
++                      ? const ValueKey('settings-detail-container')
++                      : null,
+                   constraints: BoxConstraints(
+                     maxWidth: largeScreen ? 720 : 840,
+                   ),
+                   child: ListView(
+                     padding: EdgeInsets.fromLTRB(
+-                      largeScreen ? 24 : 16,
+-                      largeScreen ? 20 : 12,
+-                      largeScreen ? 24 : 16,
++                      largeScreen ? 32 : 16,
++                      largeScreen ? 32 : 12,
++                      largeScreen ? 32 : 16,
+                       32,
+                     ),
+                     children: [
+@@ -295,12 +302,14 @@ class _SettingsPageState extends State<SettingsPage> {
+                         Padding(
+                           padding: const EdgeInsets.only(bottom: 24),
+                           child: Text(
+-                            '设置',
++                            _categoryTitle(_selectedCategory),
++                            key: const ValueKey('settings-category-heading'),
+                             style: Theme.of(context).textTheme.headlineSmall,
+                           ),
+                         ),
+                       if (showCategory(0))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[0],
+                           title: '外观与体验',
+                           children: [
+@@ -331,7 +340,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                           ],
+                         ),
+                       if (showCategory(1))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[1],
+                           title: '编辑器',
+                           children: [
+@@ -396,7 +406,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                       if (showCategory(3) &&
+                           widget.showAi &&
+                           _customAiEndpointAllowed)
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[3],
+                           title: 'AI 助手',
+                           children: [
+@@ -430,7 +441,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                       if (showCategory(5) && RemoteComputerPage.isSupported)
+                         _devicesSection(context, key: _sectionKeys[5]),
+                       if (showCategory(6))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[6],
+                           title: '数据与存储',
+                           children: [
+@@ -500,6 +512,36 @@ class _SettingsPageState extends State<SettingsPage> {
+     );
+   }
+ 
++  Widget _categorySection(
++    BuildContext context, {
++    Key? key,
++    required String title,
++    required List<Widget> children,
++  }) {
++    if (LargeScreenScope.maybeOf(context) != null) {
++      return Padding(
++        key: key,
++        padding: const EdgeInsets.only(bottom: 24),
++        child: Card.filled(
++          margin: EdgeInsets.zero,
++          child: Column(children: children),
++        ),
++      );
++    }
++    return SettingsSection(key: key, title: title, children: children);
++  }
++
++  String _categoryTitle(int index) => switch (index) {
++    0 => '外观与体验',
++    1 => '编辑器',
++    2 => '快捷键',
++    3 => 'AI 助手',
++    4 => '账户与隐私',
++    5 => '设备与远程',
++    6 => '数据与存储',
++    _ => '设置',
++  };
++
+   Widget _settingsCategoryRail(BuildContext context) {
+     final theme = Theme.of(context);
+     final entries = <(String, IconData, int)>[
+@@ -602,7 +644,8 @@ class _SettingsPageState extends State<SettingsPage> {
+     ),
+   );
+ 
+-  Widget _shortcutSection({Key? key}) => SettingsSection(
++  Widget _shortcutSection({Key? key}) => _categorySection(
++    context,
+     key: key,
+     title: '快捷键',
+     children: [
+diff --git a/test/pi_d_ui_workbench_test.dart b/test/pi_d_ui_workbench_test.dart
+index b28bd31016acd448061166d43723739b8ce15f96..53002b626543b5c1e775015c42f51daa2804146b 100644
+--- a/test/pi_d_ui_workbench_test.dart
++++ b/test/pi_d_ui_workbench_test.dart
+@@ -76,15 +76,27 @@ void main() {
+     );
+     expect(rail, findsWidgets);
+     expect(find.byType(AppBar), findsNothing);
+-    // 设置 repeats on a large screen: rail heading, page heading, and one
+-    // shortcut row title. Assert the rail heading specifically, since a bare
+-    // text count would pin unrelated shortcut content.
++    final categoryHeading = find.byKey(
++      const ValueKey('settings-category-heading'),
++    );
++    expect(categoryHeading, findsOneWidget);
++    final heading = tester.widget<Text>(categoryHeading);
++    expect(heading.data, '外观与体验');
++    // The detail headline replaces the removed page title and section label.
++    // Only the rail label and this heading identify the selected category.
++    expect(find.text('外观与体验'), findsNWidgets(2));
++    expect(find.text('设置'), findsOneWidget);
+     expect(
+-      find.descendant(
+-        of: find.byType(ListTile).first,
+-        matching: find.text('外观与体验'),
+-      ),
+-      findsOneWidget,
++      heading.style,
++      Theme.of(tester.element(categoryHeading)).textTheme.headlineSmall,
++    );
++    expect(tester.getTopLeft(categoryHeading).dx, closeTo(272, 1));
++    expect(tester.getTopLeft(categoryHeading).dy, closeTo(32, 1));
++    expect(
++      tester
++          .getSize(find.byKey(const ValueKey('settings-detail-container')))
++          .width,
++      lessThanOrEqualTo(720),
+     );
+     expect(
+       tester.getSize(find.byKey(const ValueKey('settings-ui-zoom'))).width,
+@@ -101,6 +113,8 @@ void main() {
+     await tester.pumpAndSettle();
+     expect(find.text('外观'), findsNothing);
+     expect(find.text('编辑器字体'), findsOneWidget);
++    expect(tester.widget<Text>(categoryHeading).data, '编辑器');
++    expect(find.text('编辑器'), findsNWidgets(2));
+ 
+     final dataCategory = find.ancestor(
+       of: find.text('数据与存储').first,
+diff --git a/test/screenshots/workbench_screenshots_test.dart b/test/screenshots/workbench_screenshots_test.dart
+index 15c415f35f2837b730a705eff7f017b60ae7a029..7a8460bbd188a292530b3a025a51437b09fdccda 100644
+--- a/test/screenshots/workbench_screenshots_test.dart
++++ b/test/screenshots/workbench_screenshots_test.dart
+@@ -14,6 +14,7 @@ import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
+ import 'package:qfli_studio_core/editor/editor_controller.dart';
+ import 'package:qfli_studio_core/editor/editor_page.dart';
+ import 'package:qfli_studio_core/editor/file_explorer.dart';
++import 'package:qfli_studio_core/content/content_repository.dart';
+ import 'package:qfli_studio_core/github/github_auth_controller.dart';
+ import 'package:qfli_studio_core/github/github_credential_store.dart';
+ import 'package:qfli_studio_core/harness/harness_host.dart';
+@@ -23,6 +24,9 @@ import 'package:qfli_studio_core/harness/hub/harness_hosts.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
+ import 'package:qfli_studio_core/layout/app_form_factor.dart';
+ import 'package:qfli_studio_core/pages/home_page.dart';
++import 'package:qfli_studio_core/pages/local_content_pages.dart';
++import 'package:qfli_studio_core/pages/profile_page.dart';
++import 'package:qfli_studio_core/pages/quick_tools_page.dart';
+ import 'package:qfli_studio_core/pages/settings_page.dart';
+ import 'package:qfli_studio_core/services/app_paths.dart';
+ import 'package:qfli_studio_core/services/studio_profile.dart';
+@@ -37,8 +41,10 @@ import 'package:qfli_studio_core/store/auth_store.dart';
+ import 'package:qfli_studio_core/store/project_store.dart';
+ import 'package:qfli_studio_core/store/settings_store.dart';
+ import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++import 'package:qfli_studio_core/widgets/tools_browser.dart';
+ import 'package:re_editor/re_editor.dart';
+ 
++import '../support/content_catalog_fixture.dart';
+ import '../support/fake_harness_host.dart';
+ 
+ final bool _enabled = Platform.environment['QFLI_SCREENSHOTS'] == '1';
+@@ -56,15 +62,35 @@ void main() {
+     previousProfile = StudioProfile.current;
+     PathProviderPlatform.instance = _Paths(root!.path);
+     StudioProfile.current = const StudioProfile(
+-      id: 'screenshots',
++      id: 'java',
+       appTitle: 'QFLI Studio',
+       templates: [],
+       supportedFileExtensions: ['.dart'],
+       entryFileNames: ['main.dart'],
+       productKey: StudioProductCatalog.qfliStudioKey,
++      contentRepositoryFactory: _screenshotContentRepository,
++    );
++    // Use deterministic fake hosts and the real shell/editor without PTY discovery.
++    HarnessHosts.overrideForTesting(
++      (_) => [
++        FakeHarnessHost(
++          id: 'screenshot-local',
++          label: 'Screenshot host',
++          kind: HarnessHostKind.local,
++          initialSessions: [
++            HarnessSessionInfo(
++              id: 'agents-list',
++              hostId: 'screenshot-local',
++              providerId: 'pi',
++              title: 'Screenshot Agent session',
++              status: HarnessSessionStatus.idle,
++              capabilities: const {HarnessCapability.transcript},
++              cwd: root!.path,
++            ),
++          ],
++        ),
++      ],
+     );
+-    // Use the real shell/editor with deterministic hosts and no PTY discovery.
+-    HarnessHosts.overrideForTesting((_) => []);
+     await AppPaths.storageDirectory();
+     await TaskActivityService.instance.initialize();
+     await _loadRealFonts();
+@@ -89,10 +115,16 @@ void main() {
+     tester.platformDispatcher.localeTestValue = const Locale('zh', 'CN');
+     addTearDown(tester.platformDispatcher.clearLocaleTestValue);
+     addTearDown(tester.view.reset);
+-    for (final configuration in configurations) {
+-      for (final theme in ['light', 'dark']) {
+-        await _configuration(tester, root!, configuration, theme);
++    final shadows = debugDisableShadows;
++    debugDisableShadows = false;
++    try {
++      for (final configuration in configurations) {
++        for (final theme in ['light', 'dark']) {
++          await _configuration(tester, root!, configuration, theme);
++        }
+       }
++    } finally {
++      debugDisableShadows = shadows;
+     }
+   }, skip: !_enabled);
+ }
+@@ -139,7 +171,11 @@ Future<void> _configuration(
+     final explorer = find.byKey(
+       WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
+     );
+-    expect(find.text('资源管理器'), findsOneWidget);
++    final explorerDestination = find.descendant(
++      of: find.byType(WorkbenchActivityRail),
++      matching: find.text('资源管理器'),
++    );
++    expect(explorerDestination, findsOneWidget);
+ 
+     // R5/V9: Start/Recent is visible only while the Explorer panel is hidden.
+     await _tap(tester, explorer);
+@@ -208,6 +244,49 @@ Future<void> _configuration(
+     expect(find.byType(CodeEditor), findsOneWidget);
+     await _capture(tester, '$stem-explorer-files-editor.png');
+ 
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.agents)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.agents &&
++          find.byKey(const ValueKey('agents-list')).evaluate().length == 1 &&
++          find.text('Screenshot Agent session').evaluate().length == 1,
++      '$stem Agents list',
++    );
++    expect(
++      find.byKey(const ValueKey('agents-workbench-search')),
++      findsOneWidget,
++    );
++    expect(find.text('Screenshot Agent session'), findsOneWidget);
++    await _capture(tester, '$stem-agents-list.png');
++    // Return through the visible rail label, the destination a user clicks.
++    await _tap(tester, explorerDestination);
++    final fileExplorerHeader = find.byKey(
++      const ValueKey('file-explorer-header'),
++    );
++    final fileExplorerProject = find.byKey(
++      const ValueKey('file-explorer-header-project-name'),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.explorer &&
++          layout.explorerPage == ExplorerPage.files &&
++          find.byType(FileExplorer).evaluate().length == 1 &&
++          fileExplorerHeader.evaluate().length == 1 &&
++          fileExplorerProject.evaluate().length == 1 &&
++          sourceFile.evaluate().length == 1,
++      '$stem restored Explorer after Agents list',
++    );
++    expect(
++      tester.widget<Text>(fileExplorerProject).data,
++      project.name,
++      reason: 'The Explorer rail destination must restore this project tree',
++    );
++
+     // Resolve the lazy built-in runtime before opening the fake external
+     // session. AgentDock insertion changes the conversation's ancestors.
+     layout.toggleSidebar();
+@@ -316,6 +395,56 @@ Future<void> _configuration(
+     expect(find.byKey(const ValueKey('settings-ui-zoom')), findsOneWidget);
+     await _capture(tester, '$stem-settings.png');
+ 
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.tools)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.tools &&
++          find.byType(FunctionsTab).evaluate().length == 1 &&
++          find.byType(ToolsBrowser).evaluate().length == 1,
++      '$stem Tools page',
++    );
++    expect(find.byType(ToolsBrowser), findsOneWidget);
++    expect(
++      find.byKey(const PageStorageKey<String>('tools-scroll')),
++      findsOneWidget,
++    );
++    await _capture(tester, '$stem-tools.png');
++
++    await _tap(
++      tester,
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.tutorial)),
++    );
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.tutorial &&
++          find.byType(TutorialCenterPage).evaluate().length == 1 &&
++          find.byKey(TutorialCenterPage.tutorialSectionKey).evaluate().length ==
++              1 &&
++          find.text('Java lesson 0-0').evaluate().length == 1,
++      '$stem Tutorial page',
++    );
++    expect(find.byKey(TutorialCenterPage.tutorialSectionKey), findsOneWidget);
++    expect(find.text('Java lesson 0-0'), findsOneWidget);
++    await _capture(tester, '$stem-tutorial.png');
++
++    await _tap(tester, find.byKey(WorkbenchActivityRail.avatarKey));
++    await _wait(
++      tester,
++      () =>
++          layout.activity == WorkbenchActivity.profile &&
++          find.byType(ProfileTab).evaluate().length == 1 &&
++          find.text('我的').evaluate().length == 1,
++      '$stem Profile page',
++    );
++    expect(find.byType(ProfileTab), findsOneWidget);
++    expect(find.text('我的'), findsOneWidget);
++    await _capture(tester, '$stem-profile.png');
++
+     await _tap(tester, explorer);
+     if (layout.sidebarVisible) layout.toggleSidebar();
+     await _settle(tester);
+@@ -435,6 +564,9 @@ Future<void> _capture(WidgetTester tester, String name) async {
+   });
+ }
+ 
++ContentRepository _screenshotContentRepository() =>
++    FixtureContentRepository(fixtureCatalog());
++
+ Future<_Fixture> _fixture(Directory root, String theme) async {
+   final directory = await root.createTemp('scene-');
+   final sample = Directory(p.join(directory.path, 'Screenshot Sample'));

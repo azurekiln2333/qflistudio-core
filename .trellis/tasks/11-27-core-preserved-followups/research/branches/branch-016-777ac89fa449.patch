@@ -1,0 +1,35 @@
+diff --git a/test/ui_zoom_test.dart b/test/ui_zoom_test.dart
+index 77df0f66b7d2969279e05822722ce553c9268bb5..dc5903e5f39a4743c6b411793073e80641a17afd 100644
+--- a/test/ui_zoom_test.dart
++++ b/test/ui_zoom_test.dart
+@@ -81,7 +81,13 @@ void main() {
+       await tester.sendKeyUpEvent(modifier);
+       expect(settings.uiScale, 1.2);
+       await _key(tester, LogicalKeyboardKey.numpadAdd, modifier: modifier);
+-      await _key(tester, LogicalKeyboardKey.add, modifier: modifier);
++      await _key(
++        tester,
++        LogicalKeyboardKey.add,
++        physicalKey: PhysicalKeyboardKey.equal,
++        modifier: modifier,
++        shift: true,
++      );
+       expect(settings.uiScale, 1.4);
+       await _key(
+         tester,
+@@ -342,12 +348,14 @@ Widget _app(
+ Future<void> _key(
+   WidgetTester tester,
+   LogicalKeyboardKey key, {
++  PhysicalKeyboardKey? physicalKey,
+   LogicalKeyboardKey modifier = LogicalKeyboardKey.controlLeft,
+   bool shift = false,
+ }) async {
+   await tester.sendKeyDownEvent(modifier);
+   if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+-  await tester.sendKeyEvent(key);
++  // Logical '+' has no same-named physical key; preserve the supplied key pair.
++  await tester.sendKeyEvent(key, physicalKey: physicalKey);
+   if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+   await tester.sendKeyUpEvent(modifier);
+   await tester.pump();

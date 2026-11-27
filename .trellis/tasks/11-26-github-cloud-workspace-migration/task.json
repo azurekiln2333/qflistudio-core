@@ -1,0 +1,30 @@
+{
+  "id": "github-cloud-workspace-migration",
+  "name": "github-cloud-workspace-migration",
+  "title": "GitHub consolidation and cloud-only workspace migration",
+  "description": "Audit and preserve core source and Trellis progress, consolidate branches into GitHub main, migrate to the E drive clone, verify cloud CI coverage, and hand off through herdr.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "lichengyu",
+  "assignee": "lichengyu",
+  "createdAt": "2026-11-26",
+  "completedAt": null,
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-26-core-github-preservation",
+    "11-26-core-cloud-ci-policy",
+    "11-26-core-target-handoff"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

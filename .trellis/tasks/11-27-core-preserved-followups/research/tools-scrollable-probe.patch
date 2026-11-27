@@ -1,0 +1,52 @@
+diff --git a/test/tmp_probe_test.dart b/test/tmp_probe_test.dart
+new file mode 100644
+--- /dev/null
++++ b/test/tmp_probe_test.dart
+@@ -0,0 +1,47 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_localizations/flutter_localizations.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/i18n/studio_localizations.dart';
++import 'package:qfli_studio_core/pages/quick_tools_page.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++
++void main() {
++  testWidgets('probe scrollables', (tester) async {
++    StudioProfile.current = const StudioProfile(
++      id: 'c',
++      appTitle: StudioProductCatalog.forge,
++      templates: [],
++      isOffline: true,
++    );
++    await tester.pumpWidget(
++      MaterialApp(
++        locale: const Locale('zh', 'CN'),
++        supportedLocales: StudioLocalizations.supportedLocales,
++        localizationsDelegates: const [
++          StudioLocalizations.delegate,
++          GlobalMaterialLocalizations.delegate,
++          GlobalWidgetsLocalizations.delegate,
++          GlobalCupertinoLocalizations.delegate,
++        ],
++        home: FunctionsTab(
++          store: ProjectStore(),
++          onOpenTerminal: () {},
++          onOpenContentTool: () {},
++        ),
++      ),
++    );
++    await tester.pump();
++    for (final element in find.byType(Scrollable).evaluate()) {
++      final ancestors = <String>[];
++      element.visitAncestorElements((a) {
++        ancestors.add(a.widget.runtimeType.toString());
++        return ancestors.length < 12;
++      });
++      debugPrint(
++        'PROBE scrollable axis=${(element.widget as Scrollable).axisDirection} '
++        'ancestors=${ancestors.join(" < ")}',
++      );
++    }
++  });
++}

@@ -1,0 +1,638 @@
+diff --git a/.github/workflows/remote-control.yml b/.github/workflows/remote-control.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/remote-control.yml
+@@ -0,0 +1,253 @@
++# Cloud verification for the migrated remote-control module.
++#
++# The module lives on `remote/cloudterminal-core`, not on `main`, so every job
++# checks that ref out explicitly and refuses to run against `main`.
++#
++# Toolchain: the HarmonyOS fork of Flutter, pinned by tag and commit in
++# `tool/ci/setup_flutter.sh`. Upstream Flutter cannot analyse this package:
++# `lib/config/client_platform.dart` and the other hosts below reference
++# `TargetPlatform.ohos`, an enum value that only exists in the fork. A job that
++# installs upstream stable would fail at analysis, so do not substitute one.
++#
++# `flutter config --no-enable-ohos` keeps `flutter pub get` from preparing an
++# `ohos/` project, which needs the HarmonyOS SDK; this package has no `ohos/`
++# directory and no job here installs that SDK. The flag exists in the fork
++# (`packages/flutter_tools/lib/src/features.dart`, `configSetting: 'enable-ohos'`).
++#
++# Every `uses:` is pinned to a 40-character commit SHA. All three pinned actions
++# declare `runs.using: node24`, so no Node-20 deprecation warning is expected.
++
++name: Remote control module
++
++on:
++  push:
++    branches:
++      - remote/cloudterminal-core
++    paths:
++      - "lib/remote_control/**"
++      - "test/remote_control/**"
++      - "test/support/**"
++      - "test/fixtures/**"
++      - "vendor/xterm/**"
++      - "pubspec.yaml"
++      - "pubspec.lock"
++      - "analysis_options.yaml"
++      - "tool/ci/**"
++      - ".github/workflows/remote-control.yml"
++  pull_request:
++    paths:
++      - "lib/remote_control/**"
++      - "test/remote_control/**"
++      - "test/support/**"
++      - "test/fixtures/**"
++      - "vendor/xterm/**"
++      - "pubspec.yaml"
++      - "pubspec.lock"
++      - "analysis_options.yaml"
++      - "tool/ci/**"
++      - ".github/workflows/remote-control.yml"
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++concurrency:
++  group: remote-control-core-${{ github.ref }}
++  cancel-in-progress: true
++
++defaults:
++  run:
++    shell: bash
++
++env:
++  FLUTTER_TAG: "3.27.5-ohos-1.0.1"
++  FLUTTER_COMMIT: "12587c79e88aacf3172a84e536f226457d037594"
++  # The reviewed migration commit on `remote/cloudterminal-core`. Update it in
++  # the same commit that amends the branch; a stale value here is a real failure,
++  # because the runner then verifies code that is not the reviewed code.
++  PAIRED_REF: "remote/cloudterminal-core"
++  PAIRED_COMMIT: "b8d08a6703afd480374807b11e0ff16d1276e246"
++
++jobs:
++  structure:
++    name: Structure and provenance
++    runs-on: ubuntu-24.04
++    timeout-minutes: 10
++    steps:
++      - name: Check out the paired core revision
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ env.PAIRED_COMMIT }}
++          persist-credentials: false
++
++      - name: Verify the pairing
++        env:
++          EXPECTED: ${{ env.PAIRED_COMMIT }}
++        run: |
++          set -euo pipefail
++          # The module file is the marker: it does not exist on `main`.
++          test -f lib/remote_control/remote_computer_page.dart || {
++            echo "::error::checked-out tree has no lib/remote_control; the paired ref was not used"
++            exit 1
++          }
++          actual="$(git rev-parse HEAD)"
++          if [ "$actual" != "$EXPECTED" ]; then
++            echo "::error::checked out $actual, expected the reviewed pairing $EXPECTED"
++            exit 1
++          fi
++          {
++            echo "### Remote control module"
++            echo ""
++            echo "| Field | Value |"
++            echo "| --- | --- |"
++            echo "| ref | \`${PAIRED_REF}\` |"
++            echo "| commit | \`$actual\` |"
++            echo "| Flutter | \`$FLUTTER_TAG\` (\`$FLUTTER_COMMIT\`) |"
++          } >> "$GITHUB_STEP_SUMMARY"
++
++      - name: Check module structure and vendored renderer
++        run: python3 tool/ci/check_remote_control.py
++
++      - name: Check the workflow pins
++        run: |
++          set -euo pipefail
++          workflow=.github/workflows/remote-control.yml
++          test -f "$workflow"
++          # Every action must be a full commit SHA; a moving tag is not reproducible.
++          while IFS= read -r ref; do
++            case "$ref" in
++              ./*) continue ;; # local composite actions are reviewed in-tree
++            esac
++            sha="${ref##*@}"
++            printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$' || {
++              echo "::error::unpinned action ref: $ref"
++              exit 1
++            }
++          done < <(sed -n 's/^[[:space:]]*uses:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$workflow")
++          # The pairing must never silently fall back to a moving branch.
++          ! grep -Eq 'ref:[[:space:]]*(main|master)[[:space:]]*$' "$workflow"
++
++  analyze:
++    name: Analyze the package on the pinned SDK
++    runs-on: ubuntu-24.04
++    timeout-minutes: 30
++    steps:
++      - name: Check out the paired core revision
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ env.PAIRED_COMMIT }}
++          persist-credentials: false
++
++      - name: Restore the pinned Flutter SDK
++        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
++        with:
++          path: ${{ runner.temp }}/flutter
++          key: flutter-ohos-12587c79e88a-${{ runner.os }}-${{ runner.arch }}-core
++
++      - name: Install the pinned Flutter SDK
++        run: |
++          set -euo pipefail
++          bash tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter"
++          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
++
++      - name: Resolve packages
++        run: |
++          set -euo pipefail
++          flutter config --no-analytics
++          flutter config --no-enable-ohos
++          flutter --version
++          flutter pub get
++          if ! git diff --quiet -- pubspec.lock; then
++            echo "::warning::flutter pub get rewrote pubspec.lock on the runner"
++            git --no-pager diff --stat -- pubspec.lock
++          fi
++
++      - name: Format check
++        run: |
++          set -euo pipefail
++          dart format --output=none --set-exit-if-changed \
++            lib/remote_control test/remote_control \
++            test/support/remote_control_app.dart test/support/fake_relay.dart \
++            test/support/codex_fixture.dart
++
++      - name: Analyze
++        run: flutter analyze --no-pub
++
++      - name: Lint the module documentation
++        run: python3 scripts/ste-lint-zh.py lib/remote_control/README.md
++
++  test:
++    name: Module regression suites
++    runs-on: ubuntu-24.04
++    timeout-minutes: 45
++    needs: analyze
++    steps:
++      - name: Check out the paired core revision
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ env.PAIRED_COMMIT }}
++          persist-credentials: false
++
++      - name: Restore the pinned Flutter SDK
++        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
++        with:
++          path: ${{ runner.temp }}/flutter
++          key: flutter-ohos-12587c79e88a-${{ runner.os }}-${{ runner.arch }}-core
++
++      - name: Install the pinned Flutter SDK
++        run: |
++          set -euo pipefail
++          bash tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter"
++          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
++
++      - name: Resolve packages
++        run: |
++          set -euo pipefail
++          flutter config --no-analytics
++          flutter config --no-enable-ohos
++          flutter pub get
++
++      # `herdr_test.dart` reads `test/fixtures/<name>` through `File(...)`, so the
++      # suite must start from the package root.
++      - name: Run the remote-control suites
++        run: |
++          set -euo pipefail
++          flutter test test/remote_control --reporter expanded
++
++  test-package:
++    name: Whole-package suites
++    runs-on: ubuntu-24.04
++    timeout-minutes: 90
++    needs: analyze
++    steps:
++      - name: Check out the paired core revision
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ env.PAIRED_COMMIT }}
++          persist-credentials: false
++
++      - name: Restore the pinned Flutter SDK
++        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
++        with:
++          path: ${{ runner.temp }}/flutter
++          key: flutter-ohos-12587c79e88a-${{ runner.os }}-${{ runner.arch }}-core
++
++      - name: Install the pinned Flutter SDK
++        run: |
++          set -euo pipefail
++          bash tool/ci/setup_flutter.sh "$RUNNER_TEMP/flutter"
++          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
++
++      - name: Resolve packages
++        run: |
++          set -euo pipefail
++          flutter config --no-analytics
++          flutter config --no-enable-ohos
++          flutter pub get
++
++      # Adding a dependency to the module can break a host suite even when the
++      # module suite passes, so the whole package runs too.
++      - name: Run every suite in the package
++        run: |
++          set -euo pipefail
++          flutter test --reporter expanded
+\ No newline at end of file
+diff --git a/tool/ci/check_remote_control.py b/tool/ci/check_remote_control.py
+new file mode 100644
+--- /dev/null
++++ b/tool/ci/check_remote_control.py
+@@ -0,0 +1,303 @@
++#!/usr/bin/env python3
++"""Structural checks for the migrated remote-control module.
++
++Local use is allowed because this is static inspection, not a test run:
++
++    python tool/ci/check_remote_control.py          # check the package
++    python tool/ci/check_remote_control.py --list   # print every check
++
++Exit code 1 means at least one invariant broke, and each failure names the
++file it read. The cloud workflow runs the same script before `flutter analyze`,
++so a local pass and a pipeline pass assert the same facts.
++
++The checks are deliberately mechanical. They prove *structure*, not behaviour:
++they cannot tell you that a pairing code works. Behaviour is covered by
++`test/remote_control/` and by the runtime checks documented in the phase report.
++
++Standard library only, Python 3.8+.
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import re
++import sys
++from pathlib import Path
++from typing import List, Tuple
++
++ROOT = Path(__file__).resolve().parents[2]
++
++# Source revision the module was migrated from. Recorded in the module README,
++# `lib/remote_control/remote_computer_page.dart` and `vendor/xterm/PROVENANCE.md`.
++SOURCE_HEAD = "49b2aac781858929a19307faeb808b83f8154410"
++
++MODULE_DIR = ROOT / "lib" / "remote_control"
++MODULE_ENTRY = MODULE_DIR / "remote_computer_page.dart"
++MODULE_README = MODULE_DIR / "README.md"
++
++# Layers the design keeps from the source package.
++REQUIRED_MODULE_FILES = (
++    "models/herdr.dart",
++    "models/pairing_uri.dart",
++    "models/protocol.dart",
++    "pages/codex_screen.dart",
++    "pages/herdr_screen.dart",
++    "pages/herdr_terminal_screen.dart",
++    "pages/home_screen.dart",
++    "pages/pair_screen.dart",
++    "pages/session_screen.dart",
++    "remote_computer_page.dart",
++    "state/codex_catalog.dart",
++    "state/codex_thread_view.dart",
++    "state/herdr_controller.dart",
++    "state/remote_controller.dart",
++    "state/remote_store.dart",
++    "state/remote_store_backend.dart",
++    "state/remote_store_backend_io.dart",
++    "state/remote_store_backend_stub.dart",
++    "state/session_view.dart",
++    "theme/remote_theme.dart",
++    "transport/relay_connector.dart",
++    "transport/relay_socket.dart",
++    "transport/relay_socket_io.dart",
++    "transport/relay_socket_stub.dart",
++    "widgets/remote_terminal_pane.dart",
++)
++
++REQUIRED_TEST_FILES = (
++    "test/remote_control/codex_test.dart",
++    "test/remote_control/herdr_direct_input_test.dart",
++    "test/remote_control/herdr_test.dart",
++    "test/remote_control/pairing_uri_test.dart",
++    "test/remote_control/remote_controller_test.dart",
++    "test/remote_control/terminal_test.dart",
++    "test/support/codex_fixture.dart",
++    "test/support/fake_relay.dart",
++    "test/support/remote_control_app.dart",
++)
++
++# Byte-for-byte copies of the source fixtures. A changed byte means the ported
++# Herdr assertions no longer describe the recorded terminal output.
++FIXTURE_MD5 = {
++    "test/fixtures/herdr_pS_visible_ansi.txt": "e82f26e9cdb098f521bf9fe19f0585ae",
++    "test/fixtures/herdr_pZ_visible_ansi.txt": "d960095ed7067cdc06dd6ffbc9359fe7",
++    "test/fixtures/herdr_wrap_proof.txt": "a07a81e4bba0535d3214cb15228126e7",
++}
++
++# Substrings that would make *production* code depend on the original
++# CloudTerminal checkout. Test fixture payloads legitimately carry Windows paths
++# recorded from the source machine (for example a Herdr `cwd`), so this check
++# only reads `lib/`.
++FORBIDDEN_SUBSTRINGS = (
++    "package:cloudterminal/",
++    "package:cloudterminal\\",
++    "/example/source/cloudterminal",
++    "C:\\example\\source\\cloudterminal",
++    "apps/cloudterminal_windows/",
++)
++
++# Dart files that must not create a second application shell.
++SHELL_MARKERS = ("MaterialApp(", "CupertinoApp(", "WidgetsApp(")
++
++# Modules under `lib/` that the remote-control module must not import, because
++# importing them would make the module depend on unrelated Studio features.
++FORBIDDEN_IMPORTS = (
++    "vibe_coding/",
++    "session/agent_session.dart",
++    "store/project_store.dart",
++    "pages/tools_grid.dart",
++    "pages/home_page.dart",
++)
++
++CHECKS: List[Tuple[str, str]] = []
++
++
++def check(label: str, description: str):
++    def register(fn):
++        CHECKS.append((label, description))
++        fn.label = label
++        return fn
++
++    return register
++
++
++def fail(message: str, failures: List[str]) -> None:
++    failures.append(message)
++
++
++def read(rel: str) -> str:
++    return (ROOT / rel).read_text(encoding="utf-8")
++
++
++def strip_comments(source: str) -> str:
++    """Drop line comments so prose about `MaterialApp` is not a code hit."""
++    out = []
++    for line in source.splitlines():
++        index = line.find("//")
++        out.append(line if index < 0 else line[:index])
++    return "\n".join(out)
++
++
++@check("module-layout", "every migrated layer file and the single entry exist")
++def module_layout(failures: List[str]) -> None:
++    for rel in REQUIRED_MODULE_FILES:
++        path = MODULE_DIR / rel
++        if not path.is_file():
++            fail(f"lib/remote_control/{rel}: missing", failures)
++    if not MODULE_README.is_file():
++        fail("lib/remote_control/README.md: missing", failures)
++    if not MODULE_ENTRY.is_file():
++        fail("lib/remote_control/remote_computer_page.dart: missing", failures)
++
++
++@check("single-entry", "the page exposes exactly one mount point plus the capability gate")
++def single_entry(failures: List[str]) -> None:
++    if not MODULE_ENTRY.is_file():
++        return
++    source = MODULE_ENTRY.read_text(encoding="utf-8")
++    for needle in (
++        "class RemoteComputerPage extends StatefulWidget",
++        "static bool get isSupported",
++        "static Future<void> open(BuildContext context)",
++    ):
++        if needle not in source:
++            fail(
++                f"remote_computer_page.dart: expected `{needle}` for the host entry",
++                failures,
++            )
++    if SOURCE_HEAD not in source:
++        fail(
++            "remote_computer_page.dart: provenance header lost the source HEAD "
++            f"{SOURCE_HEAD}",
++            failures,
++        )
++
++
++@check("no-second-shell", "no module file builds its own application shell")
++def no_second_shell(failures: List[str]) -> None:
++    for path in sorted(MODULE_DIR.rglob("*.dart")):
++        code = strip_comments(path.read_text(encoding="utf-8"))
++        for marker in SHELL_MARKERS:
++            if marker in code:
++                fail(
++                    f"{path.relative_to(ROOT).as_posix()}: creates `{marker}`; "
++                    "the module must inherit the host MaterialApp",
++                    failures,
++                )
++
++
++@check("no-source-deps", "no production file points at the CloudTerminal checkout")
++def no_source_deps(failures: List[str]) -> None:
++    targets = sorted(MODULE_DIR.rglob("*.dart"))
++    for path in targets:
++        text = path.read_text(encoding="utf-8")
++        for needle in FORBIDDEN_SUBSTRINGS:
++            if needle in text:
++                fail(
++                    f"{path.relative_to(ROOT).as_posix()}: contains `{needle}`",
++                    failures,
++                )
++
++
++@check("no-cross-feature-imports", "the module does not import unrelated Studio features")
++def no_cross_feature_imports(failures: List[str]) -> None:
++    pattern = re.compile(r"""^\s*(?:import|export)\s+['"]package:qfli_studio_core/([^'"]+)['"]""", re.M)
++    for path in sorted(MODULE_DIR.rglob("*.dart")):
++        for match in pattern.finditer(path.read_text(encoding="utf-8")):
++            target = match.group(1)
++            if target.startswith("remote_control/"):
++                continue
++            for forbidden in FORBIDDEN_IMPORTS:
++                if target.startswith(forbidden):
++                    fail(
++                        f"{path.relative_to(ROOT).as_posix()}: imports "
++                        f"`{target}`, which is outside this module",
++                        failures,
++                    )
++
++
++@check("xterm-vendor", "the patched xterm fork resolves inside this package")
++def xterm_vendor(failures: List[str]) -> None:
++    for rel in ("vendor/xterm/LICENSE", "vendor/xterm/PROVENANCE.md", "vendor/xterm/pubspec.yaml"):
++        if not (ROOT / rel).is_file():
++            fail(f"{rel}: missing; the patched renderer must ship with its licence", failures)
++    if not (ROOT / "vendor" / "xterm" / "lib").is_dir():
++        fail("vendor/xterm/lib: missing", failures)
++    pubspec = read("pubspec.yaml")
++    if "xterm:" not in pubspec:
++        fail("pubspec.yaml: no `xterm` dependency", failures)
++    if "path: vendor/xterm" not in pubspec:
++        fail(
++            "pubspec.yaml: `xterm` is not overridden to `path: vendor/xterm`; "
++            "a build would take the unpatched pub.dev package",
++            failures,
++        )
++    provenance = read("vendor/xterm/PROVENANCE.md")
++    if SOURCE_HEAD not in provenance:
++        fail(
++            f"vendor/xterm/PROVENANCE.md: does not pin the source HEAD {SOURCE_HEAD}",
++            failures,
++        )
++
++
++@check("fixtures", "recorded Herdr fixtures still match the source bytes")
++def fixtures(failures: List[str]) -> None:
++    for rel, expected in FIXTURE_MD5.items():
++        path = ROOT / rel
++        if not path.is_file():
++            fail(f"{rel}: missing", failures)
++            continue
++        digest = hashlib.md5(path.read_bytes()).hexdigest()
++        if digest != expected:
++            fail(f"{rel}: md5 {digest} != recorded {expected}", failures)
++
++
++@check("tests", "the ported suites and their helpers are present")
++def tests(failures: List[str]) -> None:
++    for rel in REQUIRED_TEST_FILES:
++        if not (ROOT / rel).is_file():
++            fail(f"{rel}: missing", failures)
++    suite = "\n".join(
++        p.read_text(encoding="utf-8") for p in sorted((ROOT / "test" / "remote_control").glob("*_test.dart"))
++    )
++    for needle in ("testWidgets(", "expect("):
++        if needle not in suite:
++            fail(f"test/remote_control: no `{needle}` found; the port lost assertions", failures)
++    if "package:cloudterminal/" in suite:
++        fail("test/remote_control: still imports package:cloudterminal", failures)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--list", action="store_true", help="print the check list and exit")
++    args = parser.parse_args()
++
++    if args.list:
++        for label, description in CHECKS:
++            print(f"{label:24} {description}")
++        return 0
++
++    failures: List[str] = []
++    for _label, _description in CHECKS:
++        # Registered functions are looked up by label below.
++        pass
++    for fn in _registered():
++        fn(failures)
++
++    if failures:
++        print(f"{len(failures)} structural problem(s):", file=sys.stderr)
++        for line in failures:
++            print(f"  {line}", file=sys.stderr)
++        return 1
++
++    print(f"{len(CHECKS)} structural checks passed")
++    return 0
++
++
++def _registered():
++    return [obj for obj in globals().values() if callable(obj) and hasattr(obj, "label")]
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+\ No newline at end of file
+diff --git a/tool/ci/setup_flutter.sh b/tool/ci/setup_flutter.sh
+new file mode 100644
+--- /dev/null
++++ b/tool/ci/setup_flutter.sh
+@@ -0,0 +1,64 @@
++#!/usr/bin/env bash
++# Install the pinned Flutter OHOS SDK used by the remote-control workflows.
++#
++# Usage: bash tool/ci/setup_flutter.sh <target-directory>
++#
++# Copied from the release CI of qflistudio (`tool/ci/setup_flutter.sh`) so both
++# repositories install the same SDK from the same tag and verify the same
++# commit. Keep the three constants below identical in both copies.
++#
++# Why the fork and not upstream Flutter: this package references
++# `TargetPlatform.ohos` (for example `lib/config/client_platform.dart`), an enum
++# value that only exists in the HarmonyOS fork. An upstream SDK fails to
++# compile it, so "standard Flutter stable" is not a valid substitute here.
++set -euo pipefail
++
++FLUTTER_REPOSITORY="https://gitcode.com/openharmony-tpc/flutter_flutter.git"
++FLUTTER_TAG="3.27.5-ohos-1.0.1"
++FLUTTER_COMMIT="12587c79e88aacf3172a84e536f226457d037594"
++
++if [ "$#" -ne 1 ]; then
++  echo "::error::usage: setup_flutter.sh <target-directory>"
++  exit 2
++fi
++
++target="$1"
++if command -v cygpath >/dev/null 2>&1; then
++  target="$(cygpath -u "$target")"
++fi
++
++installed_commit() {
++  git -C "$target" rev-parse HEAD 2>/dev/null || true
++}
++
++if [ -x "$target/bin/flutter" ] && [ "$(installed_commit)" = "$FLUTTER_COMMIT" ]; then
++  echo "Flutter SDK already present at $FLUTTER_COMMIT"
++else
++  cloned=0
++  for attempt in 1 2 3; do
++    rm -rf "$target"
++    if git clone --depth 1 --branch "$FLUTTER_TAG" "$FLUTTER_REPOSITORY" "$target"; then
++      cloned=1
++      break
++    fi
++    echo "::warning::Flutter SDK clone attempt $attempt failed"
++    sleep $((attempt * 15))
++  done
++  if [ "$cloned" -ne 1 ]; then
++    echo "::error::Could not clone $FLUTTER_REPOSITORY at $FLUTTER_TAG"
++    exit 1
++  fi
++fi
++
++actual="$(installed_commit)"
++if [ "$actual" != "$FLUTTER_COMMIT" ]; then
++  echo "::error::Flutter SDK commit is '$actual', expected $FLUTTER_COMMIT"
++  exit 1
++fi
++
++# The flutter tool derives its version from the tag. A shallow clone must keep it.
++if ! git -C "$target" describe --tags --exact-match >/dev/null 2>&1; then
++  git -C "$target" fetch --depth 1 origin "refs/tags/$FLUTTER_TAG:refs/tags/$FLUTTER_TAG"
++fi
++
++echo "Flutter SDK $FLUTTER_TAG ($FLUTTER_COMMIT) ready in $target"
+\ No newline at end of file

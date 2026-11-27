@@ -1,0 +1,3591 @@
+diff --git a/lib/remote_control/desktop/desktop_companion_channel.dart b/lib/remote_control/desktop/desktop_companion_channel.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_channel.dart
+@@ -0,0 +1,150 @@
++// Transport boundary for the local companion (sidecar) link.
++//
++// The desktop page talks to the Node companion over a loopback, line-delimited
++// JSON socket. Keeping the transport behind this interface means:
++//
++//   * `desktop_companion_controller.dart` stays free of `dart:io` and is unit
++//     testable with a fake that pipes frames in both directions;
++//   * the browser build (and the tests) never open a socket, so the module does
++//     not regress `RemoteComputerPage.isSupported`-style platform gating;
++//   * attaching to an already-running companion and spawning a new one differ
++//     only in how the channel is obtained, not in the protocol.
++//
++// The wire contract is the companion's existing sidecar protocol (see
++// `companion/remote_agent/src/agent/sidecar.ts`): newline-delimited JSON frames,
++// plus one optional first request `{"type":"auth","token":"..."}` when the
++// companion published a per-run attach token.
++
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/foundation.dart';
++
++/// One bidirectional link to a companion process.
++abstract class DesktopCompanionChannel {
++  /// Frames pushed by the companion: `snapshot`, `pair_code`, `event`,
++  /// `herdr_*`, `codex_*`, `error`, …
++  Stream<Map<String, dynamic>> get frames;
++
++  /// Sends one request frame. Never throws when the link is already gone; the
++  /// caller observes disconnection through [frames] and [closed].
++  void send(Map<String, dynamic> frame);
++
++  /// Completes when the link can no longer be used.
++  Future<void> get closed;
++
++  /// Releases the socket and any child process. Idempotent.
++  Future<void> close();
++}
++
++/// Decodes newline-delimited JSON without losing a frame split across reads.
++///
++/// The companion writes one frame per line; a `dart:io` socket read can end
++/// mid-line, so the partial tail is buffered until its newline arrives.
++class CompanionFrameDecoder {
++  String _buffer = '';
++
++  /// Returns every complete frame in [chunk]; partial input is retained.
++  List<Map<String, dynamic>> add(String chunk) {
++    _buffer += chunk;
++    final frames = <Map<String, dynamic>>[];
++    var index = _buffer.indexOf('\n');
++    while (index >= 0) {
++      final line = _buffer.substring(0, index).trim();
++      _buffer = _buffer.substring(index + 1);
++      if (line.isNotEmpty) {
++        final decoded = decodeFrame(line);
++        if (decoded != null) frames.add(decoded);
++      }
++      index = _buffer.indexOf('\n');
++    }
++    return frames;
++  }
++
++  /// Parses one JSON object line. Non-objects and malformed lines yield null:
++  /// a stray log line from the child must not kill the session.
++  static Map<String, dynamic>? decodeFrame(String line) {
++    final text = line.trim();
++    if (!text.startsWith('{')) return null;
++    try {
++      final decoded = jsonDecode(text);
++      if (decoded is Map<String, dynamic>) return decoded;
++      if (decoded is Map) return decoded.cast<String, dynamic>();
++    } on FormatException {
++      return null;
++    }
++    return null;
++  }
++
++  /// Encodes one request frame, including its trailing newline.
++  static String encodeFrame(Map<String, dynamic> frame) =>
++      '${jsonEncode(frame)}\n';
++}
++
++/// In-memory channel used by tests and by the unsupported-platform preview.
++///
++/// It records what the page sent and lets a test push frames back, so the
++/// controller logic (pairing timeout, offline state, session discovery) is
++/// covered without a process or a socket.
++class FakeDesktopCompanionChannel implements DesktopCompanionChannel {
++  FakeDesktopCompanionChannel({this.attachToken});
++
++  /// Token the fake accepts in its first `auth` frame, when attaching.
++  final String? attachToken;
++
++  final StreamController<Map<String, dynamic>> _frames =
++      StreamController<Map<String, dynamic>>.broadcast();
++  final Completer<void> _closed = Completer<void>();
++
++  /// Every frame the page sent, in order.
++  final List<Map<String, dynamic>> sent = <Map<String, dynamic>>[];
++
++  bool _authed = true;
++  bool _closedFlag = false;
++
++  /// Whether the first frame must be a valid `auth`.
++  bool get expectsAuth => attachToken != null;
++
++  @override
++  Stream<Map<String, dynamic>> get frames => _frames.stream;
++
++  @override
++  Future<void> get closed => _closed.future;
++
++  @override
++  void send(Map<String, dynamic> frame) {
++    if (_closedFlag) return;
++    sent.add(Map<String, dynamic>.of(frame));
++    if (expectsAuth && !_authed) {
++      if (frame['type'] == 'auth' && frame['token'] == attachToken) {
++        _authed = true;
++      }
++      return;
++    }
++  }
++
++  /// Pushes a frame as if the companion had written it.
++  void emit(Map<String, dynamic> frame) {
++    if (!_closedFlag) _frames.add(frame);
++  }
++
++  /// Simulates the companion going away (crash, user closed the window).
++  Future<void> dropConnection() async {
++    if (_closedFlag) return;
++    _closedFlag = true;
++    _frames.close();
++    _closed.complete();
++  }
++
++  @override
++  Future<void> close() async {
++    if (_closedFlag) return;
++    _closedFlag = true;
++    await _frames.close();
++    if (!_closed.isCompleted) _closed.complete();
++  }
++
++  /// Whether the page successfully authenticated against [attachToken].
++  @visibleForTesting
++  bool get authenticated => _authed;
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_controller.dart b/lib/remote_control/desktop/desktop_companion_controller.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_controller.dart
+@@ -0,0 +1,514 @@
++// State for the desktop "本机配对" page.
++//
++// This controller talks to the local companion (the Node sidecar) and reports
++// only what the companion actually returned. Two things it never does:
++//
++//   * it never invents sessions, tools or counts. An empty list means the
++//     companion said there is nothing, and the page shows a creation entry
++//     instead of pretending a session exists;
++//   * it never treats `bindings` (this run's bound streams) as the list of
++//     sessions on the machine. Existing Herdr workspaces, Claude history and
++//     Codex threads are discovered through the agent's own protocol kinds
++//     (`herdr_workspaces`, `list_history`, `codex_threads`) via the sidecar's
++//     `discover` request; `bindings` only decorates the ones already open here.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import 'desktop_companion_channel.dart';
++import 'desktop_companion_locator.dart';
++
++/// One discovered session the user can open.
++@immutable
++class DesktopDiscoveredSession {
++  const DesktopDiscoveredSession({
++    required this.id,
++    required this.kind,
++    required this.title,
++    this.subtitle,
++    this.lastUsed,
++    this.bound = false,
++    this.origin,
++    this.canOpen = true,
++    this.canAcceptInput = false,
++  });
++
++  /// Stable identifier inside its kind (Claude history id, Herdr pane id,
++  /// Codex thread id).
++  final String id;
++
++  /// `claude` | `herdr` | `codex`.
++  final String kind;
++
++  final String title;
++  final String? subtitle;
++  final DateTime? lastUsed;
++
++  /// True when this run already holds a stream for it.
++  final bool bound;
++
++  /// `live` / `history` / `pane`, mirroring the companion's own naming.
++  final String? origin;
++
++  /// False for entries that are listed but cannot be opened (for example a
++  /// Codex thread the local CLI cannot resume).
++  final bool canOpen;
++
++  /// True when the companion can deliver input to this session. Read-only
++  /// sources (polled Herdr panes, SDK history) report false, and the page hides
++  /// the composer instead of offering an action that would fail.
++  final bool canAcceptInput;
++
++  /// Human label for the kind badge.
++  String get kindLabel => switch (kind) {
++    'claude' => 'Claude Code',
++    'herdr' => 'Herdr',
++    'codex' => 'Codex',
++    _ => kind,
++  };
++}
++
++/// One line of output attached to an opened session.
++@immutable
++class DesktopSessionLine {
++  const DesktopSessionLine({required this.text, required this.seq});
++
++  final String text;
++  final int seq;
++}
++
++/// Pairing state as the companion reported it.
++@immutable
++class DesktopPairingInfo {
++  const DesktopPairingInfo({
++    required this.code,
++    required this.uri,
++    required this.expiresAt,
++  });
++
++  /// Short code, already formatted as `XXXX-XXXX` by the companion.
++  final String code;
++
++  /// `cloudterminal://pair?relay=…&code=…&v=1`; copyable and scannable.
++  final String uri;
++
++  final DateTime expiresAt;
++
++  Duration get remaining => expiresAt.difference(DateTime.now());
++
++  bool get isExpired => remaining.isNegative;
++}
++
++/// Coarse lifecycle of the local companion link.
++enum DesktopCompanionStatus {
++  /// Discovery has not finished yet.
++  probing,
++
++  /// No companion bundle was found on this machine.
++  notInstalled,
++
++  /// The platform cannot host a companion (browser build).
++  unsupported,
++
++  /// Starting or attaching in progress.
++  starting,
++
++  /// Connected; pairing code and sessions are available.
++  ready,
++
++  /// The companion link dropped; the page offers a retry.
++  stopped,
++
++  /// Starting failed; [DesktopCompanionController.lastError] says why.
++  failed,
++}
++
++/// Hands the controller a channel when the page starts.
++///
++/// Injected so tests can run the whole state machine against
++/// [FakeDesktopCompanionChannel] without a process or a socket.
++typedef DesktopCompanionConnector = Future<DesktopCompanionChannel> Function();
++
++/// Drives the desktop companion page.
++class DesktopCompanionController extends ChangeNotifier {
++  DesktopCompanionController({
++    required this.connect,
++    DesktopCompanionResolution? resolution,
++  }) : _resolution = resolution;
++
++  /// Opens the companion link (spawn or attach). Called on start and on retry.
++  final DesktopCompanionConnector connect;
++
++  final DesktopCompanionResolution? _resolution;
++  DesktopCompanionStatus _status = DesktopCompanionStatus.probing;
++  DesktopCompanionChannel? _channel;
++  StreamSubscription<Map<String, dynamic>>? _subscription;
++  String? _lastError;
++  bool _disposed = false;
++
++  DesktopPairingInfo? _pairing;
++  bool _relayOnline = false;
++  String? _relayUrl;
++  String? _connectionMode;
++  int _retries = 0;
++  int? _pairedClients;
++
++  final List<DesktopDiscoveredSession> _sessions = <DesktopDiscoveredSession>[];
++  final Map<String, List<DesktopSessionLine>> _sessionLines =
++      <String, List<DesktopSessionLine>>{};
++  final List<String> _toolProbes = <String>[];
++  String? _openSessionId;
++  int _lastSeq = 0;
++
++  // --- read-only state exposed to the page --------------------------------
++
++  DesktopCompanionStatus get status => _status;
++
++  DesktopCompanionResolution? get resolution => _resolution;
++
++  /// The companion this page is using, once discovery succeeded.
++  DesktopCompanionLocation? get location => _resolution?.location;
++
++  String? get lastError => _lastError;
++
++  DesktopPairingInfo? get pairing => _pairing;
++
++  bool get relayOnline => _relayOnline;
++
++  /// Relay or LAN address the phone must use, as reported by the companion.
++  String? get relayUrl => _relayUrl;
++
++  /// `local` (LAN relay in-process) or `remote` (public relay).
++  String? get connectionMode => _connectionMode;
++
++  int get retries => _retries;
++
++  /// Authoritative connected-client count from the relay, or null when the
++  /// companion cannot know it. Never a fabricated zero.
++  int? get pairedClients => _pairedClients;
++
++  List<DesktopDiscoveredSession> get sessions =>
++      List<DesktopDiscoveredSession>.unmodifiable(_sessions);
++
++  bool get hasSessions => _sessions.isNotEmpty;
++
++  List<String> get toolProbes => List<String>.unmodifiable(_toolProbes);
++
++  String? get openSessionId => _openSessionId;
++
++  List<DesktopSessionLine> get openSessionLines => _openSessionId == null
++      ? const <DesktopSessionLine>[]
++      : List<DesktopSessionLine>.unmodifiable(
++          _sessionLines[_openSessionId!] ?? const <DesktopSessionLine>[],
++        );
++
++  /// True when the pairing code exists but its window has passed.
++  bool get isPairingExpired => _pairing?.isExpired ?? false;
++
++  /// Whether the page can offer the "spawn" button (installed bundle that the
++  /// app is allowed to start). A sandboxed macOS build attaches instead.
++  bool get canSpawn => location?.canSpawn ?? false;
++
++  // --- lifecycle ----------------------------------------------------------
++
++  /// Resolves discovery, then connects. Safe to call once per page mount.
++  Future<void> start() async {
++    if (_status == DesktopCompanionStatus.starting ||
++        _status == DesktopCompanionStatus.ready) {
++      return;
++    }
++    _status = DesktopCompanionStatus.probing;
++    _lastError = null;
++    _notify();
++
++    final resolution = _resolution;
++    if (resolution != null && !resolution.isFound) {
++      _applyMissing(resolution);
++      return;
++    }
++    await _openChannel();
++  }
++
++  /// Retries a dropped or failed link without recreating the page.
++  Future<void> retry() async {
++    await _closeChannel();
++    await _openChannel();
++  }
++
++  Future<void> _openChannel() async {
++    _status = DesktopCompanionStatus.starting;
++    _notify();
++    try {
++      final channel = await connect();
++      if (_disposed) {
++        await channel.close();
++        return;
++      }
++      _channel = channel;
++      _subscription = channel.frames.listen(_onFrame, onError: _onChannelError);
++      unawaited(channel.closed.then((_) => _onChannelClosed()));
++      _status = DesktopCompanionStatus.ready;
++      _lastError = null;
++      // Ask for the state the page needs. The companion answers with a
++      // snapshot, a pairing code and the discovered session list.
++      _send(<String, dynamic>{'type': 'discover'});
++      _send(<String, dynamic>{'type': 'pair_code'});
++      _notify();
++    } on Object catch (error) {
++      _status = DesktopCompanionStatus.failed;
++      _lastError = _message(error);
++      _notify();
++    }
++  }
++
++  /// New one-time code (the companion invalidates the previous one).
++  void requestPairCode() {
++    _pairing = null;
++    _send(<String, dynamic>{'type': 'pair_code'});
++    _notify();
++  }
++
++  /// Re-runs session discovery and tool probing.
++  void refreshSessions() {
++    _send(<String, dynamic>{'type': 'discover'});
++    _send(<String, dynamic>{'type': 'tool_probe'});
++  }
++
++  /// Opens a discovered session: binds it through the source that produced it
++  /// and streams its output.
++  ///
++  /// The sidecar resolves Herdr panes through the pane poller, SDK Claude
++  /// history through the history loader and Codex threads through the app-server
++  /// resume path, so `open_session` must carry the same fields discovery
++  /// returned (`kind`, `origin`); `tool_bind` alone only knows the old
++  /// `listReadOnly()` sources and would reject Codex and SDK history.
++  void openSession(String id) {
++    final session = _sessions.where((s) => s.id == id).firstOrNull;
++    if (session == null || !session.canOpen) return;
++    _openSessionId = id;
++    _sessionLines.putIfAbsent(id, () => <DesktopSessionLine>[]);
++    _send(<String, dynamic>{
++      'type': 'open_session',
++      'id': id,
++      'kind': session.kind,
++      'origin': session.origin,
++      'canAcceptInput': session.canAcceptInput,
++    });
++    _notify();
++  }
++
++  /// Leaves the detail view without closing the desktop session itself.
++  void closeSessionView() {
++    _openSessionId = null;
++    _notify();
++  }
++
++  /// Sends input to the open session, when the companion marked it writable.
++  void sendInput(String text) {
++    final id = _openSessionId;
++    if (id == null || text.isEmpty) return;
++    final session = _sessions.where((s) => s.id == id).firstOrNull;
++    if (session != null && !session.canAcceptInput) return;
++    _send(<String, dynamic>{'type': 'input', 'id': id, 'text': text});
++  }
++
++  /// Dismisses the inline error banner without touching the link.
++  void clearError() {
++    _lastError = null;
++    _notify();
++  }
++
++  void _onFrame(Map<String, dynamic> frame) {
++    if (_disposed) return;
++    switch (frame['type']) {
++      case 'snapshot':
++        _applySnapshot(frame);
++      case 'pair_code':
++        final display = frame['display'];
++        final uri = frame['uri'];
++        final expiresAt = frame['expiresAt'];
++        if (display is String && uri is String && expiresAt is num) {
++          _pairing = DesktopPairingInfo(
++            code: display,
++            uri: uri,
++            expiresAt: DateTime.fromMillisecondsSinceEpoch(expiresAt.toInt()),
++          );
++        }
++        _notify();
++      case 'discovered':
++        _applyDiscovered(frame);
++      case 'tool_probe':
++        final tools = frame['tools'];
++        if (tools is List) {
++          _toolProbes
++            ..clear()
++            ..addAll(tools.whereType<Map>().map((tool) => '${tool['kind']}'));
++        }
++        _notify();
++      // Wire contract, shared with the sidecar and the phone protocol:
++      // `{type:'stream_event', kind, sessionId, eventKind, text, done?, seq}`.
++      // The previous draft invented `session_event` with an `id` field, so
++      // output never reached this page. `sessionId` is the existing name on
++      // `StreamEventPayload` and is what the sidecar already emits.
++      case 'stream_event':
++        _applyStreamEvent(frame);
++      case 'session_opened':
++        final id = frame['id'];
++        if (id is String) {
++          _sessionLines.putIfAbsent(id, () => <DesktopSessionLine>[]);
++          _notify();
++        }
++      case 'error':
++        _lastError = frame['message'] is String
++            ? frame['message'] as String
++            : '未知错误';
++        // A failed open must not keep the detail view spinning: drop the
++        // "reading…" placeholder and let the banner explain what happened.
++        _notify();
++      default:
++        // Unknown kinds are ignored on purpose: a newer companion must not
++        // break an older desktop build.
++        break;
++    }
++  }
++
++  void _applySnapshot(Map<String, dynamic> frame) {
++    _relayOnline = frame['relayOnline'] == true;
++    _relayUrl = frame['relayUrl'] is String
++        ? frame['relayUrl'] as String
++        : _relayUrl;
++    _connectionMode = frame['connectionMode'] is String
++        ? frame['connectionMode'] as String
++        : _connectionMode;
++    _retries = frame['retries'] is num
++        ? (frame['retries'] as num).toInt()
++        : _retries;
++    // The relay owns this number; `null` means "unknown", which the page shows
++    // as 未知 instead of a confident zero.
++    _pairedClients = frame['pairedClients'] is num
++        ? (frame['pairedClients'] as num).toInt()
++        : null;
++    final seq = frame['seq'];
++    if (seq is num) _lastSeq = seq.toInt();
++    _notify();
++  }
++
++  void _applyDiscovered(Map<String, dynamic> frame) {
++    final entries = frame['sessions'];
++    final discovered = <DesktopDiscoveredSession>[];
++    if (entries is List) {
++      for (final entry in entries) {
++        if (entry is! Map) continue;
++        final id = entry['id'];
++        final kind = entry['kind'];
++        if (id is! String || id.isEmpty || kind is! String) continue;
++        final lastUsed = entry['lastUsed'];
++        discovered.add(
++          DesktopDiscoveredSession(
++            id: id,
++            kind: kind,
++            title:
++                entry['title'] is String &&
++                    (entry['title'] as String).isNotEmpty
++                ? entry['title'] as String
++                : '未命名会话',
++            subtitle: entry['subtitle'] is String
++                ? entry['subtitle'] as String
++                : null,
++            lastUsed: lastUsed is num
++                ? DateTime.fromMillisecondsSinceEpoch(lastUsed.toInt())
++                : null,
++            bound: entry['bound'] == true,
++            origin: entry['origin'] is String
++                ? entry['origin'] as String
++                : null,
++            canOpen: entry['canOpen'] != false,
++            canAcceptInput: entry['canAcceptInput'] == true,
++          ),
++        );
++      }
++    }
++    _sessions
++      ..clear()
++      ..addAll(discovered);
++    _notify();
++  }
++
++  void _applyStreamEvent(Map<String, dynamic> frame) {
++    // `sessionId` is the sidecar's field; accept `id` only as a compatibility
++    // alias for an older build, so a staged companion does not go silent.
++    final id = frame['sessionId'] ?? frame['id'];
++    final text = frame['text'];
++    if (id is! String || text is! String) return;
++    final seq = frame['seq'] is num
++        ? (frame['seq'] as num).toInt()
++        : ++_lastSeq;
++    final lines = _sessionLines.putIfAbsent(id, () => <DesktopSessionLine>[]);
++    // `eventKind: 'snapshot'` replaces the buffer (initial read / polled screen);
++    // `stdout`/`stderr`/`turns` append.
++    if (frame['eventKind'] == 'snapshot' && frame['append'] != true) {
++      lines.clear();
++    }
++    lines.add(DesktopSessionLine(text: text, seq: seq));
++    // Bound the buffer so a chatty session cannot grow without limit.
++    const maxLines = 2000;
++    if (lines.length > maxLines) lines.removeRange(0, lines.length - maxLines);
++    _notify();
++  }
++
++  void _onChannelError(Object error) {
++    _lastError = _message(error);
++    _status = DesktopCompanionStatus.failed;
++    _notify();
++  }
++
++  void _onChannelClosed() {
++    if (_disposed) return;
++    if (_status == DesktopCompanionStatus.ready ||
++        _status == DesktopCompanionStatus.starting) {
++      _status = DesktopCompanionStatus.stopped;
++      _lastError ??= '本机 companion 连接已断开。';
++      _notify();
++    }
++  }
++
++  void _applyMissing(DesktopCompanionResolution resolution) {
++    _status = resolution.location == null && _unsupportedPlatform
++        ? DesktopCompanionStatus.unsupported
++        : DesktopCompanionStatus.notInstalled;
++    _lastError = resolution.problem;
++    _notify();
++  }
++
++  bool get _unsupportedPlatform =>
++      location == null && (_resolution?.searched.isEmpty ?? false);
++
++  void _send(Map<String, dynamic> frame) => _channel?.send(frame);
++
++  Future<void> _closeChannel() async {
++    await _subscription?.cancel();
++    _subscription = null;
++    final channel = _channel;
++    _channel = null;
++    await channel?.close();
++  }
++
++  static String _message(Object error) {
++    final text = error.toString();
++    return text.startsWith('Bad state: ')
++        ? text.substring('Bad state: '.length)
++        : text;
++  }
++
++  void _notify() {
++    if (!_disposed) notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    _disposed = true;
++    unawaited(_closeChannel());
++    super.dispose();
++  }
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_entry.dart b/lib/remote_control/desktop/desktop_companion_entry.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_entry.dart
+@@ -0,0 +1,255 @@
++// App-scoped ownership for the local companion, plus the entry widget Studio's
++// tools tab can render.
++//
++// Two constraints shaped this file:
++//
++//   * `StudioProfile.toolsTabBuilder` has no `BuildContext`, so the tools tab
++//     cannot look up an `InheritedWidget` to find a session. A small process-wide
++//     registry is used instead, and it is the only place a session is created.
++//   * The session must outlive the page. Closing 本机配对 therefore detaches a
++//     handle; the registry keeps the process (and every phone session it serves)
++//     alive until the user stops it explicitly or the app shuts down.
++
++import 'dart:async';
++// `AppExitResponse` lives in `dart:ui`; `material.dart` does not re-export it.
++import 'dart:ui' show AppExitResponse;
++
++import 'package:flutter/foundation.dart';
++import 'package:flutter/material.dart';
++
++import 'desktop_companion_locator.dart';
++import 'desktop_companion_platform.dart';
++import 'desktop_companion_session.dart';
++import 'desktop_remote_page.dart';
++
++/// One companion session per discovered bundle, for the life of the process.
++class DesktopCompanionRegistry {
++  DesktopCompanionRegistry._();
++
++  static final DesktopCompanionRegistry instance = DesktopCompanionRegistry._();
++
++  final Map<String, DesktopCompanionSession> _sessions =
++      <String, DesktopCompanionSession>{};
++  bool _observing = false;
++
++  /// Returns the session for [location], creating it on first use.
++  DesktopCompanionSession ensure(DesktopCompanionLocation location) {
++    _observeLifecycle();
++    final key = '${location.agentDirectory}\u0000${location.attachFile ?? ''}';
++    return _sessions.putIfAbsent(
++      key,
++      () => DesktopCompanionSession(location: location),
++    );
++  }
++
++  /// Sessions currently held. Exposed for diagnostics and tests.
++  Iterable<DesktopCompanionSession> get sessions => _sessions.values;
++
++  /// Stops everything this app started.
++  ///
++  /// Each session is stopped independently: one process that refuses to exit
++  /// must not prevent the others from being cancelled, or the app would leave
++  /// several orphans instead of one. The first failure is rethrown afterwards.
++  Future<void> stopAll() async {
++    final all = _sessions.values.toList(growable: false);
++    _sessions.clear();
++    Object? failure;
++    for (final session in all) {
++      try {
++        await session.stop();
++      } on Object catch (error) {
++        failure ??= error;
++      }
++    }
++    if (failure != null) throw failure;
++  }
++
++  /// Stops a single session, for an explicit "停止 companion" action.
++  Future<void> stop(DesktopCompanionSession session) async {
++    _sessions.removeWhere((_, value) => identical(value, session));
++    await session.stop();
++  }
++
++  /// App shutdown is the one path that must cancel the spawned process.
++  ///
++  /// The registry installs one observer for both signals, so a Node child cannot
++  /// survive the window as an orphan whichever way the app closes.
++  void _observeLifecycle() {
++    if (_observing) return;
++    _observing = true;
++    WidgetsBinding.instance.addObserver(
++      _DesktopCompanionLifecycleObserver(this),
++    );
++  }
++}
++
++class _DesktopCompanionLifecycleObserver with WidgetsBindingObserver {
++  _DesktopCompanionLifecycleObserver(this._registry);
++
++  final DesktopCompanionRegistry _registry;
++
++  /// Normal desktop exit: the engine reports `detached` before teardown. The
++  /// spawned Node child is cancelled here so it cannot outlive the window.
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.detached) {
++      unawaited(_registry.stopAll().catchError((Object _) {}));
++    }
++  }
++
++  /// Close-window path. Returning only after the children exited is what makes
++  /// this the supported cleanup hook rather than a fire-and-forget hint.
++  @override
++  Future<AppExitResponse> didRequestAppExit() async {
++    try {
++      await _registry.stopAll();
++    } on Object {
++      // Exiting must still proceed: report through the registry's diagnostics
++      // rather than blocking the app on a stuck process.
++    }
++    return AppExitResponse.exit;
++  }
++}
++
++/// Whether this build can show the local pairing entry.
++///
++/// Same gate as [RemoteComputerPage.isSupported]-style checks: a browser has no
++/// local process and no loopback socket.
++bool get isLocalCompanionSupported {
++  if (kIsWeb) return false;
++  return switch (defaultTargetPlatform) {
++    TargetPlatform.windows ||
++    TargetPlatform.macOS ||
++    TargetPlatform.linux => true,
++    _ => false,
++  };
++}
++
++/// Tools-tab entry: resolves the companion, then shows the pairing page.
++///
++/// Resolution is asynchronous (it probes the filesystem), so this widget owns
++/// the loading and missing states; the page itself only deals with a found
++/// bundle.
++class DesktopCompanionEntryPage extends StatefulWidget {
++  const DesktopCompanionEntryPage({super.key, this.environment});
++
++  /// Test seam: a fake machine description.
++  final Future<DesktopCompanionEnvironment>? environment;
++
++  @override
++  State<DesktopCompanionEntryPage> createState() =>
++      _DesktopCompanionEntryPageState();
++}
++
++class _DesktopCompanionEntryPageState extends State<DesktopCompanionEntryPage> {
++  DesktopCompanionResolution? _resolution;
++  DesktopCompanionSession? _session;
++  String? _error;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_resolve());
++  }
++
++  Future<void> _resolve() async {
++    try {
++      final env =
++          await (widget.environment ?? currentDesktopCompanionEnvironment());
++      final resolution = resolveDesktopCompanion(env);
++      if (!mounted) return;
++      setState(() {
++        _resolution = resolution;
++        final location = resolution.location;
++        _session = location == null
++            ? null
++            : DesktopCompanionRegistry.instance.ensure(location);
++      });
++    } on Object catch (error) {
++      if (!mounted) return;
++      setState(() => _error = error.toString());
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final session = _session;
++    final resolution = _resolution;
++    if (_error != null) {
++      return Scaffold(
++        appBar: AppBar(title: const Text('本机配对')),
++        body: Center(
++          child: Padding(
++            padding: const EdgeInsets.all(24),
++            child: Text('无法检查本机 companion：$_error'),
++          ),
++        ),
++      );
++    }
++    if (resolution == null) {
++      return Scaffold(
++        appBar: AppBar(title: const Text('本机配对')),
++        body: const Center(child: CircularProgressIndicator()),
++      );
++    }
++    final location = resolution.location;
++    if (location == null || session == null) {
++      // Discovery finished and found nothing: show the install/launch guidance.
++      // Returning a spinner here (the previous behaviour) hid the only message
++      // that tells the user what to do next.
++      return _MissingCompanionPage(resolution: resolution, onRetry: _resolve);
++    }
++    return DesktopRemotePage(session: session, resolution: resolution);
++  }
++}
++
++/// The "companion not installed" state, with the searched paths and a retry.
++class _MissingCompanionPage extends StatelessWidget {
++  const _MissingCompanionPage({
++    required this.resolution,
++    required this.onRetry,
++  });
++
++  final DesktopCompanionResolution resolution;
++  final Future<void> Function() onRetry;
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      appBar: AppBar(title: const Text('本机配对')),
++      body: ListView(
++        padding: const EdgeInsets.all(24),
++        children: [
++          Icon(
++            Icons.extension_off,
++            size: 48,
++            color: Theme.of(context).colorScheme.error,
++          ),
++          const SizedBox(height: 16),
++          Text(
++            '未找到本机 companion',
++            style: Theme.of(context).textTheme.titleLarge,
++          ),
++          const SizedBox(height: 8),
++          Text(resolution.problem ?? '请重新安装 Studio，或手动启动安装目录下的 companion。'),
++          const SizedBox(height: 16),
++          FilledButton.icon(
++            onPressed: () => onRetry(),
++            icon: const Icon(Icons.refresh),
++            label: const Text('重新检测'),
++          ),
++          if (resolution.searched.isNotEmpty) ...[
++            const SizedBox(height: 16),
++            ExpansionTile(
++              title: const Text('已查找的位置'),
++              children: [
++                for (final path in resolution.searched)
++                  ListTile(dense: true, title: SelectableText(path)),
++              ],
++            ),
++          ],
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_link.dart b/lib/remote_control/desktop/desktop_companion_link.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_link.dart
+@@ -0,0 +1,4 @@
++// Platform selection for the native companion link.
++
++export 'desktop_companion_link_stub.dart'
++    if (dart.library.io) 'desktop_companion_link_io.dart';
+diff --git a/lib/remote_control/desktop/desktop_companion_link_io.dart b/lib/remote_control/desktop/desktop_companion_link_io.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_link_io.dart
+@@ -0,0 +1,303 @@
++// Native companion link: spawns or attaches to the Node sidecar over loopback.
++//
++// Selected by `desktop_companion_link.dart` on platforms with `dart:io`; the
++// browser resolves the stub instead, so nothing here is reachable from a web
++// build.
++//
++// Two attachment modes, both loopback-only:
++//
++//   * **spawn** — the app starts `node src/agent/main.ts --sidecar --port-file
++//     <app temp file>` itself, waits for `{"type":"listening","port":N}` on
++//     stdout, then reads `{port, token}` from that file before connecting. The
++//     token is never printed: stdout is inherited by logs and CI output. Used on
++//     Windows and Linux, where the installer carries the companion.
++//   * **attach** — the app reads `{port, token}` from the companion's published
++//     attach file and connects to `127.0.0.1:<port>`, sending
++//     `{"type":"auth","token":"..."}` first. Used on macOS, where the app
++//     sandbox forbids spawning the bundled Node binary.
++//
++// The port is never treated as an identity: every attach path presents the
++// token, and the companion drops unauthenticated sockets.
++
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++// `ProcessSupervisor` lives in `lib/services`, two levels up from this file.
++import '../../services/process_supervisor.dart';
++
++import 'desktop_companion_channel.dart';
++import 'desktop_companion_locator.dart';
++
++/// A running companion the app started, kept alive across page visits.
++class SpawnedDesktopCompanion {
++  SpawnedDesktopCompanion({
++    required ManagedProcess process,
++    required this.port,
++    required this.token,
++    this.scratchDirectory,
++  }) : _process = process;
++
++  final ManagedProcess _process;
++  final int port;
++  final String token;
++
++  /// Per-run directory holding the attach file; removed with the process.
++  final String? scratchDirectory;
++
++  /// Cancels the child and removes its attach document. Only the session scope
++  /// calls this.
++  Future<void> stop() async {
++    try {
++      await _process.cancel();
++    } finally {
++      final directory = scratchDirectory;
++      if (directory != null) {
++        await Directory(directory)
++            .delete(recursive: true)
++            .catchError((Object _) => Directory(directory));
++      }
++    }
++  }
++}
++
++/// Starts the companion and returns the channel that owns it.
++class SpawnResult {
++  const SpawnResult({required this.channel, required this.spawned});
++
++  final DesktopCompanionChannel channel;
++  final SpawnedDesktopCompanion spawned;
++}
++
++/// Spawns or attaches, returning a channel ready for the controller.
++class NativeDesktopCompanionLink {
++  NativeDesktopCompanionLink({ProcessSupervisor? supervisor})
++    : _supervisor = supervisor ?? ProcessSupervisor();
++
++  final ProcessSupervisor _supervisor;
++
++  /// Starts the companion and returns both the channel and the owned process.
++  ///
++  /// The caller (the session scope, never the page) is responsible for the
++  /// returned [SpawnResult.spawned] lifetime; keeping it separate means a page
++  /// cannot cancel a process by closing its socket.
++  Future<SpawnResult> spawnAndOwn(
++    DesktopCompanionLocation location, {
++    Duration readyTimeout = const Duration(seconds: 20),
++  }) async {
++    final executable = location.nodeExecutable;
++    if (executable == null) {
++      throw StateError('未找到 Node 运行时，无法启动本机 companion。');
++    }
++
++    // Per-run private directory for the attach document. `systemTemp` is
++    // per-user on all three platforms; the directory is 0700 and the file 0600
++    // (written by the companion), and both are removed when the session stops.
++    final scratch = await Directory.systemTemp.createTemp('qfli-companion-');
++    final portFile = '${scratch.path}${Platform.pathSeparator}sidecar.json';
++
++    final process = await _supervisor
++        .start(
++          executable,
++          <String>['src/agent/main.ts', '--sidecar', '--port-file', portFile],
++          workingDirectory: location.agentDirectory,
++          // Inherit the parent environment so a packaged Node and the user's tool
++          // paths (Herdr/Claude/Codex) resolve exactly as they would in a shell.
++          includeParentEnvironment: true,
++          runInShell: false,
++        )
++        .catchError((Object error) async {
++          await scratch
++              .delete(recursive: true)
++              .catchError((Object _) => scratch);
++          throw error;
++        });
++
++    final ready = Completer<Map<String, dynamic>>();
++    final decoder = CompanionFrameDecoder();
++    final subscription = process.stdout
++        .transform(utf8.decoder)
++        .listen(
++          (chunk) {
++            for (final frame in decoder.add(chunk)) {
++              if (!ready.isCompleted &&
++                  frame['type'] == 'listening' &&
++                  frame['port'] is num) {
++                ready.complete(frame);
++              }
++            }
++          },
++          onError: (Object error) {
++            if (!ready.isCompleted) ready.completeError(error);
++          },
++          onDone: () {
++            if (!ready.isCompleted) {
++              ready.completeError(StateError('本机 companion 未启动：后台服务已退出。'));
++            }
++          },
++        );
++
++    Map<String, dynamic> listening;
++    try {
++      listening = await ready.future.timeout(
++        readyTimeout,
++        onTimeout: () {
++          unawaited(subscription.cancel());
++          unawaited(process.cancel());
++          throw StateError('本机 companion 未在 ${readyTimeout.inSeconds} 秒内就绪。');
++        },
++      );
++    } catch (_) {
++      await subscription.cancel();
++      await process.cancel();
++      rethrow;
++    }
++    unawaited(subscription.cancel());
++
++    final port = (listening['port'] as num).toInt();
++    // The token comes from the 0600 file the companion wrote, not from stdout.
++    final token =
++        DesktopCompanionAttachPoint.tryParse(
++          await _readFile(portFile),
++          source: portFile,
++        )?.token ??
++        '';
++    if (token.isEmpty) {
++      await process.cancel();
++      await scratch.delete(recursive: true).catchError((Object _) => scratch);
++      throw StateError('本机 companion 未写出连接凭据，已停止该进程。');
++    }
++    // The socket connect is outside the ready block on purpose: a failure here
++    // (token rejected, port gone) must not leave the child running. Whichever
++    // path throws, the process this call started is cancelled before rethrow.
++    final DesktopCompanionChannel channel;
++    try {
++      channel = await _connectSocket(port, token: token);
++    } on Object {
++      await process.cancel();
++      await scratch.delete(recursive: true).catchError((Object _) => scratch);
++      rethrow;
++    }
++    return SpawnResult(
++      channel: channel,
++      spawned: SpawnedDesktopCompanion(
++        process: process,
++        port: port,
++        token: token,
++        scratchDirectory: scratch.path,
++      ),
++    );
++  }
++
++  /// Reads the companion's attach document.
++  ///
++  /// The companion writes it asynchronously right after announcing its port, so
++  /// a short retry avoids a startup race without weakening the token check.
++  Future<String?> _readFile(String path) async {
++    for (var attempt = 0; attempt < 20; attempt++) {
++      try {
++        return await File(path).readAsString();
++      } on FileSystemException {
++        await Future<void>.delayed(const Duration(milliseconds: 50));
++      }
++    }
++    return null;
++  }
++
++  /// Starts the companion and returns only its channel.
++  ///
++  /// Deprecated for page use: the returned channel does not own the process, so
++  /// nothing can stop it. Prefer [spawnAndOwn] with a session scope.
++  Future<DesktopCompanionChannel> spawn(
++    DesktopCompanionLocation location, {
++    Duration readyTimeout = const Duration(seconds: 20),
++  }) async {
++    final result = await spawnAndOwn(location, readyTimeout: readyTimeout);
++    return result.channel;
++  }
++
++  /// Attaches to a companion started outside this app.
++  Future<DesktopCompanionChannel> attach(
++    DesktopCompanionAttachPoint attachPoint,
++  ) async {
++    return _connectSocket(attachPoint.port, token: attachPoint.token);
++  }
++
++  Future<DesktopCompanionChannel> _connectSocket(
++    int port, {
++    required String token,
++  }) async {
++    final socket = await Socket.connect(
++      InternetAddress.loopbackIPv4,
++      port,
++      timeout: const Duration(seconds: 5),
++    );
++    final channel = _SocketDesktopCompanionChannel(socket: socket);
++    // The companion requires the credential as the very first frame; there is
++    // no request that succeeds before it.
++    if (token.isNotEmpty) {
++      channel.send(<String, dynamic>{'type': 'auth', 'token': token});
++    }
++    return channel;
++  }
++}
++
++/// Loopback socket channel.
++///
++/// It never owns a process: closing it closes the socket only, so a page leaving
++/// the screen cannot kill the sessions a phone is using.
++class _SocketDesktopCompanionChannel implements DesktopCompanionChannel {
++  _SocketDesktopCompanionChannel({required Socket socket}) : _socket = socket {
++    _subscription = _socket
++        .cast<List<int>>()
++        .transform(utf8.decoder)
++        .listen(
++          (chunk) {
++            for (final frame in _decoder.add(chunk)) {
++              if (!_frames.isClosed) _frames.add(frame);
++            }
++          },
++          onError: _fail,
++          onDone: _fail,
++          cancelOnError: false,
++        );
++  }
++
++  final Socket _socket;
++  final CompanionFrameDecoder _decoder = CompanionFrameDecoder();
++  final StreamController<Map<String, dynamic>> _frames =
++      StreamController<Map<String, dynamic>>.broadcast();
++  final Completer<void> _closed = Completer<void>();
++  late final StreamSubscription<String> _subscription;
++  bool _done = false;
++
++  @override
++  Stream<Map<String, dynamic>> get frames => _frames.stream;
++
++  @override
++  Future<void> get closed => _closed.future;
++
++  @override
++  void send(Map<String, dynamic> frame) {
++    if (_done) return;
++    try {
++      _socket.write(CompanionFrameDecoder.encodeFrame(frame));
++    } on Object {
++      _fail();
++    }
++  }
++
++  void _fail([Object? _]) {
++    if (_done) return;
++    _done = true;
++    unawaited(_subscription.cancel());
++    if (!_frames.isClosed) unawaited(_frames.close());
++    if (!_closed.isCompleted) _closed.complete();
++  }
++
++  @override
++  Future<void> close() async {
++    _fail();
++    await _socket.close().catchError((Object _) {});
++  }
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_link_stub.dart b/lib/remote_control/desktop/desktop_companion_link_stub.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_link_stub.dart
+@@ -0,0 +1,30 @@
++// Browser fallback for the native companion link.
++//
++// There is no loopback socket in a web build, so every entry point reports the
++// capability as unsupported. `DesktopCompanionLinkSurface.isSupported` lets the
++// page explain that instead of showing a retry loop.
++
++import 'desktop_companion_channel.dart';
++import 'desktop_companion_locator.dart';
++
++/// Reports the platform capability for a browser build.
++abstract final class DesktopCompanionLinkSurface {
++  static bool get isSupported => false;
++}
++
++/// Always fails: a browser cannot spawn or attach to a companion.
++class NativeDesktopCompanionLink {
++  NativeDesktopCompanionLink({Object? supervisor});
++
++  Future<DesktopCompanionChannel> spawn(
++    DesktopCompanionLocation location,
++  ) async {
++    throw StateError('浏览器版不支持本机 companion。');
++  }
++
++  Future<DesktopCompanionChannel> attach(
++    DesktopCompanionAttachPoint attachPoint,
++  ) async {
++    throw StateError('浏览器版不支持本机 companion。');
++  }
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_locator.dart b/lib/remote_control/desktop/desktop_companion_locator.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_locator.dart
+@@ -0,0 +1,499 @@
++// Locating the desktop companion (Node agent) inside an installed Studio.
++//
++// The companion is shipped *outside* the Flutter bundle, not inside it:
++//
++//   Windows  C:\Program Files\QFLIStudio\companion\   (installer copies the
++//            portable `qfli-companion-<ver>-windows-<arch>` directory there)
++//   Linux    /opt/qflistudio/companion/               (deb/tar.gz layout)
++//   macOS    "QFLI Remote Companion.app/Contents/Resources/companion/" next to
++//            QFLIStudio.app, or ~/Library/Application Support/QFLIStudio/companion/
++//
++// Discovery is deliberately *not* "walk up until a source checkout appears":
++// a released app must work on a machine that never had the repository. The
++// search order below is therefore:
++//
++//   1. an explicit override directory (`QFLI_COMPANION_DIR`), used by packaged
++//      installers and by developers;
++//   2. the installed locations for this OS, in the order the installer writes
++//      them (per-user before machine-wide);
++//   3. a source checkout *only* when running from one (a `companion.json` with a
++//      `source_checkout` marker), and only as the last resort.
++//
++// Every candidate must contain a `companion.json` manifest, `package.json` and
++// `src/agent/main.ts`. A directory that merely looks plausible is rejected, so
++// the page can honestly say "companion not installed" instead of failing later
++// with a Node error.
++
++import 'dart:convert';
++
++import 'package:flutter/foundation.dart';
++
++/// Where a companion bundle lives and which Node runtime to use.
++@immutable
++class DesktopCompanionLocation {
++  const DesktopCompanionLocation({
++    required this.agentDirectory,
++    required this.nodeExecutable,
++    required this.manifest,
++    required this.origin,
++    this.attachFile,
++  });
++
++  /// Directory that contains `package.json`, `src/agent/main.ts` and `node/`.
++  final String agentDirectory;
++
++  /// Absolute path to the Node binary, or null when the bundle has none.
++  final String? nodeExecutable;
++
++  /// Parsed `companion.json`.
++  final Map<String, dynamic> manifest;
++
++  /// How this location was found, for the page's diagnostics line.
++  final DesktopCompanionOrigin origin;
++
++  /// Where the companion publishes `{port, token}` when it runs detached.
++  final String? attachFile;
++
++  /// Target OS recorded in the manifest (`windows` / `macos` / `linux`).
++  String get targetOs => _string(manifest['os']);
++
++  /// Target architecture recorded in the manifest (`x64` / `arm64`).
++  String get targetArch => _string(manifest['arch']);
++
++  /// Version of the bundled agent.
++  String get agentVersion => _string(manifest['agent_version']);
++
++  /// Bundled Node version, for the diagnostics line only.
++  String get nodeVersion => _string(manifest['node_version']);
++
++  /// Whether the app may spawn this companion itself.
++  ///
++  /// `false` on macOS: the app sandbox forbids starting the bundled Node
++  /// binary, so the page attaches to a companion the user launched instead.
++  bool get canSpawn => manifest['sandboxed'] != true;
++
++  /// Short, user-facing description of where this came from.
++  String get originLabel => switch (origin) {
++    DesktopCompanionOrigin.override => '安装包指定目录',
++    DesktopCompanionOrigin.installedPerUser => '用户安装目录',
++    DesktopCompanionOrigin.installedMachine => '系统安装目录',
++    DesktopCompanionOrigin.sourceCheckout => '开发目录',
++  };
++
++  static String _string(Object? value) => value is String ? value : '';
++}
++
++/// Provenance of a discovered companion, shown in the page's diagnostics.
++enum DesktopCompanionOrigin {
++  override,
++  installedPerUser,
++  installedMachine,
++  sourceCheckout,
++}
++
++/// A companion the user started detached, plus the credential to attach with.
++///
++/// The port alone is never accepted as identity: the companion requires this
++/// token as the first frame, so a stale or guessed port cannot drive the agent.
++@immutable
++class DesktopCompanionAttachPoint {
++  const DesktopCompanionAttachPoint({
++    required this.port,
++    required this.token,
++    this.source,
++  });
++
++  final int port;
++  final String token;
++
++  /// File the pair was read from, for the page's diagnostics line.
++  final String? source;
++
++  /// Parses the `{port, token}` document the companion publishes.
++  ///
++  /// Returns null when the document is absent, unreadable or incomplete. A
++  /// document without a token is rejected on purpose: attaching with only a
++  /// port would let any local process drive the agent.
++  static DesktopCompanionAttachPoint? tryParse(String? raw, {String? source}) {
++    if (raw == null || raw.trim().isEmpty) return null;
++    try {
++      final decoded = jsonDecode(raw);
++      if (decoded is! Map) return null;
++      final port = decoded['port'];
++      final token = decoded['token'];
++      if (port is! num || token is! String || token.isEmpty) return null;
++      final value = port.toInt();
++      if (value < 1 || value > 65535) return null;
++      return DesktopCompanionAttachPoint(
++        port: value,
++        token: token,
++        source: source,
++      );
++    } on FormatException {
++      return null;
++    }
++  }
++}
++
++/// Environment overrides read by [resolveDesktopCompanion].
++///
++/// Injected instead of reading `Platform.environment` directly so unit tests do
++/// not depend on the machine they run on. Values are directory names only; no
++/// credential is ever read here.
++@immutable
++class DesktopCompanionEnvironment {
++  const DesktopCompanionEnvironment({
++    required this.operatingSystem,
++    required this.environment,
++    required this.executablePath,
++    required this.supportDirectory,
++    required this.isFile,
++    required this.isDirectory,
++    required this.readFile,
++  });
++
++  /// `Platform.operatingSystem` (`windows`, `macos`, `linux`).
++  final String operatingSystem;
++
++  /// Process environment. Only path-like variables are consulted.
++  final Map<String, String> environment;
++
++  /// Absolute path of the running executable (`Platform.resolvedExecutable`).
++  final String executablePath;
++
++  /// Per-user writable directory for this app (`~/Library/Application Support`
++  /// equivalent). Null when the platform plugin is unavailable.
++  final String? supportDirectory;
++
++  /// Filesystem probes and reader, injected so tests run on any OS and so this
++  /// file never needs `dart:io` (it is reachable from a web build).
++  final bool Function(String path) isFile;
++  final bool Function(String path) isDirectory;
++  final String? Function(String path) readFile;
++
++  String? operator [](String key) {
++    final value = environment[key];
++    return value == null || value.trim().isEmpty ? null : value.trim();
++  }
++}
++
++/// Result of discovery: either a usable location or a reason it was not found.
++@immutable
++class DesktopCompanionResolution {
++  const DesktopCompanionResolution.found(this.location)
++    : problem = null,
++      searched = const <String>[];
++
++  const DesktopCompanionResolution.missing({
++    required this.problem,
++    required this.searched,
++  }) : location = null;
++
++  final DesktopCompanionLocation? location;
++
++  /// Actionable message when [location] is null.
++  final String? problem;
++
++  /// Directories that were inspected, for the page's "looked in" list.
++  final List<String> searched;
++
++  bool get isFound => location != null;
++}
++
++/// Marker key an installer or developer can add to `companion.json` to declare
++/// that the bundle came from a source checkout.
++const String sourceCheckoutMarker = 'source_checkout';
++
++/// Discovers the companion for the current machine.
++///
++/// [extraCandidates] lets a host (or a test) add locations ahead of the
++/// installed ones, for example a bundle unpacked next to a portable build.
++DesktopCompanionResolution resolveDesktopCompanion(
++  DesktopCompanionEnvironment env, {
++  List<String> extraCandidates = const <String>[],
++}) {
++  final searched = <String>[];
++  final candidates = <_Candidate>[
++    for (final path in extraCandidates)
++      _Candidate(path, DesktopCompanionOrigin.installedPerUser),
++    ..._candidateDirectories(env),
++  ];
++
++  final separator = env.operatingSystem == 'windows' ? '\\' : '/';
++
++  for (final candidate in candidates) {
++    final directory = _normalize(candidate.path.trim(), separator);
++    if (directory.isEmpty) continue;
++    if (searched.contains(directory)) continue;
++    searched.add(directory);
++    final location = _inspect(env, directory, candidate.origin, separator);
++    if (location != null) return DesktopCompanionResolution.found(location);
++  }
++
++  final fromSource = searched.firstWhere(
++    (path) => env.isDirectory(path),
++    orElse: () => searched.isEmpty ? '' : searched.first,
++  );
++  return DesktopCompanionResolution.missing(
++    searched: List<String>.unmodifiable(searched),
++    problem: env.operatingSystem == 'macos'
++        ? '未找到本机 companion。请启动随 Studio 安装的 QFLI 远程 companion，'
++              '再回到本页点击「连接本机 companion」。'
++        : '未找到本机 companion（$fromSource）。请重新安装 Studio，'
++              '或运行安装目录下的 companion 启动脚本。',
++  );
++}
++
++/// Ordered directories to inspect, most specific first.
++Iterable<_Candidate> _candidateDirectories(
++  DesktopCompanionEnvironment env,
++) sync* {
++  final override = env['QFLI_COMPANION_DIR'];
++  if (override != null) {
++    yield _Candidate(override, DesktopCompanionOrigin.override);
++  }
++
++  final support = env.supportDirectory;
++  switch (env.operatingSystem) {
++    case 'windows':
++      // Per-user install (portable zip) first, then the machine-wide installer.
++      final localAppData = env['LOCALAPPDATA'];
++      final programFiles = env['ProgramFiles'] ?? r'C:\Program Files';
++      final programFilesX86 = env['ProgramFiles(x86)'];
++      if (localAppData != null) {
++        yield _Candidate(
++          '$localAppData\\QFLIStudio\\companion',
++          DesktopCompanionOrigin.installedPerUser,
++        );
++        yield _Candidate(
++          '$localAppData\\Programs\\QFLIStudio\\companion',
++          DesktopCompanionOrigin.installedPerUser,
++        );
++      }
++      yield _Candidate(
++        '$programFiles\\QFLIStudio\\companion',
++        DesktopCompanionOrigin.installedMachine,
++      );
++      if (programFilesX86 != null) {
++        yield _Candidate(
++          '$programFilesX86\\QFLIStudio\\companion',
++          DesktopCompanionOrigin.installedMachine,
++        );
++      }
++      // A portable build keeps the companion beside the executable.
++      yield _Candidate(
++        '${_parentOf(env.executablePath)}\\companion',
++        DesktopCompanionOrigin.installedPerUser,
++      );
++    case 'macos':
++      // `Platform.resolvedExecutable` is
++      //   <install>/QFLIStudio.app/Contents/MacOS/qflistudio
++      // The companion is a sibling bundle, so the location is derived from the
++      // bundle root's parent, never by counting parents off the executable:
++      // counting is what put a `~/Applications` install at `/Users/me` and lost
++      // one directory level.
++      final appBundle = _macOsBundleRoot(env.executablePath);
++      if (appBundle != null) {
++        final installDir = _parentOf(appBundle);
++        yield _Candidate(
++          '$installDir/QFLI Remote Companion.app/Contents/Resources/companion',
++          DesktopCompanionOrigin.installedMachine,
++        );
++        // A companion staged inside Studio's own bundle (portable/CI layout).
++        yield _Candidate(
++          '$appBundle/Contents/Resources/companion',
++          DesktopCompanionOrigin.installedMachine,
++        );
++      }
++      if (support != null) {
++        yield _Candidate(
++          '$support/companion',
++          DesktopCompanionOrigin.installedPerUser,
++        );
++      }
++    case 'linux':
++      if (support != null) {
++        yield _Candidate(
++          '$support/companion',
++          DesktopCompanionOrigin.installedPerUser,
++        );
++      }
++      yield _Candidate(
++        '/opt/qflistudio/companion',
++        DesktopCompanionOrigin.installedMachine,
++      );
++      yield _Candidate(
++        '/usr/lib/qflistudio/companion',
++        DesktopCompanionOrigin.installedMachine,
++      );
++      yield _Candidate(
++        '${_parentOf(env.executablePath)}/companion',
++        DesktopCompanionOrigin.installedMachine,
++      );
++  }
++
++  // Source checkout, only when the running app itself sits inside one. This
++  // keeps `flutter run` usable for developers without making it a requirement
++  // for installed builds.
++  for (final root in _sourceRoots(env)) {
++    yield _Candidate(root, DesktopCompanionOrigin.sourceCheckout);
++  }
++}
++
++/// Source-checkout candidate roots derived from the executable location.
++Iterable<String> _sourceRoots(DesktopCompanionEnvironment env) sync* {
++  final separator = env.operatingSystem == 'windows' ? '\\' : '/';
++  var directory = _parentOf(env.executablePath);
++  for (var depth = 0; depth < 6; depth++) {
++    if (env.isFile('$directory${separator}pubspec.yaml') &&
++        env.isDirectory(
++          '$directory${separator}companion${separator}remote_agent',
++        )) {
++      yield '$directory${separator}companion${separator}remote_agent';
++      return;
++    }
++    final parent = _parentOf(directory);
++    if (parent == directory) return;
++    directory = parent;
++  }
++}
++
++DesktopCompanionLocation? _inspect(
++  DesktopCompanionEnvironment env,
++  String directory,
++  DesktopCompanionOrigin origin,
++  String separator,
++) {
++  if (!env.isDirectory(directory)) return null;
++  final manifestPath = '$directory${separator}companion.json';
++  final packagePath = '$directory${separator}package.json';
++  final entryPath =
++      '$directory${separator}src${separator}agent${separator}main.ts';
++  // A source checkout has no manifest; only accept it when it declares itself.
++  if (!env.isFile(manifestPath) ||
++      !env.isFile(packagePath) ||
++      !env.isFile(entryPath)) {
++    return null;
++  }
++  final manifest = _readManifest(env, manifestPath);
++  if (manifest == null) return null;
++  final declaredSource = manifest[sourceCheckoutMarker] == true;
++  if (origin == DesktopCompanionOrigin.sourceCheckout && !declaredSource) {
++    return null;
++  }
++
++  final nodeCandidate = <String>[
++    if (env.operatingSystem == 'windows') ...[
++      '$directory${separator}node${separator}node.exe',
++      '$directory${separator}node${separator}node',
++    ] else ...[
++      '$directory${separator}node${separator}bin${separator}node',
++      '$directory${separator}node${separator}node',
++    ],
++  ].firstWhere(env.isFile, orElse: () => '');
++
++  final attachFile = _attachFile(env, manifest, separator);
++  return DesktopCompanionLocation(
++    agentDirectory: directory,
++    nodeExecutable: nodeCandidate.isEmpty ? null : nodeCandidate,
++    manifest: Map<String, dynamic>.unmodifiable(manifest),
++    origin: origin,
++    attachFile: attachFile,
++  );
++}
++
++/// Where the companion publishes `{port, token}` for a detached launch.
++///
++/// Must match what `start.sh` / `start.cmd` in the bundle write, and must be a
++/// directory the sandboxed Studio app is allowed to read. Both launchers use
++/// one location per OS:
++///
++///   Windows  %APPDATA%\QFLIStudio\companion\sidecar.json
++///   macOS    ~/Library/Application Support/QFLIStudio/companion/sidecar.json
++///   Linux    ${XDG_CONFIG_HOME:-~/.config}/QFLIStudio/companion/sidecar.json
++String? _attachFile(
++  DesktopCompanionEnvironment env,
++  Map<String, dynamic> manifest,
++  String separator,
++) {
++  final attach = manifest['attach'];
++  final fileName = attach is Map && attach['port_file'] is String
++      ? attach['port_file'] as String
++      : 'sidecar.json';
++  switch (env.operatingSystem) {
++    case 'windows':
++      final appData = env['APPDATA'];
++      if (appData == null) return null;
++      return '$appData${separator}QFLIStudio${separator}companion$separator$fileName';
++    case 'macos':
++      // Shared, non-sandboxed location: the companion is a normal app, so it
++      // can write ~/Library/Application Support while Studio only reads it.
++      final home = env['HOME'];
++      if (home == null) return null;
++      return '$home/Library/Application Support/QFLIStudio/companion/$fileName';
++    default:
++      final configHome =
++          env['XDG_CONFIG_HOME'] ??
++          (env['HOME'] == null ? null : '${env['HOME']}/.config');
++      if (configHome == null) return null;
++      return '$configHome${separator}QFLIStudio${separator}companion$separator$fileName';
++  }
++}
++
++Map<String, dynamic>? _readManifest(
++  DesktopCompanionEnvironment env,
++  String path,
++) {
++  final raw = env.readFile(path);
++  if (raw == null) return null;
++  try {
++    final decoded = jsonDecode(raw);
++    return decoded is Map<String, dynamic> ? decoded : null;
++  } on FormatException {
++    return null;
++  }
++}
++
++String _normalize(String path, String separator) {
++  var value = path.trim();
++  if (value.isEmpty) return '';
++  while (value.length > 1 && value.endsWith(separator)) {
++    value = value.substring(0, value.length - 1);
++  }
++  return value;
++}
++
++String _parentOf(String path) {
++  final index = path.lastIndexOf(RegExp(r'[\\/]'));
++  if (index <= 0) return path;
++  return path.substring(0, index);
++}
++
++/// The `.app` directory containing [executablePath], or null when the path is
++/// not inside a bundle.
++///
++/// This is a search for the nearest `.app` ancestor instead of a fixed number of
++/// `_parentOf` calls, so a bundle at any depth — `/Applications`,
++/// `~/Applications`, `/Volumes/X/Applications` — resolves its sibling at the
++/// right level. [resolveDesktopCompanion] appends the sibling bundle name.
++String? _macOsBundleRoot(String executablePath) {
++  var directory = _parentOf(executablePath);
++  for (var depth = 0; depth < 8; depth++) {
++    if (directory.isEmpty ||
++        directory == '/' ||
++        directory == _parentOf(directory)) {
++      return null;
++    }
++    if (directory.endsWith('.app')) return directory;
++    directory = _parentOf(directory);
++  }
++  return null;
++}
++
++@immutable
++class _Candidate {
++  const _Candidate(this.path, this.origin);
++
++  final String path;
++  final DesktopCompanionOrigin origin;
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_platform.dart b/lib/remote_control/desktop/desktop_companion_platform.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_platform.dart
+@@ -0,0 +1,8 @@
++// Platform selection for companion discovery.
++//
++// `dart:io` never reaches a browser build: the stub is resolved instead, so the
++// desktop page compiles on web and the host's `isSupported` gate still decides
++// whether the entry is shown at all.
++
++export 'desktop_companion_platform_stub.dart'
++    if (dart.library.io) 'desktop_companion_platform_io.dart';
+diff --git a/lib/remote_control/desktop/desktop_companion_platform_io.dart b/lib/remote_control/desktop/desktop_companion_platform_io.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_platform_io.dart
+@@ -0,0 +1,54 @@
++// Real environment for desktop companion discovery.
++//
++// Selected by `desktop_companion_platform.dart` on platforms with `dart:io`.
++// Everything here is a thin, honest probe: it reports what the filesystem
++// actually contains and never fabricates a bundle path. Directory names come
++// from the process environment; no credential is read.
++
++import 'dart:io';
++
++import 'package:path_provider/path_provider.dart';
++
++import 'desktop_companion_locator.dart';
++
++/// Builds a [DesktopCompanionEnvironment] for this machine.
++///
++/// [supportDirectory] is the app-private directory (`path_provider`); it is
++/// resolved lazily because it needs the plugin channel, and a missing channel
++/// must degrade to "no per-user location" rather than failing the page.
++Future<DesktopCompanionEnvironment> currentDesktopCompanionEnvironment() async {
++  String? support;
++  try {
++    support = (await getApplicationSupportDirectory()).path;
++  } on Object {
++    support = null;
++  }
++  return DesktopCompanionEnvironment(
++    operatingSystem: Platform.operatingSystem,
++    environment: Platform.environment,
++    executablePath: Platform.resolvedExecutable,
++    supportDirectory: support,
++    isFile: (String path) => File(path).existsSync(),
++    isDirectory: (String path) => Directory(path).existsSync(),
++    readFile: (String path) {
++      try {
++        return File(path).readAsStringSync();
++      } on Object {
++        return null;
++      }
++    },
++  );
++}
++
++/// Reads the attach file the companion publishes.
++///
++/// Only the `{port, token}` document is read; nothing else on disk is touched,
++/// and the token is never logged. Exported through
++/// `desktop_companion_platform.dart` so shared code needs no `dart:io`.
++String? readDesktopCompanionFile(String path) {
++  try {
++    return File(path).readAsStringSync();
++  } on Object {
++    return null;
++  }
++}
+diff --git a/lib/remote_control/desktop/desktop_companion_platform_stub.dart b/lib/remote_control/desktop/desktop_companion_platform_stub.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_platform_stub.dart
+@@ -0,0 +1,27 @@
++// Browser fallback for desktop companion discovery.
++//
++// A web build has no filesystem and no local companion, so discovery reports a
++// truthful "unsupported" state instead of an empty search list that would look
++// like a missing installation.
++
++import 'desktop_companion_locator.dart';
++
++/// A browser cannot host a local companion.
++Future<DesktopCompanionEnvironment> currentDesktopCompanionEnvironment() async {
++  return const DesktopCompanionEnvironment(
++    operatingSystem: 'web',
++    environment: <String, String>{},
++    executablePath: '',
++    supportDirectory: null,
++    isFile: _never,
++    isDirectory: _never,
++    readFile: _noContent,
++  );
++}
++
++bool _never(String path) => false;
++
++String? _noContent(String path) => null;
++
++/// A browser cannot read the companion's attach file.
++String? readDesktopCompanionFile(String path) => null;
+diff --git a/lib/remote_control/desktop/desktop_companion_session.dart b/lib/remote_control/desktop/desktop_companion_session.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_companion_session.dart
+@@ -0,0 +1,326 @@
++// Ownership of the local companion process and its shared link.
++//
++// Reported problem this file fixes: the page controller used to own the process,
++// so `controller.dispose()` → `channel.close()` → `process.cancel()` killed the
++// sidecar and every managed Claude/Codex session it was running. A phone
++// connected to that machine then dropped mid-task just because the desktop user
++// closed the page.
++//
++// Ownership is now split three ways:
++//
++//   * **session scope** ([DesktopCompanionSession]) owns the process and the one
++//     shared connection. It is created once per app run and disposed with the
++//     app (or by an explicit 停止), which is the only place a process is
++//     cancelled. That is what keeps the process from becoming an orphan.
++//   * **the page** ([DesktopCompanionController]) holds a *handle* on the
++//     session. Leaving the page detaches the handle only; sessions keep running.
++//   * **ProcessSupervisor** remains the single canceller, reached through the
++//     session, never through the page.
++//
++// `DesktopCompanionSession.attach()` returns a [DesktopCompanionChannel] whose
++// `close()` is a detach, not a shutdown. That keeps the page's existing
++// controller contract unchanged.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import 'desktop_companion_channel.dart';
++import 'desktop_companion_link_io.dart';
++import 'desktop_companion_locator.dart';
++import 'desktop_companion_platform.dart';
++
++/// Shared companion connection plus the process that serves it.
++class DesktopCompanionSession {
++  DesktopCompanionSession({
++    required this.location,
++    NativeDesktopCompanionLink? link,
++  }) : _link = link ?? NativeDesktopCompanionLink();
++
++  /// The discovered bundle this session drives.
++  final DesktopCompanionLocation location;
++
++  /// Explicit attach credentials chosen by the user.
++  ///
++  /// On macOS the app sandbox cannot read the companion's real-home attach file
++  /// (`~/Library/Application Support/...` is outside the container), so the page
++  /// asks the user to pick that file with `file_selector` and passes its parsed
++  /// contents here. Windows/Linux never need this: their attach file is
++  /// readable automatically.
++  DesktopCompanionAttachPoint? selectedAttachPoint;
++
++  /// Whether the page must ask the user for the attach file.
++  ///
++  /// True when the companion cannot be spawned and no attach point was selected
++  /// yet. Attaching without a token is never attempted.
++  bool get needsUserSelectedAttach =>
++      !location.canSpawn && selectedAttachPoint == null;
++
++  /// Records the point parsed from a user-selected file.
++  ///
++  /// Replacing the point closes the current channel so the next [attach] uses
++  /// the new credentials instead of silently reusing the old socket.
++  Future<void> useAttachPoint(DesktopCompanionAttachPoint point) async {
++    if (_disposed) return;
++    await _channel?.close();
++    _channel = null;
++    selectedAttachPoint = point;
++  }
++
++  final NativeDesktopCompanionLink _link;
++
++  DesktopCompanionChannel? _channel;
++  SpawnedDesktopCompanion? _spawned;
++  Future<DesktopCompanionChannel>? _connecting;
++  bool _disposed = false;
++
++  /// Bumped by [stop]; a connection that resolves after that belongs to a dead
++  /// generation and is torn down instead of being kept.
++  int _generation = 0;
++
++  /// Set when the session started its own process (Windows/Linux). A macOS
++  /// attach has no process here; the user owns that companion and must stop it
++  /// themselves, which the page states explicitly.
++  bool get spawnedByApp => _spawned != null;
++
++  bool get isDisposed => _disposed;
++
++  /// Opens the shared channel once; later callers reuse it.
++  ///
++  /// A channel whose link has already gone away is dropped first: caching it
++  /// would make every retry return the same dead socket and never reconnect.
++  Future<DesktopCompanionChannel> attach() {
++    if (_disposed) {
++      return Future<DesktopCompanionChannel>.error(
++        StateError('companion 会话已停止'),
++      );
++    }
++    final existing = _channel;
++    if (existing != null) {
++      final alive = _alive.contains(existing);
++      if (alive) return Future<DesktopCompanionChannel>.value(existing);
++      _channel = null;
++    }
++    final pending = _connecting;
++    if (pending != null) return pending;
++    return _connecting = _connect();
++  }
++
++  /// Channels whose `closed` future has not completed yet.
++  final Set<DesktopCompanionChannel> _alive = <DesktopCompanionChannel>{};
++
++  void _track(DesktopCompanionChannel channel) {
++    _alive.add(channel);
++    unawaited(
++      channel.closed.whenComplete(() {
++        _alive.remove(channel);
++        if (identical(_channel, channel)) _channel = null;
++      }),
++    );
++  }
++
++  Future<DesktopCompanionChannel> _connect() async {
++    try {
++      final generation = _generation;
++      // A dead channel may have left its child behind (crashed or lost socket).
++      // Stop it before spawning again so the old handle cannot be overwritten and
++      // leak a process nobody can reach.
++      //
++      // The handle is cleared only after the cancel returned: if it throws
++      // (a hung `cancel` timing out), `_spawned` still refers to that process so
++      // the next retry can try again instead of losing ownership for good.
++      final previous = _spawned;
++      if (previous != null) {
++        try {
++          await previous.stop();
++        } on Object {
++          if (identical(_spawned, previous)) {
++            // Keep the handle: still owned, still cancellable, retry allowed.
++            throw StateError('上一个 companion 进程未能停止。请稍后重试。');
++          }
++          rethrow;
++        }
++        if (identical(_spawned, previous)) _spawned = null;
++      }
++      if (location.canSpawn) {
++        // Re-check the fence right before spawning: `stop()` may have run while
++        // the previous process was being cancelled, and starting a new child
++        // after that would leave an ownerless companion behind.
++        if (_disposed || generation != _generation) {
++          throw StateError('companion 会话已停止');
++        }
++        final value = await _link.spawnAndOwn(location);
++        if (generation != _generation || _disposed) {
++          // `stop()` ran while the child was starting: cancel it here so the
++          // late completion cannot retain an orphan companion.
++          await value.channel.close();
++          await value.spawned.stop();
++          throw StateError('companion 会话已停止');
++        }
++        _spawned = value.spawned;
++        _channel = value.channel;
++        _track(value.channel);
++        return value.channel;
++      }
++      // Sandboxed platform: attach to the companion the user launched.
++      final attachPoint = selectedAttachPoint ?? readAttachPoint(location);
++      if (attachPoint == null) {
++        throw StateError(
++          '尚未选择本机 companion 的凭据文件。请先启动 QFLI 远程 companion，'
++          '然后选择它写出的 sidecar.json。',
++        );
++      }
++      final channel = await _link.attach(attachPoint);
++      if (generation != _generation || _disposed) {
++        await channel.close();
++        throw StateError('companion 会话已停止');
++      }
++      _channel = channel;
++      _track(channel);
++      return channel;
++    } finally {
++      // Always clear the in-flight slot: a failed attempt must stay retryable,
++      // and `attach()` guards on `_disposed` separately.
++      _connecting = null;
++    }
++  }
++
++  /// Stops the companion this app started. Attach-based companions are left
++  /// running; their owner is the user's own process.
++  Future<void> stop() async {
++    _disposed = true;
++    // Invalidate in-flight connections before awaiting them: a spawn that is
++    // already executing must not be retained once it completes.
++    _generation += 1;
++    final pending = _connecting;
++    _connecting = null;
++    final spawned = _spawned;
++    _spawned = null;
++    final channel = _channel;
++    _channel = null;
++    _alive.removeWhere((entry) => identical(entry, channel));
++    await channel?.close();
++    // Wait for the in-flight attempt to observe the new generation and clean up
++    // its own child; never leave a half-started process behind.
++    if (pending != null) {
++      await pending.then<void>((_) {}, onError: (Object _) {});
++    }
++    // An attempt that completed between the reads above may have stored a child
++    // *after* `spawned` was taken. Collect it now, so the fence cannot leak it.
++    final late = _spawned;
++    _spawned = null;
++    await late?.stop();
++    await spawned?.stop();
++  }
++
++  /// App shutdown: same as [stop], kept as a separate name at call sites.
++  Future<void> dispose() => stop();
++}
++
++/// Reads `{port, token}` from the companion's published attach file.
++///
++/// Lifecycle contract with the companion: the file exists only while that
++/// companion runs. It removes the file on shutdown — ownership-checked, so a
++/// newer instance's file is never deleted — which means a *present* file whose
++/// connection fails points at a process that died without cleaning up (SIGKILL,
++/// power loss) rather than at a machine that never had a companion. The page
++/// treats that as a retryable failure and, on macOS, offers to pick it again.
++///
++/// Returns null when the file is missing, unreadable or incomplete. A file
++/// without a token is rejected on purpose: the port alone is not an identity.
++DesktopCompanionAttachPoint? readAttachPoint(
++  DesktopCompanionLocation location,
++) {
++  final path = location.attachFile;
++  if (path == null) return null;
++  final raw = readDesktopCompanionFile(path);
++  if (raw == null) return null;
++  return DesktopCompanionAttachPoint.tryParse(raw, source: path);
++}
++
++/// Handle the page holds. Closing it detaches; it never stops the process.
++class _DetachableCompanionChannel implements DesktopCompanionChannel {
++  _DetachableCompanionChannel(this._session);
++
++  final DesktopCompanionSession _session;
++  DesktopCompanionChannel? _inner;
++  final StreamController<Map<String, dynamic>> _frames =
++      StreamController<Map<String, dynamic>>.broadcast();
++  StreamSubscription<Map<String, dynamic>>? _subscription;
++  final Completer<void> _closed = Completer<void>();
++  bool _detached = false;
++
++  Future<DesktopCompanionChannel> _ensure() async {
++    final channel = _inner ??= await _session.attach();
++    if (_subscription == null) {
++      _subscription = channel.frames.listen(
++        (frame) {
++          if (!_frames.isClosed) _frames.add(frame);
++        },
++        onError: (Object error, StackTrace stack) {
++          if (!_frames.isClosed) _frames.addError(error, stack);
++        },
++        onDone: _finish,
++      );
++      unawaited(channel.closed.then((_) => _finish()));
++    }
++    return channel;
++  }
++
++  void _finish() {
++    if (_detached) return;
++    _detached = true;
++    if (!_frames.isClosed) unawaited(_frames.close());
++    if (!_closed.isCompleted) _closed.complete();
++  }
++
++  @override
++  Stream<Map<String, dynamic>> get frames => _frames.stream;
++
++  @override
++  void send(Map<String, dynamic> frame) {
++    final inner = _inner;
++    // A request before the shared channel is ready is dropped rather than
++    // queued: the controller re-requests state after connecting.
++    if (inner != null && !_detached) inner.send(frame);
++  }
++
++  @override
++  Future<void> get closed => _closed.future;
++
++  /// Starts forwarding. Awaited by the session before the page sees `ready`.
++  Future<void> begin() => _ensure().then((_) {});
++
++  @override
++  Future<void> close() async {
++    _detached = true;
++    // Detach only: the shared connection and the process stay alive so phone
++    // sessions survive the desktop page closing.
++    await _subscription?.cancel();
++    _subscription = null;
++    _inner = null;
++    if (!_frames.isClosed) await _frames.close();
++    if (!_closed.isCompleted) _closed.complete();
++  }
++}
++
++/// Creates a page handle on a session scope.
++///
++/// The page must call `close()` on the returned channel when it goes away; that
++/// only detaches. Stopping the companion is [DesktopCompanionSession.stop].
++Future<DesktopCompanionChannel> attachDesktopCompanion(
++  DesktopCompanionSession session,
++) async {
++  final handle = _DetachableCompanionChannel(session);
++  await handle.begin();
++  return handle;
++}
++
++/// Registry helpers used by the host: one session per discovered bundle.
++@visibleForTesting
++const String companionSessionScopeDoc = '''
++The companion session lives for the whole app run. Create it where the app owns
++long-lived services (for example next to ProcessSupervisor), pass
++`() => attachDesktopCompanion(session)` to the page controller, and call
++`session.dispose()` from the app's own shutdown path.
++''';
+diff --git a/lib/remote_control/desktop/desktop_remote_page.dart b/lib/remote_control/desktop/desktop_remote_page.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/desktop/desktop_remote_page.dart
+@@ -0,0 +1,689 @@
++// Desktop "本机配对" page.
++//
++// What it shows, and what it deliberately does not:
++//
++//   * the address the phone must reach, the one-time code, its countdown and a
++//     copyable `cloudterminal://pair?...` link, plus a scannable QR;
++//   * a truthful status line: relay online/offline, whether this app spawned the
++//     companion or attached to one the user started, and the bundled versions;
++//   * the sessions that actually exist on this machine. An empty list is shown
++//     as empty with a "create a session" action, never padded with placeholders;
++//   * the connected-client count only when the relay reported it. Otherwise the
++//     field reads 未知 — a fabricated 0 would be worse than no number.
++//
++// It never renders a token, a device secret or the contents of `agent.json`.
++
++import 'dart:async';
++
++import 'package:file_selector/file_selector.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:qr_flutter/qr_flutter.dart';
++
++import 'desktop_companion_controller.dart';
++import 'desktop_companion_locator.dart';
++import 'desktop_companion_session.dart';
++
++/// Opens the desktop pairing page.
++Future<void> showDesktopRemotePage(
++  BuildContext context, {
++  required DesktopCompanionSession session,
++  required DesktopCompanionResolution resolution,
++}) {
++  return Navigator.of(context).push(
++    MaterialPageRoute<void>(
++      builder: (_) =>
++          DesktopRemotePage(session: session, resolution: resolution),
++    ),
++  );
++}
++
++/// The desktop-local pairing page.
++class DesktopRemotePage extends StatefulWidget {
++  const DesktopRemotePage({
++    super.key,
++    required this.session,
++    required this.resolution,
++    this.connect,
++  });
++
++  final DesktopCompanionSession session;
++  final DesktopCompanionResolution resolution;
++
++  /// Override for tests; defaults to a detachable handle on [session].
++  final DesktopCompanionConnector? connect;
++
++  @override
++  State<DesktopRemotePage> createState() => _DesktopRemotePageState();
++}
++
++class _DesktopRemotePageState extends State<DesktopRemotePage> {
++  late final DesktopCompanionController _controller;
++  Timer? _ticker;
++
++  @override
++  void initState() {
++    super.initState();
++    _controller = DesktopCompanionController(
++      connect: widget.connect ?? () => attachDesktopCompanion(widget.session),
++      resolution: widget.resolution,
++    );
++    unawaited(_controller.start());
++    // One ticker drives the countdown text; the controller stores the absolute
++    // expiry, so a paused app cannot drift.
++    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (mounted && _controller.pairing != null) setState(() {});
++    });
++  }
++
++  @override
++  void dispose() {
++    _ticker?.cancel();
++    // Detaches this page only. The companion and the phone sessions keep
++    // running; see DesktopCompanionSession for the owner of the process.
++    _controller.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return AnimatedBuilder(
++      animation: _controller,
++      builder: (context, _) => Scaffold(
++        appBar: AppBar(
++          title: const Text('本机配对'),
++          actions: [
++            IconButton(
++              tooltip: '刷新',
++              onPressed: _controller.status == DesktopCompanionStatus.ready
++                  ? () {
++                      _controller.refreshSessions();
++                      _controller.requestPairCode();
++                    }
++                  : null,
++              icon: const Icon(Icons.refresh),
++            ),
++          ],
++        ),
++        body: _body(context),
++      ),
++    );
++  }
++
++  Widget _body(BuildContext context) {
++    switch (_controller.status) {
++      case DesktopCompanionStatus.probing:
++        return const Center(child: CircularProgressIndicator());
++      case DesktopCompanionStatus.unsupported:
++        return _notice(
++          Icons.desktop_access_disabled,
++          '此版本不支持本机配对',
++          '本机配对需要桌面版 Studio。手机或网页版请使用「远程电脑」入口。',
++        );
++      case DesktopCompanionStatus.notInstalled:
++        return _missingCompanion(context);
++      case DesktopCompanionStatus.failed:
++      case DesktopCompanionStatus.stopped:
++        return _linkProblem(context);
++      case DesktopCompanionStatus.starting:
++        return const Center(
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              CircularProgressIndicator(),
++              SizedBox(height: 16),
++              Text('正在连接本机 companion…'),
++            ],
++          ),
++        );
++      case DesktopCompanionStatus.ready:
++        return _ready(context);
++    }
++  }
++
++  Widget _notice(IconData icon, String title, String body) {
++    return Center(
++      child: ConstrainedBox(
++        constraints: const BoxConstraints(maxWidth: 520),
++        child: Padding(
++          padding: const EdgeInsets.all(24),
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              Icon(icon, size: 48),
++              const SizedBox(height: 16),
++              Text(
++                title,
++                style: Theme.of(context).textTheme.titleLarge,
++                textAlign: TextAlign.center,
++              ),
++              const SizedBox(height: 8),
++              Text(body, textAlign: TextAlign.center),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  Widget _missingCompanion(BuildContext context) {
++    final searched = widget.resolution.searched;
++    return ListView(
++      padding: const EdgeInsets.all(24),
++      children: [
++        _notice(
++          Icons.extension_off,
++          '未找到本机 companion',
++          widget.resolution.problem ?? '请重新安装 Studio，或手动启动安装目录下的 companion。',
++        ),
++        if (searched.isNotEmpty) ...[
++          const SizedBox(height: 8),
++          ExpansionTile(
++            title: const Text('已查找的位置'),
++            children: [
++              for (final path in searched)
++                ListTile(dense: true, title: SelectableText(path)),
++            ],
++          ),
++        ],
++      ],
++    );
++  }
++
++  Widget _linkProblem(BuildContext context) {
++    final macAttach = !widget.session.location.canSpawn;
++    return ListView(
++      padding: const EdgeInsets.all(24),
++      children: [
++        _notice(
++          Icons.link_off,
++          _controller.status == DesktopCompanionStatus.stopped
++              ? 'companion 连接已断开'
++              : '连接本机 companion 失败',
++          _controller.lastError ?? '请确认 companion 正在运行，然后重试。',
++        ),
++        const SizedBox(height: 16),
++        if (macAttach) ...[
++          _attachFilePicker(context, prominent: true),
++          const SizedBox(height: 16),
++        ],
++        FilledButton.icon(
++          onPressed: _controller.retry,
++          icon: const Icon(Icons.refresh),
++          label: const Text('重试连接'),
++        ),
++      ],
++    );
++  }
++
++  /// macOS: the sandbox cannot read the real-home attach file, so the user
++  /// chooses it explicitly and only the selected file's contents are read.
++  Widget _attachFilePicker(BuildContext context, {bool prominent = false}) {
++    final expected = widget.session.location.attachFile;
++    return Card(
++      child: Padding(
++        padding: const EdgeInsets.all(16),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text(
++              '选择 companion 凭据文件',
++              style: Theme.of(context).textTheme.titleMedium,
++            ),
++            const SizedBox(height: 8),
++            const Text(
++              'macOS 沙箱无法读取其他应用的 Application Support 目录。'
++              '请先启动 QFLI 远程 companion，再选择它写出的 sidecar.json。'
++              '文件里是本机连接的临时凭据，只会用于 127.0.0.1 连接。',
++            ),
++            if (expected != null) ...[
++              const SizedBox(height: 12),
++              const Text(
++                '默认位置：',
++                style: TextStyle(fontWeight: FontWeight.w600),
++              ),
++              SelectableText(expected),
++            ],
++            const SizedBox(height: 12),
++            FilledButton.icon(
++              onPressed: _pickAttachFile,
++              icon: const Icon(Icons.folder_open),
++              label: const Text('选择 sidecar.json…'),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Future<void> _pickAttachFile() async {
++    const typeGroup = XTypeGroup(
++      label: 'companion 凭据',
++      extensions: <String>['json'],
++    );
++    final file = await openFile(acceptedTypeGroups: const [typeGroup]);
++    if (file == null) return;
++    String contents;
++    try {
++      contents = await file.readAsString();
++    } on Object catch (error) {
++      _showMessage('无法读取所选文件：$error');
++      return;
++    }
++    final point = DesktopCompanionAttachPoint.tryParse(
++      contents,
++      source: file.path,
++    );
++    if (point == null) {
++      // A wrong file must say why, and must not be sent anywhere.
++      _showMessage('所选文件不是有效的 companion 凭据（需要 port 与 token）。');
++      return;
++    }
++    await widget.session.useAttachPoint(point);
++    if (!mounted) return;
++    await _controller.retry();
++  }
++
++  void _showMessage(String text) {
++    if (!mounted) return;
++    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
++  }
++
++  Widget _ready(BuildContext context) {
++    final pairing = _controller.pairing;
++    final error = _controller.lastError;
++    return ListView(
++      padding: const EdgeInsets.all(24),
++      children: [
++        _statusStrip(context),
++        // A per-request failure (opening a session, reading history) arrives as
++        // an `error` frame while the link stays up. Without this banner the page
++        // kept showing 「正在读取会话内容…」 forever and the reason was lost.
++        if (error != null) ...[
++          const SizedBox(height: 16),
++          _errorBanner(context, error),
++        ],
++        const SizedBox(height: 16),
++        if (pairing == null)
++          _pairingPending(context)
++        else
++          _pairingCard(context, pairing),
++        const SizedBox(height: 24),
++        _sessionsSection(context),
++      ],
++    );
++  }
++
++  Widget _pairingPending(BuildContext context) {
++    return Card(
++      child: Padding(
++        padding: const EdgeInsets.all(24),
++        child: Row(
++          children: [
++            const SizedBox(
++              width: 20,
++              height: 20,
++              child: CircularProgressIndicator(strokeWidth: 2),
++            ),
++            const SizedBox(width: 16),
++            Expanded(
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(
++                    '正在生成配对码…',
++                    style: Theme.of(context).textTheme.titleMedium,
++                  ),
++                  const SizedBox(height: 4),
++                  const Text('配网由本机 companion 生成，不会伪造或复用旧码。'),
++                ],
++              ),
++            ),
++            TextButton(
++              onPressed: _controller.requestPairCode,
++              child: const Text('刷新配对码'),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Widget _statusStrip(BuildContext context) {
++    final expired = _controller.isPairingExpired;
++    return Wrap(
++      spacing: 12,
++      runSpacing: 8,
++      crossAxisAlignment: WrapCrossAlignment.center,
++      children: [
++        _chip(
++          _controller.relayOnline ? Icons.cloud_done : Icons.cloud_off,
++          _controller.relayOnline ? '中继在线' : '中继离线',
++          good: _controller.relayOnline,
++        ),
++        if (_controller.connectionMode != null)
++          _chip(
++            Icons.lan,
++            _controller.connectionMode == 'local' ? '局域网模式' : '远程中继模式',
++            good: true,
++          ),
++        _chip(
++          widget.session.spawnedByApp ? Icons.play_circle : Icons.link,
++          widget.session.spawnedByApp ? '由本应用启动' : '已连接外部启动的 companion',
++          good: true,
++        ),
++        // Unknown stays unknown: the relay owns this number.
++        _chip(
++          Icons.phonelink,
++          _controller.pairedClients == null
++              ? '已配对设备：未知'
++              : '已配对设备：${_controller.pairedClients}',
++          good: true,
++        ),
++        if (expired) _chip(Icons.timer_off, '配对码已过期', good: false),
++      ],
++    );
++  }
++
++  /// Inline failure notice for a request that did not stop the link.
++  Widget _errorBanner(BuildContext context, String message) {
++    final scheme = Theme.of(context).colorScheme;
++    return Container(
++      padding: const EdgeInsets.all(12),
++      decoration: BoxDecoration(
++        color: scheme.errorContainer,
++        borderRadius: BorderRadius.circular(8),
++      ),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Icon(Icons.error_outline, color: scheme.onErrorContainer),
++          const SizedBox(width: 8),
++          Expanded(
++            child: SelectableText(
++              message,
++              style: TextStyle(color: scheme.onErrorContainer),
++            ),
++          ),
++          TextButton(
++            onPressed: _controller.clearError,
++            child: const Text('知道了'),
++          ),
++        ],
++      ),
++    );
++  }
++
++  Widget _chip(IconData icon, String label, {required bool good}) {
++    final color = good
++        ? Theme.of(context).colorScheme.primary
++        : Theme.of(context).colorScheme.error;
++    return Chip(
++      avatar: Icon(icon, size: 18, color: color),
++      label: Text(label),
++      visualDensity: VisualDensity.compact,
++    );
++  }
++
++  Widget _pairingCard(BuildContext context, DesktopPairingInfo pairing) {
++    // Resolution succeeded before this page was shown, so the location is
++    // non-null; the fallback exists only for a hand-constructed page in tests.
++    final location = _controller.location ?? widget.session.location;
++    final expired = pairing.isExpired;
++    final remaining = pairing.remaining;
++    final countdown = expired
++        ? '已过期'
++        : '${remaining.inMinutes.toString().padLeft(2, '0')}:'
++              '${(remaining.inSeconds % 60).toString().padLeft(2, '0')}';
++    return Card(
++      child: Padding(
++        padding: const EdgeInsets.all(24),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text('手机配对', style: Theme.of(context).textTheme.titleLarge),
++            const SizedBox(height: 16),
++            Wrap(
++              spacing: 32,
++              runSpacing: 24,
++              crossAxisAlignment: WrapCrossAlignment.start,
++              children: [
++                Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    const Text('地址'),
++                    SelectableText(
++                      _controller.relayUrl ?? '未配置中继地址',
++                      style: Theme.of(context).textTheme.titleMedium,
++                    ),
++                    const SizedBox(height: 16),
++                    const Text('一次性配对码'),
++                    Row(
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        SelectableText(
++                          pairing.code,
++                          style: Theme.of(context).textTheme.headlineMedium
++                              ?.copyWith(
++                                fontFeatures: const [
++                                  FontFeature.tabularFigures(),
++                                ],
++                                letterSpacing: 2,
++                                decoration: expired
++                                    ? TextDecoration.lineThrough
++                                    : null,
++                              ),
++                        ),
++                        const SizedBox(width: 8),
++                        IconButton(
++                          tooltip: '复制配对码',
++                          onPressed: () => _copy(pairing.code, '配对码已复制'),
++                          icon: const Icon(Icons.copy),
++                        ),
++                      ],
++                    ),
++                    const SizedBox(height: 8),
++                    Text(
++                      expired ? '配对码已过期，请刷新' : '剩余 $countdown',
++                      style: TextStyle(
++                        color: expired
++                            ? Theme.of(context).colorScheme.error
++                            : Theme.of(context).colorScheme.onSurfaceVariant,
++                      ),
++                    ),
++                    const SizedBox(height: 16),
++                    const Text('配对链接'),
++                    const SizedBox(height: 4),
++                    Row(
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        Flexible(
++                          child: SelectableText(
++                            pairing.uri,
++                            style: const TextStyle(
++                              fontFamily: 'monospace',
++                              fontSize: 12,
++                            ),
++                          ),
++                        ),
++                        IconButton(
++                          tooltip: '复制配对链接',
++                          onPressed: () => _copy(pairing.uri, '配对链接已复制'),
++                          icon: const Icon(Icons.link),
++                        ),
++                      ],
++                    ),
++                    const SizedBox(height: 8),
++                    Text(
++                      '${location.originLabel} · ${location.targetOs}/${location.targetArch}'
++                      ' · agent ${location.agentVersion} · Node ${location.nodeVersion}',
++                      style: Theme.of(context).textTheme.bodySmall,
++                    ),
++                  ],
++                ),
++                Column(
++                  children: [
++                    QrImageView(
++                      data: pairing.uri,
++                      version: QrVersions.auto,
++                      // The page background is light in both themes, so the QR
++                      // keeps its required contrast.
++                      backgroundColor: Colors.white,
++                      padding: const EdgeInsets.all(12),
++                      errorStateBuilder: (context, error) => const Padding(
++                        padding: EdgeInsets.all(12),
++                        child: Text('配对链接过长，无法生成二维码'),
++                      ),
++                    ),
++                    const SizedBox(height: 8),
++                    const Text('用手机扫描'),
++                  ],
++                ),
++              ],
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Future<void> _copy(String value, String message) async {
++    await Clipboard.setData(ClipboardData(text: value));
++    _showMessage(message);
++  }
++
++  Widget _sessionsSection(BuildContext context) {
++    final sessions = _controller.sessions;
++    return Card(
++      child: Padding(
++        padding: const EdgeInsets.all(16),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Row(
++              children: [
++                Expanded(
++                  child: Text(
++                    '本机已有会话',
++                    style: Theme.of(context).textTheme.titleMedium,
++                  ),
++                ),
++                TextButton.icon(
++                  onPressed: _controller.refreshSessions,
++                  icon: const Icon(Icons.refresh, size: 18),
++                  label: const Text('重新扫描'),
++                ),
++              ],
++            ),
++            const SizedBox(height: 4),
++            Text(
++              '来自 Herdr、Claude Code 与 Codex 的真实记录；只显示本机已存在的会话。',
++              style: Theme.of(context).textTheme.bodySmall,
++            ),
++            const SizedBox(height: 12),
++            if (sessions.isEmpty)
++              _emptySessions(context)
++            else
++              for (final session in sessions) _sessionTile(context, session),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Widget _emptySessions(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const Text('没有找到已有会话。'),
++        const SizedBox(height: 8),
++        Wrap(
++          spacing: 8,
++          children: [
++            FilledButton.tonalIcon(
++              onPressed: () =>
++                  _showMessage('请在 Claude Code 或 Herdr 中新建会话，完成后回到本页刷新。'),
++              icon: const Icon(Icons.add),
++              label: const Text('新建 Claude 会话'),
++            ),
++            OutlinedButton.icon(
++              onPressed: () => _showMessage('Herdr 会话请在 Herdr 中创建后回到本页刷新。'),
++              icon: const Icon(Icons.terminal),
++              label: const Text('在 Herdr 中创建'),
++            ),
++          ],
++        ),
++      ],
++    );
++  }
++
++  Widget _sessionTile(BuildContext context, DesktopDiscoveredSession session) {
++    final open = _controller.openSessionId == session.id;
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        ListTile(
++          dense: true,
++          leading: Icon(switch (session.kind) {
++            'herdr' => Icons.terminal,
++            'codex' => Icons.smart_toy_outlined,
++            _ => Icons.chat_bubble_outline,
++          }),
++          title: Text(session.title),
++          subtitle: Text(
++            [
++              session.kindLabel,
++              if (session.origin != null) _originLabel(session.origin!),
++              if (session.subtitle != null) session.subtitle!,
++              if (session.bound) '本次已连接',
++            ].join(' · '),
++          ),
++          trailing: session.canOpen
++              ? TextButton(
++                  onPressed: open
++                      ? _controller.closeSessionView
++                      : () => _controller.openSession(session.id),
++                  child: Text(open ? '收起' : '查看'),
++                )
++              : const Tooltip(message: '本机无法打开此会话', child: Text('不可用')),
++        ),
++        if (open) _sessionOutput(context),
++      ],
++    );
++  }
++
++  String _originLabel(String origin) => switch (origin) {
++    'pane' => '实时屏幕',
++    'history' => '历史记录',
++    'thread' => 'Codex 会话',
++    _ => origin,
++  };
++
++  Widget _sessionOutput(BuildContext context) {
++    final lines = _controller.openSessionLines;
++    return Container(
++      margin: const EdgeInsets.only(left: 16, right: 16, bottom: 12),
++      padding: const EdgeInsets.all(12),
++      constraints: const BoxConstraints(maxHeight: 260),
++      decoration: BoxDecoration(
++        color: Theme.of(context).colorScheme.surfaceContainerHighest,
++        borderRadius: BorderRadius.circular(8),
++      ),
++      child: lines.isEmpty
++          ? const Text('正在读取会话内容…')
++          : ListView(
++              shrinkWrap: true,
++              children: [
++                for (final line in lines)
++                  SelectableText(
++                    line.text,
++                    style: const TextStyle(
++                      fontFamily: 'monospace',
++                      fontSize: 12,
++                    ),
++                  ),
++              ],
++            ),
++    );
++  }
++}
+diff --git a/pubspec.lock b/pubspec.lock
+--- a/pubspec.lock
++++ b/pubspec.lock
+@@ -373,6 +373,22 @@
+       url: "https://pub.dev"
+     source: hosted
+     version: "6.5.2"
++  qr:
++    dependency: transitive
++    description:
++      name: qr
++      sha256: "5a1d2586170e172b8a8c8470bbbffd5eb0cd38a66c0d77155ea138d3af3a4445"
++      url: "https://pub.dev"
++    source: hosted
++    version: "3.0.2"
++  qr_flutter:
++    dependency: "direct main"
++    description:
++      name: qr_flutter
++      sha256: "5095f0fc6e3f71d08adef8feccc8cea4f12eec18a2e31c2e8d82cb6019f4b097"
++      url: "https://pub.dev"
++    source: hosted
++    version: "4.1.0"
+   quiver:
+     dependency: transitive
+     description:
+diff --git a/pubspec.yaml b/pubspec.yaml
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -25,6 +25,8 @@
+   xml: ^6.6.1
+   crypto: ^3.0.6
+   web_socket_channel: ^3.0.3
++  # Match the existing desktop assistant's pure Flutter QR renderer.
++  qr_flutter: ^4.1.0
+   # 远程电脑的终端渲染器（CloudTerminal 打过补丁的 xterm 分支）。
+   xterm: ^4.0.0
+ 
+diff --git a/test/remote_control/desktop/desktop_companion_controller_test.dart b/test/remote_control/desktop/desktop_companion_controller_test.dart
+new file mode 100644
+--- /dev/null
++++ b/test/remote_control/desktop/desktop_companion_controller_test.dart
+@@ -0,0 +1,288 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/remote_control/desktop/desktop_companion_channel.dart';
++import 'package:qfli_studio_core/remote_control/desktop/desktop_companion_controller.dart';
++import 'package:qfli_studio_core/remote_control/desktop/desktop_companion_locator.dart';
++
++DesktopCompanionResolution _found() => const DesktopCompanionResolution.found(
++  DesktopCompanionLocation(
++    agentDirectory: '/opt/qflistudio/companion',
++    nodeExecutable: '/opt/qflistudio/companion/node/bin/node',
++    manifest: <String, dynamic>{
++      'os': 'linux',
++      'arch': 'x64',
++      'agent_version': '1.0.0',
++    },
++    origin: DesktopCompanionOrigin.installedMachine,
++  ),
++);
++
++void main() {
++  late FakeDesktopCompanionChannel channel;
++  late DesktopCompanionController controller;
++
++  setUp(() {
++    channel = FakeDesktopCompanionChannel();
++    controller = DesktopCompanionController(
++      connect: () async => channel,
++      resolution: _found(),
++    );
++  });
++
++  tearDown(() => controller.dispose());
++
++  test('connects and asks for the state the page needs', () async {
++    await controller.start();
++
++    expect(controller.status, DesktopCompanionStatus.ready);
++    expect(
++      channel.sent.map((frame) => frame['type']),
++      containsAll(<String>['discover', 'pair_code']),
++    );
++  });
++
++  test('shows the pairing code, link and countdown from the companion', () async {
++    await controller.start();
++    final expiresAt = DateTime.now()
++        .add(const Duration(minutes: 5))
++        .millisecondsSinceEpoch;
++    channel.emit(<String, dynamic>{
++      'type': 'pair_code',
++      'display': 'ABCD-1234',
++      'uri':
++          'cloudterminal://pair?relay=ws%3A%2F%2F127.0.0.1%3A8787%2Fws&code=ABCD1234&v=1',
++      'expiresAt': expiresAt,
++    });
++
++    expect(controller.pairing!.code, 'ABCD-1234');
++    expect(controller.pairing!.uri, contains('cloudterminal://pair?'));
++    expect(controller.pairing!.isExpired, isFalse);
++  });
++
++  test(
++    'an expired code is reported as expired, not refreshed silently',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'pair_code',
++        'display': 'ABCD-1234',
++        'uri': 'cloudterminal://pair?code=ABCD1234&v=1',
++        'expiresAt': DateTime.now()
++            .subtract(const Duration(seconds: 1))
++            .millisecondsSinceEpoch,
++      });
++
++      expect(controller.isPairingExpired, isTrue);
++    },
++  );
++
++  test(
++    'paired client count stays unknown when the relay cannot report it',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'snapshot',
++        'pairingsSinceStart': 2,
++        'pairedClients': null,
++      });
++
++      // Not 0, not 2: the relay owns the authoritative count.
++      expect(controller.pairedClients, isNull);
++    },
++  );
++
++  test('relay offline is surfaced instead of an empty address', () async {
++    await controller.start();
++    channel.emit(<String, dynamic>{'type': 'snapshot', 'relayOnline': false});
++
++    expect(controller.relayOnline, isFalse);
++    expect(controller.relayUrl, isNull);
++  });
++
++  test('lists the sessions discovery returned', () async {
++    await controller.start();
++    channel.emit(<String, dynamic>{
++      'type': 'discovered',
++      'sessions': <Map<String, dynamic>>[
++        {
++          'id': 'pane-1',
++          'kind': 'herdr',
++          'title': 'api',
++          'origin': 'pane',
++          'canOpen': true,
++          'canAcceptInput': false,
++        },
++        {
++          'id': 'thread-9',
++          'kind': 'codex',
++          'title': 'refactor',
++          'origin': 'thread',
++          'canOpen': true,
++          'canAcceptInput': true,
++        },
++      ],
++      'bound': <String>['pane-1'],
++    });
++
++    expect(controller.sessions, hasLength(2));
++    expect(controller.sessions.first.bound, isTrue);
++    expect(controller.sessions.last.canAcceptInput, isTrue);
++  });
++
++  test(
++    'an empty discovery result stays empty rather than inventing sessions',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'discovered',
++        'sessions': <Object>[],
++        'bound': <String>[],
++      });
++
++      expect(controller.hasSessions, isFalse);
++    },
++  );
++
++  test(
++    'opening a session sends its kind and origin so the right provider is used',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'discovered',
++        'sessions': <Map<String, dynamic>>[
++          {
++            'id': 'thread-9',
++            'kind': 'codex',
++            'title': 'refactor',
++            'origin': 'thread',
++            'canOpen': true,
++          },
++        ],
++        'bound': <String>[],
++      });
++
++      controller.openSession('thread-9');
++
++      final open = channel.sent.lastWhere(
++        (frame) => frame['type'] == 'open_session',
++      );
++      expect(open['id'], 'thread-9');
++      expect(open['kind'], 'codex');
++      expect(open['origin'], 'thread');
++    },
++  );
++
++  test(
++    'stream_event output reaches the page under the sidecar sessionId field',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'discovered',
++        'sessions': <Map<String, dynamic>>[
++          {
++            'id': 'thread-9',
++            'kind': 'codex',
++            'title': 'refactor',
++            'origin': 'thread',
++            'canOpen': true,
++          },
++        ],
++        'bound': <String>[],
++      });
++      controller.openSession('thread-9');
++
++      // The sidecar broadcasts `{type:'stream_event', kind, sessionId, eventKind, text}`.
++      channel.emit(<String, dynamic>{
++        'type': 'stream_event',
++        'kind': 'codex',
++        'sessionId': 'thread-9',
++        'eventKind': 'snapshot',
++        'text': 'first turn',
++        'seq': 4,
++      });
++
++      expect(controller.openSessionLines.map((line) => line.text), <String>[
++        'first turn',
++      ]);
++
++      channel.emit(<String, dynamic>{
++        'type': 'stream_event',
++        'kind': 'codex',
++        'sessionId': 'thread-9',
++        'eventKind': 'stdout',
++        'text': 'second turn',
++        'seq': 5,
++      });
++      expect(controller.openSessionLines.map((line) => line.text), <String>[
++        'first turn',
++        'second turn',
++      ]);
++    },
++  );
++
++  test(
++    'read-only sessions refuse input instead of sending a doomed request',
++    () async {
++      await controller.start();
++      channel.emit(<String, dynamic>{
++        'type': 'discovered',
++        'sessions': <Map<String, dynamic>>[
++          {
++            'id': 'pane-1',
++            'kind': 'herdr',
++            'title': 'api',
++            'origin': 'pane',
++            'canOpen': true,
++            'canAcceptInput': false,
++          },
++        ],
++        'bound': <String>[],
++      });
++      controller.openSession('pane-1');
++      final before = channel.sent.length;
++
++      controller.sendInput('ls');
++
++      expect(channel.sent.length, before);
++    },
++  );
++
++  test('a dropped link becomes a retryable stopped state', () async {
++    await controller.start();
++    await channel.dropConnection();
++    await Future<void>.delayed(Duration.zero);
++
++    expect(controller.status, DesktopCompanionStatus.stopped);
++  });
++
++  test(
++    'a missing companion reports the guided problem instead of connecting',
++    () async {
++      final missing = DesktopCompanionController(
++        connect: () async => throw StateError('should not connect'),
++        resolution: const DesktopCompanionResolution.missing(
++          problem: '未找到本机 companion',
++          searched: <String>['/opt/qflistudio/companion'],
++        ),
++      );
++      addTearDown(missing.dispose);
++
++      await missing.start();
++
++      expect(missing.status, DesktopCompanionStatus.notInstalled);
++      expect(missing.lastError, contains('未找到'));
++    },
++  );
++
++  test('a failed start keeps the message for the page to show', () async {
++    final failing = DesktopCompanionController(
++      connect: () async => throw StateError('未找到 Node 运行时'),
++      resolution: _found(),
++    );
++    addTearDown(failing.dispose);
++
++    await failing.start();
++
++    expect(failing.status, DesktopCompanionStatus.failed);
++    expect(failing.lastError, '未找到 Node 运行时');
++  });
++}
+diff --git a/test/remote_control/desktop/desktop_companion_locator_test.dart b/test/remote_control/desktop/desktop_companion_locator_test.dart
+new file mode 100644
+--- /dev/null
++++ b/test/remote_control/desktop/desktop_companion_locator_test.dart
+@@ -0,0 +1,336 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/remote_control/desktop/desktop_companion_locator.dart';
++
++/// A fake machine: a set of files, a set of directories, and an environment.
++class _FakeMachine {
++  _FakeMachine({
++    required this.os,
++    required this.executablePath,
++    Map<String, String>? environment,
++  }) : environment = environment ?? <String, String>{};
++
++  final String os;
++  final String executablePath;
++  final Map<String, String> environment;
++  final Set<String> files = <String>{};
++  final Set<String> directories = <String>{};
++  final Map<String, String> contents = <String, String>{};
++
++  void addCompanion(
++    String directory, {
++    String? manifest,
++    String node = 'node/bin/node',
++  }) {
++    directories.add(directory);
++    final separator = os == 'windows' ? r'\' : '/';
++    final manifestPath = '$directory${separator}companion.json';
++    files.add(manifestPath);
++    files.add('$directory${separator}package.json');
++    files.add('$directory${separator}src${separator}agent${separator}main.ts');
++    files.add('$directory${separator}node$separator$node');
++    contents[manifestPath] =
++        manifest ??
++        '{"os":"$os","arch":"x64","agent_version":"1.2.3","node_version":"24.14.1"}';
++  }
++
++  DesktopCompanionEnvironment env({String? supportDirectory}) =>
++      DesktopCompanionEnvironment(
++        operatingSystem: os,
++        environment: environment,
++        executablePath: executablePath,
++        supportDirectory: supportDirectory,
++        isFile: files.contains,
++        isDirectory: directories.contains,
++        readFile: (String path) => contents[path],
++      );
++}
++
++void main() {
++  group('macOS', () {
++    test('finds the sibling app next to /Applications/QFLIStudio.app', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Applications/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++      machine.addCompanion(
++        '/Applications/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++
++      final resolution = resolveDesktopCompanion(machine.env());
++
++      expect(resolution.isFound, isTrue);
++      expect(
++        resolution.location!.agentDirectory,
++        '/Applications/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++    });
++
++    test('finds the sibling of a per-user ~/Applications install', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Users/lin/Applications/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++      machine.addCompanion(
++        '/Users/lin/Applications/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++
++      final resolution = resolveDesktopCompanion(machine.env());
++
++      expect(resolution.isFound, isTrue);
++      expect(
++        resolution.location!.agentDirectory,
++        '/Users/lin/Applications/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++    });
++
++    test('resolves a nested install without dropping a directory level', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Volumes/Build/Apps/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++      machine.addCompanion(
++        '/Volumes/Build/Apps/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++
++      final resolution = resolveDesktopCompanion(machine.env());
++
++      expect(resolution.isFound, isTrue);
++      expect(
++        resolution.location!.agentDirectory,
++        '/Volumes/Build/Apps/QFLI Remote Companion.app/Contents/Resources/companion',
++      );
++    });
++
++    test('accepts a companion staged inside Studio\'s own bundle', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Applications/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++      machine.addCompanion(
++        '/Applications/QFLIStudio.app/Contents/Resources/companion',
++      );
++
++      final resolution = resolveDesktopCompanion(machine.env());
++
++      expect(resolution.isFound, isTrue);
++      expect(
++        resolution.location!.agentDirectory,
++        '/Applications/QFLIStudio.app/Contents/Resources/companion',
++      );
++    });
++
++    test('a sandboxed manifest is attach-only, with the shared attach file', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Applications/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++      machine.addCompanion(
++        '/Applications/QFLI Remote Companion.app/Contents/Resources/companion',
++        manifest:
++            '{"os":"macos","arch":"arm64","sandboxed":true,"attach":{"port_file":"sidecar.json"}}',
++      );
++
++      final location = resolveDesktopCompanion(machine.env()).location!;
++
++      expect(location.canSpawn, isFalse);
++      // The launcher writes here; Studio only reads. Both sides must agree or
++      // macOS could never attach.
++      expect(
++        location.attachFile,
++        '/Users/lin/Library/Application Support/QFLIStudio/companion/sidecar.json',
++      );
++    });
++
++    test('reports a guided missing state and lists what it looked in', () {
++      final machine = _FakeMachine(
++        os: 'macos',
++        executablePath:
++            '/Applications/QFLIStudio.app/Contents/MacOS/qflistudio',
++        environment: {'HOME': '/Users/lin'},
++      );
++
++      final resolution = resolveDesktopCompanion(machine.env());
++
++      expect(resolution.isFound, isFalse);
++      expect(resolution.searched, isNotEmpty);
++      expect(resolution.problem, contains('QFLI 远程 companion'));
++    });
++  });
++
++  group('Windows', () {
++    test('prefers the per-user install before Program Files', () {
++      final machine = _FakeMachine(
++        os: 'windows',
++        executablePath: r'C:\Users\lin\AppData\Local\QFLIStudio\qflistudio.exe',
++        environment: {
++          'LOCALAPPDATA': r'C:\Users\lin\AppData\Local',
++          'APPDATA': r'C:\Users\lin\AppData\Roaming',
++          'ProgramFiles': r'C:\Program Files',
++        },
++      );
++      machine.addCompanion(
++        r'C:\Users\lin\AppData\Local\QFLIStudio\companion',
++        node: r'node\node.exe',
++      );
++      machine.addCompanion(
++        r'C:\Program Files\QFLIStudio\companion',
++        node: r'node\node.exe',
++      );
++
++      final location = resolveDesktopCompanion(machine.env()).location!;
++
++      expect(
++        location.agentDirectory,
++        r'C:\Users\lin\AppData\Local\QFLIStudio\companion',
++      );
++      expect(
++        location.nodeExecutable,
++        r'C:\Users\lin\AppData\Local\QFLIStudio\companion\node\node.exe',
++      );
++      expect(location.canSpawn, isTrue);
++      expect(
++        location.attachFile,
++        r'C:\Users\lin\AppData\Roaming\QFLIStudio\companion\sidecar.json',
++      );
++    });
++
++    test('falls back to Program Files when the user copy is absent', () {
++      final machine = _FakeMachine(
++        os: 'windows',
++        executablePath: r'C:\Program Files\QFLIStudio\qflistudio.exe',
++        environment: {
++          'LOCALAPPDATA': r'C:\Users\lin\AppData\Local',
++          'APPDATA': r'C:\Users\lin\AppData\Roaming',
++          'ProgramFiles': r'C:\Program Files',
++        },
++      );
++      machine.addCompanion(
++        r'C:\Program Files\QFLIStudio\companion',
++        node: r'node\node.exe',
++      );
++
++      expect(
++        resolveDesktopCompanion(machine.env()).location!.agentDirectory,
++        r'C:\Program Files\QFLIStudio\companion',
++      );
++    });
++  });
++
++  group('Linux', () {
++    test(
++      'finds the /opt install and uses XDG_CONFIG_HOME for the attach file',
++      () {
++        final machine = _FakeMachine(
++          os: 'linux',
++          executablePath: '/usr/bin/qflistudio',
++          environment: {
++            'HOME': '/home/lin',
++            'XDG_CONFIG_HOME': '/home/lin/.config',
++          },
++        );
++        machine.addCompanion('/opt/qflistudio/companion');
++
++        final location = resolveDesktopCompanion(machine.env()).location!;
++
++        expect(location.agentDirectory, '/opt/qflistudio/companion');
++        expect(
++          location.attachFile,
++          '/home/lin/.config/QFLIStudio/companion/sidecar.json',
++        );
++      },
++    );
++
++    test('honours QFLI_COMPANION_DIR before any installed path', () {
++      final machine = _FakeMachine(
++        os: 'linux',
++        executablePath: '/usr/bin/qflistudio',
++        environment: {
++          'HOME': '/home/lin',
++          'QFLI_COMPANION_DIR': '/srv/qfli/companion',
++        },
++      );
++      machine.addCompanion('/srv/qfli/companion');
++      machine.addCompanion('/opt/qflistudio/companion');
++
++      final location = resolveDesktopCompanion(machine.env()).location!;
++
++      expect(location.agentDirectory, '/srv/qfli/companion');
++      expect(location.origin, DesktopCompanionOrigin.override);
++    });
++  });
++
++  group('rejection', () {
++    test('a directory without companion.json is not accepted', () {
++      final machine = _FakeMachine(
++        os: 'linux',
++        executablePath: '/usr/bin/qflistudio',
++        environment: {'HOME': '/home/lin'},
++      );
++      machine.directories.add('/opt/qflistudio/companion');
++
++      expect(resolveDesktopCompanion(machine.env()).isFound, isFalse);
++    });
++
++    test('a source checkout must declare itself in the manifest', () {
++      final machine = _FakeMachine(
++        os: 'linux',
++        executablePath: '/repo/studio/build/linux/x64/debug/bundle/qflistudio',
++        environment: {'HOME': '/home/lin'},
++      );
++      machine.files.add('/repo/studio/pubspec.yaml');
++      machine.directories.add('/repo/studio/companion/remote_agent');
++      machine.addCompanion('/repo/studio/companion/remote_agent');
++
++      expect(resolveDesktopCompanion(machine.env()).isFound, isFalse);
++
++      machine.contents['/repo/studio/companion/remote_agent/companion.json'] =
++          '{"os":"linux","arch":"x64","source_checkout":true}';
++      final location = resolveDesktopCompanion(machine.env()).location!;
++
++      expect(location.agentDirectory, '/repo/studio/companion/remote_agent');
++      expect(location.origin, DesktopCompanionOrigin.sourceCheckout);
++    });
++  });
++
++  group('attach point', () {
++    test('parses port and token', () {
++      final point = DesktopCompanionAttachPoint.tryParse(
++        '{"port":51234,"token":"abc"}',
++      );
++
++      expect(point!.port, 51234);
++      expect(point.token, 'abc');
++    });
++
++    test('rejects a document without a token: a port is not an identity', () {
++      expect(DesktopCompanionAttachPoint.tryParse('{"port":51234}'), isNull);
++      expect(
++        DesktopCompanionAttachPoint.tryParse('{"port":51234,"token":""}'),
++        isNull,
++      );
++    });
++
++    test('rejects out-of-range ports and malformed documents', () {
++      expect(
++        DesktopCompanionAttachPoint.tryParse('{"port":0,"token":"abc"}'),
++        isNull,
++      );
++      expect(
++        DesktopCompanionAttachPoint.tryParse('{"port":70000,"token":"abc"}'),
++        isNull,
++      );
++      expect(DesktopCompanionAttachPoint.tryParse('not json'), isNull);
++      expect(DesktopCompanionAttachPoint.tryParse(null), isNull);
++    });
++  });
++}

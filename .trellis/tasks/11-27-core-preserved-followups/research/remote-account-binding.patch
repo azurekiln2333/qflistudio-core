@@ -1,0 +1,4786 @@
+diff --git a/lib/app.dart b/lib/app.dart
+--- a/lib/app.dart
++++ b/lib/app.dart
+@@ -7,6 +7,7 @@
+ import 'editor/retained_editor_host.dart';
+ import 'pages/home_page.dart';
+ import 'pages/restore_complete_page.dart';
++import 'remote_control/account/account_scope.dart';
+ import 'services/app_restore_gate.dart';
+ import 'services/studio_profile.dart';
+ import 'splash_screen.dart';
+@@ -131,10 +132,17 @@
+             ? RestoreCompletePage(status: appearance.restoreStatus!)
+             : !appearance.ready
+             ? const SplashScreen()
+-            : HomePage(
+-                store: widget.store,
++            // The remote-computer module is mounted from a tools tab whose builder
++            // has no BuildContext, so the app's single `AuthStore` is published
++            // here. No second store is created: this scope only exposes the one
++            // instance the app already loaded from `auth.json`.
++            : RemoteAccountScope(
+                 auth: widget.auth,
+-                settings: settings,
++                child: HomePage(
++                  store: widget.store,
++                  auth: widget.auth,
++                  settings: settings,
++                ),
+               ),
+       ),
+     );
+diff --git a/lib/remote_control/account/account_api.dart b/lib/remote_control/account/account_api.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/account_api.dart
+@@ -0,0 +1,516 @@
++// The relay-only halves of the account flow.
++//
++// Two different servers, two different credentials, one rule: a token only ever
++// leaves the code that owns it, and only towards the origin it was issued for.
++//
++//   QFLI  POST /api/relay/grants   ← QFLI session token (QFLI origin only)
++//   relay POST /api/v1/auth/exchange          ← grant
++//   relay POST /api/v1/auth/token/refresh     ← refresh token + fresh grant
++//   relay GET  /api/v1/devices                ← relay access token
++//   relay POST /api/v1/devices/:id/bindings   ← relay access token + pair code
++//   relay DELETE /api/v1/devices/:id/bindings/:accountId
++//
++// The QFLI session token never reaches [RelayAccountApi], and the relay token
++// never reaches [QfliGrantApi]. The two clients are separate classes precisely
++// so that no refactor can wire them into one request by accident.
++
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/foundation.dart';
++import 'package:http/http.dart' as http;
++
++import '../../config/api_config.dart';
++import '../../config/client_platform.dart';
++import '../models/pairing_uri.dart';
++import 'account_models.dart';
++import 'relay_credentials.dart';
++import 'relay_endpoint.dart';
++
++/// A relay-issued token pair.
++///
++/// Opaque to everything above [RelayAccountApi]. [toString] reports expiry only,
++/// so the value can sit in a debugger watch or an error path safely.
++class RelayTokenSet {
++  const RelayTokenSet({
++    required this.accountId,
++    required this.accessToken,
++    required this.refreshToken,
++    this.accessExpiresAt,
++    this.refreshExpiresAt,
++  });
++
++  /// The relay's account id. Comes from the verified grant, never from input.
++  final String accountId;
++
++  final String accessToken;
++  final String refreshToken;
++  final DateTime? accessExpiresAt;
++  final DateTime? refreshExpiresAt;
++
++  /// Treats a token without a known expiry as usable; the relay is the
++  /// authority and will answer `401`, which the caller handles.
++  bool isAccessExpired({Duration skew = const Duration(seconds: 30)}) {
++    final expiry = accessExpiresAt;
++    if (expiry == null) return false;
++    return !DateTime.now().toUtc().add(skew).isBefore(expiry);
++  }
++
++  bool get isRefreshExpired {
++    final expiry = refreshExpiresAt;
++    if (expiry == null) return false;
++    return !DateTime.now().toUtc().isBefore(expiry);
++  }
++
++  @override
++  String toString() =>
++      'RelayTokenSet(account: $accountId, accessExpires: '
++      '${accessExpiresAt?.toIso8601String() ?? 'unknown'})';
++}
++
++/// Failure of an account request, with the HTTP status kept for the caller.
++///
++/// [message] is always safe to show: server bodies are clipped and re-rendered
++/// as transport text, never echoed verbatim, because a misbehaving server could
++/// reflect a token back in its error field.
++class AccountApiException implements Exception {
++  const AccountApiException(
++    this.message, {
++    this.statusCode,
++    this.code = '',
++    this.retryAfter,
++  });
++
++  final String message;
++  final int? statusCode;
++
++  /// Machine-readable reason: `unauthorized`, `forbidden`, `expired`,
++  /// `rate_limited`, `unavailable`, `network`, `protocol`, `cancelled`.
++  final String code;
++
++  /// Set for `429`, so a caller can back off instead of hammering.
++  final Duration? retryAfter;
++
++  /// Whether the user's sign-in still looks valid (the relay, not QFLI, failed).
++  bool get isTransient =>
++      code == 'unavailable' || code == 'network' || code == 'rate_limited';
++
++  @override
++  String toString() => message;
++}
++
++/// A QFLI-issued short-lived relay grant.
++///
++/// [QfliGrantApi.request] is the only way to obtain one. The grant is
++/// single-use: after a successful exchange it must be dropped, and a refresh
++/// always asks for a fresh one.
++class QfliGrantApi {
++  QfliGrantApi({http.Client? transport, String? baseUrl})
++    : _transport = transport,
++      _baseUrl = baseUrl ?? ApiConfig.baseUrl;
++
++  final http.Client? _transport;
++  final String _baseUrl;
++  late final http.Client _http = _transport ?? http.Client();
++
++  /// Owns the transport only when it created it; an injected client belongs to
++  /// the caller (tests reuse a mock across calls).
++  void close() {
++    if (_transport == null) _http.close();
++  }
++
++  /// Requests `{audience: relayGrantAudience, scope: relayGrantScope}`.
++  ///
++  /// The QFLI token is sent to [_baseUrl] and to nothing else. The base URL is
++  /// fixed at construction and compared to [ApiConfig.origin] so a caller
++  /// cannot point this client at a relay by mistake.
++  Future<RelayGrant> request({
++    required String sessionToken,
++    Future<void>? abortTrigger,
++  }) async {
++    if (sessionToken.isEmpty) {
++      throw const AccountApiException('需要先登录 QFLI 账号', code: 'unauthorized');
++    }
++    final uri = Uri.parse('$_baseUrl/api/relay/grants');
++    if (uri.origin != Uri.parse(ApiConfig.baseUrl).origin) {
++      throw const AccountApiException('账号服务地址无效', code: 'protocol');
++    }
++    final body = await _send(
++      uri,
++      method: 'POST',
++      body: <String, Object>{
++        'audience': relayGrantAudience,
++        'scope': relayGrantScope,
++      },
++      headers: <String, String>{
++        'content-type': 'application/json',
++        'x-client-platform': ClientPlatform.header,
++        'authorization': 'Bearer $sessionToken',
++      },
++      abortTrigger: abortTrigger,
++    );
++    try {
++      return RelayGrant.fromJson(body);
++    } on AccountProtocolException catch (e) {
++      throw AccountApiException(e.message, code: 'protocol');
++    }
++  }
++
++  Future<Object?> _send(
++    Uri uri, {
++    required String method,
++    required Map<String, String> headers,
++    Map<String, Object>? body,
++    Future<void>? abortTrigger,
++  }) {
++    return sendAccountRequest(
++      _http,
++      uri,
++      method: method,
++      headers: headers,
++      body: body,
++      abortTrigger: abortTrigger,
++    );
++  }
++}
++
++/// The relay's account API: exchange, refresh, devices, bindings.
++///
++/// Holds no QFLI token and never asks for one. Every method takes the relay URL
++/// explicitly so a single instance can serve several relays without keeping a
++/// "last relay" that could be used for the wrong account.
++class RelayAccountApi {
++  RelayAccountApi({
++    http.Client? transport,
++    this.requestTimeout = const Duration(seconds: 25),
++  }) : _transport = transport;
++
++  final http.Client? _transport;
++  final Duration requestTimeout;
++  late final http.Client _http = _transport ?? http.Client();
++
++  /// See [QfliGrantApi.close].
++  void close() {
++    if (_transport == null) _http.close();
++  }
++
++  /// `POST /api/v1/auth/exchange`.
++  ///
++  /// [relayToken] is required: an account-bound connection must never silently
++  /// fall back to a device secret, so the caller has to have one first.
++  Future<RelayTokenSet> exchange({
++    required RelayEndpoint relay,
++    required String grant,
++    Future<void>? abortTrigger,
++  }) async {
++    if (grant.trim().isEmpty) {
++      throw const AccountApiException('授权票据为空', code: 'protocol');
++    }
++    final body = await _json(
++      relay,
++      method: 'POST',
++      path: '/api/v1/auth/exchange',
++      body: <String, Object>{'grant': grant},
++      abortTrigger: abortTrigger,
++    );
++    return _tokenSet(body, 'exchanged');
++  }
++
++  /// `POST /api/v1/auth/token/refresh`.
++  ///
++  /// Always takes a **fresh** grant: the relay checks that the introspected
++  /// subject still matches the refresh token's account, which is what makes
++  /// "sign out of QFLI" and "account switched" take effect.
++  Future<RelayTokenSet> refresh({
++    required RelayEndpoint relay,
++    required RelayTokenSet current,
++    required String grant,
++    Future<void>? abortTrigger,
++  }) async {
++    final body = await _json(
++      relay,
++      method: 'POST',
++      path: '/api/v1/auth/token/refresh',
++      body: <String, Object>{
++        'refresh_token': current.refreshToken,
++        'grant': grant,
++      },
++      abortTrigger: abortTrigger,
++    );
++    final refreshed = _tokenSet(body, 'refreshed');
++    if (refreshed.accountId != current.accountId) {
++      // A relay that answers with another account would silently re-point the
++      // client at someone else's devices. Treat it as a protocol failure.
++      throw const AccountApiException('刷新后的账号与当前账号不一致', code: 'protocol');
++    }
++    return refreshed;
++  }
++
++  /// `GET /api/v1/devices` for one access token.
++  Future<List<RelayDevice>> devices({
++    required RelayEndpoint relay,
++    required RelayCredentials credentials,
++    Future<void>? abortTrigger,
++  }) async {
++    final body = await _json(
++      relay,
++      method: 'GET',
++      path: '/api/v1/devices',
++      credentials: credentials,
++      abortTrigger: abortTrigger,
++    );
++    try {
++      return parseRelayDevices(body);
++    } on AccountProtocolException catch (e) {
++      throw AccountApiException(e.message, code: 'protocol');
++    }
++  }
++
++  /// Binds a computer with the desktop's one-time code.
++  ///
++  /// The code alone identifies the device: the relay resolves it and answers with
++  /// the `device_id` it bound. That is the only correct flow, since a pair code is
++  /// single use — connecting with it first (the legacy manual path) and then
++  /// binding with the same code would spend it twice and fail.
++  ///
++  /// [deviceId] is optional and only for a caller that already learned the id
++  /// without spending the code; it selects the older known-id route. Both routes
++  /// send the same body, and the code-only route requires a `device_id` back.
++  Future<RelayDevice> bind({
++    required RelayEndpoint relay,
++    required RelayCredentials credentials,
++    required String pairCode,
++    String? deviceId,
++    Future<void>? abortTrigger,
++  }) async {
++    final code = PairingUri.normalizePairCode(pairCode);
++    if (code == null) {
++      throw const AccountApiException('配对码应为 8 位字母或数字', code: 'protocol');
++    }
++    final knownId = deviceId == null ? null : _validDeviceId(deviceId);
++    final body = await _json(
++      relay,
++      method: 'POST',
++      path: knownId == null
++          ? '/api/v1/devices/bindings'
++          : '/api/v1/devices/${Uri.encodeComponent(knownId)}/bindings',
++      credentials: credentials,
++      body: <String, Object>{'pair_code': code},
++      abortTrigger: abortTrigger,
++    );
++    return _deviceFromResponse(body, knownId);
++  }
++
++  /// `DELETE /api/v1/devices/:deviceId/bindings/:accountId`.
++  ///
++  /// The URL account id is the *target*; the caller is authenticated by the
++  /// access token, so a member cannot revoke someone else's binding by editing
++  /// the path.
++  Future<void> revoke({
++    required RelayEndpoint relay,
++    required RelayCredentials credentials,
++    required String deviceId,
++    String? targetAccountId,
++    Future<void>? abortTrigger,
++  }) async {
++    final id = _validDeviceId(deviceId);
++    final account = (targetAccountId ?? credentials.accountId).trim();
++    if (account.isEmpty) {
++      throw const AccountApiException('缺少要撤销的账号', code: 'protocol');
++    }
++    await _json(
++      relay,
++      method: 'DELETE',
++      path:
++          '/api/v1/devices/${Uri.encodeComponent(id)}/bindings/'
++          '${Uri.encodeComponent(account)}',
++      credentials: credentials,
++      abortTrigger: abortTrigger,
++    );
++  }
++
++  // -------------------------------------------------------------------------
++
++  String _validDeviceId(String deviceId) {
++    try {
++      return validateDeviceId(deviceId);
++    } on AccountProtocolException catch (e) {
++      throw AccountApiException(e.message, code: 'protocol');
++    }
++  }
++
++  /// Extracts the bound device from a bind response.
++  ///
++  /// The relay's account envelope nests the row, so `{device: {...}}`,
++  /// `{binding: {...}}` and a bare row are all accepted. [expectedId] is null for
++  /// the code-only route, where the id is known only from the response — and in
++  /// that case a response without a usable id is an error, because the caller
++  /// needs the id to connect.
++  RelayDevice _deviceFromResponse(Object? body, String? expectedId) {
++    if (body is Map) {
++      final map = body is Map<String, dynamic>
++          ? body
++          : Map<String, dynamic>.from(body);
++      final candidate = map['device'] ?? map['binding'] ?? map;
++      try {
++        final device = RelayDevice.fromJson(candidate);
++        if (expectedId != null && device.deviceId != expectedId) {
++          throw const AccountApiException('绑定响应的设备与请求不一致', code: 'protocol');
++        }
++        return device;
++      } on AccountProtocolException {
++        // A `{ok: true}` answer is only usable when the caller knew the id
++        // already; the code-only route cannot fall back to anything.
++      }
++    }
++    if (expectedId == null) {
++      throw const AccountApiException('绑定成功但服务器没有返回设备 ID', code: 'protocol');
++    }
++    return RelayDevice(deviceId: expectedId);
++  }
++
++  RelayTokenSet _tokenSet(Object? body, String action) {
++    if (body is! Map) {
++      throw AccountApiException('$action 响应格式无效', code: 'protocol');
++    }
++    final map = body is Map<String, dynamic>
++        ? body
++        : Map<String, dynamic>.from(body);
++    final accountId = map['account_id'] ?? map['accountId'];
++    final access = map['access_token'] ?? map['accessToken'];
++    final refresh = map['refresh_token'] ?? map['refreshToken'];
++    if (accountId is! String || accountId.trim().isEmpty) {
++      throw AccountApiException('$action 响应缺少账号', code: 'protocol');
++    }
++    if (access is! String || access.length < 8) {
++      throw AccountApiException('$action 响应缺少访问令牌', code: 'protocol');
++    }
++    if (refresh is! String || refresh.length < 8) {
++      throw AccountApiException('$action 响应缺少刷新令牌', code: 'protocol');
++    }
++    return RelayTokenSet(
++      accountId: accountId.trim(),
++      accessToken: access,
++      refreshToken: refresh,
++      accessExpiresAt: parseAccountTime(
++        map['access_expires_at'] ?? map['accessExpiresAt'],
++      ),
++      refreshExpiresAt: parseAccountTime(
++        map['refresh_expires_at'] ?? map['refreshExpiresAt'],
++      ),
++    );
++  }
++
++  Future<Object?> _json(
++    RelayEndpoint relay, {
++    required String method,
++    required String path,
++    RelayCredentials? credentials,
++    Map<String, Object>? body,
++    Future<void>? abortTrigger,
++  }) async {
++    if (credentials != null && credentials.needsRefresh(Duration.zero)) {
++      throw const AccountApiException('访问令牌已过期', code: 'expired');
++    }
++    return sendAccountRequest(
++      _http,
++      relay.api(path),
++      method: method,
++      headers: <String, String>{
++        'content-type': 'application/json',
++        'x-client-platform': ClientPlatform.header,
++        if (credentials != null)
++          'authorization': 'Bearer ${credentials.accessToken}',
++      },
++      body: body,
++      abortTrigger: abortTrigger,
++    );
++  }
++}
++
++/// One HTTP call with the account client's shared safety rules.
++///
++/// * redirects are not followed, so a `30x` can never re-post a token to another
++///   origin;
++/// * the parsed body is required to be a JSON object or array;
++/// * error bodies are turned into a short status sentence and the status is kept,
++///   never the body itself.
++@visibleForTesting
++Future<Object?> sendAccountRequest(
++  http.Client client,
++  Uri uri, {
++  required String method,
++  required Map<String, String> headers,
++  Map<String, Object>? body,
++  Duration timeout = const Duration(seconds: 25),
++  Future<void>? abortTrigger,
++}) async {
++  try {
++    final request =
++        (abortTrigger == null
++              ? http.Request(method, uri)
++              : http.AbortableRequest(method, uri, abortTrigger: abortTrigger))
++          ..followRedirects = false
++          ..headers.addAll(headers);
++    if (body != null) request.body = jsonEncode(body);
++    final response = await client
++        .send(request)
++        .then(http.Response.fromStream)
++        .timeout(timeout);
++    final text = utf8.decode(response.bodyBytes, allowMalformed: true);
++    Object? decoded;
++    if (text.isNotEmpty) {
++      try {
++        decoded = jsonDecode(text);
++      } on FormatException {
++        decoded = null;
++      }
++    }
++    if (response.statusCode >= 300) {
++      throw _errorFor(response.statusCode, decoded);
++    }
++    if (decoded != null && decoded is! Map && decoded is! List) {
++      throw const AccountApiException('账号服务响应格式无效', code: 'protocol');
++    }
++    return decoded;
++  } on http.RequestAbortedException {
++    throw const AccountApiException('请求已取消', code: 'cancelled');
++  } on TimeoutException {
++    throw const AccountApiException('账号服务响应超时', code: 'network');
++  } on AccountApiException {
++    rethrow;
++  } catch (_) {
++    throw const AccountApiException('无法连接账号服务', code: 'network');
++  }
++}
++
++AccountApiException _errorFor(int status, Object? decoded) {
++  final code = switch (status) {
++    400 => 'protocol',
++    401 => 'unauthorized',
++    403 => 'forbidden',
++    404 => 'not_found',
++    409 => 'conflict',
++    410 => 'expired',
++    429 => 'rate_limited',
++    >= 500 => 'unavailable',
++    _ => 'protocol',
++  };
++  final message = switch (code) {
++    'protocol' => '请求被拒绝，请检查填写内容',
++    'unauthorized' => '登录已过期，请重新登录',
++    'forbidden' => '该账号无权访问这台电脑',
++    'not_found' => '找不到这台电脑的绑定',
++    'conflict' => '电脑已绑定到其他账号',
++    'expired' => '配对码无效或已过期，请在电脑上生成新的配对码',
++    'rate_limited' => '尝试次数过多，请稍后再试',
++    'unavailable' => '账号服务暂时不可用，请稍后重试',
++    _ => '账号服务返回了错误',
++  };
++  return AccountApiException(
++    message,
++    statusCode: status,
++    code: code,
++    retryAfter: status == 429 ? const Duration(seconds: 30) : null,
++  );
++}
+diff --git a/lib/remote_control/account/account_devices_page.dart b/lib/remote_control/account/account_devices_page.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/account_devices_page.dart
+@@ -0,0 +1,769 @@
++// "我的电脑": the account's bound computers, and the account itself.
++//
++// Two jobs, deliberately in one screen:
++//
++//   1. show which computers this QFLI account may drive, with live presence;
++//   2. keep the manual pairing routes visible, because the account layer is an
++//      addition and never a requirement. If the server has no account API, or
++//      the user is offline, or they signed in on another phone, the module must
++//      still work exactly as before.
++//
++// Rendered as a pushed route from `RemoteComputerPage`, so the pair screen and
++// the dashboard are untouched when the account is unused.
++
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../models/pairing_uri.dart';
++import '../state/remote_controller.dart';
++import '../theme/remote_theme.dart';
++import 'account_models.dart';
++import 'remote_account_controller.dart';
++
++/// Exposes the page-owned account controller to pushed account routes.
++///
++/// `RemoteComputerPage` installs this so the devices route shares one
++/// controller: a second one would dial the relay again and race the dashboard's
++/// token refreshes.
++class AccountOwnerScope extends InheritedWidget {
++  const AccountOwnerScope({
++    super.key,
++    required this.account,
++    required super.child,
++  });
++
++  final RemoteAccountController account;
++
++  static RemoteAccountController? maybeOf(BuildContext context) =>
++      context.dependOnInheritedWidgetOfExactType<AccountOwnerScope>()?.account;
++
++  @override
++  bool updateShouldNotify(AccountOwnerScope oldWidget) =>
++      !identical(account, oldWidget.account);
++}
++
++/// Hook the host installs to open its login screen.
++///
++/// A callback instead of an import keeps this module independent of the host's
++/// login UI, which lives outside the remote-control package. Absent hook is a
++/// supported state: the notice stays visible and manual pairing still works.
++class AccountSignInHook extends InheritedWidget {
++  const AccountSignInHook({
++    super.key,
++    required this.onSignIn,
++    required super.child,
++  });
++
++  final Future<void> Function() onSignIn;
++
++  static Future<void> Function()? maybeOf(BuildContext context) =>
++      context.dependOnInheritedWidgetOfExactType<AccountSignInHook>()?.onSignIn;
++
++  @override
++  bool updateShouldNotify(AccountSignInHook oldWidget) =>
++      onSignIn != oldWidget.onSignIn;
++}
++
++/// The devices screen.
++///
++/// [account] and [controller] are injectable so a test or the desktop shell can
++/// mount the screen with instances it already owns.
++class AccountDevicesPage extends StatelessWidget {
++  const AccountDevicesPage({
++    super.key,
++    this.account,
++    this.controller,
++    this.onManualPair,
++  });
++
++  final RemoteAccountController? account;
++  final RemoteController? controller;
++
++  /// Escape hatch into manual pairing. Defaults to popping back, which is the
++  /// pair screen the route was opened from.
++  final VoidCallback? onManualPair;
++
++  @override
++  Widget build(BuildContext context) {
++    final account = this.account ?? AccountOwnerScope.maybeOf(context);
++    if (account == null) {
++      return Scaffold(
++        appBar: AppBar(title: const Text('我的电脑')),
++        body: const _Notice(
++          message: '账号功能在当前环境中不可用，可以直接用配对码连接。',
++          tone: _NoticeTone.info,
++        ),
++      );
++    }
++    return _DevicesView(
++      account: account,
++      controller: controller,
++      onManualPair:
++          onManualPair ??
++          () {
++            final navigator = Navigator.maybeOf(context);
++            if (navigator != null && navigator.canPop()) navigator.pop();
++          },
++    );
++  }
++}
++
++class _DevicesView extends StatefulWidget {
++  const _DevicesView({
++    required this.account,
++    required this.onManualPair,
++    this.controller,
++  });
++
++  final RemoteAccountController account;
++  final VoidCallback onManualPair;
++  final RemoteController? controller;
++
++  @override
++  State<_DevicesView> createState() => _DevicesViewState();
++}
++
++class _DevicesViewState extends State<_DevicesView> {
++  final TextEditingController _relay = TextEditingController();
++  final TextEditingController _code = TextEditingController();
++  bool _relaySeeded = false;
++  bool _binding = false;
++  String? _actionError;
++
++  RemoteAccountController get _account => widget.account;
++
++  @override
++  void didChangeDependencies() {
++    super.didChangeDependencies();
++    if (_relaySeeded) return;
++    _relaySeeded = true;
++    // Prefill with the server already in use so the user rarely has to type it.
++    _relay.text = _account.relayInput;
++  }
++
++  @override
++  void dispose() {
++    _relay.dispose();
++    _code.dispose();
++    super.dispose();
++  }
++
++  // -------------------------------------------------------------------------
++  // Actions
++  // -------------------------------------------------------------------------
++
++  Future<void> _applyRelay() async {
++    FocusScope.of(context).unfocus();
++    setState(() => _actionError = null);
++    await _account.setRelayAddress(_relay.text.trim());
++  }
++
++  Future<void> _authorize() async {
++    FocusScope.of(context).unfocus();
++    setState(() => _actionError = null);
++    await _account.authorize();
++  }
++
++  /// Binds with the code alone, then refreshes and connects.
++  ///
++  /// The code is what the desktop shows; asking for a device id here would
++  /// contradict the flow the desktop actually offers, and the legacy
++  /// "pair first, bind later" path would spend the single-use code twice.
++  Future<void> _bindAndConnect() async {
++    final code = PairingUri.normalizePairCode(_code.text);
++    if (code == null) {
++      setState(() => _actionError = '配对码应为 8 位字母或数字');
++      return;
++    }
++    setState(() {
++      _actionError = null;
++      _binding = true;
++    });
++    try {
++      final device = await _account.bindDevice(pairCode: code);
++      if (!mounted) return;
++      _code.clear();
++      if (device.isRevoked) {
++        setState(() => _actionError = '这台电脑的绑定已被解除');
++        return;
++      }
++      if (widget.controller == null) {
++        ScaffoldMessenger.of(
++          context,
++        ).showSnackBar(const SnackBar(content: Text('已绑定，这台电脑出现在列表中')));
++        return;
++      }
++      if (_account.phase != AccountPhase.ready) {
++        ScaffoldMessenger.of(
++          context,
++        ).showSnackBar(const SnackBar(content: Text('已绑定，请刷新设备列表确认连接状态')));
++        return;
++      }
++      if (!device.isOnline) {
++        // Bound, but the agent is not connected right now. Say so instead of
++        // opening a socket that can only report "电脑不在线".
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text('已绑定「${device.displayName}」，等电脑上线后即可连接')),
++        );
++        return;
++      }
++      await _connect(device);
++    } catch (e) {
++      if (!mounted) return;
++      setState(() => _actionError = '$e');
++    } finally {
++      if (mounted) setState(() => _binding = false);
++    }
++  }
++
++  Future<void> _revoke(RelayDevice device) async {
++    setState(() => _actionError = null);
++    final ok = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        icon: const Icon(Icons.link_off_rounded),
++        title: Text('从「${device.displayName}」解除绑定？'),
++        content: const Text(
++          '解除后这个账号不能再连接这台电脑。已建立的连接会立即断开。'
++          '再次连接时，请在电脑上重新生成配对码。',
++        ),
++        actions: <Widget>[
++          TextButton(
++            onPressed: () => Navigator.of(context).pop(false),
++            child: const Text('取消'),
++          ),
++          FilledButton(
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('解除绑定'),
++          ),
++        ],
++      ),
++    );
++    if (ok != true || !mounted) return;
++    try {
++      final applied = await _account.revokeDevice(device.deviceId);
++      if (!mounted) return;
++      if (!applied) {
++        // The account or relay changed while the request was in flight. Say so
++        // instead of reporting a revocation that no longer belongs to this list.
++        setState(() => _actionError = '账号已切换，本次解除未生效');
++        return;
++      }
++      // Drop the live link only for the computer just revoked, and only while it
++      // is still the linked one: another account's connection must survive.
++      final controller = widget.controller;
++      if (controller != null &&
++          controller.pairing?.agentId == device.deviceId) {
++        await controller.unpair();
++      }
++    } catch (e) {
++      if (!mounted) return;
++      setState(() => _actionError = '$e');
++    }
++  }
++
++  Future<void> _connect(RelayDevice device) async {
++    final controller = widget.controller;
++    final endpoint = _account.endpoint;
++    final accountId = _account.accountId;
++    if (controller == null || endpoint == null || accountId == null) {
++      setState(() => _actionError = '账号授权已失效，请重新授权');
++      return;
++    }
++    final navigator = Navigator.maybeOf(context);
++    try {
++      await controller.connectAccountDevice(
++        relayUrl: endpoint.key,
++        deviceId: device.deviceId,
++        accountId: accountId,
++        name: device.label,
++        tokens: ({required String accountId, required String relayUrl}) async {
++          final credentials = await _account.credentialsFor(
++            accountId: accountId,
++            relayUrl: relayUrl,
++          );
++          return credentials?.accessToken;
++        },
++      );
++    } on RemoteException catch (e) {
++      if (!mounted) return;
++      setState(() => _actionError = e.message);
++      return;
++    }
++    // The dashboard is behind this route; closing it shows the new connection.
++    if (navigator != null && navigator.canPop()) navigator.pop();
++  }
++
++  Future<void> _refresh() async {
++    setState(() => _actionError = null);
++    await _account.refreshDevices();
++  }
++
++  // -------------------------------------------------------------------------
++
++  @override
++  Widget build(BuildContext context) {
++    return ListenableBuilder(
++      listenable: _account,
++      builder: (context, _) {
++        final scheme = Theme.of(context).colorScheme;
++        return Scaffold(
++          appBar: AppBar(
++            title: const Text('我的电脑'),
++            actions: <Widget>[
++              if (_account.phase == AccountPhase.ready)
++                IconButton(
++                  tooltip: '刷新',
++                  onPressed: _account.isLoading ? null : _refresh,
++                  icon: const Icon(Icons.refresh_rounded),
++                ),
++            ],
++          ),
++          body: RefreshIndicator(
++            onRefresh: _refresh,
++            child: ListView(
++              padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
++              children: <Widget>[
++                _RelayCard(
++                  controller: _relay,
++                  host: _account.relayHost,
++                  onApply: _account.phase == AccountPhase.authorizing
++                      ? null
++                      : _applyRelay,
++                ),
++                const SizedBox(height: 12),
++                ..._body(context),
++                const SizedBox(height: 20),
++                const Divider(),
++                const SizedBox(height: 8),
++                OutlinedButton.icon(
++                  onPressed: widget.onManualPair,
++                  icon: const Icon(Icons.key_rounded),
++                  label: const Text('改用配对码或密钥连接'),
++                ),
++                const SizedBox(height: 8),
++                Text(
++                  '配对码、配对链接和手动密钥始终可用，不依赖账号服务。',
++                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
++                    color: scheme.onSurfaceVariant,
++                  ),
++                ),
++              ],
++            ),
++          ),
++        );
++      },
++    );
++  }
++
++  List<Widget> _body(BuildContext context) {
++    final error = _actionError ?? _account.errorMessage;
++    final header = <Widget>[
++      if (error != null) ...<Widget>[
++        _Notice(message: error, tone: _NoticeTone.error),
++        const SizedBox(height: 12),
++      ],
++    ];
++
++    return switch (_account.phase) {
++      AccountPhase.signedOut => <Widget>[
++        ...header,
++        _Notice(
++          message: '登录 QFLI 账号后，这里会列出绑定到账号的电脑。',
++          tone: _NoticeTone.info,
++          action: TextButton(
++            onPressed: () => _signIn(context),
++            child: const Text('去登录'),
++          ),
++        ),
++      ],
++      AccountPhase.signInExpired => <Widget>[
++        ...header,
++        _Notice(
++          message: '登录状态已失效，请重新登录后再授权。',
++          tone: _NoticeTone.error,
++          action: TextButton(
++            onPressed: () => _signIn(context),
++            child: const Text('重新登录'),
++          ),
++        ),
++      ],
++      AccountPhase.needsAuthorization => <Widget>[
++        ...header,
++        _Notice(
++          message: _account.endpoint == null
++              ? '先填写电脑所连接的服务器地址，再授权账号。'
++              : '授权后，这个账号绑定的电脑会出现在这里。',
++          tone: _NoticeTone.info,
++        ),
++        const SizedBox(height: 12),
++        FilledButton.icon(
++          onPressed: _account.endpoint == null ? null : _authorize,
++          icon: const Icon(Icons.verified_user_outlined),
++          label: const Text('授权账号访问'),
++        ),
++        const SizedBox(height: 8),
++        if (!_account.persistsCredentials)
++          Text(
++            '授权只在本次运行中有效，重启应用后需要重新授权。',
++            style: Theme.of(context).textTheme.bodySmall?.copyWith(
++              color: Theme.of(context).colorScheme.onSurfaceVariant,
++            ),
++          ),
++      ],
++      AccountPhase.authorizing => <Widget>[
++        ...header,
++        const Padding(
++          padding: EdgeInsets.symmetric(vertical: 24),
++          child: Center(child: CircularProgressIndicator()),
++        ),
++        Text(
++          '正在向账号服务确认授权…',
++          textAlign: TextAlign.center,
++          style: Theme.of(context).textTheme.bodySmall?.copyWith(
++            color: Theme.of(context).colorScheme.onSurfaceVariant,
++          ),
++        ),
++      ],
++      AccountPhase.unavailable => <Widget>[
++        ...header,
++        _Notice(
++          message: _account.hasAuthorization
++              ? '账号服务暂时连不上，下面是上次读取到的列表。'
++              : '账号服务暂时连不上。可以稍后重试，或直接用配对码连接。',
++          tone: _NoticeTone.warning,
++        ),
++        const SizedBox(height: 12),
++        OutlinedButton.icon(
++          onPressed: _account.hasAuthorization ? _refresh : _authorize,
++          icon: const Icon(Icons.refresh_rounded),
++          label: const Text('重试'),
++        ),
++        if (_account.devices.isNotEmpty) ...<Widget>[
++          const SizedBox(height: 16),
++          ..._deviceList(),
++        ],
++      ],
++      AccountPhase.ready => <Widget>[
++        ...header,
++        if (_account.devices.isEmpty)
++          const _Notice(
++            message: '这个账号还没有绑定电脑。在电脑端打开「远程控制」生成配对码，再在下面绑定。',
++            tone: _NoticeTone.info,
++          )
++        else
++          ..._deviceList(),
++        const SizedBox(height: 16),
++        _BindCard(
++          code: _code,
++          busy: _binding,
++          onSubmit: _binding ? null : _bindAndConnect,
++          onChanged: () => setState(() => _actionError = null),
++        ),
++      ],
++    };
++  }
++
++  void _signIn(BuildContext context) {
++    final hook = AccountSignInHook.maybeOf(context);
++    if (hook == null) {
++      setState(() => _actionError = '请在应用内登录 QFLI 账号后返回这里');
++      return;
++    }
++    unawaited(hook());
++  }
++
++  List<Widget> _deviceList() {
++    return <Widget>[
++      for (final device in _account.devices) ...<Widget>[
++        _DeviceTile(
++          device: device,
++          busy: _account.isLoading,
++          onConnect: device.isRevoked ? null : () => _connect(device),
++          onRevoke: device.isRevoked ? null : () => _revoke(device),
++        ),
++        const SizedBox(height: 8),
++      ],
++    ];
++  }
++}
++
++/// Relay selection plus the account's authorization state.
++class _RelayCard extends StatelessWidget {
++  const _RelayCard({
++    required this.controller,
++    required this.host,
++    required this.onApply,
++  });
++
++  final TextEditingController controller;
++  final String host;
++  final VoidCallback? onApply;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return Card(
++      elevation: 0,
++      color: scheme.surfaceContainerLow,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: <Widget>[
++            Row(
++              children: <Widget>[
++                Icon(Icons.dns_outlined, size: 18, color: scheme.primary),
++                const SizedBox(width: 8),
++                Text('服务器', style: Theme.of(context).textTheme.labelLarge),
++                const Spacer(),
++                if (host.isNotEmpty)
++                  Text(
++                    host,
++                    style: RemoteTheme.mono(
++                      12,
++                    ).copyWith(color: scheme.onSurfaceVariant),
++                  ),
++              ],
++            ),
++            const SizedBox(height: 8),
++            TextField(
++              controller: controller,
++              autocorrect: false,
++              keyboardType: TextInputType.url,
++              style: RemoteTheme.mono(13),
++              decoration: const InputDecoration(
++                isDense: true,
++                hintText: 'wss://relay.example.com/ws',
++                prefixIcon: Icon(Icons.link_rounded),
++              ),
++              onSubmitted: (_) => onApply?.call(),
++            ),
++            const SizedBox(height: 8),
++            Align(
++              alignment: Alignment.centerRight,
++              child: TextButton(
++                onPressed: onApply,
++                child: const Text('使用此服务器'),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// Binds a computer with the one-time code shown on its desktop.
++class _BindCard extends StatelessWidget {
++  const _BindCard({
++    required this.code,
++    required this.busy,
++    required this.onSubmit,
++    required this.onChanged,
++  });
++
++  final TextEditingController code;
++  final bool busy;
++  final VoidCallback? onSubmit;
++  final VoidCallback onChanged;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return Card(
++      elevation: 0,
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: <Widget>[
++            Text('绑定一台电脑', style: Theme.of(context).textTheme.titleSmall),
++            const SizedBox(height: 4),
++            Text(
++              '在电脑上生成配对码，填入下面的输入框。配对码证明你就在电脑前，账号证明这是你的账号。',
++              style: Theme.of(
++                context,
++              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
++            ),
++            const SizedBox(height: 10),
++            TextField(
++              controller: code,
++              autocorrect: false,
++              enabled: !busy,
++              textCapitalization: TextCapitalization.characters,
++              style: RemoteTheme.mono(15),
++              decoration: const InputDecoration(
++                isDense: true,
++                labelText: '配对码',
++                hintText: 'XXXXXXXX',
++                prefixIcon: Icon(Icons.pin_outlined),
++              ),
++              onChanged: (_) => onChanged(),
++            ),
++            const SizedBox(height: 10),
++            FilledButton(
++              onPressed: onSubmit,
++              child: Text(busy ? '正在绑定…' : '绑定并连接'),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _DeviceTile extends StatelessWidget {
++  const _DeviceTile({
++    required this.device,
++    required this.busy,
++    required this.onConnect,
++    required this.onRevoke,
++  });
++
++  final RelayDevice device;
++  final bool busy;
++  final VoidCallback? onConnect;
++  final VoidCallback? onRevoke;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final revoked = device.isRevoked;
++    final (dot, status) = switch (device.state) {
++      RelayDeviceState.online => (scheme.primary, '在线'),
++      RelayDeviceState.offline => (scheme.outline, '离线'),
++      RelayDeviceState.revoked => (scheme.error, '已解除绑定'),
++    };
++
++    return Card(
++      elevation: 0,
++      color: revoked ? scheme.surfaceContainerLow : null,
++      child: ListTile(
++        onTap: revoked || busy ? null : onConnect,
++        leading: Container(
++          width: 10,
++          height: 10,
++          margin: const EdgeInsets.only(top: 6),
++          decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
++        ),
++        title: Text(
++          device.displayName,
++          maxLines: 1,
++          overflow: TextOverflow.ellipsis,
++          style: revoked
++              ? theme.textTheme.titleSmall?.copyWith(
++                  color: scheme.onSurfaceVariant,
++                )
++              : theme.textTheme.titleSmall,
++        ),
++        subtitle: Padding(
++          padding: const EdgeInsets.only(top: 4),
++          child: Text(
++            <String>[
++              status,
++              device.platformLabel,
++              if (device.isOwner)
++                '本人绑定'
++              else if (device.role.isNotEmpty)
++                device.role,
++              if (device.lastSeenAt != null)
++                '最近 ${_shortTime(device.lastSeenAt!)}',
++            ].join(' · '),
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: theme.textTheme.bodySmall?.copyWith(
++              color: revoked ? scheme.outline : scheme.onSurfaceVariant,
++            ),
++          ),
++        ),
++        trailing: revoked
++            ? const Icon(Icons.link_off_rounded, size: 18)
++            : PopupMenuButton<String>(
++                tooltip: '更多',
++                enabled: !busy,
++                onSelected: (value) {
++                  if (value == 'connect') onConnect?.call();
++                  if (value == 'revoke') onRevoke?.call();
++                },
++                itemBuilder: (context) => <PopupMenuEntry<String>>[
++                  PopupMenuItem<String>(
++                    value: 'connect',
++                    enabled: onConnect != null,
++                    child: const ListTile(
++                      leading: Icon(Icons.settings_remote_rounded),
++                      title: Text('连接'),
++                    ),
++                  ),
++                  PopupMenuItem<String>(
++                    value: 'revoke',
++                    enabled: onRevoke != null,
++                    child: ListTile(
++                      leading: Icon(
++                        Icons.link_off_rounded,
++                        color: scheme.error,
++                      ),
++                      title: const Text('解除绑定'),
++                    ),
++                  ),
++                ],
++              ),
++      ),
++    );
++  }
++
++  /// Coarse relative time. Exact seconds would be noise on a device row.
++  static String _shortTime(DateTime time) {
++    final diff = DateTime.now().toUtc().difference(time.toUtc());
++    if (diff.inMinutes < 1) return '刚刚';
++    if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
++    if (diff.inHours < 24) return '${diff.inHours} 小时前';
++    final local = time.toLocal();
++    return '${local.month}月${local.day}日';
++  }
++}
++
++enum _NoticeTone { info, warning, error }
++
++class _Notice extends StatelessWidget {
++  const _Notice({required this.message, required this.tone, this.action});
++
++  final String message;
++  final _NoticeTone tone;
++  final Widget? action;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    final (icon, color) = switch (tone) {
++      _NoticeTone.info => (Icons.info_outline_rounded, scheme.primary),
++      _NoticeTone.warning => (Icons.wifi_off_rounded, scheme.tertiary),
++      _NoticeTone.error => (Icons.error_outline_rounded, scheme.error),
++    };
++    return Container(
++      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
++      decoration: BoxDecoration(
++        color: color.withValues(alpha: 0.08),
++        borderRadius: BorderRadius.circular(12),
++      ),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: <Widget>[
++          Icon(icon, size: 18, color: color),
++          const SizedBox(width: 10),
++          Expanded(
++            child: Text(
++              message,
++              style: Theme.of(
++                context,
++              ).textTheme.bodySmall?.copyWith(color: scheme.onSurface),
++            ),
++          ),
++          ?action,
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/remote_control/account/account_models.dart b/lib/remote_control/account/account_models.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/account_models.dart
+@@ -0,0 +1,352 @@
++// Wire models for the relay account API and the device list.
++//
++// Every response shape is decoded in this one file so validation happens in a
++// single place: the UI never touches raw JSON, and a hostile or broken relay
++// cannot smuggle a malformed device id into the connection flow.
++
++/// A relay response that does not match the documented contract.
++///
++/// Carries a user-readable Chinese sentence and nothing else: no body, no
++/// header, no token.
++class AccountProtocolException implements Exception {
++  const AccountProtocolException(this.message);
++
++  final String message;
++
++  @override
++  String toString() => message;
++}
++
++/// What a bound device currently looks like to this account.
++enum RelayDeviceState {
++  /// The computer holds a live agent socket on the relay.
++  online,
++
++  /// The account is still bound, but the agent is not connected.
++  offline,
++
++  /// The device itself or this account's binding was revoked.
++  revoked,
++}
++
++/// One computer bound to the signed-in account.
++class RelayDevice {
++  const RelayDevice({
++    required this.deviceId,
++    this.label = '',
++    this.platform = '',
++    this.role = '',
++    this.state = RelayDeviceState.offline,
++    this.lastSeenAt,
++    this.boundAt,
++  });
++
++  /// Relay device id (the agent id). Never a secret; safe to persist and show.
++  final String deviceId;
++
++  /// User-visible name set on the desktop or by a previous binding.
++  final String label;
++
++  /// `win32` / `darwin` / `linux`, as reported by the agent.
++  final String platform;
++
++  /// `owner` or `member` for this account, when the relay reports it.
++  final String role;
++
++  final RelayDeviceState state;
++
++  /// Last time the relay saw the agent, when reported.
++  final DateTime? lastSeenAt;
++
++  /// When this account bound the device, when reported.
++  final DateTime? boundAt;
++
++  bool get isRevoked => state == RelayDeviceState.revoked;
++
++  bool get isOnline => state == RelayDeviceState.online;
++
++  bool get isOwner => role.toLowerCase() == 'owner';
++
++  /// Falls back to the id so a row is never blank.
++  String get displayName {
++    final trimmed = label.trim();
++    return trimmed.isEmpty ? deviceId : trimmed;
++  }
++
++  /// Platform shown in the list. Unknown values are passed through unchanged —
++  /// the relay already stores whatever the agent reported.
++  String get platformLabel =>
++      platform.trim().isEmpty ? '未知平台' : platform.trim();
++
++  RelayDevice copyWith({RelayDeviceState? state}) => RelayDevice(
++    deviceId: deviceId,
++    label: label,
++    platform: platform,
++    role: role,
++    state: state ?? this.state,
++    lastSeenAt: lastSeenAt,
++    boundAt: boundAt,
++  );
++
++  /// Central validation for one device record.
++  ///
++  /// Accepts the relay's snake_case envelope and camelCase spellings, because
++  /// the relay also has to serve older clients. Anything that is not a bounded,
++  /// printable id is rejected instead of being passed to the socket layer.
++  factory RelayDevice.fromJson(Object? json) {
++    if (json is! Map) {
++      throw const AccountProtocolException('设备记录格式无效');
++    }
++    final map = json is Map<String, dynamic>
++        ? json
++        : Map<String, dynamic>.from(json);
++
++    final rawId = _read(map, const <String>['device_id', 'deviceId', 'id']);
++    final deviceId = validateDeviceId(rawId);
++
++    final deviceRevoked =
++        _read(map, const <String>['device_revoked', 'deviceRevoked']) == true;
++    final online = _read(map, const <String>['online']) == true;
++    // `state` is written by [AccountDeviceCache.toJson], so the cache round-trips:
++    // without it every restored row would read as offline because the memo carries
++    // no `online` / `device_revoked` flags.
++    final stateText = (_readString(map, const <String>['state']) ?? '')
++        .toLowerCase();
++
++    return RelayDevice(
++      deviceId: deviceId,
++      label:
++          _readString(map, const <String>[
++            'label',
++            'name',
++            'display_name',
++            'displayName',
++          ]) ??
++          '',
++      platform: _readString(map, const <String>['platform', 'os']) ?? '',
++      role: _readString(map, const <String>['role', 'binding_role']) ?? '',
++      state: deviceRevoked || stateText == RelayDeviceState.revoked.name
++          ? RelayDeviceState.revoked
++          : online || stateText == RelayDeviceState.online.name
++          ? RelayDeviceState.online
++          : RelayDeviceState.offline,
++      lastSeenAt: parseAccountTime(
++        _read(map, const <String>['last_seen_at', 'lastSeenAt']),
++      ),
++      boundAt: parseAccountTime(
++        _read(map, const <String>[
++          'bound_at',
++          'boundAt',
++          'created_at',
++          'createdAt',
++        ]),
++      ),
++    );
++  }
++
++  /// Never includes a credential; the device id is public metadata.
++  @override
++  String toString() => 'RelayDevice($deviceId, ${state.name})';
++}
++
++/// Validates a device id before it is used in a URL path or a socket frame.
++///
++/// The bound is intentionally conservative: ids come from the relay's own
++/// records, so a value with whitespace, control characters, slashes or an
++/// unexpected length is a protocol error rather than something to repair.
++String validateDeviceId(Object? raw) {
++  if (raw is! String) {
++    throw const AccountProtocolException('设备 ID 缺失或格式无效');
++  }
++  final value = raw.trim();
++  if (value.isEmpty || value.length > 128) {
++    throw const AccountProtocolException('设备 ID 长度无效');
++  }
++  if (!RegExp(r'^[A-Za-z0-9._:-]+$').hasMatch(value)) {
++    throw const AccountProtocolException('设备 ID 含有非法字符');
++  }
++  return value;
++}
++
++/// Decodes `GET /api/v1/devices`, tolerating both envelopes the relay may use.
++///
++/// Duplicate ids are collapsed: the list is rendered by device, and a repeated
++/// row would let a user revoke the same binding twice.
++List<RelayDevice> parseRelayDevices(Object? payload) {
++  final raw = switch (payload) {
++    List<dynamic>() => payload,
++    Map<dynamic, dynamic>() when payload['devices'] is List =>
++      payload['devices'] as List<dynamic>,
++    Map<dynamic, dynamic>() when payload['items'] is List =>
++      payload['items'] as List<dynamic>,
++    _ => throw const AccountProtocolException('设备列表响应格式无效'),
++  };
++
++  final devices = <RelayDevice>[];
++  final seen = <String>{};
++  for (final item in raw) {
++    final device = RelayDevice.fromJson(item);
++    if (!seen.add(device.deviceId)) continue;
++    devices.add(device);
++  }
++  return devices;
++}
++
++/// The short-lived QFLI grant the relay exchanges for its own tokens.
++///
++/// Deliberately has no accessor that prints it: [toString] reports the audience
++/// only, so an accidental interpolation cannot leak a usable authorization.
++class RelayGrant {
++  const RelayGrant({required this.grant, this.audience = '', this.expiresAt});
++
++  final String grant;
++  final String audience;
++  final DateTime? expiresAt;
++
++  bool get isExpired {
++    final expiry = expiresAt;
++    return expiry != null && !DateTime.now().toUtc().isBefore(expiry);
++  }
++
++  /// Central validation of `POST /api/relay/grants`.
++  factory RelayGrant.fromJson(Object? payload) {
++    if (payload is! Map) {
++      throw const AccountProtocolException('授权票据响应格式无效');
++    }
++    final map = payload is Map<String, dynamic>
++        ? payload
++        : Map<String, dynamic>.from(payload);
++    final value = _readString(map, const <String>['grant', 'token']);
++    if (value == null || value.length < 16 || value.length > 4096) {
++      throw const AccountProtocolException('授权票据缺失或长度无效');
++    }
++    final audience = _readString(map, const <String>['audience', 'aud']) ?? '';
++    if (audience.isNotEmpty && audience != relayGrantAudience) {
++      throw const AccountProtocolException('授权票据的 audience 与预期不符');
++    }
++    return RelayGrant(
++      grant: value,
++      audience: audience,
++      expiresAt: parseAccountTime(
++        _read(map, const <String>['expires_at', 'expiresAt', 'exp']),
++      ),
++    );
++  }
++
++  @override
++  String toString() =>
++      'RelayGrant(audience: ${audience.isEmpty ? 'unspecified' : audience})';
++}
++
++/// The only audience this client asks for or accepts.
++const String relayGrantAudience = 'cloudterminal-relay';
++
++/// The only scope this client asks for.
++const String relayGrantScope = 'relay.connect';
++
++/// Device list memo scoped to one account on one relay.
++///
++/// Contains selection metadata only — never a token, never a grant. The cache is
++/// only consulted after a successful exchange has proved which relay account the
++/// signed-in QFLI user maps to, so a second user on the same phone can never see
++/// the previous account's list.
++class AccountDeviceCache {
++  const AccountDeviceCache({
++    required this.accountId,
++    required this.relayUrl,
++    required this.devices,
++    required this.fetchedAt,
++  });
++
++  final String accountId;
++  final String relayUrl;
++  final List<RelayDevice> devices;
++  final DateTime fetchedAt;
++
++  bool matches({required String accountId, required String relayUrl}) =>
++      this.accountId == accountId && this.relayUrl == relayUrl;
++
++  factory AccountDeviceCache.fromJson(Object? json) {
++    if (json is! Map) {
++      throw const AccountProtocolException('设备缓存格式无效');
++    }
++    final map = json is Map<String, dynamic>
++        ? json
++        : Map<String, dynamic>.from(json);
++    final accountId = _readString(map, const <String>['accountId']);
++    final relayUrl = _readString(map, const <String>['relayUrl']);
++    if (accountId == null || accountId.isEmpty) {
++      throw const AccountProtocolException('设备缓存缺少账号');
++    }
++    if (relayUrl == null || relayUrl.isEmpty) {
++      throw const AccountProtocolException('设备缓存缺少服务器地址');
++    }
++    return AccountDeviceCache(
++      accountId: accountId,
++      relayUrl: relayUrl,
++      devices: parseRelayDevices(map['devices']),
++      fetchedAt:
++          parseAccountTime(_read(map, const <String>['fetchedAt'])) ??
++          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
++    );
++  }
++
++  Map<String, dynamic> toJson() => <String, dynamic>{
++    'accountId': accountId,
++    'relayUrl': relayUrl,
++    'fetchedAt': fetchedAt.toUtc().toIso8601String(),
++    'devices': <Map<String, dynamic>>[
++      for (final device in devices) _deviceToJson(device),
++    ],
++  };
++}
++
++Map<String, dynamic> _deviceToJson(RelayDevice device) => <String, dynamic>{
++  'deviceId': device.deviceId,
++  'label': device.label,
++  'platform': device.platform,
++  'role': device.role,
++  'state': device.state.name,
++  'lastSeenAt': device.lastSeenAt?.toUtc().toIso8601String(),
++  'boundAt': device.boundAt?.toUtc().toIso8601String(),
++};
++
++/// Parses an ISO-8601 string or UNIX seconds.
++///
++/// Contract: QFLI grants and relay exchanges answer ISO-8601, while the relay's
++/// introspection `exp` is UNIX seconds. Accepting both here keeps the client
++/// honest if a relay echoes either form; milliseconds are tolerated because
++/// older relays answered them.
++DateTime? parseAccountTime(Object? value) {
++  if (value is String) {
++    final text = value.trim();
++    if (text.isEmpty) return null;
++    final iso = DateTime.tryParse(text);
++    if (iso != null) return iso.toUtc();
++    final seconds = int.tryParse(text);
++    if (seconds == null) return null;
++    return _fromEpoch(seconds);
++  }
++  if (value is num) return _fromEpoch(value.toInt());
++  return null;
++}
++
++DateTime? _fromEpoch(int value) {
++  if (value <= 0) return null;
++  final milliseconds = value > 100000000000 ? value : value * 1000;
++  return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
++}
++
++/// First non-null value among [keys].
++Object? _read(Map<String, dynamic> map, List<String> keys) {
++  for (final key in keys) {
++    final value = map[key];
++    if (value != null) return value;
++  }
++  return null;
++}
++
++String? _readString(Map<String, dynamic> map, List<String> keys) {
++  final value = _read(map, keys);
++  return value is String ? value : null;
++}
+diff --git a/lib/remote_control/account/account_scope.dart b/lib/remote_control/account/account_scope.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/account_scope.dart
+@@ -0,0 +1,42 @@
++// Narrow account scope for the remote-computer module.
++//
++// The module is mounted from a product tools tab whose builder signature is
++// `Widget Function(ProjectStore, VoidCallback)` — no BuildContext, no AuthStore.
++// Rather than inventing a second account store, [QfliApp] installs this scope
++// over the real [AuthStore] it was handed at startup, and the module reads it
++// from the context. Login gating keeps using the existing `LoginGateScope`
++// primitive; this class only answers "which account is signed in".
++
++import 'package:flutter/material.dart';
++
++import '../../store/auth_store.dart';
++
++/// Provides the app's real [AuthStore] to the remote-computer module.
++///
++/// Deliberately tiny: no token copying, no caching, no second persistence. Every
++/// caller that needs the session token reads `auth.token` at the moment of the
++/// request, which is also what keeps a sign-out race honest.
++class RemoteAccountScope extends InheritedWidget {
++  const RemoteAccountScope({
++    super.key,
++    required this.auth,
++    required super.child,
++  });
++
++  final AuthStore auth;
++
++  static AuthStore? maybeAuthOf(BuildContext context) =>
++      context.dependOnInheritedWidgetOfExactType<RemoteAccountScope>()?.auth;
++
++  /// Throws in debug builds when the scope was not installed, which is a wiring
++  /// error rather than a runtime condition.
++  static AuthStore authOf(BuildContext context) {
++    final auth = maybeAuthOf(context);
++    assert(auth != null, '缺少 RemoteAccountScope 祖先');
++    return auth!;
++  }
++
++  @override
++  bool updateShouldNotify(RemoteAccountScope oldWidget) =>
++      !identical(auth, oldWidget.auth) || !identical(child, oldWidget.child);
++}
+diff --git a/lib/remote_control/account/relay_credentials.dart b/lib/remote_control/account/relay_credentials.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/relay_credentials.dart
+@@ -0,0 +1,252 @@
++/// Storage boundary for relay account tokens.
++///
++/// Relay tokens are **not** credentials the user typed: they are machine-issued,
++/// revocable and short-lived (15 minutes for access). The task contract therefore
++/// says they must live apart from `auth.json` and `qfli_remote_control.json`, and
++/// must never be written to plaintext storage.
++///
++/// This file ships the interface plus an in-memory default. No file backend is
++/// provided on purpose: writing a bearer token into the app-private JSON the
++/// pairing secret already uses would widen the plaintext surface for no gain. A
++/// host with platform secure storage can plug a backend in; until then the UI
++/// says that authorization does not survive a restart.
++///
++/// ## Versioning
++///
++/// A backend may be slow (Keystore, HUKS, a test double). Every mutation bumps a
++/// version, and each async step compares the version it started with against the
++/// current one. A completion that lost the race is discarded instead of being
++/// applied, so:
++///
++///   * a slow `load()` cannot reinstate tokens after a sign-out;
++///   * a slow `save()` cannot overwrite a newer account's tokens;
++///   * a slow `clear()` cannot erase tokens a newer account just stored.
++library;
++
++/// A credential backend, e.g. Keychain / Keystore / HarmonyOS HUKS.
++///
++/// Implementations must never log the values they read or write.
++abstract interface class RelayCredentialBackend {
++  Future<RelayCredentials?> read();
++
++  Future<void> write(RelayCredentials credentials);
++
++  Future<void> clear();
++}
++
++/// Relay tokens for one account on one relay, issued to one QFLI identity.
++///
++/// [ownerId] is the QFLI user id that authorized the exchange. It is stored with
++/// the tokens so a backend cannot hand account A's tokens to a phone signed in
++/// as B — the relay's `account_id` alone cannot prove that, because the mapping
++/// lives on the server.
++class RelayCredentials {
++  const RelayCredentials({
++    required this.ownerId,
++    required this.accountId,
++    required this.relayUrl,
++    required this.accessToken,
++    required this.refreshToken,
++    this.accessExpiresAt,
++    this.refreshExpiresAt,
++  });
++
++  /// QFLI user id this authorization belongs to. Never rendered.
++  final String ownerId;
++
++  /// Relay account id returned by the exchange.
++  final String accountId;
++
++  /// Exact socket address these tokens were issued for. Prevents replaying an
++  /// account token against a different relay instance.
++  final String relayUrl;
++
++  final String accessToken;
++  final String refreshToken;
++  final DateTime? accessExpiresAt;
++  final DateTime? refreshExpiresAt;
++
++  bool belongsTo(String relayUrl) => this.relayUrl == relayUrl;
++
++  bool isOwnedBy(String ownerId) => this.ownerId == ownerId;
++
++  /// True when the access token is close enough to expiry that a refresh should
++  /// happen before dialling (the relay rejects stale access tokens).
++  bool needsRefresh(Duration skew) {
++    final expiry = accessExpiresAt;
++    if (expiry == null) return false;
++    return !DateTime.now().toUtc().add(skew).isBefore(expiry);
++  }
++
++  /// Metadata only — used by `clearIf` to recognise its own value.
++  bool sameAuthorization(RelayCredentials other) =>
++      ownerId == other.ownerId &&
++      accountId == other.accountId &&
++      relayUrl == other.relayUrl &&
++      accessToken == other.accessToken;
++
++  /// Persistence shape for a platform backend.
++  ///
++  /// Contains tokens by necessity — that is what a credential backend stores —
++  /// but never reaches the app's JSON documents.
++  Map<String, dynamic> toJson() => <String, dynamic>{
++    'ownerId': ownerId,
++    'accountId': accountId,
++    'relayUrl': relayUrl,
++    'accessToken': accessToken,
++    'refreshToken': refreshToken,
++    'accessExpiresAt': accessExpiresAt?.toUtc().toIso8601String(),
++    'refreshExpiresAt': refreshExpiresAt?.toUtc().toIso8601String(),
++  };
++
++  factory RelayCredentials.fromJson(Map<String, dynamic> json) =>
++      RelayCredentials(
++        ownerId: json['ownerId'] as String? ?? '',
++        accountId: json['accountId'] as String? ?? '',
++        relayUrl: json['relayUrl'] as String? ?? '',
++        accessToken: json['accessToken'] as String? ?? '',
++        refreshToken: json['refreshToken'] as String? ?? '',
++        accessExpiresAt: DateTime.tryParse(
++          json['accessExpiresAt'] as String? ?? '',
++        )?.toUtc(),
++        refreshExpiresAt: DateTime.tryParse(
++          json['refreshExpiresAt'] as String? ?? '',
++        )?.toUtc(),
++      );
++
++  @override
++  String toString() =>
++      'RelayCredentials(owner: $ownerId, account: $accountId, '
++      'relay: ${Uri.tryParse(relayUrl)?.host ?? '-'}, '
++      'accessExpires: ${accessExpiresAt?.toIso8601String() ?? 'unknown'})';
++}
++
++/// Holds the current relay tokens for the app session.
++///
++/// Without a [backend] the store is memory-only: closing the app forgets the
++/// tokens and the user re-authorizes. That is the honest fallback when no
++/// supported secure-storage plugin exists, and it is visible to the UI through
++/// [isPersistent] so the screen can say so.
++class RelayCredentialStore {
++  RelayCredentialStore({RelayCredentialBackend? backend}) : _backend = backend;
++
++  final RelayCredentialBackend? _backend;
++
++  RelayCredentials? _credentials;
++
++  /// Bumped by every operation that changes what should be stored.
++  int _version = 0;
++
++  /// Set when the owner is gone. Memory is dropped and the backend is left
++  /// alone: a closed store must not delete tokens another owner may hold.
++  bool _closed = false;
++
++  /// Whether tokens survive an app restart.
++  bool get isPersistent => _backend != null;
++
++  RelayCredentials? get credentials => _credentials;
++
++  /// Current version, for diagnostics and tests.
++  int get version => _version;
++
++  bool get isClosed => _closed;
++
++  /// Loads persisted tokens once.
++  ///
++  /// A load that completes after a save or a clear is discarded: the newer
++  /// operation already decided what the store should hold.
++  Future<RelayCredentials?> load() async {
++    final backend = _backend;
++    if (_closed) return null;
++    if (backend == null) return _credentials;
++    if (_credentials != null) return _credentials;
++    final start = _version;
++    RelayCredentials? loaded;
++    try {
++      loaded = await backend.read();
++    } catch (_) {
++      // A broken keystore must not break the feature: the user re-authorizes.
++      loaded = null;
++    }
++    if (_closed) return null;
++    if (_version != start) return _credentials;
++    _credentials = loaded;
++    return _credentials;
++  }
++
++  /// Stores tokens and mirrors them into the backend.
++  ///
++  /// The in-memory copy is updated synchronously so the caller can dial the
++  /// socket immediately; the backend write is awaited but a write that lost a
++  /// race is followed by a re-assert of the current value.
++  Future<void> save(RelayCredentials credentials) async {
++    if (_closed) return;
++    final version = ++_version;
++    _credentials = credentials;
++    await _writeThrough(version, () => _backend!.write(credentials));
++  }
++
++  /// Drops tokens.
++  ///
++  /// [expected] limits the effect to the value the caller still owns: on sign-out
++  /// and account switch the controller passes the credentials it is dropping, so
++  /// a clear that lands late cannot erase the next account's fresh tokens.
++  ///
++  /// Returns whether anything was dropped, which lets a late `401` tell "my token
++  /// is gone" from "someone already replaced it".
++  Future<bool> clearIf(RelayCredentials? expected) async {
++    if (_closed) return false;
++    if (expected != null) {
++      final current = _credentials;
++      if (current == null || !current.sameAuthorization(expected)) return false;
++    }
++    await clear();
++    return true;
++  }
++
++  /// Drops whatever the store currently holds.
++  Future<void> clear() async {
++    if (_closed) return;
++    final version = ++_version;
++    _credentials = null;
++    await _writeThrough(version, () => _backend!.clear());
++  }
++
++  /// Forgets everything in memory without touching the backend.
++  ///
++  /// Called by `dispose()`: releasing one owner must not delete tokens that
++  /// another live owner on the same store still uses, nor the persisted copy the
++  /// next launch is supposed to find.
++  void close() {
++    _closed = true;
++    _credentials = null;
++    _version++;
++  }
++
++  Future<void> _writeThrough(
++    int version,
++    Future<void> Function() operation,
++  ) async {
++    final backend = _backend;
++    if (backend == null) return;
++    try {
++      await operation();
++    } catch (_) {
++      // Persisting is best effort; memory still serves this session.
++      return;
++    }
++    if (_closed || _version == version) return;
++    // A newer save/clear landed while this write was in flight, so the backend
++    // may now hold the older value. Re-assert the current one.
++    final current = _credentials;
++    try {
++      if (current == null) {
++        await backend.clear();
++      } else {
++        await backend.write(current);
++      }
++    } catch (_) {
++      // Nothing else to do: the next save will reconcile again.
++    }
++  }
++}
+diff --git a/lib/remote_control/account/relay_endpoint.dart b/lib/remote_control/account/relay_endpoint.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/relay_endpoint.dart
+@@ -0,0 +1,74 @@
++// Account-binding support for the remote-control module.
++//
++// Everything in this directory is about *who may connect*, never about how the
++// agent protocol works: pairing, sessions, terminals, Herdr and Codex keep using
++// the unchanged wire contract in `../state/remote_controller.dart`.
++//
++// Credential rules (task 11-21, contract §"不能改变"):
++//   * the QFLI session token only ever travels to the QFLI origin;
++//   * the relay only receives a short-lived grant and its own tokens;
++//   * relay tokens live in memory here and are never written to `auth.json` or
++//     `qfli_remote_control.json`;
++//   * no `toString`, exception or log line in this directory contains a token,
++//     a grant or a device secret.
++
++import '../transport/relay_socket.dart';
++
++/// A relay server expressed as both the WebSocket URL the agent link dials and
++/// the HTTP origin the account API lives on.
++///
++/// The HTTP origin is *derived* from the WebSocket address instead of being
++/// typed separately. That is deliberate: it makes it impossible to send the
++/// account token to a different host than the socket the user selected, which
++/// is exactly the credential-forwarding mistake this task must avoid.
++class RelayEndpoint {
++  RelayEndpoint._({required this.webSocket, required this.origin});
++
++  /// Normalized `ws` / `wss` URL, including its path (`/ws` by default).
++  final Uri webSocket;
++
++  /// `http` / `https` origin with no path, query or fragment.
++  final Uri origin;
++
++  /// Parses user input the same way the manual pairing form does.
++  ///
++  /// Returns `null` for anything that is not a plain `ws`/`wss` address with a
++  /// host. User info, queries and fragments are rejected rather than tidied:
++  /// they would either end up inside a request URL or hide the real host.
++  static RelayEndpoint? tryParse(String? input) {
++    final socket = normalizeRelayUrl(input ?? '');
++    if (socket == null) return null;
++    if (socket.host.isEmpty) return null;
++    if (socket.userInfo.isNotEmpty) return null;
++    if (socket.hasQuery || socket.hasFragment) return null;
++    return RelayEndpoint._(
++      webSocket: socket,
++      origin: Uri(
++        scheme: socket.scheme == 'wss' ? 'https' : 'http',
++        host: socket.host,
++        port: socket.hasPort ? socket.port : null,
++      ),
++    );
++  }
++
++  /// Absolute account-API URL on this relay.
++  ///
++  /// Only `/api/...` paths are accepted, so a caller cannot accidentally build
++  /// a request against another origin or a scheme-relative URL.
++  Uri api(String path, [Map<String, String>? query]) {
++    if (!path.startsWith('/api/') || path.contains('://')) {
++      throw ArgumentError.value(path, 'path', '需要 /api/ 开头的账号接口路径');
++    }
++    return origin.replace(
++      path: path,
++      queryParameters: (query == null || query.isEmpty) ? null : query,
++    );
++  }
++
++  /// Stable key for account-scoped caches: the exact address the user picked.
++  String get key => webSocket.toString();
++
++  /// Diagnostic label. Host only — no path, no credentials.
++  @override
++  String toString() => 'RelayEndpoint(${origin.host})';
++}
+diff --git a/lib/remote_control/account/remote_account_controller.dart b/lib/remote_control/account/remote_account_controller.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/remote_control/account/remote_account_controller.dart
+@@ -0,0 +1,900 @@
++// Account-side state for remote computers: which computer belongs to the
++// signed-in QFLI user, whether it is online, and whether this phone may connect.
++//
++// Scope discipline: this controller never touches the agent protocol. It hands
++// the remote controller a token provider and a device to dial; sessions,
++// terminals, Herdr, Codex and approvals stay exactly as they are.
++//
++// Identity rules:
++//   * the account is the QFLI user in [AuthStore] — no second login;
++//   * signing out, switching user, or a rejected token clears the relay tokens;
++//   * every await is fenced on the identity that started it, so a slow response
++//     for the previous account can never overwrite the current one.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../../store/auth_store.dart';
++import '../models/pairing_uri.dart';
++import '../state/remote_store.dart';
++import 'account_api.dart';
++import 'account_models.dart';
++import 'relay_credentials.dart';
++import 'relay_endpoint.dart';
++
++/// Where the account side stands.
++enum AccountPhase {
++  /// No QFLI user is signed in.
++  signedOut,
++
++  /// Signed in, but this phone holds no relay tokens yet.
++  needsAuthorization,
++
++  /// Grant → exchange in flight.
++  authorizing,
++
++  /// Relay tokens are held; [RemoteAccountController.devices] is authoritative.
++  ready,
++
++  /// The QFLI session itself was rejected (expired or revoked server-side).
++  signInExpired,
++
++  /// The account service could not be reached.
++  unavailable,
++}
++
++/// Store key for the account-scoped device memo.
++const String accountDeviceCacheKey = 'accountDevices';
++
++/// Owns the relay account session and the bound-device list.
++///
++/// One instance per signed-in identity inside one remote-computer page; the page
++/// recreates it when the scope hands over a different [AuthStore].
++class RemoteAccountController extends ChangeNotifier {
++  RemoteAccountController({
++    required AuthStore auth,
++    required QfliGrantApi grants,
++    required RelayAccountApi relay,
++    RemoteStore? store,
++    RelayCredentialStore? credentials,
++    RelayEndpoint? endpoint,
++    this.refreshSkew = const Duration(seconds: 45),
++    this.onIdentityLost,
++  }) : _auth = auth,
++       _grants = grants,
++       _relay = relay,
++       _store = store,
++       _credentials = credentials ?? RelayCredentialStore(),
++       _endpoint =
++           endpoint ?? RelayEndpoint.tryParse(store?.lastRelayUrl ?? '') {
++    _identity = _identityOf(auth);
++    _phase = auth.isLoggedIn
++        ? AccountPhase.needsAuthorization
++        : AccountPhase.signedOut;
++    auth.addListener(_onAuthChanged);
++    unawaited(_restore());
++  }
++
++  final AuthStore _auth;
++  final QfliGrantApi _grants;
++  final RelayAccountApi _relay;
++  final RemoteStore? _store;
++  final RelayCredentialStore _credentials;
++
++  /// Refresh the access token this long before it expires, so a dial does not
++  /// race the relay's clock.
++  final Duration refreshSkew;
++
++  /// Invoked when the signed-in identity disappears or changes.
++  ///
++  /// The page uses it to close an account-bound link: the token that authorised
++  /// that socket is gone, so keeping the socket open would be a lie.
++  final VoidCallback? onIdentityLost;
++
++  AccountPhase _phase = AccountPhase.signedOut;
++  List<RelayDevice> _devices = const <RelayDevice>[];
++  RelayEndpoint? _endpoint;
++  String? _accountId;
++  String? _error;
++  String? _identity;
++  String? _relayInput;
++  bool _busy = false;
++  bool _disposed = false;
++  int _epoch = 0;
++
++  /// Bumped by every [refreshDevices] so the newest list answer wins.
++  int _devicesEpoch = 0;
++  Future<String?>? _refreshing;
++
++  AccountPhase get phase => _phase;
++
++  List<RelayDevice> get devices => List<RelayDevice>.unmodifiable(_devices);
++
++  RelayEndpoint? get endpoint => _endpoint;
++
++  /// Relay account id from the verified grant. `null` before authorization.
++  String? get accountId => _accountId;
++
++  String? get errorMessage => _error;
++
++  bool get isBusy => _busy;
++
++  /// True when a refresh or a request is in flight.
++  bool get isLoading => _busy || _phase == AccountPhase.authorizing;
++
++  /// True when the platform backend keeps tokens between launches.
++  bool get persistsCredentials => _credentials.isPersistent;
++
++  bool get hasAuthorization => _credentials.credentials != null;
++
++  /// Host shown for the selected relay, or an empty string when none is set.
++  String get relayHost => _endpoint?.origin.host ?? '';
++
++  /// Relay address for the editable field, preferring what the user typed.
++  String get relayInput => _relayInput ?? _endpoint?.webSocket.toString() ?? '';
++
++  bool get isEmpty => _devices.isEmpty;
++
++  // -------------------------------------------------------------------------
++  // Identity
++  // -------------------------------------------------------------------------
++
++  static String? _identityOf(AuthStore auth) {
++    final user = auth.user;
++    if (user == null) return null;
++    // The QFLI user id is stable per account and differs between users, which
++    // is exactly what is needed to detect a switch. It is not a credential.
++    return user.id;
++  }
++
++  void _onAuthChanged() {
++    if (_disposed) return;
++    final identity = _identityOf(_auth);
++    if (identity == _identity) {
++      // Profile refreshes (nickname, points) do not change the account.
++      return;
++    }
++    // Everything below is synchronous on purpose: the old identity's socket must
++    // die in the same turn the identity changed, not after an awaited store call.
++    final previous = _credentials.credentials;
++    final hadIdentity = _identity != null;
++    _identity = identity;
++    _invalidateInFlight();
++    _devices = const <RelayDevice>[];
++    _accountId = null;
++    _error = null;
++    _relayInput = null;
++    _busy = false;
++    _phase = identity == null
++        ? AccountPhase.signedOut
++        : AccountPhase.needsAuthorization;
++    if (hadIdentity) onIdentityLost?.call();
++    _notify();
++    // The store clear is fenced: `clearIf` only drops the value that belonged to
++    // the identity that just left, so a slow clear cannot erase the next account.
++    unawaited(_credentials.clearIf(previous));
++  }
++
++  String? get identity => _identity;
++
++  Future<void> _restore() async {
++    final fence = _fence();
++    final identity = _identity;
++    if (identity == null) {
++      _phase = AccountPhase.signedOut;
++      _notify();
++      return;
++    }
++    final loaded = await _credentials.load();
++    // A slow backend read must not reinstate tokens after a sign-out, an account
++    // switch, or a relay switch.
++    if (!fence.isCurrent(this)) return;
++    final endpoint = _endpoint;
++    if (loaded == null || endpoint == null) {
++      _phase = AccountPhase.needsAuthorization;
++      _notify();
++      return;
++    }
++    if (!loaded.isOwnedBy(identity) || !loaded.belongsTo(endpoint.key)) {
++      // Tokens issued to another QFLI user, or to another relay, are not ours.
++      await _credentials.clearIf(loaded);
++      if (!fence.isCurrent(this)) return;
++      _phase = AccountPhase.needsAuthorization;
++      _notify();
++      return;
++    }
++    _accountId = loaded.accountId;
++    _loadCachedDevices();
++    _phase = AccountPhase.ready;
++    _notify();
++    unawaited(refreshDevices());
++  }
++
++  // -------------------------------------------------------------------------
++  // Relay selection
++  // -------------------------------------------------------------------------
++
++  /// Validates and applies the relay address typed by the user.
++  ///
++  /// Tokens issued for a different relay stay in memory but are refused by
++  /// [accessToken], so switching relays never connects with the wrong account.
++  Future<void> setRelayAddress(String input) async {
++    if (_disposed) return;
++    _relayInput = input;
++    final endpoint = RelayEndpoint.tryParse(input);
++    if (endpoint == null) {
++      _error = '服务器地址格式不正确';
++      _notify();
++      return;
++    }
++    _error = null;
++    if (_endpoint?.key == endpoint.key) {
++      _notify();
++      await refreshDevices();
++      return;
++    }
++    // A different server invalidates every in-flight answer: they were asked of,
++    // or authorized for, the previous relay.
++    _invalidateInFlight();
++    _endpoint = endpoint;
++    _devices = const <RelayDevice>[];
++    _busy = false;
++    final tokens = _credentials.credentials;
++    if (tokens == null || !tokens.belongsTo(endpoint.key)) {
++      _accountId = null;
++      _phase = _auth.isLoggedIn
++          ? AccountPhase.needsAuthorization
++          : AccountPhase.signedOut;
++      _notify();
++      return;
++    }
++    _accountId = tokens.accountId;
++    _loadCachedDevices();
++    _phase = AccountPhase.ready;
++    _notify();
++    await refreshDevices();
++  }
++
++  // -------------------------------------------------------------------------
++  // Authorization
++  // -------------------------------------------------------------------------
++
++  /// Exchanges the QFLI session for relay tokens.
++  ///
++  /// Two separate calls, two separate failure meanings: a rejected QFLI token
++  /// means "sign in again", a rejected exchange means "the relay did not accept
++  /// this grant". Collapsing them would tell the user to re-enter a password for
++  /// a server-side problem.
++  Future<void> authorize() async {
++    if (_disposed || _phase == AccountPhase.authorizing) return;
++    final identity = _identity;
++    if (identity == null) {
++      _phase = AccountPhase.signedOut;
++      _error = '请先登录 QFLI 账号';
++      _notify();
++      return;
++    }
++    final sessionToken = _auth.token;
++    if (sessionToken == null || sessionToken.isEmpty) {
++      _phase = AccountPhase.signInExpired;
++      _error = '登录状态已失效，请重新登录';
++      _notify();
++      return;
++    }
++    final endpoint = _endpoint;
++    if (endpoint == null) {
++      _error = '请先填写电脑所连接的服务器地址';
++      _notify();
++      return;
++    }
++
++    _phase = AccountPhase.authorizing;
++    _error = null;
++    _notify();
++    // Everything below is fenced on (identity, epoch, relay). Comparing only the
++    // identity would let an A → B → A sequence accept the first A's exchange, and
++    // a relay switch would keep the identity unchanged entirely.
++    final fence = _fence();
++
++    final RelayGrant grant;
++    try {
++      grant = await _grants.request(sessionToken: sessionToken);
++    } on AccountApiException catch (e) {
++      if (!fence.isCurrent(this)) return;
++      _phase = e.code == 'unauthorized'
++          ? AccountPhase.signInExpired
++          : AccountPhase.unavailable;
++      _error = e.message;
++      _notify();
++      return;
++    }
++    if (!fence.isCurrent(this)) return;
++
++    try {
++      final tokens = await _relay.exchange(relay: endpoint, grant: grant.grant);
++      if (!fence.isCurrent(this)) return;
++      final saved = RelayCredentials(
++        ownerId: identity,
++        accountId: tokens.accountId,
++        relayUrl: endpoint.key,
++        accessToken: tokens.accessToken,
++        refreshToken: tokens.refreshToken,
++        accessExpiresAt: tokens.accessExpiresAt,
++        refreshExpiresAt: tokens.refreshExpiresAt,
++      );
++      await _credentials.save(saved);
++      if (!fence.isCurrent(this)) {
++        // The save landed after the fence moved. Drop exactly this value: a plain
++        // `clear()` here would also erase tokens a newer identity just stored.
++        await _credentials.clearIf(saved);
++        return;
++      }
++      _accountId = saved.accountId;
++      _loadCachedDevices();
++      _phase = AccountPhase.ready;
++      _error = null;
++      _notify();
++    } on AccountApiException catch (e) {
++      if (!fence.isCurrent(this)) return;
++      _phase = e.isTransient
++          ? AccountPhase.unavailable
++          : AccountPhase.needsAuthorization;
++      _error = e.message;
++      _notify();
++      return;
++    }
++
++    await refreshDevices();
++  }
++
++  // -------------------------------------------------------------------------
++  // Devices
++  // -------------------------------------------------------------------------
++
++  /// Fetches the account's devices.
++  ///
++  /// Returns the list this call produced, or an empty list when it was skipped or
++  /// superseded. Callers that need the freshly read rows (the bind flow) use the
++  /// return value instead of re-reading `devices`, which a later call may already
++  /// have replaced.
++  Future<List<RelayDevice>> refreshDevices() async {
++    if (_disposed) return const <RelayDevice>[];
++    final endpoint = _endpoint;
++    final tokens = _credentials.credentials;
++    if (endpoint == null || tokens == null || !tokens.belongsTo(endpoint.key)) {
++      return const <RelayDevice>[];
++    }
++    final fence = _fence();
++    final listEpoch = ++_devicesEpoch;
++    // Declared outside `try` so the 401 path can name exactly which authorization
++    // the rejected request carried.
++    RelayCredentials? access;
++    _busy = true;
++    _notify();
++    try {
++      access = await _usableCredentials(tokens);
++      if (!_deviceListIsCurrent(fence, listEpoch)) {
++        return const <RelayDevice>[];
++      }
++      if (access == null) {
++        _phase = AccountPhase.needsAuthorization;
++        _error ??= '账号授权已失效，请重新授权';
++        return const <RelayDevice>[];
++      }
++      final list = await _relay.devices(relay: endpoint, credentials: access);
++      if (!_deviceListIsCurrent(fence, listEpoch)) {
++        return const <RelayDevice>[];
++      }
++      _devices = list;
++      _error = null;
++      _phase = AccountPhase.ready;
++      await _saveCache(fence, list);
++      return list;
++    } on AccountApiException catch (e) {
++      if (!_deviceListIsCurrent(fence, listEpoch)) {
++        return const <RelayDevice>[];
++      }
++      await _handleFailure(fence, e, failedWith: access);
++      return const <RelayDevice>[];
++    } finally {
++      // `_busy` belongs to the newest request only: an abandoned answer must not
++      // clear the spinner of the one that replaced it.
++      if (_deviceListIsCurrent(fence, listEpoch)) {
++        _busy = false;
++        _notify();
++      }
++    }
++  }
++
++  /// Binds a computer with the one-time code shown on its desktop.
++  ///
++  /// The code alone is enough: the relay resolves it to a device and answers with
++  /// the device row, which is also why the account flow must not connect with the
++  /// same code first — a code is single use, so `pairWithCode` followed by a bind
++  /// would spend it twice and fail on the second call.
++  ///
++  /// Returns the bound device so the caller can refresh and connect immediately.
++  ///
++  /// [deviceId] is optional: the code-only route is the default, and the known-id
++  /// route is used only when the caller already learned the id without spending
++  /// the code.
++  Future<RelayDevice> bindDevice({
++    required String pairCode,
++    String? deviceId,
++  }) async {
++    final endpoint = _endpoint;
++    final tokens = _credentials.credentials;
++    final owner = _identity;
++    if (endpoint == null || tokens == null) {
++      throw const AccountApiException('账号授权已失效，请重新授权', code: 'unauthorized');
++    }
++    if (!tokens.belongsTo(endpoint.key) ||
++        owner == null ||
++        !tokens.isOwnedBy(owner)) {
++      throw const AccountApiException('账号授权已失效，请重新授权', code: 'unauthorized');
++    }
++    final code = PairingUri.normalizePairCode(pairCode);
++    if (code == null) {
++      throw const AccountApiException('配对码应为 8 位字母或数字', code: 'protocol');
++    }
++    final fence = _fence();
++    final access = await _usableCredentials(tokens);
++    if (!fence.isCurrent(this)) {
++      throw const AccountApiException('账号已切换，绑定已取消', code: 'cancelled');
++    }
++    if (access == null) {
++      throw const AccountApiException('账号授权已失效，请重新授权', code: 'unauthorized');
++    }
++    final RelayDevice bound;
++    try {
++      bound = await _relay.bind(
++        relay: endpoint,
++        credentials: access,
++        pairCode: code,
++        deviceId: deviceId,
++      );
++    } on AccountApiException catch (e) {
++      if (fence.isCurrent(this)) {
++        await _handleFailure(fence, e, failedWith: access);
++        if (fence.isCurrent(this)) _notify();
++      }
++      rethrow;
++    }
++    if (!fence.isCurrent(this)) {
++      throw const AccountApiException('账号已切换，绑定结果已丢弃', code: 'cancelled');
++    }
++    final refreshed = await refreshDevices();
++    // The refresh awaited above can finish after an account switch, and the
++    // caller connects in the next statement: re-check before handing it a device
++    // that belongs to the previous account.
++    if (!fence.isCurrent(this)) {
++      throw const AccountApiException('账号已切换，绑定结果已丢弃', code: 'cancelled');
++    }
++    if (_credentials.credentials == null) return bound;
++    if (!_credentialsMatches(bound)) {
++      throw const AccountApiException('账号已切换，绑定结果已丢弃', code: 'cancelled');
++    }
++    // The bind response only proves the binding exists (`ok` / `device_id` /
++    // `role`), so its row carries no presence. Presence comes from the list this
++    // refresh returned: answering with the bind row would report every online
++    // computer as offline and skip the connect the user asked for.
++    final known = _deviceById(refreshed, bound.deviceId);
++    if (known == null) {
++      // Bound, but the fresh list does not show it yet. Keep the bind row, which
++      // has no presence and is therefore treated as offline.
++      return bound;
++    }
++    // Presence, label and platform come from the list; the bind row confirmed the
++    // id and fills any field the list left blank.
++    return RelayDevice(
++      deviceId: known.deviceId,
++      label: known.label.isEmpty ? bound.label : known.label,
++      platform: known.platform.isEmpty ? bound.platform : known.platform,
++      role: known.role.isEmpty ? bound.role : known.role,
++      state: known.state,
++      lastSeenAt: known.lastSeenAt,
++      boundAt: known.boundAt ?? bound.boundAt,
++    );
++  }
++
++  /// The row with [deviceId] in [list].
++  static RelayDevice? _deviceById(List<RelayDevice> list, String deviceId) {
++    for (final device in list) {
++      if (device.deviceId == deviceId) return device;
++    }
++    return null;
++  }
++
++  /// True when the current authorization still covers the device's relay.
++  bool _credentialsMatches(RelayDevice device) {
++    final endpoint = _endpoint;
++    final current = _credentials.credentials;
++    if (endpoint == null || current == null) return false;
++    if (current.ownerId != _identity) return false;
++    return current.belongsTo(endpoint.key);
++  }
++
++  /// Revokes this account's binding on [deviceId].
++  ///
++  /// Returns `true` only when the revocation still belongs to the account and
++  /// relay that started it. A revocation that resolves after a sign-out or an
++  /// account switch returns `false` and touches no state: otherwise a late answer
++  /// for account A could mark a row revoked in account B's list, or the page's
++  /// caller could tear down B's live connection on behalf of A.
++  Future<bool> revokeDevice(String deviceId) async {
++    final endpoint = _endpoint;
++    final tokens = _credentials.credentials;
++    if (endpoint == null || tokens == null || !tokens.belongsTo(endpoint.key)) {
++      throw const AccountApiException('账号授权已失效，请重新授权', code: 'unauthorized');
++    }
++    final fence = _fence();
++    final access = await _usableCredentials(tokens);
++    if (!fence.isCurrent(this)) return false;
++    if (access == null) {
++      throw const AccountApiException('账号授权已失效，请重新授权', code: 'unauthorized');
++    }
++    try {
++      await _relay.revoke(
++        relay: endpoint,
++        credentials: access,
++        deviceId: deviceId,
++        targetAccountId: tokens.accountId,
++      );
++    } on AccountApiException catch (e) {
++      if (fence.isCurrent(this)) {
++        await _handleFailure(fence, e, failedWith: access);
++        if (fence.isCurrent(this)) _notify();
++      }
++      rethrow;
++    }
++    if (!fence.isCurrent(this)) return false;
++    _devices = <RelayDevice>[
++      for (final device in _devices)
++        if (device.deviceId == deviceId && !device.isRevoked)
++          device.copyWith(state: RelayDeviceState.revoked)
++        else
++          device,
++    ];
++    _notify();
++    unawaited(refreshDevices());
++    return true;
++  }
++
++  // -------------------------------------------------------------------------
++  // Tokens for the socket layer
++  // -------------------------------------------------------------------------
++
++  /// Current credentials for one pairing, refreshed first when near expiry.
++  ///
++  /// Returns a **complete** snapshot, never a token re-attached to the previous
++  /// expiry: mixing a fresh access token with a stale `accessExpiresAt` made the
++  /// very next `devices` / `bind` / `revoke` call fail its own expiry check.
++  ///
++  /// [accountId] and [relayUrl] come from the pairing being dialled. A request for
++  /// another account, or for a relay this phone holds no tokens for, answers `null`
++  /// instead of lending out the currently selected server's token.
++  Future<RelayCredentials?> credentialsFor({
++    required String accountId,
++    required String relayUrl,
++  }) async {
++    if (_disposed) return null;
++    final endpoint = RelayEndpoint.tryParse(relayUrl);
++    if (endpoint == null) return null;
++    final fence = _fence();
++    final current = _credentials.credentials;
++    if (current == null) return null;
++    if (!current.belongsTo(endpoint.key)) return null;
++    if (current.accountId != accountId) return null;
++    if (!current.isOwnedBy(_identity ?? '')) return null;
++    if (!current.needsRefresh(refreshSkew)) return current;
++
++    final pending = _refreshing;
++    if (pending != null) {
++      // Join the in-flight refresh instead of answering with credentials that
++      // were already too old to use.
++      await pending;
++    } else {
++      final future = _refreshTokens(endpoint);
++      _refreshing = future;
++      try {
++        await future;
++      } finally {
++        if (identical(_refreshing, future)) _refreshing = null;
++      }
++    }
++    // Epoch and relay are checked too: the identity can return to a previous
++    // value (A → B → A), and `_refreshTokens` may have lost the race entirely.
++    if (!fence.isCurrent(this)) return null;
++    final refreshed = _freshCredentials(endpoint, accountId);
++    if (refreshed == null) return null;
++    // A refresh that failed leaves the old credentials in place; hand them back
++    // only when they are genuinely still usable, never while expired.
++    if (refreshed.needsRefresh(Duration.zero)) return null;
++    return refreshed;
++  }
++
++  /// Current token for the socket layer.
++  ///
++  /// Kept for callers that only need the string; [credentialsFor] is the form the
++  /// account layer hands to the pairing.
++  Future<String?> accessToken() async {
++    final endpoint = _endpoint;
++    final current = _credentials.credentials;
++    if (endpoint == null || current == null) return null;
++    final fresh = await credentialsFor(
++      accountId: current.accountId,
++      relayUrl: endpoint.key,
++    );
++    return fresh?.accessToken;
++  }
++
++  /// Re-reads the stored credentials and checks they still belong to the pair
++  /// asked for.
++  RelayCredentials? _freshCredentials(
++    RelayEndpoint endpoint,
++    String accountId,
++  ) {
++    if (_disposed) return null;
++    final current = _credentials.credentials;
++    if (current == null) return null;
++    if (!current.belongsTo(endpoint.key)) return null;
++    if (current.accountId != accountId) return null;
++    if (!current.isOwnedBy(_identity ?? '')) return null;
++    return current;
++  }
++
++  /// Credentials for the currently selected relay, refreshed when needed.
++  Future<RelayCredentials?> _usableCredentials(RelayCredentials tokens) async {
++    final endpoint = _endpoint;
++    if (endpoint == null) return null;
++    if (!tokens.belongsTo(endpoint.key)) return null;
++    return credentialsFor(accountId: tokens.accountId, relayUrl: endpoint.key);
++  }
++
++  Future<String?> _refreshTokens(RelayEndpoint endpoint) async {
++    final fence = _fence();
++    final tokens = _credentials.credentials;
++    if (tokens == null) return null;
++    if (!tokens.belongsTo(endpoint.key)) return null;
++    final owner = _identity;
++    if (owner == null || !tokens.isOwnedBy(owner)) return null;
++    final sessionToken = _auth.token;
++    if (sessionToken == null || sessionToken.isEmpty) return null;
++
++    final RelayGrant grant;
++    try {
++      grant = await _grants.request(sessionToken: sessionToken);
++    } on AccountApiException catch (e) {
++      if (!fence.isCurrent(this)) return null;
++      if (e.code == 'unauthorized') {
++        _phase = AccountPhase.signInExpired;
++        _error = e.message;
++        await _credentials.clearIf(tokens);
++        if (!fence.isCurrent(this)) return null;
++        _notify();
++        return null;
++      }
++      // Transient: keep using an access token that has not expired yet so an
++      // offline minute does not drop a working link.
++      return tokens.needsRefresh(const Duration(seconds: 0))
++          ? null
++          : tokens.accessToken;
++    }
++    // The grant is single-use and short-lived. Exchanging it after a sign-out or
++    // an account switch would hand the resulting tokens to the wrong identity.
++    if (!fence.isCurrent(this)) return null;
++
++    try {
++      final refreshed = await _relay.refresh(
++        relay: endpoint,
++        current: RelayTokenSet(
++          accountId: tokens.accountId,
++          accessToken: tokens.accessToken,
++          refreshToken: tokens.refreshToken,
++          accessExpiresAt: tokens.accessExpiresAt,
++          refreshExpiresAt: tokens.refreshExpiresAt,
++        ),
++        grant: grant.grant,
++      );
++      if (!fence.isCurrent(this)) return null;
++      final saved = RelayCredentials(
++        ownerId: owner,
++        accountId: refreshed.accountId,
++        relayUrl: endpoint.key,
++        accessToken: refreshed.accessToken,
++        refreshToken: refreshed.refreshToken,
++        accessExpiresAt: refreshed.accessExpiresAt,
++        refreshExpiresAt: refreshed.refreshExpiresAt,
++      );
++      await _credentials.save(saved);
++      if (!fence.isCurrent(this)) {
++        // The save landed after the fence moved; drop exactly this value so the
++        // next identity is not offered a rival's tokens. `clearIf` leaves a newer
++        // save alone.
++        await _credentials.clearIf(saved);
++        return null;
++      }
++      _accountId = saved.accountId;
++      _notify();
++      return saved.accessToken;
++    } on AccountApiException catch (e) {
++      if (!fence.isCurrent(this)) return null;
++      if (e.code == 'unauthorized' || e.code == 'expired') {
++        // The relay no longer honours this refresh token: a revocation, a
++        // rotation race, or a sign-out elsewhere. Ask for a fresh grant.
++        await _credentials.clearIf(tokens);
++        if (!fence.isCurrent(this)) return null;
++        _phase = AccountPhase.needsAuthorization;
++        _error = '账号授权已失效，请重新授权';
++        _notify();
++        return null;
++      }
++      return tokens.needsRefresh(const Duration(seconds: 0))
++          ? null
++          : tokens.accessToken;
++    }
++  }
++
++  // -------------------------------------------------------------------------
++  // Fencing
++  // -------------------------------------------------------------------------
++
++  /// Captures the state an async operation must still be in when it resumes.
++  ///
++  /// Comparing the identity alone is not enough: A → B → A returns to the same
++  /// identity while the in-flight answer belongs to the *first* A, and switching
++  /// relays keeps the identity unchanged. The epoch is bumped on every identity
++  /// reset and every relay switch, so the pair (identity, epoch, relay) identifies
++  /// one continuous authorization attempt.
++  _AccountFence _fence() => _AccountFence(
++    identity: _identity,
++    epoch: _epoch,
++    endpoint: _endpoint,
++    relayInput: _relayInput,
++  );
++
++  // -------------------------------------------------------------------------
++  // Failures and cache
++  // -------------------------------------------------------------------------
++
++  /// Applies a failure, but only when [fence] is still current.
++  ///
++  /// [failedWith] is the exact authorization the rejected request carried. The
++  /// clear is conditional on it, and the phase only degrades when that clear
++  /// actually removed something: a `401` for an old token must not report "请重新
++  /// 授权" over an authorization a concurrent refresh just stored.
++  Future<void> _handleFailure(
++    _AccountFence fence,
++    AccountApiException e, {
++    RelayCredentials? failedWith,
++  }) async {
++    if (e.code == 'unauthorized') {
++      final dropped = failedWith != null
++          ? await _credentials.clearIf(failedWith)
++          : false;
++      if (!fence.isCurrent(this)) return;
++      if (!dropped) {
++        // The rejected token is already gone and a newer one owns the store: this
++        // answer is stale, so it must not overwrite the newer state.
++        return;
++      }
++      _accountId = null;
++      _phase = AccountPhase.needsAuthorization;
++      _error = '账号授权已失效，请重新授权';
++      return;
++    }
++    if (e.code == 'expired') {
++      // Access token past its expiry while the refresh also failed.
++      _phase = AccountPhase.needsAuthorization;
++      _error = e.message;
++      return;
++    }
++    _error = e.message;
++    if (_devices.isEmpty || e.code == 'network' || e.code == 'unavailable') {
++      _phase = AccountPhase.unavailable;
++    }
++  }
++
++  void _loadCachedDevices() {
++    final store = _store;
++    final endpoint = _endpoint;
++    final accountId = _accountId;
++    if (store == null || endpoint == null || accountId == null) return;
++    final raw = store.getJson(accountDeviceCacheKey);
++    if (raw == null) return;
++    try {
++      final cache = AccountDeviceCache.fromJson(raw);
++      if (!cache.matches(accountId: accountId, relayUrl: endpoint.key)) return;
++      if (_devices.isEmpty) _devices = cache.devices;
++    } on AccountProtocolException {
++      // A stale or corrupt memo is simply ignored; the network answer replaces
++      // it on the next successful refresh.
++    }
++  }
++
++  /// Persists the device memo for the current account and relay.
++  ///
++  /// Guarded by [fence] because a write that started for one account would
++  /// otherwise land while another account is selected, and the next restore would
++  /// show the wrong list.
++  Future<void> _saveCache(
++    _AccountFence fence,
++    List<RelayDevice> devices,
++  ) async {
++    final store = _store;
++    final endpoint = fence.endpoint;
++    final accountId = _accountId;
++    if (store == null || endpoint == null || accountId == null) return;
++    final payload = AccountDeviceCache(
++      accountId: accountId,
++      relayUrl: endpoint.key,
++      devices: devices,
++      fetchedAt: DateTime.now().toUtc(),
++    ).toJson();
++    if (!fence.isCurrent(this)) return;
++    await store.setJson(accountDeviceCacheKey, payload);
++  }
++
++  /// Invalidates every in-flight operation: used on identity reset and relay
++  /// switch. Bumping the epoch is what stops an A → B → A sequence from reviving
++  /// the first A's answers.
++  void _invalidateInFlight() {
++    _epoch++;
++    _refreshing = null;
++  }
++
++  /// True when [fence] still describes this controller's account and relay.
++  bool _fenceIsCurrent(_AccountFence fence) =>
++      !_disposed &&
++      _identity == fence.identity &&
++      _epoch == fence.epoch &&
++      _endpoint?.key == fence.endpoint?.key &&
++      _relayInput == fence.relayInput;
++
++  /// Fence **and** newest-list check for [refreshDevices].
++  ///
++  /// Two refreshes can share a fence (same account, same relay); the newer one
++  /// must win regardless of which response lands first.
++  bool _deviceListIsCurrent(_AccountFence fence, int listEpoch) =>
++      _fenceIsCurrent(fence) && listEpoch == _devicesEpoch;
++
++  void _notify() {
++    if (!_disposed) notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    _disposed = true;
++    _auth.removeListener(_onAuthChanged);
++    _relay.close();
++    _grants.close();
++    // Memory only: the store may be shared, and the persisted copy belongs to the
++    // next launch. Closing the page must not sign the account out of the relay.
++    _credentials.close();
++    super.dispose();
++  }
++}
++
++/// One continuous authorization attempt: which identity, which epoch, which
++/// relay.
++///
++/// All three matter. The identity alone cannot tell A → B → A apart from an
++/// ordinary A, and a relay switch leaves the identity untouched while making
++/// every in-flight answer — tokens included — belong to the wrong server.
++class _AccountFence {
++  const _AccountFence({
++    required this.identity,
++    required this.epoch,
++    required this.endpoint,
++    required this.relayInput,
++  });
++
++  final String? identity;
++  final int epoch;
++  final RelayEndpoint? endpoint;
++  final String? relayInput;
++
++  bool isCurrent(RemoteAccountController controller) =>
++      controller._fenceIsCurrent(this);
++}
+diff --git a/lib/remote_control/pages/home_screen.dart b/lib/remote_control/pages/home_screen.dart
+--- a/lib/remote_control/pages/home_screen.dart
++++ b/lib/remote_control/pages/home_screen.dart
+@@ -2,6 +2,8 @@
+ 
+ import 'package:flutter/material.dart';
+ 
++import '../account/account_devices_page.dart';
++import '../account/remote_account_controller.dart';
+ import '../models/protocol.dart';
+ import '../state/codex_catalog.dart';
+ import '../state/herdr_controller.dart';
+@@ -18,9 +20,18 @@
+ 
+ /// Connection status plus the list of sessions on the paired PC.
+ class HomeScreen extends StatefulWidget {
+-  const HomeScreen({super.key, required this.controller, this.onExit});
++  const HomeScreen({
++    super.key,
++    required this.controller,
++    this.onExit,
++    this.account,
++  });
+ 
+   final RemoteController controller;
++
++  /// Account layer, when the host has one. Drives the "我的电脑" entry and the
++  /// account-aware wording of the auth failure banner.
++  final RemoteAccountController? account;
+ 
+   /// Leaves the module for the host app.
+   ///
+@@ -212,6 +223,7 @@
+                   builder: (context) => _ManagedHomeScreen(
+                     controller: widget.controller,
+                     herdr: _herdr,
++                    account: widget.account,
+                     navigationButton: _navigationButton(context),
+                     onOpen: (session) => _open(session: session),
+                     onHerdr: _openHerdr,
+@@ -233,12 +245,16 @@
+     required this.onOpen,
+     required this.onHerdr,
+     this.herdr,
++    this.account,
+     this.navigationButton,
+     this.onExit,
+   });
+ 
+   final RemoteController controller;
+   final ValueChanged<SessionInfo> onOpen;
++
++  /// Account layer, only for the "我的电脑" entry and banner wording.
++  final RemoteAccountController? account;
+ 
+   /// Opens the Herdr destination; drives the app-bar action and the empty
+   /// state's shortcut, which is the only way into Herdr when no PTY session was
+@@ -265,6 +281,25 @@
+   Future<void> _history(BuildContext context) async {
+     final resumed = await showHistorySheet(context, controller);
+     if (resumed != null && context.mounted) _open(context, resumed);
++  }
++
++  Future<void> _openDevices(BuildContext context) async {
++    final account = this.account;
++    if (account == null) return;
++    await Navigator.of(context).push(
++      MaterialPageRoute<void>(
++        builder: (_) => AccountDevicesPage(
++          account: account,
++          controller: controller,
++          // Leaving the devices page without connecting returns to this
++          // dashboard, so "manual pairing" pops back to the pair screen only when
++          // there is genuinely no pairing left to show.
++          onManualPair: () {
++            Navigator.of(context).popUntil((route) => route.isFirst);
++          },
++        ),
++      ),
++    );
+   }
+ 
+   Future<void> _confirmUnpair(BuildContext context) async {
+@@ -376,16 +411,26 @@
+                       controller.connect();
+                     case 'unpair':
+                       _confirmUnpair(context);
++                    case 'devices':
++                      _openDevices(context);
+                   }
+                 },
+-                itemBuilder: (context) => const <PopupMenuEntry<String>>[
++                itemBuilder: (context) => <PopupMenuEntry<String>>[
+                   PopupMenuItem<String>(
+                     value: 'reconnect',
+-                    child: ListTile(
++                    child: const ListTile(
+                       leading: Icon(Icons.refresh_rounded),
+                       title: Text('重新连接'),
+                     ),
+                   ),
++                  if (account != null)
++                    const PopupMenuItem<String>(
++                      value: 'devices',
++                      child: ListTile(
++                        leading: Icon(Icons.devices_other_rounded),
++                        title: Text('我的电脑'),
++                      ),
++                    ),
+                   PopupMenuItem<String>(
+                     value: 'unpair',
+                     child: ListTile(
+@@ -407,7 +452,7 @@
+           ),
+           body: Column(
+             children: <Widget>[
+-              _ConnectionBanner(controller: controller),
++              _ConnectionBanner(controller: controller, account: account),
+               Expanded(
+                 child: RefreshIndicator(
+                   onRefresh: () async {
+@@ -500,14 +545,44 @@
+ }
+ 
+ class _ConnectionBanner extends StatelessWidget {
+-  const _ConnectionBanner({required this.controller});
++  const _ConnectionBanner({required this.controller, this.account});
+ 
+   final RemoteController controller;
++
++  /// Account layer, used only so the recovery button can re-authorize an
++  /// account-bound link instead of discarding a perfectly good binding.
++  final RemoteAccountController? account;
++
++  /// Recovery for a failed authentication.
++  ///
++  /// An account-bound link lost only its tokens, so re-authorizing keeps the
++  /// binding and the computer row. Anything else has to be re-paired, which is
++  /// what the banner promises.
++  Future<void> _recoverAuth(BuildContext context) async {
++    final account = this.account;
++    if (account == null || !controller.isAccountBound) {
++      await controller.unpair();
++      return;
++    }
++    final navigator = Navigator.maybeOf(context);
++    if (navigator == null) {
++      await account.authorize();
++      controller.connect();
++      return;
++    }
++    await navigator.push(
++      MaterialPageRoute<void>(
++        builder: (_) =>
++            AccountDevicesPage(account: account, controller: controller),
++      ),
++    );
++  }
+ 
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+     final phase = controller.phase;
++    final accountBound = controller.isAccountBound;
+ 
+     final content = switch (phase) {
+       ConnectionPhase.agentOffline => (
+@@ -518,8 +593,9 @@
+       ),
+       ConnectionPhase.authFailed => (
+         Icons.key_off_rounded,
+-        controller.lastError ?? '配对已失效，请重新配对。',
+-        '重新配对',
++        controller.lastError ??
++            (accountBound ? '账号授权已失效，请重新授权。' : '配对已失效，请重新配对。'),
++        accountBound ? '重新授权' : '重新配对',
+         true,
+       ),
+       ConnectionPhase.disconnected => (
+@@ -569,7 +645,7 @@
+                   ),
+                   TextButton(
+                     onPressed: content.$4
+-                        ? controller.unpair
++                        ? () => _recoverAuth(context)
+                         : controller.reconnectNow,
+                     child: Text(content.$3),
+                   ),
+diff --git a/lib/remote_control/pages/pair_screen.dart b/lib/remote_control/pages/pair_screen.dart
+--- a/lib/remote_control/pages/pair_screen.dart
++++ b/lib/remote_control/pages/pair_screen.dart
+@@ -1,6 +1,8 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
++import '../account/account_devices_page.dart';
++import '../account/remote_account_controller.dart';
+ import '../models/pairing_uri.dart';
+ import '../state/remote_controller.dart';
+ import '../theme/remote_theme.dart';
+@@ -19,10 +21,18 @@
+     required this.controller,
+     this.initialRelay,
+     this.onExit,
++    this.account,
+   });
+ 
+   final RemoteController controller;
+   final String? initialRelay;
++
++  /// Account layer, when the host has one.
++  ///
++  /// Only used to offer the "账号里的电脑" shortcut: every route below stays
++  /// reachable without it, and a host that never installs the scope simply does
++  /// not render the shortcut.
++  final RemoteAccountController? account;
+ 
+   /// Leaves the module for the host app, rendered as a visible control above the
+   /// form. The unpaired state has no app bar and no inner route to pop, so
+@@ -261,6 +271,13 @@
+                     ),
+                   ),
+                   const SizedBox(height: 18),
++                  if (widget.account != null) ...<Widget>[
++                    _AccountEntry(
++                      account: widget.account!,
++                      controller: widget.controller,
++                    ),
++                    const SizedBox(height: 14),
++                  ],
+                   Row(
+                     children: <Widget>[
+                       Expanded(
+@@ -518,6 +535,58 @@
+ }
+ 
+ /// One of the two prominent entry points at the top of the screen.
++class _AccountEntry extends StatelessWidget {
++  const _AccountEntry({required this.account, required this.controller});
++
++  final RemoteAccountController account;
++
++  /// The module controller, so a first-run user who binds a computer from the
++  /// devices page lands on a live connection instead of a page that can only
++  /// list it.
++  final RemoteController controller;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return ListenableBuilder(
++      listenable: account,
++      builder: (context, _) {
++        final signedIn = account.phase != AccountPhase.signedOut;
++        final count = account.devices.where((d) => !d.isRevoked).length;
++        final subtitle = !signedIn
++            ? '登录 QFLI 账号后可一键连接'
++            : switch (account.phase) {
++                AccountPhase.ready =>
++                  count == 0 ? '这个账号还没有绑定电脑' : '已绑定 $count 台电脑',
++                _ => '查看账号下的电脑',
++              };
++        return Card(
++          elevation: 0,
++          color: scheme.primaryContainer.withValues(alpha: 0.5),
++          child: ListTile(
++            leading: Icon(
++              Icons.account_circle_rounded,
++              color: scheme.onPrimaryContainer,
++            ),
++            title: const Text('我的电脑'),
++            subtitle: Text(subtitle),
++            trailing: const Icon(Icons.chevron_right_rounded),
++            onTap: () => Navigator.of(context).push(
++              MaterialPageRoute<void>(
++                builder: (_) => AccountDevicesPage(
++                  account: account,
++                  controller: controller,
++                ),
++              ),
++            ),
++          ),
++        );
++      },
++    );
++  }
++}
++
++/// One of the two prominent entry points at the top of the screen.
+ class _EntryButton extends StatelessWidget {
+   const _EntryButton({
+     required this.icon,
+diff --git a/lib/remote_control/remote_computer_page.dart b/lib/remote_control/remote_computer_page.dart
+--- a/lib/remote_control/remote_computer_page.dart
++++ b/lib/remote_control/remote_computer_page.dart
+@@ -21,6 +21,9 @@
+ //   disposes it when the route goes away.
+ // * `store`/`controller` injected: the **caller** owns them. The page never
+ //   disposes them, and the caller keeps whatever it wants across module visits.
++//   Ownership decides destruction only: an account-bound link this page attached
++//   is torn down on the way out regardless, because its relay tokens are released
++//   with the page. A manual pairing is the caller's state and stays untouched.
+ //
+ // Returning to Studio uses the host route that mounted this page, captured
+ // outside the module's own inner `Navigator` (see [RemoteComputerPage.onExit]),
+@@ -31,11 +34,16 @@
+ import 'package:flutter/foundation.dart' show kIsWeb;
+ import 'package:flutter/material.dart';
+ 
++import 'account/account_api.dart';
++import 'account/account_devices_page.dart';
++import 'account/account_scope.dart';
++import 'account/remote_account_controller.dart';
+ import 'pages/home_screen.dart';
+ import 'pages/pair_screen.dart';
+ import 'state/remote_controller.dart';
+ import 'state/remote_store.dart';
+ import 'widgets/module_exit.dart';
++import '../store/auth_store.dart';
+ 
+ /// Single entry point for the remote-computer module.
+ ///
+@@ -57,6 +65,7 @@
+     this.store,
+     this.controller,
+     this.onExit,
++    this.authOverride,
+   });
+ 
+   /// Pre-opened store. Tests pass one to avoid the private directory; the app
+@@ -78,6 +87,14 @@
+   /// even while a nested remote page (a pane, a Codex thread) is on top of the
+   /// inner stack, and internal back navigation keeps working for those pages.
+   final VoidCallback? onExit;
++
++  /// Signed-in account, when the host cannot install [RemoteAccountScope].
++  ///
++  /// The app uses the scope (one wiring point above the tools tab); this field is
++  /// for a host that mounts the module inside its own route and already holds the
++  /// `AuthStore`. Passing it is never required and never changes the manual
++  /// flows.
++  final AuthStore? authOverride;
+ 
+   /// Whether this build can drive a paired computer at all.
+   ///
+@@ -105,6 +122,8 @@
+     required this.controller,
+     required this.store,
+     required this.ownsController,
++    this.account,
++    this.signIn,
+   });
+ 
+   final RemoteController controller;
+@@ -117,6 +136,15 @@
+ 
+   /// True when this page created the controller and must dispose it.
+   final bool ownsController;
++
++  /// Account layer, present only when a QFLI `AuthStore` was in scope.
++  ///
++  /// A null value is the supported no-account build: pairing, sessions and
++  /// terminals behave exactly as before and nothing account-related renders.
++  final RemoteAccountController? account;
++
++  /// Host sign-in entry point, when the host installed [AccountSignInHook].
++  final Future<void> Function()? signIn;
+ }
+ 
+ class _RemoteComputerPageState extends State<RemoteComputerPage>
+@@ -161,12 +189,42 @@
+         if (ownsController) controller.dispose();
+         return;
+       }
++      // The account layer is optional by construction: `AuthStore` reaches this
++      // module through `RemoteAccountScope`, and a host that never installs it
++      // (or a test that mounts the page directly) gets the manual flow only.
++      final auth =
++          RemoteAccountScope.maybeAuthOf(context) ?? widget.authOverride;
++      final account = auth == null
++          ? null
++          : RemoteAccountController(
++              auth: auth,
++              grants: QfliGrantApi(),
++              relay: RelayAccountApi(),
++              store: store,
++              // A signed-out or switched account keeps no path to a live account
++              // link. Manual pairings are deliberately spared: they never depended
++              // on the account, so dropping them would break a working setup.
++              onIdentityLost: () {
++                if (controller.isAccountBound) unawaited(controller.unpair());
++              },
++            );
++      controller.relayTokens = account == null
++          ? null
++          : ({required String accountId, required String relayUrl}) async {
++              final credentials = await account.credentialsFor(
++                accountId: accountId,
++                relayUrl: relayUrl,
++              );
++              return credentials?.accessToken;
++            };
+       controller.connect();
+       setState(
+         () => _boot = _Boot(
+           controller: controller,
+           store: store,
+           ownsController: ownsController,
++          account: account,
++          signIn: AccountSignInHook.maybeOf(context),
+         ),
+       );
+     } catch (e) {
+@@ -189,10 +247,22 @@
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeObserver(this);
+-    // Disposing the client view must not touch the desktop: this only closes the
+-    // local socket and settles local pending requests.
++    // Ownership decides who *destroys* the controller, never who releases the
++    // account link. A caller-supplied controller outlives the route on purpose
++    // (the host keeps its state across module visits), but the account tokens
++    // this page attached belong to this page: leaving them attached would let a
++    // later reconnect dial with a token nothing else can revoke.
+     final boot = _boot;
+-    if (boot != null && boot.ownsController) boot.controller.dispose();
++    if (boot != null) {
++      boot.controller.relayTokens = null;
++      if (boot.controller.isAccountBound) {
++        // Only the account link is torn down. A manual pairing is the caller's
++        // own state and must survive the route exactly as before this feature.
++        unawaited(boot.controller.unpair());
++      }
++      boot.account?.dispose();
++      if (boot.ownsController) boot.controller.dispose();
++    }
+     super.dispose();
+   }
+ 
+@@ -203,10 +273,24 @@
+     if (error != null) return _BootFailure(error: error, onExit: _exit);
+     final boot = _boot;
+     if (boot == null) return const _Booting();
+-    return _RemoteRoot(
++    final root = _RemoteRoot(
+       controller: boot.controller,
+       store: boot.store,
++      account: boot.account,
++      signIn: boot.signIn,
+       onExit: _exit,
++    );
++    final account = boot.account;
++    if (account == null) return root;
++    // Two scopes, one owner: the account controller is created here and shared
++    // with every pushed account route, so a devices page never dials the relay
++    // twice or refreshes tokens behind the dashboard's back.
++    return AccountOwnerScope(
++      account: account,
++      child: AccountSignInHook(
++        onSignIn: boot.signIn ?? () async {},
++        child: root,
++      ),
+     );
+   }
+ 
+@@ -234,11 +318,19 @@
+ /// Split out so the transition rebuilds only on controller notifications and
+ /// never re-runs the page's boot or lifecycle logic.
+ class _RemoteRoot extends StatelessWidget {
+-  const _RemoteRoot({required this.controller, this.store, this.onExit});
++  const _RemoteRoot({
++    required this.controller,
++    this.store,
++    this.onExit,
++    this.account,
++    this.signIn,
++  });
+ 
+   final RemoteController controller;
+   final RemoteStore? store;
+   final VoidCallback? onExit;
++  final RemoteAccountController? account;
++  final Future<void> Function()? signIn;
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -253,6 +345,7 @@
+                   key: const ValueKey<String>('remote-pair'),
+                   controller: controller,
+                   onExit: onExit,
++                  account: account,
+                   // Remembering the last relay saves retyping the address after
+                   // an unpair; the secret is gone with the pairing.
+                   initialRelay: store?.lastRelayUrl,
+@@ -261,6 +354,7 @@
+                   key: ValueKey<String>('remote-home-${pairing.agentId}'),
+                   controller: controller,
+                   onExit: onExit,
++                  account: account,
+                 ),
+         );
+       },
+diff --git a/lib/remote_control/state/remote_controller.dart b/lib/remote_control/state/remote_controller.dart
+--- a/lib/remote_control/state/remote_controller.dart
++++ b/lib/remote_control/state/remote_controller.dart
+@@ -54,6 +54,23 @@
+   disconnected,
+ }
+ 
++/// Supplies the relay access token for an account-bound pairing.
++///
++/// Takes the pairing's own account id and relay URL so the account layer can
++/// refuse a token that was issued for a different relay or a different account:
++/// a saved pairing is a claim about *one* server, and a token from the currently
++/// selected server must never be presented to another one.
++///
++/// Returning `null` means "no usable authorization for this pairing". The
++/// controller turns that into [ConnectionPhase.authFailed] and stops: an
++/// account-bound link must never fall back to a device secret after an error or
++/// a revocation.
++typedef RelayTokenProvider =
++    Future<String?> Function({
++      required String accountId,
++      required String relayUrl,
++    });
++
+ class RemoteException implements Exception {
+   const RemoteException(this.message);
+   final String message;
+@@ -112,8 +129,10 @@
+     required RemoteStore store,
+     RelayConnector connector = connectRelaySocket,
+     this.requestTimeout = const Duration(seconds: 20),
++    RelayTokenProvider? relayTokens,
+   }) : _store = store,
+        _connector = connector,
++       _relayTokens = relayTokens,
+        _pairing = store.pairing {
+     if (_pairing == null) _phase = ConnectionPhase.unpaired;
+   }
+@@ -121,6 +140,12 @@
+   final RemoteStore _store;
+   final RelayConnector _connector;
+   final Duration requestTimeout;
++
++  /// Account-mode token source, when the host has one.
++  ///
++  /// `null` keeps the controller byte-identical to the manual pairing build: only
++  /// [PairingAuth.deviceSecret] pairings can then exist.
++  RelayTokenProvider? _relayTokens;
+ 
+   Pairing? _pairing;
+   ConnectionPhase _phase = ConnectionPhase.disconnected;
+@@ -155,6 +180,15 @@
+   String? get lastError => _lastError;
+   AgentInfo? get agent => _agent;
+   Stream<CodexNotice> get codexNotices => _codexNotices.stream;
++
++  /// Whether the current pairing proves access with a relay token.
++  bool get isAccountBound => _pairing?.isAccountBound ?? false;
++
++  /// Attaches the account token source after construction.
++  ///
++  /// The page usually passes it to the constructor; this setter exists for hosts
++  /// that build the controller before the account layer exists.
++  set relayTokens(RelayTokenProvider? provider) => _relayTokens = provider;
+ 
+   /// Sink for Herdr push messages.
+   ///
+@@ -303,8 +337,10 @@
+   }
+ 
+   Future<void> _savePairing(Pairing pairing) async {
++    final generation = _generation;
+     await _store.setPairing(pairing);
+     await _store.setString('lastRelayUrl', pairing.relayUrl);
++    if (_disposed || _generation != generation) return;
+     _pairing = pairing;
+     _sessions.clear();
+     _views.clear();
+@@ -313,10 +349,84 @@
+     connect();
+   }
+ 
++  /// Connects to a computer the signed-in account is bound to.
++  ///
++  /// Stored like a manual pairing (so a relaunch knows which computer the phone
++  /// was showing) but with [PairingAuth.relayAccount] and an empty secret: the
++  /// proof of access is [tokens], which lives in the account layer's memory and
++  /// is asked for again on every dial.
++  ///
++  /// The store write is awaited, so the generation is re-checked afterwards: a
++  /// late save from a previous call must not start a second connection loop over
++  /// the pairing the user just replaced.
++  Future<void> connectAccountDevice({
++    required String relayUrl,
++    required String deviceId,
++    required String accountId,
++    String name = '',
++    RelayTokenProvider? tokens,
++  }) async {
++    final url = _requireUrl(relayUrl);
++    if (deviceId.trim().isEmpty) {
++      throw const RemoteException('设备 ID 为空，无法连接');
++    }
++    if (accountId.trim().isEmpty) {
++      throw const RemoteException('账号信息缺失，请重新授权');
++    }
++    if (tokens != null) _relayTokens = tokens;
++    final generation = _generation;
++    final pairing = Pairing(
++      relayUrl: url.toString(),
++      agentId: deviceId.trim(),
++      secret: '',
++      name: name,
++      auth: PairingAuth.relayAccount,
++      accountId: accountId.trim(),
++    );
++    await _store.setPairing(pairing);
++    await _store.setString('lastRelayUrl', pairing.relayUrl);
++    if (_disposed) return;
++    if (_generation != generation) {
++      // Another connect/unpair won the race while the store was writing. That
++      // call already started its own loop, so this one must not start a second.
++      return;
++    }
++    _pairing = pairing;
++    _sessions.clear();
++    _views.clear();
++    _subscriptionOwners.clear();
++    _lastError = null;
++    connect();
++  }
++
+   Uri _requireUrl(String input) {
+     final url = normalizeRelayUrl(input);
+     if (url == null) throw const RemoteException('服务器地址格式不正确');
+     return url;
++  }
++
++  /// Credential for the client hello, or `null` when an account-bound link has
++  /// no usable token right now.
++  ///
++  /// A provider that throws is treated as "no authorization": an exception must
++  /// never be able to make the loop proceed with an empty credential. A pairing
++  /// that names no account cannot be authorized at all, so it answers `null`
++  /// instead of asking for "the current token".
++  Future<String?> _tokenFor(Pairing pairing) async {
++    if (!pairing.isAccountBound) return null;
++    if (pairing.accountId.isEmpty) return null;
++    final provider = _relayTokens;
++    if (provider == null) return null;
++    try {
++      final token = await provider(
++        accountId: pairing.accountId,
++        relayUrl: pairing.relayUrl,
++      );
++      if (token == null || token.isEmpty) return null;
++      return token;
++    } catch (_) {
++      return null;
++    }
+   }
+ 
+   // -------------------------------------------------------------------------
+@@ -359,11 +469,29 @@
+           return;
+         }
+         _socket = socket;
++        final relayToken = await _tokenFor(pairing);
++        if (gen != _generation || _disposed) {
++          unawaited(socket.close());
++          return;
++        }
++        if (relayToken == null && pairing.isAccountBound) {
++          // Account-bound links have no secret to fall back to. Stop here and ask
++          // for a fresh authorization instead of retrying a link that cannot work.
++          unawaited(socket.close());
++          _socket = null;
++          if (gen != _generation) return;
++          _lastError = _relayTokens == null ? '账号连接未就绪，请重新授权' : '账号授权已失效，请重新授权';
++          _setPhase(ConnectionPhase.authFailed);
++          return;
++        }
+         socket.send(<String, dynamic>{
+           't': 'hello',
+           'role': 'client',
+           'agentId': pairing.agentId,
+-          'secret': pairing.secret,
++          if (pairing.isAccountBound)
++            'relayToken': relayToken!
++          else
++            'secret': pairing.secret,
+           'v': 1,
+         });
+         final done = _socketDone = Completer<void>();
+@@ -446,7 +574,13 @@
+       case 'error':
+         final code = frame['code'];
+         if (code == 'unauthorized') {
+-          _lastError = '配对已失效，请重新配对';
++          final account = _pairing?.isAccountBound ?? false;
++          _lastError = account ? '绑定已失效，请重新绑定' : '配对已失效，请重新配对';
++          if (account) {
++            // The relay rejected an account token: the binding or the token was
++            // revoked. Stop retrying so the UI can offer re-authorization.
++            _generation++;
++          }
+           _setPhase(ConnectionPhase.authFailed);
+         } else if (code == 'agent_offline') {
+           _failPending('电脑已离线');
+diff --git a/lib/remote_control/state/remote_store.dart b/lib/remote_control/state/remote_store.dart
+--- a/lib/remote_control/state/remote_store.dart
++++ b/lib/remote_control/state/remote_store.dart
+@@ -19,6 +19,19 @@
+     if (dart.library.io) 'remote_store_backend_io.dart'
+     as platform;
+ 
++/// How this phone proved it may open the link.
++///
++/// The distinction exists so an account-bound link can never quietly use a
++/// device secret: [relayAccount] pairings carry no secret at all, and the socket
++/// layer refuses to dial them without a fresh relay token.
++enum PairingAuth {
++  /// The one-time pairing code exchanged for the device secret (manual flow).
++  deviceSecret,
++
++  /// A relay access token obtained by exchanging a QFLI grant (account flow).
++  relayAccount,
++}
++
+ /// Credentials for one paired computer.
+ class Pairing {
+   const Pairing({
+@@ -26,6 +39,8 @@
+     required this.agentId,
+     required this.secret,
+     this.name = '',
++    this.auth = PairingAuth.deviceSecret,
++    this.accountId = '',
+   });
+ 
+   factory Pairing.fromJson(Map<String, dynamic> json) => Pairing(
+@@ -33,18 +48,35 @@
+     agentId: json['agentId'] as String,
+     secret: json['secret'] as String,
+     name: json['name'] as String? ?? '',
++    auth: json['auth'] == PairingAuth.relayAccount.name
++        ? PairingAuth.relayAccount
++        : PairingAuth.deviceSecret,
++    accountId: json['accountId'] as String? ?? '',
+   );
+ 
+   final String relayUrl;
+   final String agentId;
++
++  /// Device secret. Empty for [PairingAuth.relayAccount] — those tokens live in
++  /// the account layer's memory store and are never written to this document.
+   final String secret;
++
+   final String name;
++  final PairingAuth auth;
++
++  /// Relay account id for an account-bound pairing; `''` otherwise. Metadata,
++  /// not a credential: it says whose binding this row is, not how to prove it.
++  final String accountId;
++
++  bool get isAccountBound => auth == PairingAuth.relayAccount;
+ 
+   Map<String, dynamic> toJson() => <String, dynamic>{
+     'relayUrl': relayUrl,
+     'agentId': agentId,
+     'secret': secret,
+     'name': name,
++    if (auth != PairingAuth.deviceSecret) 'auth': auth.name,
++    if (accountId.isNotEmpty) 'accountId': accountId,
+   };
+ 
+   Pairing copyWith({String? name}) => Pairing(
+@@ -52,6 +84,8 @@
+     agentId: agentId,
+     secret: secret,
+     name: name ?? this.name,
++    auth: auth,
++    accountId: accountId,
+   );
+ 
+   /// Never renders the secret; used if a pairing ever reaches a log line.
+@@ -113,6 +147,22 @@
+ 
+   Future<void> setString(String key, String? value) => _put(key, value);
+ 
++  /// Structured value under [key], or `null` when it is absent or not an object.
++  ///
++  /// Used for the account device memo: selection metadata only, never a token.
++  Map<String, dynamic>? getJson(String key) {
++    final raw = _data[key];
++    if (raw is! Map) return null;
++    try {
++      return Map<String, dynamic>.from(raw);
++    } catch (_) {
++      return null;
++    }
++  }
++
++  Future<void> setJson(String key, Map<String, dynamic>? value) =>
++      _put(key, value);
++
+   /// Last server address typed on the pair screen (kept after unpairing).
+   String? get lastRelayUrl => getString('lastRelayUrl');
+ 
+diff --git a/test/remote_control/account_test.dart b/test/remote_control/account_test.dart
+new file mode 100644
+--- /dev/null
++++ b/test/remote_control/account_test.dart
+@@ -0,0 +1,998 @@
++// Account-layer tests: models, endpoint derivation, credential store fencing and
++// the controller's identity/relay fencing.
++//
++// These are written for the cloud CI runner. Nothing here touches the network,
++// the file system or a device: `MockClient` answers the HTTP calls, the store
++// backend is an in-test double whose latency the test controls, and the pairing
++// store uses the in-memory backend.
++//
++// The regressions they pin down are the ones a reviewer can no longer reach by
++// reading the code:
++//
++//   * a code-only bind must be one request, not "pair then bind" (a code is
++//     single use and the second call would fail);
++//   * a refresh must hand back the token **and** its own expiry;
++//   * slow storage, A → B → A, relay switches and a shared refresh must never
++//     let an older generation write over a newer one;
++//   * an account-bound failure must never fall back to a device secret;
++//   * manual pairing must keep working with no account layer at all.
++
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:qfli_studio_core/community/models.dart';
++import 'package:qfli_studio_core/remote_control/account/account_api.dart';
++import 'package:qfli_studio_core/remote_control/account/account_models.dart';
++import 'package:qfli_studio_core/remote_control/account/relay_credentials.dart';
++import 'package:qfli_studio_core/remote_control/account/relay_endpoint.dart';
++import 'package:qfli_studio_core/remote_control/account/remote_account_controller.dart';
++import 'package:qfli_studio_core/remote_control/state/remote_controller.dart';
++import 'package:qfli_studio_core/remote_control/state/remote_store.dart';
++import 'package:qfli_studio_core/remote_control/state/remote_store_backend.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++
++import '../support/fake_relay.dart';
++
++const String relayUrl = 'wss://relay.example.com/ws';
++const String otherRelayUrl = 'wss://relay2.example.com/ws';
++
++CommunityUser _user(String id) => CommunityUser(
++  id: id,
++  username: 'user-$id',
++  nickname: 'nick-$id',
++  bio: '',
++  avatarColor: '#2196F3',
++  points: 0,
++  checkinStreak: 0,
++  provider: 'local',
++);
++
++/// In-memory backend whose latency each test can stretch.
++class _SlowBackend implements RelayCredentialBackend {
++  _SlowBackend();
++
++  Completer<void>? gateLoad;
++  Completer<void>? gateWrite;
++  Completer<void>? gateClear;
++
++  RelayCredentials? stored;
++  int writes = 0;
++  int clears = 0;
++
++  @override
++  Future<RelayCredentials?> read() async {
++    await gateLoad?.future;
++    return stored;
++  }
++
++  @override
++  Future<void> write(RelayCredentials credentials) async {
++    await gateWrite?.future;
++    writes += 1;
++    stored = credentials;
++  }
++
++  @override
++  Future<void> clear() async {
++    await gateClear?.future;
++    clears += 1;
++    stored = null;
++  }
++}
++
++/// Scripted relay/QFLI server.
++class _Server {
++  static const String accountId = 'relay-account';
++
++  final List<http.Request> requests = <http.Request>[];
++  Completer<void>? gateExchange;
++  Completer<void>? gateDevices;
++  Completer<void>? gateRefresh;
++  Completer<void>? gateBind;
++  Completer<void>? gateRevoke;
++
++  /// Set to make the next exchange/devices call answer 401.
++  bool rejectDevices = false;
++
++  /// Device calls carrying this bearer answer 401, whatever their timing.
++  String? rejectAccessToken;
++
++  /// Device the code-only bind route resolves to.
++  String bindDeviceId = 'pc-new';
++
++  /// Rows returned by `GET /api/v1/devices`; null uses the default single row.
++  List<Map<String, dynamic>>? devicesOverride;
++
++  int accessSerial = 0;
++
++  http.Client get client => MockClient((request) async {
++    requests.add(request);
++    final path = request.url.path;
++    if (path == '/api/relay/grants') {
++      return http.Response(
++        jsonEncode(<String, dynamic>{
++          'grant': 'grant-${DateTime.now().microsecondsSinceEpoch}',
++          'expires_at': DateTime.now()
++              .toUtc()
++              .add(const Duration(seconds: 60))
++              .toIso8601String(),
++          'audience': 'cloudterminal-relay',
++        }),
++        200,
++      );
++    }
++    if (path == '/api/v1/auth/exchange') {
++      await gateExchange?.future;
++      return http.Response(jsonEncode(_tokens()), 200);
++    }
++    if (path == '/api/v1/auth/token/refresh') {
++      await gateRefresh?.future;
++      return http.Response(jsonEncode(_tokens()), 200);
++    }
++    if (path == '/api/v1/devices' && request.method == 'GET') {
++      // A single gate: whatever call is already waiting finishes when it opens,
++      // later calls proceed immediately.
++      final gate = gateDevices;
++      gateDevices = null;
++      await gate?.future;
++      final bearer = request.headers['authorization'];
++      if (rejectDevices ||
++          (rejectAccessToken != null &&
++              bearer == 'Bearer $rejectAccessToken')) {
++        return http.Response(jsonEncode(<String, dynamic>{'error': 'x'}), 401);
++      }
++      final rows =
++          devicesOverride ??
++          <Map<String, dynamic>>[
++            <String, dynamic>{
++              'device_id': 'pc-1',
++              'label': '办公室台式机',
++              'platform': 'win32',
++              'role': 'owner',
++              'online': true,
++              'last_seen_at': DateTime.now()
++                  .toUtc()
++                  .subtract(const Duration(minutes: 3))
++                  .toIso8601String(),
++            },
++          ];
++      return http.Response(
++        jsonEncode(<String, dynamic>{'ok': true, 'devices': rows}),
++        200,
++      );
++    }
++    if (path == '/api/v1/devices/bindings' && request.method == 'POST') {
++      await gateBind?.future;
++      // The real relay answers a bind with the binding, not the device: `ok`,
++      // `account_id`, `device_id` and `role`, and no presence at all.
++      return http.Response(
++        jsonEncode(<String, dynamic>{
++          'ok': true,
++          'account_id': accountId,
++          'device_id': bindDeviceId,
++          'role': 'owner',
++        }),
++        200,
++      );
++    }
++    if (path.startsWith('/api/v1/devices/') &&
++        request.method == 'POST' &&
++        path.endsWith('/bindings')) {
++      await gateBind?.future;
++      return http.Response(
++        jsonEncode(<String, dynamic>{'ok': true, 'device_id': 'pc-1'}),
++        200,
++      );
++    }
++    if (path.contains('/bindings/') && request.method == 'DELETE') {
++      await gateRevoke?.future;
++      return http.Response(jsonEncode(<String, dynamic>{'ok': true}), 200);
++    }
++    return http.Response(
++      jsonEncode(<String, dynamic>{'error': 'unexpected'}),
++      404,
++    );
++  });
++
++  Map<String, dynamic> _tokens() {
++    accessSerial += 1;
++    final now = DateTime.now().toUtc();
++    return <String, dynamic>{
++      'account_id': accountId,
++      'access_token': 'access-$accessSerial',
++      'refresh_token': 'refresh-$accessSerial',
++      'access_expires_at': now
++          .add(const Duration(minutes: 15))
++          .toIso8601String(),
++      'refresh_expires_at': now.add(const Duration(days: 30)).toIso8601String(),
++    };
++  }
++
++  List<String> get paths => requests.map((r) => r.url.path).toList();
++
++  int countPath(String path) => paths.where((p) => p == path).length;
++}
++
++/// A `RemoteStore` over an in-memory backend.
++Future<RemoteStore> _openStore() =>
++    RemoteStore.open(backend: MemoryRemoteStoreBackend());
++
++void main() {
++  group('RelayEndpoint', () {
++    test('derives the HTTP origin from the socket address', () {
++      final endpoint = RelayEndpoint.tryParse(relayUrl)!;
++      expect(endpoint.origin.toString(), 'https://relay.example.com');
++      expect(
++        endpoint.api('/api/v1/devices').toString(),
++        'https://relay.example.com/api/v1/devices',
++      );
++    });
++
++    test('rejects credentials, queries and fragments in the address', () {
++      expect(
++        RelayEndpoint.tryParse('wss://user:pw@relay.example.com/ws'),
++        isNull,
++      );
++      expect(RelayEndpoint.tryParse('wss://relay.example.com/ws?x=1'), isNull);
++      expect(RelayEndpoint.tryParse('wss://relay.example.com/ws#frag'), isNull);
++      expect(RelayEndpoint.tryParse(''), isNull);
++    });
++
++    test('refuses to build a non-/api/ URL', () {
++      final endpoint = RelayEndpoint.tryParse(relayUrl)!;
++      expect(() => endpoint.api('/other'), throwsArgumentError);
++      expect(() => endpoint.api('/api/x://y'), throwsArgumentError);
++    });
++
++    test('never prints a token-shaped value', () {
++      expect(
++        RelayEndpoint.tryParse(relayUrl).toString(),
++        contains('relay.example.com'),
++      );
++    });
++  });
++
++  group('RelayDevice', () {
++    test('reads the snake_case relay envelope', () {
++      final device = RelayDevice.fromJson(<String, dynamic>{
++        'device_id': 'pc-1',
++        'label': 'Mac',
++        'platform': 'darwin',
++        'role': 'owner',
++        'online': true,
++      });
++      expect(device.deviceId, 'pc-1');
++      expect(device.isOnline, isTrue);
++      expect(device.isOwner, isTrue);
++      expect(device.displayName, 'Mac');
++    });
++
++    test('a revoked device stays revoked and is not online', () {
++      final device = RelayDevice.fromJson(<String, dynamic>{
++        'device_id': 'pc-1',
++        'online': true,
++        'device_revoked': true,
++      });
++      expect(device.state, RelayDeviceState.revoked);
++      expect(device.isOnline, isFalse);
++    });
++
++    test('rejects ids that would break a URL path or a socket frame', () {
++      for (final bad in <Object?>[
++        null,
++        '',
++        '  ',
++        'a/b',
++        'a b',
++        'x' * 200,
++        'pä',
++      ]) {
++        expect(
++          () => RelayDevice.fromJson(<String, dynamic>{'device_id': bad}),
++          throwsA(isA<AccountProtocolException>()),
++          reason: '$bad',
++        );
++      }
++    });
++
++    test('toString never carries a token or a secret', () {
++      final device = RelayDevice.fromJson(<String, dynamic>{
++        'device_id': 'pc-1',
++        'secret': 'hidden',
++      });
++      expect(device.toString(), isNot(contains('hidden')));
++      expect(device.toString(), contains('pc-1'));
++    });
++  });
++
++  group('device cache round trip', () {
++    test('online and revoked survive a write/read cycle', () {
++      final cache = AccountDeviceCache(
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++        fetchedAt: DateTime.utc(2026, 1, 2, 3, 4),
++        devices: <RelayDevice>[
++          const RelayDevice(
++            deviceId: 'pc-online',
++            state: RelayDeviceState.online,
++          ),
++          const RelayDevice(
++            deviceId: 'pc-revoked',
++            state: RelayDeviceState.revoked,
++          ),
++          const RelayDevice(deviceId: 'pc-offline'),
++        ],
++      );
++      final restored = AccountDeviceCache.fromJson(
++        jsonDecode(jsonEncode(cache.toJson())),
++      );
++      expect(restored.devices.map((d) => d.state), <RelayDeviceState>[
++        RelayDeviceState.online,
++        RelayDeviceState.revoked,
++        RelayDeviceState.offline,
++      ]);
++      expect(
++        restored.matches(accountId: 'relay-account', relayUrl: relayUrl),
++        isTrue,
++      );
++      expect(restored.matches(accountId: 'other', relayUrl: relayUrl), isFalse);
++    });
++
++    test('the memo contains no credential field', () {
++      final json = AccountDeviceCache(
++        accountId: 'a',
++        relayUrl: relayUrl,
++        fetchedAt: DateTime.utc(2026),
++        devices: const <RelayDevice>[RelayDevice(deviceId: 'pc-1')],
++      ).toJson();
++      final text = jsonEncode(json);
++      expect(text, isNot(contains('token')));
++      expect(text, isNot(contains('secret')));
++    });
++  });
++
++  group('RelayCredentialStore', () {
++    test('a slow load does not resurrect tokens after a clear', () async {
++      final backend = _SlowBackend();
++      final store = RelayCredentialStore(backend: backend);
++      backend.stored = const RelayCredentials(
++        ownerId: 'A',
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++        accessToken: 'access-A',
++        refreshToken: 'refresh-A',
++      );
++      backend.gateLoad = Completer<void>();
++      final loading = store.load();
++      await store.clear();
++      backend.gateLoad!.complete();
++      await loading;
++      expect(store.credentials, isNull);
++    });
++
++    test('a slow save cannot overwrite a newer save', () async {
++      final backend = _SlowBackend();
++      final store = RelayCredentialStore(backend: backend);
++      final first = const RelayCredentials(
++        ownerId: 'A',
++        accountId: 'relay-a',
++        relayUrl: relayUrl,
++        accessToken: 'access-A',
++        refreshToken: 'refresh-A',
++      );
++      final second = const RelayCredentials(
++        ownerId: 'B',
++        accountId: 'relay-b',
++        relayUrl: relayUrl,
++        accessToken: 'access-B',
++        refreshToken: 'refresh-B',
++      );
++      backend.gateWrite = Completer<void>();
++      final slow = store.save(first);
++      await store.save(second);
++      backend.gateWrite!.complete();
++      await slow;
++      expect(store.credentials?.accessToken, 'access-B');
++      expect(backend.stored?.accessToken, 'access-B');
++    });
++
++    test('clearIf leaves a newer owner alone', () async {
++      final store = RelayCredentialStore();
++      final a = const RelayCredentials(
++        ownerId: 'A',
++        accountId: 'relay-a',
++        relayUrl: relayUrl,
++        accessToken: 'access-A',
++        refreshToken: 'refresh-A',
++      );
++      final b = const RelayCredentials(
++        ownerId: 'B',
++        accountId: 'relay-b',
++        relayUrl: relayUrl,
++        accessToken: 'access-B',
++        refreshToken: 'refresh-B',
++      );
++      await store.save(b);
++      await store.clearIf(a);
++      expect(store.credentials?.accessToken, 'access-B');
++      await store.clearIf(b);
++      expect(store.credentials, isNull);
++    });
++
++    test('close keeps the persisted copy', () async {
++      final backend = _SlowBackend();
++      final store = RelayCredentialStore(backend: backend);
++      await store.save(
++        const RelayCredentials(
++          ownerId: 'A',
++          accountId: 'relay-a',
++          relayUrl: relayUrl,
++          accessToken: 'access-A',
++          refreshToken: 'refresh-A',
++        ),
++      );
++      store.close();
++      expect(store.credentials, isNull);
++      expect(backend.stored, isNotNull);
++      expect(backend.clears, 0);
++    });
++  });
++
++  group('RelayAccountApi.bind', () {
++    test(
++      'the code-only route sends one POST with no device id in the path',
++      () async {
++        final server = _Server();
++        final api = RelayAccountApi(transport: server.client);
++        final device = await api.bind(
++          relay: RelayEndpoint.tryParse(relayUrl)!,
++          credentials: const RelayCredentials(
++            ownerId: 'A',
++            accountId: 'relay-account',
++            relayUrl: relayUrl,
++            accessToken: 'access-1',
++            refreshToken: 'refresh-1',
++          ),
++          pairCode: 'abcd-1234',
++        );
++        expect(device.deviceId, 'pc-new');
++        // The binding response has no presence, so the row must not claim online.
++        expect(device.state, RelayDeviceState.offline);
++        expect(device.role, 'owner');
++        expect(server.countPath('/api/v1/devices/bindings'), 1);
++        expect(server.paths.any((p) => p.contains('/devices/pc-')), isFalse);
++        expect(jsonDecode(server.requests.single.body), <String, dynamic>{
++          'pair_code': 'ABCD1234',
++        });
++        expect(
++          server.requests.single.headers['authorization'],
++          'Bearer access-1',
++        );
++      },
++    );
++
++    test(
++      'a code-only response without a device id is a protocol error',
++      () async {
++        final api = RelayAccountApi(
++          transport: MockClient(
++            (_) async =>
++                http.Response(jsonEncode(<String, dynamic>{'ok': true}), 200),
++          ),
++        );
++        expect(
++          () => api.bind(
++            relay: RelayEndpoint.tryParse(relayUrl)!,
++            credentials: const RelayCredentials(
++              ownerId: 'A',
++              accountId: 'relay-account',
++              relayUrl: relayUrl,
++              accessToken: 'access-1',
++              refreshToken: 'refresh-1',
++            ),
++            pairCode: 'ABCD1234',
++          ),
++          throwsA(
++            isA<AccountApiException>().having(
++              (e) => e.code,
++              'code',
++              'protocol',
++            ),
++          ),
++        );
++      },
++    );
++
++    test('a known-id route uses the documented path', () async {
++      final server = _Server();
++      final api = RelayAccountApi(transport: server.client);
++      await api.bind(
++        relay: RelayEndpoint.tryParse(relayUrl)!,
++        credentials: const RelayCredentials(
++          ownerId: 'A',
++          accountId: 'relay-account',
++          relayUrl: relayUrl,
++          accessToken: 'access-1',
++          refreshToken: 'refresh-1',
++        ),
++        pairCode: 'ABCD1234',
++        deviceId: 'pc-1',
++      );
++      expect(server.countPath('/api/v1/devices/pc-1/bindings'), 1);
++    });
++
++    test('errors never echo a server body', () async {
++      final api = RelayAccountApi(
++        transport: MockClient(
++          (_) async => http.Response(
++            jsonEncode(<String, dynamic>{'error': 'access-1 leaked'}),
++            403,
++          ),
++        ),
++      );
++      expect(
++        () => api.devices(
++          relay: RelayEndpoint.tryParse(relayUrl)!,
++          credentials: const RelayCredentials(
++            ownerId: 'A',
++            accountId: 'relay-account',
++            relayUrl: relayUrl,
++            accessToken: 'access-1',
++            refreshToken: 'refresh-1',
++          ),
++        ),
++        throwsA(
++          isA<AccountApiException>().having(
++            (e) => e.message,
++            'message',
++            isNot(contains('access-1')),
++          ),
++        ),
++      );
++    });
++  });
++
++  group('RemoteAccountController', () {
++    late AuthStore auth;
++    late _Server server;
++    late _SlowBackend backend;
++    late RemoteStore store;
++    late RemoteAccountController controller;
++
++    RemoteAccountController build({String? identity}) {
++      auth = AuthStore();
++      server = _Server();
++      backend = _SlowBackend();
++      return RemoteAccountController(
++        auth: auth,
++        grants: QfliGrantApi(
++          transport: server.client,
++          baseUrl: 'https://qfli.suanxiwanjie.cn',
++        ),
++        relay: RelayAccountApi(transport: server.client),
++        store: store,
++        credentials: RelayCredentialStore(backend: backend),
++        endpoint: RelayEndpoint.tryParse(relayUrl),
++      );
++    }
++
++    setUp(() async {
++      store = await _openStore();
++    });
++
++    tearDown(() {
++      controller.dispose();
++    });
++
++    test('authorize exchanges a grant and lists devices', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      expect(controller.phase, AccountPhase.ready);
++      expect(server.countPath('/api/relay/grants'), 1);
++      expect(server.countPath('/api/v1/auth/exchange'), 1);
++      expect(controller.devices.single.deviceId, 'pc-1');
++      expect(controller.devices.single.isOnline, isTrue);
++      expect(controller.accountId, 'relay-account');
++      // The QFLI session token only ever went to the QFLI origin.
++      final qfli = server.requests.firstWhere(
++        (r) => r.url.path == '/api/relay/grants',
++      );
++      expect(qfli.url.host, 'qfli.suanxiwanjie.cn');
++      expect(qfli.headers['authorization'], 'Bearer session-A');
++      for (final request in server.requests.where(
++        (r) => r.url.path.startsWith('/api/v1/'),
++      )) {
++        expect(request.headers['authorization'], isNot('Bearer session-A'));
++      }
++    });
++
++    test('a slow restore cannot reinstate tokens for a new identity', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      final tokensForA = backend.stored!;
++
++      // The next controller starts with A's tokens on the backend, then the user
++      // signs in as B before the backend answers.
++      controller.dispose();
++      backend.gateLoad = Completer<void>();
++      controller = build();
++      expect(controller.phase, AccountPhase.needsAuthorization);
++      await auth.signIn('session-B', _user('B'));
++      backend.gateLoad!.complete();
++      await Future<void>.delayed(Duration.zero);
++      expect(controller.phase, AccountPhase.needsAuthorization);
++      expect(controller.accountId, isNull);
++      expect(controller.hasAuthorization, isFalse);
++      expect(tokensForA.ownerId, 'A');
++    });
++
++    test('A → B → A does not revive the first A generation', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      expect(controller.accountId, 'relay-account');
++
++      server.rejectDevices = true;
++      server.gateDevices = Completer<void>();
++      final stale = controller.refreshDevices();
++      await auth.signIn('session-B', _user('B'));
++      await auth.signIn('session-A2', _user('A'));
++      server.gateDevices!.complete();
++      await stale;
++      // The answer belonged to the first A; the third identity owns no tokens.
++      expect(controller.devices, isEmpty);
++      expect(controller.hasAuthorization, isFalse);
++    });
++
++    test(
++      'a late bind answer cannot hand a device to the next account',
++      () async {
++        controller = build();
++        await auth.signIn('session-A', _user('A'));
++        await controller.authorize();
++        server.gateBind = Completer<void>();
++        final binding = controller.bindDevice(pairCode: 'ABCD1234');
++        await auth.signIn('session-B', _user('B'));
++        server.gateBind!.complete();
++        await expectLater(
++          binding,
++          throwsA(
++            isA<AccountApiException>().having(
++              (e) => e.code,
++              'code',
++              'cancelled',
++            ),
++          ),
++        );
++      },
++    );
++
++    test(
++      'a late revoke reports false instead of editing the new list',
++      () async {
++        controller = build();
++        await auth.signIn('session-A', _user('A'));
++        await controller.authorize();
++        server.gateRevoke = Completer<void>();
++        final revoking = controller.revokeDevice('pc-1');
++        await auth.signIn('session-B', _user('B'));
++        server.gateRevoke!.complete();
++        expect(await revoking, isFalse);
++        expect(controller.devices, isEmpty);
++      },
++    );
++
++    test('a shared refresh is joined, not repeated', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      // Force the first token near expiry so both callers want a refresh.
++      final stale = RelayCredentials(
++        ownerId: 'A',
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++        accessToken: 'access-expired',
++        refreshToken: 'refresh-expired',
++        accessExpiresAt: DateTime.now().toUtc().subtract(
++          const Duration(minutes: 1),
++        ),
++        refreshExpiresAt: DateTime.now().toUtc().add(const Duration(days: 1)),
++      );
++      final credentialStore = RelayCredentialStore(backend: backend);
++      await credentialStore.save(stale);
++      controller.dispose();
++      server.gateRefresh = Completer<void>();
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      await credentialStore.save(stale);
++
++      server.gateRefresh = Completer<void>();
++      final first = controller.credentialsFor(
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++      );
++      final second = controller.credentialsFor(
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++      );
++      server.gateRefresh!.complete();
++      final results = await Future.wait(<Future<RelayCredentials?>>[
++        first,
++        second,
++      ]);
++      expect(
++        server.countPath('/api/v1/auth/token/refresh'),
++        lessThanOrEqualTo(1),
++      );
++      for (final entry in results) {
++        expect(entry, isNotNull);
++        // The token and its expiry must come from the same response.
++        expect(
++          entry!.accessExpiresAt!.isAfter(DateTime.now().toUtc()),
++          isTrue,
++          reason: 'refreshed credentials must carry a fresh expiry',
++        );
++      }
++    });
++
++    test('credentialsFor refuses a token issued for another relay', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      final token = await controller.credentialsFor(
++        accountId: 'relay-account',
++        relayUrl: relayUrl,
++      );
++      expect(token, isNull);
++      await controller.authorize();
++      expect(
++        await controller.credentialsFor(
++          accountId: 'relay-account',
++          relayUrl: otherRelayUrl,
++        ),
++        isNull,
++      );
++      expect(
++        await controller.credentialsFor(
++          accountId: 'another-account',
++          relayUrl: relayUrl,
++        ),
++        isNull,
++      );
++    });
++
++    test(
++      'signing out clears the tokens and reports the identity loss once',
++      () async {
++        var lost = 0;
++        controller = build();
++        controller.dispose();
++        controller = RemoteAccountController(
++          auth: auth,
++          grants: QfliGrantApi(transport: server.client),
++          relay: RelayAccountApi(transport: server.client),
++          store: store,
++          credentials: RelayCredentialStore(backend: backend),
++          endpoint: RelayEndpoint.tryParse(relayUrl),
++          onIdentityLost: () => lost += 1,
++        );
++        await auth.signIn('session-A', _user('A'));
++        await controller.authorize();
++        await auth.signOut();
++        expect(lost, 1);
++        expect(controller.phase, AccountPhase.signedOut);
++        expect(controller.hasAuthorization, isFalse);
++        expect(controller.devices, isEmpty);
++      },
++    );
++
++    test(
++      'binding reports the freshly read presence, not the bind response',
++      () async {
++        controller = build();
++        await auth.signIn('session-A', _user('A'));
++        await controller.authorize();
++        // The relay answers a bind with `ok` + `device_id` only; presence lives in
++        // the device list. Answering with the bind row would make every online
++        // computer look offline and skip the connect after a first binding.
++        server.bindDeviceId = 'pc-new';
++        server.devicesOverride = <Map<String, dynamic>>[
++          <String, dynamic>{
++            'device_id': 'pc-new',
++            'label': '新电脑',
++            'platform': 'darwin',
++            'role': 'owner',
++            'online': true,
++          },
++        ];
++        final bound = await controller.bindDevice(pairCode: 'ABCD1234');
++        expect(bound.deviceId, 'pc-new');
++        expect(
++          bound.isOnline,
++          isTrue,
++          reason: 'presence must come from the list',
++        );
++        expect(bound.label, '新电脑');
++        expect(controller.devices.single.isOnline, isTrue);
++      },
++    );
++
++    test('a binding the list does not show yet stays offline', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      server.bindDeviceId = 'pc-later';
++      server.devicesOverride = const <Map<String, dynamic>>[];
++      final bound = await controller.bindDevice(pairCode: 'ABCD1234');
++      expect(bound.deviceId, 'pc-later');
++      // Nothing proves it is reachable, so the page must not open a socket.
++      expect(bound.isOnline, isFalse);
++      expect(controller.devices, isEmpty);
++    });
++
++    test('switching relay invalidates an in-flight device list', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      expect(controller.devices.single.deviceId, 'pc-1');
++
++      server.gateDevices = Completer<void>();
++      final inflight = controller.refreshDevices();
++      await controller.setRelayAddress(otherRelayUrl);
++      server.gateDevices!.complete();
++      await inflight;
++      // The answer was for the previous relay, which holds no tokens here.
++      expect(controller.devices, isEmpty);
++      expect(controller.accountId, isNull);
++      expect(controller.phase, AccountPhase.needsAuthorization);
++      expect(controller.relayHost, 'relay2.example.com');
++    });
++
++    test('a 401 for an old token does not clear a newer authorization', () async {
++      controller = build();
++      await auth.signIn('session-A', _user('A'));
++      await controller.authorize();
++      final staleToken = backend.stored!.accessToken;
++
++      // The first device call hangs; the bearer it sent is the one that will be
++      // rejected. Only that call waits: the gate clears itself, so the
++      // re-authorization below can proceed with its own token.
++      server.rejectAccessToken = staleToken;
++      server.gateDevices = Completer<void>();
++      final stale = controller.refreshDevices();
++
++      await controller.authorize();
++      final freshToken = backend.stored?.accessToken;
++      expect(freshToken, isNotNull);
++      expect(freshToken, isNot(staleToken));
++
++      server.gateDevices!.complete();
++      await stale;
++      // The rejected request named the old token, so `clearIf` left the newer
++      // authorization in place and the phase stays usable.
++      expect(controller.hasAuthorization, isTrue);
++      expect(backend.stored?.accessToken, freshToken);
++      expect(controller.phase, AccountPhase.ready);
++    });
++
++    test(
++      'a rejected access token asks for re-authorization, never a secret',
++      () async {
++        controller = build();
++        await auth.signIn('session-A', _user('A'));
++        await controller.authorize();
++        server.rejectDevices = true;
++        await controller.refreshDevices();
++        expect(controller.phase, AccountPhase.needsAuthorization);
++        expect(controller.hasAuthorization, isFalse);
++      },
++    );
++  });
++
++  group('RemoteController account link', () {
++    late RemoteStore store;
++
++    setUp(() async {
++      store = await _openStore();
++    });
++
++    test(
++      'sends relayToken instead of a secret for an account pairing',
++      () async {
++        final socket = FakeSocket();
++        final pairing = Pairing(
++          relayUrl: relayUrl,
++          agentId: 'pc-1',
++          secret: '',
++          auth: PairingAuth.relayAccount,
++          accountId: 'relay-account',
++        );
++        await store.setPairing(pairing);
++        final controller = RemoteController(
++          store: store,
++          connector: (uri) async => socket,
++          relayTokens:
++              ({required String accountId, required String relayUrl}) async {
++                expect(accountId, 'relay-account');
++                expect(relayUrl, pairing.relayUrl);
++                return 'access-account';
++              },
++        );
++        addTearDown(controller.dispose);
++        controller.connect();
++        await Future<void>.delayed(const Duration(milliseconds: 20));
++        final hello = socket.sent.firstWhere((f) => f['t'] == 'hello');
++        expect(hello['relayToken'], 'access-account');
++        expect(hello.containsKey('secret'), isFalse);
++      },
++    );
++
++    test(
++      'a missing token fails authentication instead of falling back',
++      () async {
++        final socket = FakeSocket();
++        await store.setPairing(
++          Pairing(
++            relayUrl: relayUrl,
++            agentId: 'pc-1',
++            secret: '',
++            auth: PairingAuth.relayAccount,
++            accountId: 'relay-account',
++          ),
++        );
++        final controller = RemoteController(
++          store: store,
++          connector: (uri) async => socket,
++          relayTokens:
++              ({required String accountId, required String relayUrl}) async =>
++                  null,
++        );
++        addTearDown(controller.dispose);
++        controller.connect();
++        await Future<void>.delayed(const Duration(milliseconds: 20));
++        expect(controller.phase, ConnectionPhase.authFailed);
++        expect(socket.sent.where((f) => f['t'] == 'hello'), isEmpty);
++      },
++    );
++
++    test('manual pairing still sends the device secret', () async {
++      final socket = healthyAgent();
++      await store.setPairing(
++        const Pairing(
++          relayUrl: relayUrl,
++          agentId: 'pc-1',
++          secret: 'device-secret',
++        ),
++      );
++      final controller = RemoteController(
++        store: store,
++        connector: (uri) async => socket,
++      );
++      addTearDown(controller.dispose);
++      controller.connect();
++      await Future<void>.delayed(const Duration(milliseconds: 20));
++      final hello = socket.sent.firstWhere((f) => f['t'] == 'hello');
++      expect(hello['secret'], 'device-secret');
++      expect(hello.containsKey('relayToken'), isFalse);
++    });
++
++    test('a pairing keeps no credential in its serialized form', () {
++      const pairing = Pairing(
++        relayUrl: relayUrl,
++        agentId: 'pc-1',
++        secret: '',
++        auth: PairingAuth.relayAccount,
++        accountId: 'relay-account',
++      );
++      final text = jsonEncode(pairing.toJson());
++      expect(text, isNot(contains('token')));
++      expect(Pairing.fromJson(pairing.toJson()).auth, PairingAuth.relayAccount);
++      expect(Pairing.fromJson(pairing.toJson()).secret, isEmpty);
++    });
++  });
++}

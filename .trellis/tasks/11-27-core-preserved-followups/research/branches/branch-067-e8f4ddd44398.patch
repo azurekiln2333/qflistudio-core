@@ -1,0 +1,1546 @@
+diff --git a/lib/pages/home_page.dart b/lib/pages/home_page.dart
+index aa1be39f501b719729f52fd56f92f66b7b570cb9..8c36288539b89a59fd1e6ae2c9049564c5697dca 100644
+--- a/lib/pages/home_page.dart
++++ b/lib/pages/home_page.dart
+@@ -53,6 +53,7 @@ import '../services/local_audit_service.dart';
+ import '../editor/open_performance.dart';
+ import '../services/local_stats_service.dart';
+ import '../workspace/saved_workspaces_tab.dart';
++import '../shell/large_screen_controller.dart';
+ 
+ /// 应用外壳：功能、教程、示例和个人页均为独立页面。
+ class HomePage extends StatefulWidget {
+@@ -476,7 +477,12 @@ class _HomeTabState extends State<HomeTab>
+     final visible = _retainedEditor?.isVisible ?? false;
+     final returnedHome = _retainedEditorVisible && !visible;
+     _retainedEditorVisible = visible;
+-    if (mounted && returnedHome) setState(() => _gitRefreshRevision++);
++    if (!mounted) return;
++    if (returnedHome) {
++      setState(() => _gitRefreshRevision++);
++    } else if (widget.embedded && LargeScreenScope.maybeOf(context) != null) {
++      setState(() {});
++    }
+   }
+ 
+   /// Reads the saved tab order once, as soon as the store can read without a
+@@ -1324,7 +1330,7 @@ class _HomeTabState extends State<HomeTab>
+   }
+ 
+   Widget _buildCard(BuildContext context, Project project) {
+-    return ProjectCard(
++    final card = ProjectCard(
+       project: project,
+       gitRefreshRevision: _gitRefreshRevision,
+       onOpen: () => _openProject(context, project),
+@@ -1346,6 +1352,62 @@ class _HomeTabState extends State<HomeTab>
+           ? () => unawaited(_clearProjectCache(project))
+           : null,
+     );
++    if (!widget.embedded || LargeScreenScope.maybeOf(context) == null) {
++      return card;
++    }
++    final editors = _retainedEditor;
++    final opened =
++        editors?.sessionInfos.any(
++          (session) => _sameProjectPath(session.project, project),
++        ) ??
++        false;
++    final current = editors?.activeProject;
++    final active = current != null && _sameProjectPath(current, project);
++    final l = StudioLocalizations.of(context);
++    final label = active
++        ? (l.isEnglish
++              ? 'Current project'
++              : l.isTraditionalChinese
++              ? '目前專案'
++              : '当前项目')
++        : (l.isEnglish
++              ? 'Open project'
++              : l.isTraditionalChinese
++              ? '已開啟'
++              : '已打开');
++    return Semantics(
++      label: opened ? label : null,
++      selected: active,
++      child: Stack(
++        children: [
++          card,
++          if (opened)
++            Positioned(
++              left: 4,
++              top: 4,
++              child: IgnorePointer(
++                child: Tooltip(
++                  message: label,
++                  child: Icon(
++                    active ? Icons.radio_button_checked : Icons.circle_outlined,
++                    size: 12,
++                    color: Theme.of(context).colorScheme.primary,
++                    semanticLabel: label,
++                  ),
++                ),
++              ),
++            ),
++        ],
++      ),
++    );
++  }
++
++  bool _sameProjectPath(Project a, Project b) {
++    final first = p.normalize(p.absolute(a.path));
++    final second = p.normalize(p.absolute(b.path));
++    return Platform.isWindows
++        ? first.toLowerCase() == second.toLowerCase()
++        : first == second;
+   }
+ 
+   // R5/R6: capture the account generation before download/ZIP/native handoff.
+@@ -1809,14 +1871,40 @@ class _HomeTabState extends State<HomeTab>
+       ),
+     );
+     if (!context.mounted) return;
+-    await openEditorPage(
+-      context,
+-      project: project,
+-      auth: widget.auth,
+-      store: widget.store,
+-      settings: widget.settings,
+-      initialOpenPath: initialOpenFile,
+-    );
++    final largeScreen = widget.embedded
++        ? LargeScreenScope.maybeOf(context)
++        : null;
++    final editors = largeScreen == null
++        ? null
++        : RetainedEditorScope.maybeOf(context);
++    final sessions = editors?.sessionInfos
++        .where((session) => _sameProjectPath(session.project, project))
++        .toList();
++    if (editors != null &&
++        initialOpenFile == null &&
++        sessions != null &&
++        sessions.isNotEmpty) {
++      // A saved workspace can share this primary project. Resume its exact
++      // retained key instead of creating a second standalone editor.
++      final current = sessions.where(
++        (session) => session.key == editors.activeSessionKey,
++      );
++      editors.resumeSession(
++        current.isNotEmpty ? current.first.key : sessions.first.key,
++      );
++    } else {
++      await openEditorPage(
++        context,
++        project: project,
++        auth: widget.auth,
++        store: widget.store,
++        settings: widget.settings,
++        initialOpenPath: initialOpenFile,
++      );
++    }
++    // Reopening the already visible session must still leave Projects.
++    largeScreen?.closeCenterOverlay();
++    largeScreen?.showFiles();
+     if (mounted) setState(() => _gitRefreshRevision++);
+     OpenPerformance.endOpen();
+   }
+diff --git a/lib/shell/large_screen_controller.dart b/lib/shell/large_screen_controller.dart
+index 14103175f00c841546250a7aebd6932209f36c70..1c2b06f3fda256df112ac60fa9166dd2f9b9b475 100644
+--- a/lib/shell/large_screen_controller.dart
++++ b/lib/shell/large_screen_controller.dart
+@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
+ 
+ import 'workbench_chrome.dart';
+ 
++enum ExplorerPage { projects, files }
++
+ /// Presentation state only. Project, editor and Agent lifetimes remain with
+ /// their existing owners. Resizing never replaces this controller.
+ class LargeScreenController extends ChangeNotifier {
+-  WorkbenchActivity _activity = WorkbenchActivity.projects;
++  WorkbenchActivity _activity = WorkbenchActivity.explorer;
++  ExplorerPage _explorerPage = ExplorerPage.projects;
+   bool _sidebarVisible = true;
+   bool _compact = false;
+   bool _disposed = false;
+@@ -15,6 +18,7 @@ class LargeScreenController extends ChangeNotifier {
+   WidgetBuilder? _centerOverlay;
+ 
+   WorkbenchActivity get activity => _activity;
++  ExplorerPage get explorerPage => _explorerPage;
+   bool get sidebarVisible => _sidebarVisible;
+   bool get compact => _compact;
+   Object? get activeEditor => _activeEditor;
+@@ -27,6 +31,8 @@ class LargeScreenController extends ChangeNotifier {
+ 
+   void showCenterOverlay(WidgetBuilder builder) {
+     _centerOverlay = builder;
++    if (!showsWorkspace) _activity = WorkbenchActivity.agents;
++    closeCompactSidebar();
+     notifyListeners();
+   }
+ 
+@@ -37,9 +43,7 @@ class LargeScreenController extends ChangeNotifier {
+   }
+ 
+   bool get showsWorkspace => switch (_activity) {
+-    WorkbenchActivity.projects ||
+-    WorkbenchActivity.files ||
+-    WorkbenchActivity.agents => true,
++    WorkbenchActivity.explorer || WorkbenchActivity.agents => true,
+     _ => false,
+   };
+ 
+@@ -54,7 +58,33 @@ class LargeScreenController extends ChangeNotifier {
+ 
+   void showWorkspace() {
+     if (showsWorkspace) return;
+-    _activity = WorkbenchActivity.projects;
++    _activity = WorkbenchActivity.explorer;
++    notifyListeners();
++  }
++
++  void toggleSidebar() {
++    if (!showsWorkspace) {
++      _activity = WorkbenchActivity.explorer;
++      _sidebarVisible = true;
++    } else {
++      _sidebarVisible = !_sidebarVisible;
++    }
++    notifyListeners();
++  }
++
++  void showProjects() {
++    _activity = WorkbenchActivity.explorer;
++    _explorerPage = ExplorerPage.projects;
++    _sidebarVisible = true;
++    notifyListeners();
++  }
++
++  void showFiles() {
++    // An editor registers its tree on the following frame. Opening a project
++    // may request this page before the panel is registered.
++    _activity = WorkbenchActivity.explorer;
++    _explorerPage = ExplorerPage.files;
++    _sidebarVisible = true;
+     notifyListeners();
+   }
+ 
+@@ -84,7 +114,10 @@ class LargeScreenController extends ChangeNotifier {
+ 
+   void unregisterFiles(Object owner) {
+     _files.remove(owner);
+-    if (_activeEditor == owner) _activeEditor = null;
++    if (_activeEditor == owner) {
++      _activeEditor = null;
++      _explorerPage = ExplorerPage.projects;
++    }
+     _notifyAfterFrame();
+   }
+ 
+diff --git a/lib/shell/large_screen_workbench.dart b/lib/shell/large_screen_workbench.dart
+index 940f41a0e952b2d3c8ec41236c40cdeb4ecbd9bf..5be974374f9cba161246142423aceecb5db93111 100644
+--- a/lib/shell/large_screen_workbench.dart
++++ b/lib/shell/large_screen_workbench.dart
+@@ -2,6 +2,7 @@ import 'dart:async';
+ import 'dart:io';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
+ 
+ import '../content/asset_content_repository.dart';
+ import '../content/content_repository.dart';
+@@ -28,6 +29,7 @@ import '../store/settings_store.dart';
+ import '../widgets/project_dialogs.dart';
+ import 'large_screen_controller.dart';
+ import 'workbench_chrome.dart';
++import 'workbench_explorer.dart';
+ import 'workbench_theme.dart';
+ 
+ /// One route for project selection and editing on desktop/tablet. Editors stay
+@@ -59,6 +61,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+   HarnessHub? _agents;
+   DesktopFolderDrop? _drop;
+   String? _resumeSession;
++  String? _visibleSession;
+   final _visitedFiles = <Object>{};
+   late final Widget _editorHost;
+ 
+@@ -83,8 +86,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+             store: widget.store,
+             settings: widget.settings,
+           );
+-          _layout.showWorkspace();
+-          _layout.closeCompactSidebar();
++          _layout.closeCenterOverlay();
++          _layout.showFiles();
+         },
+         onError: _showError,
+       );
+@@ -101,18 +104,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+ 
+   void _editorsChanged() {
+     if (!mounted) return;
+-    if (!widget.editors.isVisible) {
++    final session = widget.editors.activeSessionKey;
++    // Popup notifications are not project opens. Keep a conversation overlay
++    // until a session actually changes or an explicit open clears it.
++    if (session == _visibleSession) return;
++    _visibleSession = session;
++    if (session == null) {
+       _layout.activateFiles(null);
+       return;
+     }
+     _resumeSession = null;
+-    _layout.showWorkspace();
+-    _layout.closeCompactSidebar();
++    _layout.closeCenterOverlay();
++    _layout.showFiles();
+   }
+ 
+-  void _select(WorkbenchActivity activity) {
++  void _select(WorkbenchActivity activity, {bool toggle = true}) {
+     final wasWorkspace = _layout.showsWorkspace;
+-    _layout.select(activity);
++    _layout.select(activity, toggle: toggle);
+     if (wasWorkspace && !_layout.showsWorkspace) {
+       _resumeSession = widget.editors.activeSessionKey;
+       widget.editors.minimize();
+@@ -125,6 +133,14 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+     }
+   }
+ 
++  void _toggleSidebar() {
++    if (!_layout.showsWorkspace) {
++      _select(WorkbenchActivity.explorer, toggle: false);
++    } else {
++      _layout.toggleSidebar();
++    }
++  }
++
+   Future<void> _addExisting() async {
+     final project = await showAddExistingDialog(context, widget.store);
+     if (!mounted || project == null) return;
+@@ -134,6 +150,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       store: widget.store,
+       settings: widget.settings,
+     );
++    _layout.closeCenterOverlay();
++    _layout.showFiles();
+   }
+ 
+   Widget _agentsPanel() {
+@@ -176,7 +194,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+   Widget _page(WorkbenchActivity activity) => _pages.putIfAbsent(
+     activity,
+     () => switch (activity) {
+-      WorkbenchActivity.projects => HomeTab(
++      WorkbenchActivity.explorer => HomeTab(
+         store: widget.store,
+         auth: widget.auth,
+         settings: widget.settings,
+@@ -213,7 +231,6 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+               ),
+       ),
+       WorkbenchActivity.tutorial => _tutorialPage(),
+-      WorkbenchActivity.files => const SizedBox.shrink(),
+     },
+   );
+ 
+@@ -254,7 +271,7 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       onPopInvokedWithResult: (didPop, _) {
+         if (didPop) return;
+         if (!_layout.showsWorkspace) {
+-          _select(WorkbenchActivity.projects);
++          _select(WorkbenchActivity.explorer, toggle: false);
+         } else {
+           unawaited(widget.editors.handleBack());
+         }
+@@ -265,88 +282,127 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       data: WorkbenchTheme.from(Theme.of(context)),
+       child: LargeScreenScope(
+         controller: _layout,
+-        child: RetainedEditorScope(
+-          controller: widget.editors,
+-          child: ScaffoldMessenger(
+-            key: _scaffold,
+-            child: Scaffold(
+-              body: SafeArea(
+-                child: LayoutBuilder(
+-                  builder: (context, constraints) {
+-                    final compact =
+-                        constraints.maxWidth < Breakpoints.sidebarPersistent;
+-                    _layout.setCompact(compact);
+-                    return ListenableBuilder(
+-                      listenable: _layout,
+-                      builder: (context, _) {
+-                        final workspace = _layout.showsWorkspace;
+-                        final sideWidth =
+-                            (constraints.maxWidth - WorkbenchActivityRail.width)
+-                                .clamp(0.0, Breakpoints.sidebarWidth);
+-                        final sideShown = workspace && _layout.sidebarVisible;
+-                        if (_layout.activity != WorkbenchActivity.files) {
+-                          _page(_layout.activity);
+-                        }
+-                        return Row(
+-                          crossAxisAlignment: CrossAxisAlignment.stretch,
+-                          children: [
+-                            ListenableBuilder(
+-                              listenable: widget.auth,
+-                              builder: (context, _) {
+-                                final user = widget.auth.user;
+-                                final avatar = user?.avatarUrl ?? '';
+-                                return WorkbenchActivityRail(
+-                                  selected: _layout.activity,
+-                                  onSelected: _select,
+-                                  accountLabel: user?.nickname,
+-                                  avatarImage: avatar.isEmpty
+-                                      ? null
+-                                      : NetworkImage(avatar),
+-                                );
+-                              },
+-                            ),
+-                            Expanded(
+-                              child: Stack(
++        child: Shortcuts(
++          shortcuts: {
++            _shortcut(LogicalKeyboardKey.keyB): const _ToggleSidebarIntent(),
++            _shortcut(LogicalKeyboardKey.keyE, shift: true):
++                const _SelectActivityIntent(WorkbenchActivity.explorer),
++            _shortcut(LogicalKeyboardKey.keyA, shift: true):
++                const _SelectActivityIntent(WorkbenchActivity.agents),
++            _shortcut(LogicalKeyboardKey.comma): const _SelectActivityIntent(
++              WorkbenchActivity.settings,
++            ),
++          },
++          child: Actions(
++            actions: {
++              _ToggleSidebarIntent: CallbackAction<_ToggleSidebarIntent>(
++                onInvoke: (_) {
++                  _toggleSidebar();
++                  return null;
++                },
++              ),
++              _SelectActivityIntent: CallbackAction<_SelectActivityIntent>(
++                onInvoke: (intent) {
++                  _select(intent.activity, toggle: false);
++                  return null;
++                },
++              ),
++            },
++            child: Focus(
++              autofocus: true,
++              child: RetainedEditorScope(
++                controller: widget.editors,
++                child: ScaffoldMessenger(
++                  key: _scaffold,
++                  child: Scaffold(
++                    body: SafeArea(
++                      child: LayoutBuilder(
++                        builder: (context, constraints) {
++                          final compact =
++                              constraints.maxWidth <
++                              Breakpoints.sidebarPersistent;
++                          _layout.setCompact(compact);
++                          return ListenableBuilder(
++                            listenable: _layout,
++                            builder: (context, _) {
++                              final workspace = _layout.showsWorkspace;
++                              final sideWidth =
++                                  (constraints.maxWidth -
++                                          WorkbenchActivityRail.width)
++                                      .clamp(0.0, Breakpoints.sidebarWidth);
++                              final sideShown =
++                                  workspace && _layout.sidebarVisible;
++                              _page(_layout.activity);
++                              return Row(
++                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                 children: [
+-                                  Positioned.fill(
+-                                    key: const ValueKey('workbench-center'),
+-                                    left: !compact && sideShown ? sideWidth : 0,
+-                                    child: _center(workspace),
++                                  ListenableBuilder(
++                                    listenable: widget.auth,
++                                    builder: (context, _) {
++                                      final user = widget.auth.user;
++                                      final avatar = user?.avatarUrl ?? '';
++                                      return WorkbenchActivityRail(
++                                        selected: _layout.activity,
++                                        onSelected: _select,
++                                        accountLabel: user?.nickname,
++                                        avatarImage: avatar.isEmpty
++                                            ? null
++                                            : NetworkImage(avatar),
++                                      );
++                                    },
+                                   ),
+-                                  if (compact && sideShown)
+-                                    Positioned.fill(
+-                                      key: const ValueKey('workbench-scrim'),
+-                                      child: GestureDetector(
+-                                        onTap: _layout.closeCompactSidebar,
+-                                        child: ColoredBox(
+-                                          color: Theme.of(context)
+-                                              .colorScheme
+-                                              .scrim
+-                                              .withValues(alpha: 0.25),
++                                  Expanded(
++                                    child: Stack(
++                                      children: [
++                                        Positioned.fill(
++                                          key: const ValueKey(
++                                            'workbench-center',
++                                          ),
++                                          left: !compact && sideShown
++                                              ? sideWidth
++                                              : 0,
++                                          child: _center(workspace),
+                                         ),
+-                                      ),
+-                                    ),
+-                                  Positioned(
+-                                    key: const ValueKey(
+-                                      'workbench-sidebar-slot',
+-                                    ),
+-                                    left: 0,
+-                                    top: 0,
+-                                    bottom: 0,
+-                                    width: sideWidth,
+-                                    child: _retain(
+-                                      visible: sideShown,
+-                                      child: _sidebar(),
++                                        if (compact && sideShown)
++                                          Positioned.fill(
++                                            key: const ValueKey(
++                                              'workbench-scrim',
++                                            ),
++                                            child: GestureDetector(
++                                              onTap:
++                                                  _layout.closeCompactSidebar,
++                                              child: ColoredBox(
++                                                color: Theme.of(context)
++                                                    .colorScheme
++                                                    .scrim
++                                                    .withValues(alpha: 0.25),
++                                              ),
++                                            ),
++                                          ),
++                                        Positioned(
++                                          key: const ValueKey(
++                                            'workbench-sidebar-slot',
++                                          ),
++                                          left: 0,
++                                          top: 0,
++                                          bottom: 0,
++                                          width: sideWidth,
++                                          child: _retain(
++                                            visible: sideShown,
++                                            child: _sidebar(),
++                                          ),
++                                        ),
++                                      ],
+                                     ),
+                                   ),
+                                 ],
+-                              ),
+-                            ),
+-                          ],
+-                        );
+-                      },
+-                    );
+-                  },
++                              );
++                            },
++                          );
++                        },
++                      ),
++                    ),
++                  ),
+                 ),
+               ),
+             ),
+@@ -356,6 +412,14 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+     ),
+   );
+ 
++  SingleActivator _shortcut(LogicalKeyboardKey key, {bool shift = false}) =>
++      SingleActivator(
++        key,
++        control: !Platform.isMacOS,
++        meta: Platform.isMacOS,
++        shift: shift,
++      );
++
+   Widget _center(bool workspace) => LayoutBuilder(
+     builder: (context, constraints) => MediaQuery(
+       data: MediaQuery.of(context).copyWith(size: constraints.biggest),
+@@ -364,17 +428,23 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+         children: [
+           _retain(
+             key: const ValueKey('workbench-editor-host'),
+-            visible: workspace,
++            visible: workspace && _layout.centerOverlay == null,
+             child: _editorHost,
+           ),
+           for (final entry in _pages.entries)
+-            if (entry.key != WorkbenchActivity.projects &&
++            if (entry.key != WorkbenchActivity.explorer &&
+                 entry.key != WorkbenchActivity.agents)
+               _retain(
+                 key: ValueKey(entry.key),
+                 visible: entry.key == _layout.activity,
+                 child: entry.value,
+               ),
++          if (_layout.centerOverlay case final overlay?)
++            _retain(
++              key: const ValueKey('workbench-center-overlay'),
++              visible: workspace,
++              child: Builder(builder: overlay),
++            ),
+         ],
+       ),
+     ),
+@@ -383,7 +453,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+   Widget _sidebar() {
+     final panels = _layout.filePanels;
+     _visitedFiles.removeWhere((owner) => !panels.containsKey(owner));
+-    if (_layout.activity == WorkbenchActivity.files) {
++    if (_layout.activity == WorkbenchActivity.explorer &&
++        _layout.explorerPage == ExplorerPage.files) {
+       if (_layout.activeEditor case final owner?) {
+         _visitedFiles.add(owner);
+       }
+@@ -394,35 +465,35 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       child: Stack(
+         fit: StackFit.expand,
+         children: [
+-          for (final activity in [
+-            WorkbenchActivity.projects,
+-            WorkbenchActivity.agents,
+-          ])
+-            if (_pages[activity] case final page?)
+-              _retain(
+-                key: ValueKey(activity),
+-                visible: _layout.activity == activity,
+-                child: page,
++          if (_pages[WorkbenchActivity.explorer] case final projects?)
++            _retain(
++              key: const ValueKey('workbench-explorer'),
++              visible: _layout.activity == WorkbenchActivity.explorer,
++              child: WorkbenchExplorer(
++                controller: _layout,
++                projectName: widget.editors.activeProject?.name,
++                projects: projects,
++                files: Stack(
++                  fit: StackFit.expand,
++                  children: [
++                    for (final entry in panels.entries.where(
++                      (entry) => _visitedFiles.contains(entry.key),
++                    ))
++                      _retain(
++                        key: ObjectKey(entry.key),
++                        visible: identical(entry.key, _layout.activeEditor),
++                        child: Builder(builder: entry.value),
++                      ),
++                  ],
++                ),
+               ),
+-          _retain(
+-            key: const ValueKey('workbench-files'),
+-            visible: _layout.activity == WorkbenchActivity.files,
+-            child: Stack(
+-              fit: StackFit.expand,
+-              children: [
+-                if (_layout.activeEditor == null)
+-                  const Center(child: Text('先打开一个项目')),
+-                for (final entry in panels.entries.where(
+-                  (entry) => _visitedFiles.contains(entry.key),
+-                ))
+-                  _retain(
+-                    key: ObjectKey(entry.key),
+-                    visible: identical(entry.key, _layout.activeEditor),
+-                    child: Builder(builder: entry.value),
+-                  ),
+-              ],
+             ),
+-          ),
++          if (_pages[WorkbenchActivity.agents] case final agents?)
++            _retain(
++              key: const ValueKey('workbench-agents'),
++              visible: _layout.activity == WorkbenchActivity.agents,
++              child: agents,
++            ),
+         ],
+       ),
+     );
+@@ -444,3 +515,12 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+         ),
+       );
+ }
++
++class _ToggleSidebarIntent extends Intent {
++  const _ToggleSidebarIntent();
++}
++
++class _SelectActivityIntent extends Intent {
++  const _SelectActivityIntent(this.activity);
++  final WorkbenchActivity activity;
++}
+diff --git a/lib/shell/workbench_chrome.dart b/lib/shell/workbench_chrome.dart
+index 3e5d16f8212d674892da31a0d5a2bc6bede08dc7..4c466740772bbc4ee2db40609f0ccadcda5e1bf3 100644
+--- a/lib/shell/workbench_chrome.dart
++++ b/lib/shell/workbench_chrome.dart
+@@ -1,19 +1,25 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../i18n/studio_localizations.dart';
++import 'shortcut_label.dart';
+ 
+-/// 大屏工作台左侧图标导航的七个去处。
++/// 大屏工作台左侧图标导航的六个去处。
+ ///
+ /// 一个枚举值对应侧栏的一种内容，切换时只替换侧栏与欢迎区，
+ /// 中间的编辑器与各列表状态由宿主保留。
+ enum WorkbenchActivity {
+-  projects,
+-  files,
++  explorer,
+   agents,
+   tools,
+   tutorial,
+   settings,
+-  profile,
++  profile;
++
++  // Source compatibility for callers migrating to the single Explorer entry.
++  // These aliases are not extra destinations in values or the rail.
++  // Use explorer and LargeScreenController.showProjects()/showFiles().
++  static const projects = explorer;
++  static const files = explorer;
+ }
+ 
+ /// VS Code 式图标导航条。
+@@ -50,10 +56,9 @@ class WorkbenchActivityRail extends StatelessWidget {
+   /// 单个图标的触控目标边长。
+   static const double touchTarget = 44;
+ 
+-  /// 顶部的三块主要去处。
++  /// 顶部的两个主要去处。
+   static const List<WorkbenchActivity> primary = <WorkbenchActivity>[
+-    WorkbenchActivity.projects,
+-    WorkbenchActivity.files,
++    WorkbenchActivity.explorer,
+     WorkbenchActivity.agents,
+   ];
+ 
+@@ -97,7 +102,7 @@ class WorkbenchActivityRail extends StatelessWidget {
+                         activity: activity,
+                         selected: activity == selected,
+                         onPressed: onSelected,
+-                        label: _labelFor(activity, l),
++                        label: _tooltipFor(activity, l),
+                         icon: _iconFor(activity),
+                       ),
+                     const SizedBox(height: 8),
+@@ -120,7 +125,7 @@ class WorkbenchActivityRail extends StatelessWidget {
+               activity: WorkbenchActivity.settings,
+               selected: selected == WorkbenchActivity.settings,
+               onPressed: onSelected,
+-              label: _labelFor(WorkbenchActivity.settings, l),
++              label: _tooltipFor(WorkbenchActivity.settings, l),
+               icon: _iconFor(WorkbenchActivity.settings),
+             ),
+             _AvatarButton(
+@@ -140,10 +145,8 @@ class WorkbenchActivityRail extends StatelessWidget {
+ 
+   static IconData _iconFor(WorkbenchActivity activity) {
+     switch (activity) {
+-      case WorkbenchActivity.projects:
++      case WorkbenchActivity.explorer:
+         return Icons.folder_copy_outlined;
+-      case WorkbenchActivity.files:
+-        return Icons.description_outlined;
+       case WorkbenchActivity.agents:
+         return Icons.smart_toy_outlined;
+       case WorkbenchActivity.tools:
+@@ -159,14 +162,16 @@ class WorkbenchActivityRail extends StatelessWidget {
+ 
+   /// 导航条的语义标签。
+   ///
+-  /// 复用 [StudioLocalizations] 已有的条目；只有「文件」与「设置」在
+-  /// 内核里还没有对应 getter，此处就地按同一套三语文案取值。
++  /// 复用 [StudioLocalizations] 的条目。
++  /// 资源管理器与设置使用同一套三语文案。
+   static String _labelFor(WorkbenchActivity activity, StudioLocalizations l) {
+     switch (activity) {
+-      case WorkbenchActivity.projects:
+-        return l.allProjects;
+-      case WorkbenchActivity.files:
+-        return _filesLabel(l);
++      case WorkbenchActivity.explorer:
++        return l.isEnglish
++            ? 'Explorer'
++            : l.isTraditionalChinese
++            ? '資源管理器'
++            : '资源管理器';
+       case WorkbenchActivity.agents:
+         return l.agentsTab;
+       case WorkbenchActivity.tools:
+@@ -180,11 +185,16 @@ class WorkbenchActivityRail extends StatelessWidget {
+     }
+   }
+ 
+-  static String _filesLabel(StudioLocalizations l) => l.isEnglish
+-      ? 'Files'
+-      : l.isTraditionalChinese
+-      ? '檔案'
+-      : '文件';
++  static String _tooltipFor(WorkbenchActivity activity, StudioLocalizations l) {
++    final keys = switch (activity) {
++      WorkbenchActivity.explorer => 'Ctrl+Shift+E',
++      WorkbenchActivity.agents => 'Ctrl+Shift+A',
++      WorkbenchActivity.settings => 'Ctrl+,',
++      _ => null,
++    };
++    final label = _labelFor(activity, l);
++    return keys == null ? label : '$label (${shortcutLabel(keys)})';
++  }
+ 
+   static String _settingsLabel(StudioLocalizations l) => l.isEnglish
+       ? 'Settings'
+diff --git a/lib/shell/workbench_explorer.dart b/lib/shell/workbench_explorer.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..28a29e3fd10b3192ea8b284d33316c447d47b94c
+--- /dev/null
++++ b/lib/shell/workbench_explorer.dart
+@@ -0,0 +1,164 @@
++import 'package:flutter/material.dart';
++
++import '../i18n/studio_localizations.dart';
++import 'large_screen_controller.dart';
++
++/// Two retained pages in the shell's single Explorer sidebar slot.
++class WorkbenchExplorer extends StatefulWidget {
++  const WorkbenchExplorer({
++    super.key,
++    required this.controller,
++    required this.projects,
++    required this.files,
++    required this.projectName,
++  });
++
++  final LargeScreenController controller;
++  final Widget projects;
++  final Widget files;
++  final String? projectName;
++
++  static const backKey = ValueKey('workbench-explorer-projects');
++  static const duration = Duration(milliseconds: 200);
++
++  @override
++  State<WorkbenchExplorer> createState() => _WorkbenchExplorerState();
++}
++
++class _WorkbenchExplorerState extends State<WorkbenchExplorer>
++    with SingleTickerProviderStateMixin {
++  late final AnimationController _motion;
++  late double _destination;
++
++  double get _target =>
++      widget.projectName != null &&
++          widget.controller.explorerPage == ExplorerPage.files
++      ? 1
++      : 0;
++
++  @override
++  void initState() {
++    super.initState();
++    _destination = _target;
++    _motion = AnimationController(
++      vsync: this,
++      duration: WorkbenchExplorer.duration,
++      value: _destination,
++    );
++    widget.controller.addListener(_changed);
++  }
++
++  @override
++  void didUpdateWidget(covariant WorkbenchExplorer oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.controller != widget.controller) {
++      oldWidget.controller.removeListener(_changed);
++      widget.controller.addListener(_changed);
++    }
++    _changed();
++  }
++
++  void _changed() {
++    final target = _target;
++    if (_destination == target) return;
++    _destination = target;
++    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
++      _motion.value = target;
++    } else {
++      _motion.animateTo(
++        target,
++        duration: WorkbenchExplorer.duration,
++        curve: Curves.easeInOut,
++      );
++    }
++  }
++
++  @override
++  void dispose() {
++    widget.controller.removeListener(_changed);
++    _motion.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final l = StudioLocalizations.of(context);
++    final projectsLabel = l.isEnglish
++        ? 'Project list'
++        : l.isTraditionalChinese
++        ? '專案列表'
++        : '项目列表';
++    return ClipRect(
++      child: LayoutBuilder(
++        builder: (context, constraints) => AnimatedBuilder(
++          animation: _motion,
++          builder: (context, _) => Stack(
++            fit: StackFit.expand,
++            children: [
++              _page(
++                key: const ValueKey('workbench-explorer-project-page'),
++                active: _target == 0,
++                offset: -_motion.value * constraints.maxWidth,
++                child: widget.projects,
++              ),
++              _page(
++                key: const ValueKey('workbench-explorer-files-page'),
++                active: _target == 1,
++                offset: (1 - _motion.value) * constraints.maxWidth,
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                    Row(
++                      children: [
++                        IconButton(
++                          key: WorkbenchExplorer.backKey,
++                          tooltip: projectsLabel,
++                          onPressed: widget.controller.showProjects,
++                          icon: const Icon(Icons.arrow_back),
++                        ),
++                        Expanded(
++                          child: Text(
++                            widget.projectName ?? '',
++                            maxLines: 1,
++                            overflow: TextOverflow.ellipsis,
++                            style: Theme.of(context).textTheme.titleSmall,
++                          ),
++                        ),
++                        const SizedBox(width: 8),
++                      ],
++                    ),
++                    const Divider(height: 1),
++                    Expanded(child: widget.files),
++                  ],
++                ),
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  Widget _page({
++    required Key key,
++    required bool active,
++    required double offset,
++    required Widget child,
++  }) => Offstage(
++    key: key,
++    offstage: !active && !_motion.isAnimating,
++    child: Transform.translate(
++      offset: Offset(offset, 0),
++      child: TickerMode(
++        enabled: active,
++        child: ExcludeFocus(
++          excluding: !active,
++          child: ExcludeSemantics(
++            excluding: !active,
++            child: IgnorePointer(ignoring: !active, child: child),
++          ),
++        ),
++      ),
++    ),
++  );
++}
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b8666b49a0bb6316b60ce34952841086b432012
+--- /dev/null
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -0,0 +1,405 @@
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:qfli_studio_core/chat/composer_draft.dart';
++import 'package:qfli_studio_core/editor/retained_editor_host.dart';
++import 'package:qfli_studio_core/harness/harness_session_target.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/pages/home_page.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/services/project_templates.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/services/task_activity_service.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/large_screen_workbench.dart';
++import 'package:qfli_studio_core/shell/workbench_chrome.dart';
++import 'package:qfli_studio_core/shell/workbench_explorer.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/workspace/saved_workspace.dart';
++import 'package:qfli_studio_core/workspace/workspace_store.dart';
++
++Future<void> _finishExplorerTransition(WidgetTester tester) async {
++  await tester.pump();
++  // The interpolation simulation finishes strictly after its duration.
++  await tester.pump(
++    WorkbenchExplorer.duration + const Duration(milliseconds: 16),
++  );
++}
++
++class _FilePanel extends StatefulWidget {
++  const _FilePanel({super.key});
++
++  @override
++  State<_FilePanel> createState() => _FilePanelState();
++}
++
++class _FilePanelState extends State<_FilePanel> {
++  @override
++  Widget build(BuildContext context) => const Text('Retained file panel');
++}
++
++class _Paths extends PathProviderPlatform {
++  _Paths(this.root);
++  final String root;
++
++  @override
++  Future<String?> getApplicationSupportPath() async => root;
++  @override
++  Future<String?> getApplicationDocumentsPath() async => root;
++  @override
++  Future<String?> getTemporaryPath() async => root;
++}
++
++/// Avoids starting real runtimes: these tests exercise the shell and Home's
++/// project-open boundary, while the existing host suite covers editor state.
++class _Editors extends RetainedEditorController {
++  final _opened =
++      <({String key, Project project, SavedWorkspace? workspace})>[];
++  String? active;
++  final resumed = <String>[];
++
++  void statusChanged() => notifyListeners();
++
++  @override
++  bool get isVisible => active != null;
++  @override
++  String? get activeSessionKey => active;
++  @override
++  Project? get activeProject =>
++      _opened.where((session) => session.key == active).firstOrNull?.project;
++
++  @override
++  List<({String key, Project project, SavedWorkspace? workspace})>
++  get sessionInfos => [
++    for (final session in _opened)
++      (
++        key: session.key,
++        project: session.project,
++        workspace: session.workspace,
++      ),
++  ];
++
++  @override
++  void open({
++    required Project project,
++    required AuthStore auth,
++    required ProjectStore store,
++    required SettingsStore settings,
++    String? initialOpenPath,
++    SavedWorkspace? workspace,
++    List<Project>? workspaceProjects,
++    WorkspaceStore? workspaceStore,
++    bool revealAgentPane = false,
++    HarnessSessionTarget? harnessSession,
++    HarnessHub? harnessHub,
++    ComposerDraft? composerPrefill,
++  }) {
++    final key = 'test:${project.id}';
++    if (!_opened.any((session) => session.key == key)) {
++      _opened.add((key: key, project: project, workspace: workspace));
++    }
++    active = key;
++    notifyListeners();
++  }
++
++  @override
++  void resumeSession(String key) {
++    resumed.add(key);
++    active = key;
++    notifyListeners();
++  }
++
++  @override
++  void minimize() {
++    active = null;
++    notifyListeners();
++  }
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  late Directory root;
++  late PathProviderPlatform previousPaths;
++  StudioProfile? previousProfile;
++
++  setUpAll(() async {
++    root = await Directory.systemTemp.createTemp('workbench_cleanup_');
++    previousPaths = PathProviderPlatform.instance;
++    PathProviderPlatform.instance = _Paths(root.path);
++    await AppPaths.storageDirectory();
++    await TaskActivityService.instance.initialize();
++  });
++  tearDownAll(() async {
++    PathProviderPlatform.instance = previousPaths;
++    if (root.existsSync()) await root.delete(recursive: true);
++  });
++  setUp(() {
++    previousProfile = StudioProfile.current;
++    StudioProfile.current = const StudioProfile(
++      id: 'java',
++      appTitle: 'Workbench test',
++      templates: [ProjectTemplate.java],
++      isOffline: true,
++    );
++  });
++  tearDown(() => StudioProfile.current = previousProfile);
++
++  Future<({LargeScreenController layout, _Editors editors})> mount(
++    WidgetTester tester,
++  ) async {
++    tester.view.physicalSize = const Size(1200, 850);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    final auth = AuthStore();
++    final settings = SettingsStore();
++    final store = ProjectStore(
++      storageFile: File(p.join(root.path, 'projects.json')),
++    );
++    final editors = _Editors();
++    await tester.runAsync(() async {
++      await store.load();
++      for (final name in ['Alpha', 'Beta']) {
++        final directory = Directory(p.join(root.path, name));
++        await directory.create(recursive: true);
++        await store.addExisting(directory.path);
++      }
++    });
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 50)),
++      );
++      editors.dispose();
++      auth.dispose();
++      settings.dispose();
++      store.dispose();
++    });
++    await tester.pumpWidget(
++      MaterialApp(
++        home: LargeScreenWorkbench(
++          editors: editors,
++          store: store,
++          auth: auth,
++          settings: settings,
++        ),
++      ),
++    );
++    await tester.pump(const Duration(milliseconds: 300));
++    return (
++      layout: LargeScreenScope.maybeOf(tester.element(find.byType(HomeTab)))!,
++      editors: editors,
++    );
++  }
++
++  Future<void> project(WidgetTester tester, String name) async {
++    await tester.tap(find.text(name).first);
++    for (var i = 0; i < 12; i++) {
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 10)),
++      );
++      await tester.pump(const Duration(milliseconds: 25));
++    }
++  }
++
++  testWidgets('project clicks switch to Files and resume the same live key', (
++    tester,
++  ) async {
++    final fixture = await mount(tester);
++    final layout = fixture.layout;
++    final editors = fixture.editors;
++    layout.showCenterOverlay((_) => const Text('Conversation'));
++    await tester.pump();
++    expect(find.text('Conversation'), findsOneWidget);
++    await project(tester, 'Alpha');
++    final alpha = editors.activeSessionKey;
++    expect(layout.centerOverlay, isNull);
++    expect(layout.explorerPage, ExplorerPage.files);
++    expect(editors.sessionInfos, hasLength(1));
++    await tester.tap(find.byKey(WorkbenchExplorer.backKey));
++    await tester.pump();
++    await _finishExplorerTransition(tester);
++    expect(editors.activeSessionKey, alpha);
++    expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
++    await project(tester, 'Alpha');
++    expect(editors.resumed.last, alpha);
++    expect(editors.sessionInfos, hasLength(1));
++    expect(layout.explorerPage, ExplorerPage.files);
++    layout.showCenterOverlay((_) => const Text('Another conversation'));
++    await tester.pump();
++    editors.statusChanged(); // A popup/status notification is not an open.
++    await tester.pump();
++    expect(find.text('Another conversation'), findsOneWidget);
++    layout.showProjects();
++    await tester.pump();
++    await _finishExplorerTransition(tester);
++    await project(tester, 'Alpha');
++    expect(layout.centerOverlay, isNull);
++    expect(editors.activeSessionKey, alpha);
++    layout.showProjects();
++    await tester.pump();
++    await _finishExplorerTransition(tester);
++    await project(tester, 'Beta');
++    expect(editors.activeProject!.name, 'Beta');
++    expect(editors.sessionInfos, hasLength(2));
++    expect(layout.explorerPage, ExplorerPage.files);
++    layout.showProjects();
++    await tester.pump();
++    await _finishExplorerTransition(tester);
++    expect(find.byIcon(Icons.circle_outlined), findsOneWidget);
++    await project(tester, 'Alpha');
++    expect(editors.activeSessionKey, alpha);
++    expect(editors.sessionInfos, hasLength(2));
++    // A promoted workspace must resume its exact key, not create standalone.
++    final current = editors._opened.first;
++    final now = DateTime(2026, 11, 25);
++    editors._opened[0] = (
++      key: 'workspace:kept',
++      project: current.project,
++      workspace: SavedWorkspace(
++        id: 'kept',
++        name: 'Kept workspace',
++        createdAt: now,
++        updatedAt: now,
++        members: const [],
++      ),
++    );
++    editors.active = 'workspace:kept';
++    editors.statusChanged();
++    layout.showProjects();
++    await tester.pump();
++    await _finishExplorerTransition(tester);
++    await project(tester, 'Alpha');
++    expect(editors.activeSessionKey, 'workspace:kept');
++    expect(editors.resumed.last, 'workspace:kept');
++    expect(editors.sessionInfos, hasLength(2));
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets(
++    'file panel survives Explorer pages, activities and compact resize',
++    (tester) async {
++      final fixture = await mount(tester);
++      await project(tester, 'Alpha');
++      final owner = Object();
++      fixture.layout.registerFiles(
++        owner,
++        (_) => const _FilePanel(key: ValueKey('retained-test-files')),
++      );
++      fixture.layout.activateFiles(owner);
++      await tester.pump();
++      await tester.pump();
++      final panel = tester.state(find.byType(_FilePanel));
++      fixture.layout.showProjects();
++      await tester.pump();
++      await _finishExplorerTransition(tester);
++      expect(find.byType(_FilePanel), findsNothing);
++      expect(panel.mounted, isTrue);
++      expect(
++        tester.state(find.byType(_FilePanel, skipOffstage: false)),
++        same(panel),
++      );
++      fixture.layout.showFiles();
++      await tester.pump();
++      await _finishExplorerTransition(tester);
++      expect(tester.state(find.byType(_FilePanel)), same(panel));
++      await tester.tap(
++        find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.agents)),
++      );
++      await tester.pump();
++      expect(find.byType(_FilePanel), findsNothing);
++      await tester.tap(
++        find.byKey(
++          WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
++        ),
++      );
++      await tester.pump();
++      expect(tester.state(find.byType(_FilePanel)), same(panel));
++      tester.view.physicalSize = const Size(500, 800);
++      await tester.pump();
++      expect(tester.state(find.byType(_FilePanel)), same(panel));
++      await tester.tap(
++        find.byKey(
++          WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
++        ),
++      );
++      await tester.pump();
++      expect(find.byType(_FilePanel), findsNothing);
++      tester.view.physicalSize = const Size(1200, 850);
++      await tester.pump();
++      await tester.tap(
++        find.byKey(
++          WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
++        ),
++      );
++      await tester.pump();
++      expect(tester.state(find.byType(_FilePanel)), same(panel));
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets('overlay keeps editor host mounted and sidebar usable', (
++    tester,
++  ) async {
++    final fixture = await mount(tester);
++    final host = tester.state(find.byType(RetainedEditorHost));
++    fixture.layout.showCenterOverlay((_) => const Text('Conversation'));
++    await tester.pump();
++    expect(find.text('Conversation'), findsOneWidget);
++    expect(find.byType(RetainedEditorHost), findsNothing);
++    expect(host.mounted, isTrue);
++    final home = tester.state(find.byType(HomeTab));
++    expect(home.mounted, isTrue);
++    fixture.layout.closeCenterOverlay();
++    await tester.pump();
++    expect(tester.state(find.byType(RetainedEditorHost)), same(host));
++    expect(find.text('Conversation'), findsNothing);
++    expect(tester.state(find.byType(HomeTab)), same(home));
++  });
++
++  testWidgets(
++    'shell shortcuts select rather than toggle and use platform modifier',
++    (tester) async {
++      final fixture = await mount(tester);
++      Future<void> key(LogicalKeyboardKey key, {bool shift = false}) async {
++        final modifier = Platform.isMacOS
++            ? LogicalKeyboardKey.metaLeft
++            : LogicalKeyboardKey.controlLeft;
++        await tester.sendKeyDownEvent(modifier);
++        if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
++        await tester.sendKeyEvent(key);
++        if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
++        await tester.sendKeyUpEvent(modifier);
++        await tester.pump();
++        await tester.pump(const Duration(milliseconds: 250));
++      }
++
++      await key(LogicalKeyboardKey.keyB);
++      expect(fixture.layout.sidebarVisible, isFalse);
++      await key(LogicalKeyboardKey.keyE, shift: true);
++      expect(fixture.layout.activity, WorkbenchActivity.explorer);
++      expect(fixture.layout.sidebarVisible, isTrue);
++      await key(LogicalKeyboardKey.keyE, shift: true);
++      expect(fixture.layout.sidebarVisible, isTrue);
++      await key(LogicalKeyboardKey.keyA, shift: true);
++      expect(fixture.layout.activity, WorkbenchActivity.agents);
++      await key(LogicalKeyboardKey.comma);
++      expect(fixture.layout.activity, WorkbenchActivity.settings);
++      expect(find.byType(WorkbenchActivityRail), findsOneWidget);
++      expect(WorkbenchActivity.values, hasLength(6));
++      expect(WorkbenchActivityRail.primary, [
++        WorkbenchActivity.explorer,
++        WorkbenchActivity.agents,
++      ]);
++      expect(find.byTooltip(RegExp(r'Shift\+E')), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    },
++  );
++}
+diff --git a/test/workbench_explorer_test.dart b/test/workbench_explorer_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..33776317ab9f64307830636aa261f46f6e5fac60
+--- /dev/null
++++ b/test/workbench_explorer_test.dart
+@@ -0,0 +1,147 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/workbench_chrome.dart';
++import 'package:qfli_studio_core/shell/workbench_explorer.dart';
++
++class _Probe extends StatefulWidget {
++  const _Probe(this.label);
++  final String label;
++
++  @override
++  State<_Probe> createState() => _ProbeState();
++}
++
++class _ProbeState extends State<_Probe> {
++  int count = 0;
++
++  @override
++  Widget build(BuildContext context) => TextButton(
++    onPressed: () => setState(() => count++),
++    child: Text('${widget.label}: $count'),
++  );
++}
++
++void main() {
++  testWidgets(
++    'Explorer slides, keeps both page states and returns without closing',
++    (tester) async {
++      final controller = LargeScreenController();
++      addTearDown(controller.dispose);
++      await tester.pumpWidget(
++        MaterialApp(
++          home: Scaffold(
++            body: SizedBox(
++              width: 300,
++              child: WorkbenchExplorer(
++                controller: controller,
++                projectName: 'Alpha',
++                projects: const _Probe('Projects'),
++                files: const _Probe('Files'),
++              ),
++            ),
++          ),
++        ),
++      );
++      await tester.tap(find.text('Projects: 0'));
++      final projects = tester.state(find.byType(_Probe));
++      controller.showFiles();
++      await tester.pump();
++      await tester.pump(const Duration(milliseconds: 100));
++      final filesPage = find.byKey(
++        const ValueKey('workbench-explorer-files-page'),
++      );
++      final transform = tester.widget<Transform>(
++        find.descendant(of: filesPage, matching: find.byType(Transform)).first,
++      );
++      expect(transform.transform.storage[12], greaterThan(0));
++      expect(transform.transform.storage[12], lessThan(300));
++      await tester.pump(WorkbenchExplorer.duration);
++      expect(find.text('Projects: 1'), findsNothing);
++      expect(find.text('Alpha'), findsOneWidget);
++      await tester.tap(find.text('Files: 0'));
++      final files = tester.state(find.byType(_Probe));
++      final owner = Object();
++      controller.activateFiles(owner);
++      await tester.pump();
++      await tester.tap(find.byKey(WorkbenchExplorer.backKey));
++      await tester.pump();
++      await tester.pump(WorkbenchExplorer.duration);
++      expect(controller.activeEditor, same(owner));
++      expect(controller.activity, WorkbenchActivity.explorer);
++      expect(controller.explorerPage, ExplorerPage.projects);
++      expect(find.text('Projects: 1'), findsOneWidget);
++      expect(tester.state(find.byType(_Probe)), same(projects));
++      expect(find.text('Files: 1'), findsNothing);
++      controller.showFiles();
++      await tester.pump();
++      await tester.pump(WorkbenchExplorer.duration);
++      expect(tester.state(find.byType(_Probe)), same(files));
++      expect(find.text('Files: 1'), findsOneWidget);
++      await tester.pumpWidget(const SizedBox.shrink());
++    },
++  );
++
++  testWidgets('Explorer cannot show files when no project is open', (
++    tester,
++  ) async {
++    final controller = LargeScreenController();
++    addTearDown(controller.dispose);
++    controller.showFiles();
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: WorkbenchExplorer(
++            controller: controller,
++            projectName: null,
++            projects: const Text('Projects'),
++            files: const Text('Files'),
++          ),
++        ),
++      ),
++    );
++    expect(find.text('Projects'), findsOneWidget);
++    expect(find.text('Files'), findsNothing);
++    expect(find.byKey(WorkbenchExplorer.backKey), findsNothing);
++    expect(find.text('先打开一个项目'), findsNothing);
++    await tester.pumpWidget(const SizedBox.shrink());
++  });
++
++  testWidgets('hidden Explorer pages exclude focus, semantics and input', (
++    tester,
++  ) async {
++    final controller = LargeScreenController();
++    addTearDown(controller.dispose);
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: WorkbenchExplorer(
++            controller: controller,
++            projectName: 'Alpha',
++            projects: const Text('Projects'),
++            files: const TextField(),
++          ),
++        ),
++      ),
++    );
++    final page = find.byKey(
++      const ValueKey('workbench-explorer-files-page'),
++      skipOffstage: false,
++    );
++    T descendant<T extends Widget>() => tester.widget<T>(
++      find
++          .descendant(
++            of: page,
++            matching: find.byType(T, skipOffstage: false),
++            skipOffstage: false,
++          )
++          .first,
++    );
++    expect(tester.widget<Offstage>(page).offstage, isTrue);
++    expect(descendant<ExcludeFocus>().excluding, isTrue);
++    expect(descendant<ExcludeSemantics>().excluding, isTrue);
++    expect(descendant<IgnorePointer>().ignoring, isTrue);
++    expect(descendant<TickerMode>().enabled, isFalse);
++    await tester.pumpWidget(const SizedBox.shrink());
++  });
++}

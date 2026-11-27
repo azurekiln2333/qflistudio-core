@@ -1,0 +1,149 @@
+diff --git a/lib/shell/workbench_explorer.dart b/lib/shell/workbench_explorer.dart
+index 7bee43f20229cb8ea4793ec6bc947244d31d71a5..27ec650ebb61beea3b7551bcf8e91e6e74c5898b 100644
+--- a/lib/shell/workbench_explorer.dart
++++ b/lib/shell/workbench_explorer.dart
+@@ -85,12 +85,6 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final l = StudioLocalizations.of(context);
+-    final projectsLabel = l.isEnglish
+-        ? 'Project list'
+-        : l.isTraditionalChinese
+-        ? '專案列表'
+-        : '项目列表';
+     return ClipRect(
+       child: LayoutBuilder(
+         builder: (context, constraints) => AnimatedBuilder(
+@@ -108,35 +102,7 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+                 key: const ValueKey('workbench-explorer-files-page'),
+                 active: _target == 1,
+                 offset: (1 - _motion.value) * constraints.maxWidth,
+-                child: Column(
+-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+-                  children: [
+-                    SizedBox(
+-                      height: LargeScreenScope.isDesktop(context) ? 40 : 48,
+-                      child: Row(
+-                        children: [
+-                          IconButton(
+-                            key: WorkbenchExplorer.backKey,
+-                            tooltip: projectsLabel,
+-                            onPressed: widget.controller.showProjects,
+-                            icon: const Icon(Icons.arrow_back),
+-                          ),
+-                          Expanded(
+-                            child: Text(
+-                              widget.projectName ?? '',
+-                              maxLines: 1,
+-                              overflow: TextOverflow.ellipsis,
+-                              style: Theme.of(context).textTheme.titleSmall,
+-                            ),
+-                          ),
+-                          const SizedBox(width: 8),
+-                        ],
+-                      ),
+-                    ),
+-                    const Divider(height: 1),
+-                    Expanded(child: widget.files),
+-                  ],
+-                ),
++                child: widget.files,
+               ),
+             ],
+           ),
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index 7cccc5b4af192cbdc33e29b1ba7cb4970c46a39c..47f11f061e55e976fe2438fae100f9162f3fabf9 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -47,7 +47,18 @@ class _FilePanel extends StatefulWidget {
+ 
+ class _FilePanelState extends State<_FilePanel> {
+   @override
+-  Widget build(BuildContext context) => const Text('Retained file panel');
++  Widget build(BuildContext context) => Column(
++    children: [
++      // R5/R14: registered files panels now own their single header.
++      IconButton(
++        key: WorkbenchExplorer.backKey,
++        tooltip: '项目列表',
++        onPressed: LargeScreenScope.maybeOf(context)!.showProjects,
++        icon: const Icon(Icons.arrow_back),
++      ),
++      const Text('Retained file panel'),
++    ],
++  );
+ }
+ 
+ class _Paths extends PathProviderPlatform {
+@@ -306,6 +317,11 @@ void main() {
+     expect(layout.centerOverlay, isNull);
+     expect(layout.explorerPage, ExplorerPage.files);
+     expect(editors.sessionInfos, hasLength(1));
++    // This fake controller starts no editor. Supply its registered files
++    // header instead of relying on the duplicate shell header removed by R5.
++    layout.registerFiles(editors, (_) => const _FilePanel());
++    layout.activateFiles(editors);
++    await tester.pump();
+     await tester.tap(find.byKey(WorkbenchExplorer.backKey));
+     await tester.pump();
+     await _finishExplorerTransition(tester);
+diff --git a/test/workbench_explorer_test.dart b/test/workbench_explorer_test.dart
+index 5ae46b6668d344eabac1d212a040e30c1c8d895d..82f7a8809002a6272dfadde000c7b3d4e38ad19b 100644
+--- a/test/workbench_explorer_test.dart
++++ b/test/workbench_explorer_test.dart
+@@ -5,8 +5,9 @@ import 'package:qfli_studio_core/shell/workbench_chrome.dart';
+ import 'package:qfli_studio_core/shell/workbench_explorer.dart';
+ 
+ class _Probe extends StatefulWidget {
+-  const _Probe(this.label);
++  const _Probe(this.label, {this.onBack});
+   final String label;
++  final VoidCallback? onBack;
+ 
+   @override
+   State<_Probe> createState() => _ProbeState();
+@@ -16,9 +17,20 @@ class _ProbeState extends State<_Probe> {
+   int count = 0;
+ 
+   @override
+-  Widget build(BuildContext context) => TextButton(
+-    onPressed: () => setState(() => count++),
+-    child: Text('${widget.label}: $count'),
++  Widget build(BuildContext context) => Column(
++    children: [
++      // R5/R14: registered files content owns its header, including Back.
++      if (widget.onBack != null)
++        IconButton(
++          key: WorkbenchExplorer.backKey,
++          onPressed: widget.onBack,
++          icon: const Icon(Icons.arrow_back),
++        ),
++      TextButton(
++        onPressed: () => setState(() => count++),
++        child: Text('${widget.label}: $count'),
++      ),
++    ],
+   );
+ }
+ 
+@@ -45,7 +57,7 @@ void main() {
+                 controller: controller,
+                 projectName: 'Alpha',
+                 projects: const _Probe('Projects'),
+-                files: const _Probe('Files'),
++                files: _Probe('Files', onBack: controller.showProjects),
+               ),
+             ),
+           ),
+@@ -75,7 +87,9 @@ void main() {
+         ),
+         same(projects),
+       );
+-      expect(find.text('Alpha'), findsOneWidget);
++      // R5: the Explorer transition no longer repeats a project title above
++      // the FileExplorer header.
++      expect(find.text('Alpha'), findsNothing);
+       await tester.tap(find.text('Files: 0'));
+       final files = tester.state(find.byType(_Probe));
+       final owner = Object();

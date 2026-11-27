@@ -1,0 +1,1198 @@
+diff --git a/lib/harness/studio/studio_agent_host.dart b/lib/harness/studio/studio_agent_host.dart
+index 3d448fd3f1362448bf8f4c2244a5bbe85a27a542..85ac8f97e9050b39c8e82886e3ff1ac5a0775def 100644
+--- a/lib/harness/studio/studio_agent_host.dart
++++ b/lib/harness/studio/studio_agent_host.dart
+@@ -25,20 +25,28 @@ const int kStudioTranscriptBacklog = 200;
+ /// 内置 Agent 主机。
+ ///
+ /// 只有 [watchSessions]、[open] 与 [launch] 会读会话存储；[dispose] 只释放
+-/// 本主机的监听与流，不会停止任何会话。
++/// 本主机的监听与流，不会停止任何会话。一个主机只属于一个项目，一个 Hub
++/// 一个实例——[dispose] 之后不可复用。
+ class StudioAgentHost implements HarnessHost {
+   StudioAgentHost({
+     required AgentRuntime runtime,
+     required this.projectId,
+     required this.projectRoot,
+     this.label = kStudioHostLabel,
+-  }) : _runtime = runtime {
++    bool Function()? signedIn,
++  }) : _runtime = runtime,
++       _signedIn = signedIn ?? _assumeSignedIn {
+     _sessions.addListener(_onChanged);
+     _runtime.liveChanges.addListener(_onChanged);
+   }
+ 
++  static bool _assumeSignedIn() => true;
++
+   final AgentRuntime _runtime;
+ 
++  /// 登录态探针；未接线时假定已登录（启动前 hub 不拦用户）。
++  final bool Function() _signedIn;
++
+   /// 会话所属项目。
+   final String projectId;
+ 
+@@ -113,17 +121,24 @@ class StudioAgentHost implements HarnessHost {
+   };
+ 
+   @override
+-  Future<List<HarnessProviderInfo>> providers() async => const [
++  Future<List<HarnessProviderInfo>> providers() async => [
+     HarnessProviderInfo(
+       id: kStudioProviderId,
+       label: kStudioHostLabel,
+-      available: true,
++      // 未登录时启动必然抛 [AgentLoginRequired]，不要报“可用”。
++      available: _signedIn(),
+     ),
+   ];
+ 
+   @override
+   Future<HarnessSessionHandle> open(String sessionId) async {
+     if (_disposed) throw StateError('StudioAgentHost has been disposed');
++    final meta = _sessions.metaOf(sessionId);
++    // 会话必须属于本项目：否则 `AgentRuntime.open` 会拿本项目的根目录去装
++    // 别的项目的会话，读写边界跟着错。
++    if (meta == null || meta.projectId != projectId) {
++      throw ArgumentError.value(sessionId, 'sessionId', '会话不属于本项目');
++    }
+     final facade = await _runtime.open(projectId, sessionId);
+     final handle = StudioSessionHandle(
+       host: this,
+@@ -146,8 +161,21 @@ class StudioAgentHost implements HarnessHost {
+         '内置主机只启动内置 Agent',
+       );
+     }
++    if (request.args.isNotEmpty) {
++      throw UnsupportedError('内置 Agent 不接受启动参数');
++    }
++    final cwd = request.cwd.trim();
++    if (cwd.isNotEmpty && !_sameDirectory(cwd, projectRoot)) {
++      throw UnsupportedError('内置 Agent 只在项目根目录启动：$projectRoot');
++    }
+     final meta = await _sessions.create(projectId, title: request.title);
+-    return open(meta.id);
++    try {
++      return await open(meta.id);
++    } on Object {
++      // 打开失败（例如未登录）时不留空会话记录。
++      await _sessions.delete(meta.id);
++      rethrow;
++    }
+   }
+ 
+   @override
+@@ -184,15 +212,7 @@ class StudioAgentHost implements HarnessHost {
+ 
+   /// 运行时活动状态到契约状态。
+   HarnessSessionStatus _statusOf(String sessionId) =>
+-      switch (_runtime.statusOf(sessionId)) {
+-        AgentLiveStatus.running ||
+-        AgentLiveStatus.queued => HarnessSessionStatus.working,
+-        AgentLiveStatus.awaitingApproval => HarnessSessionStatus.blocked,
+-        AgentLiveStatus.finishedUnread => HarnessSessionStatus.done,
+-        // 失败未读既不是完成也不是在跑，按未知上报，不粉饰。
+-        AgentLiveStatus.failed => HarnessSessionStatus.unknown,
+-        AgentLiveStatus.idle => HarnessSessionStatus.idle,
+-      };
++      mapStudioLiveStatus(_runtime.statusOf(sessionId));
+ 
+   void _onChanged() {
+     if (_disposed) return;
+@@ -203,8 +223,34 @@ class StudioAgentHost implements HarnessHost {
+   }
+ 
+   void _release(StudioSessionHandle handle) => _handles.remove(handle);
++
++  static bool _sameDirectory(String left, String right) {
++    String normalize(String value) {
++      var path = value.replaceAll('\\', '/');
++      while (path.length > 1 && path.endsWith('/')) {
++        path = path.substring(0, path.length - 1);
++      }
++      return path.toLowerCase();
++    }
++
++    return normalize(left) == normalize(right);
++  }
+ }
+ 
++/// 运行时活动状态到契约状态。
++///
++/// 列表与句柄共用这一份：两处各写一遍时，加一个状态很容易只改一处。
++/// 失败既不是完成也不是在跑，按未知上报，不粉饰。
++HarnessSessionStatus mapStudioLiveStatus(AgentLiveStatus status) =>
++    switch (status) {
++      AgentLiveStatus.running ||
++      AgentLiveStatus.queued => HarnessSessionStatus.working,
++      AgentLiveStatus.awaitingApproval => HarnessSessionStatus.blocked,
++      AgentLiveStatus.finishedUnread => HarnessSessionStatus.done,
++      AgentLiveStatus.failed => HarnessSessionStatus.unknown,
++      AgentLiveStatus.idle => HarnessSessionStatus.idle,
++    };
++
+ /// 一个内置 Agent 会话的视图。
+ ///
+ /// [detach] 只释放本视图，会话继续运行；[stop] 结束本轮运行。
+@@ -219,12 +265,18 @@ class StudioSessionHandle implements HarnessSessionHandle {
+        _runtime = runtime,
+        _facade = facade,
+        _infoOf = info,
+-       _status = ValueNotifier(_mapStatus(runtime.statusOf(facade.sessionId))) {
++       _status = ValueNotifier(
++         mapStudioLiveStatus(runtime.statusOf(facade.sessionId)),
++       ) {
+     _facade.addListener(_onFacadeChanged);
++    // 排队进出与“完成/失败未读”只在运行时侧变化，门面不会通知。
++    _runtime.liveChanges.addListener(_onLiveChanged);
+     for (final message in _facade.messages) {
+       _remember(_eventOf(message));
+     }
+     _approvalKey = _pendingApprovalKey();
++    // 打开时已经失败的会话也要在转录里留下原因。
++    _publishFailure();
+   }
+ 
+   final StudioAgentHost _host;
+@@ -243,6 +295,9 @@ class StudioSessionHandle implements HarnessSessionHandle {
+   /// 已经发布过的确认请求键，避免同一次确认重复出现。
+   String? _approvalKey;
+ 
++  /// 已经作为转录事件发布过的错误文本，避免同一错误重复刷屏。
++  String? _lastError;
++
+   bool _detached = false;
+ 
+   /// 当前转录快照；新监听者先收到历史，再收后续消息。
+@@ -275,14 +330,32 @@ class StudioSessionHandle implements HarnessSessionHandle {
+   Future<void> sendPrompt(String text) async {
+     final prompt = text.trim();
+     if (prompt.isEmpty) return;
++    // 门面在 running/cancelling/awaitingApproval 时直接 return，不排队也不
++    // 报错；这里必须显式失败，否则用户输入被静默丢掉。
++    if (_facade.state != AgentRunState.idle &&
++        _facade.state != AgentRunState.failed) {
++      throw StateError('会话正在运行，请先停止或等待本轮结束');
++    }
+     await _facade.send(prompt, permission: _facade.permission);
+   }
+ 
+   @override
+   Future<void> reply(HarnessReply reply) async {
++    final key = _approvalKey;
++    // 只处理当前这一次确认；旧卡片重放时 requestId 对不上，直接忽略。
++    if (key == null || reply.requestId != key) return;
+     if (_facade.pendingApproval == null) return;
+     final choice = reply.choice.trim().toLowerCase();
+-    final allow = choice == 'allow' || choice == 'yes' || choice == 'approve';
++    final bool allow;
++    switch (choice) {
++      case 'allow' || 'yes' || 'approve' || 'always':
++        allow = true;
++      case 'deny' || 'no' || 'reject':
++        allow = false;
++      default:
++        // 未知选项不当作拒绝：错写法不应该直接放行或直接拒绝一次写盘。
++        throw ArgumentError.value(reply.choice, 'choice', '未知的确认选项');
++    }
+     _facade.resolveApproval(allow);
+     _approvalKey = null;
+   }
+@@ -292,6 +365,7 @@ class StudioSessionHandle implements HarnessSessionHandle {
+     if (_detached) return;
+     _detached = true;
+     _facade.removeListener(_onFacadeChanged);
++    _runtime.liveChanges.removeListener(_onLiveChanged);
+     for (final controller in _listeners.toList()) {
+       controller.close();
+     }
+@@ -299,19 +373,33 @@ class StudioSessionHandle implements HarnessSessionHandle {
+     _host._release(this);
+   }
+ 
++  /// 停止本轮运行。
++  ///
++  /// 契约的措辞是“结束会话”，但内置 Agent 的会话是持久对话：这里只取消
++  /// 当前轮次，会话记录与历史保留。界面文案必须写“停止本轮”，不能写
++  /// “结束会话”。删除会话是另一件事。
+   @override
+   Future<void> stop() async {
+     await _facade.cancel();
+   }
+ 
++  /// 只有运行时侧状态变化，例如排队进出与完成/失败未读。
++  void _onLiveChanged() {
++    if (_detached) return;
++    _status.value = mapStudioLiveStatus(_runtime.statusOf(_facade.sessionId));
++    _publishFailure();
++  }
++
+   /// 快照的是当前转录，包括打开前已有的消息；之后的消息实时追加。
+   void _onFacadeChanged() {
+     if (_detached) return;
+-    _status.value = _mapStatus(_runtime.statusOf(_facade.sessionId));
++    _status.value = mapStudioLiveStatus(_runtime.statusOf(_facade.sessionId));
++    // 先比较文本再构事件：流式输出时每条增量都会走到这里，逐条 new 一遍
++    // TranscriptEvent 是不必要的分配。消息是追加式的，未变的最多几百个 map
++    // 查询，比重构整份转录便宜。
+     for (final message in _facade.messages) {
+-      final event = _eventOf(message);
+-      if (_lastText[event.id] == event.text) continue;
+-      _publish(event);
++      if (_lastText[message.id] == message.text) continue;
++      _publish(_eventOf(message));
+     }
+     final key = _pendingApprovalKey();
+     if (key != null && key != _approvalKey) {
+@@ -329,6 +417,22 @@ class StudioSessionHandle implements HarnessSessionHandle {
+     } else if (key == null) {
+       _approvalKey = null;
+     }
++    _publishFailure();
++  }
++
++  /// 失败时补一条系统事件；同一错误只发一次。
++  void _publishFailure() {
++    if (_runtime.statusOf(_facade.sessionId) != AgentLiveStatus.failed) return;
++    final error = _facade.lastError?.trim();
++    if (error == null || error.isEmpty || error == _lastError) return;
++    _lastError = error;
++    _publish(
++      TranscriptEvent(
++        id: 'error:${_lastError.hashCode}',
++        role: TranscriptRole.system,
++        text: error,
++      ),
++    );
+   }
+ 
+   String? _pendingApprovalKey() {
+@@ -369,14 +473,4 @@ class StudioSessionHandle implements HarnessSessionHandle {
+     },
+     text: message.text,
+   );
+-
+-  static HarnessSessionStatus _mapStatus(AgentLiveStatus status) =>
+-      switch (status) {
+-        AgentLiveStatus.running ||
+-        AgentLiveStatus.queued => HarnessSessionStatus.working,
+-        AgentLiveStatus.awaitingApproval => HarnessSessionStatus.blocked,
+-        AgentLiveStatus.finishedUnread => HarnessSessionStatus.done,
+-        AgentLiveStatus.failed => HarnessSessionStatus.unknown,
+-        AgentLiveStatus.idle => HarnessSessionStatus.idle,
+-      };
+ }
+diff --git a/lib/trellis/trellis_context.dart b/lib/trellis/trellis_context.dart
+index 31e5b21c0f0cdaa0fbf7611a604ac4895b6939ce..6b6c6f59de61d92b04d56bfa12f5bc2305d1f52d 100644
+--- a/lib/trellis/trellis_context.dart
++++ b/lib/trellis/trellis_context.dart
+@@ -104,24 +104,38 @@ String clampTrellisContext(
+ 
+ /// 载入一次会话上下文。
+ ///
+-/// [preferPython] 只应在桌面版打开；移动端与网页直接走 Dart 解析。
++/// 默认只做 Dart 解析，不执行任何项目自带代码。官方脚本
++/// `get_context.py` 属于“打开仓库就执行仓库里的代码”，因此需要两道开关同时
++/// 打开：[preferPython]（桌面版才接）与 [allowProjectScript]（用户在设置里
++/// 显式允许运行项目脚本）。少一道就走 Dart 解析。
+ class TrellisContextLoader {
+   const TrellisContextLoader({
+     this.preferPython = false,
++    this.allowProjectScript = false,
+     this.pythonExecutable = 'python',
+     this.timeout = const Duration(seconds: 8),
+   });
+ 
++  /// 桌面版愿意尝试脚本；单独为 true 不会执行脚本。
+   final bool preferPython;
++
++  /// 用户显式允许运行项目自带的 `.trellis/scripts/get_context.py`。
++  ///
++  /// 只有 [preferPython] 也为 true 时才生效。移动端与网页恒为 false。
++  final bool allowProjectScript;
++
+   final String pythonExecutable;
+ 
+   /// 调用脚本的总时限；超时后杀掉进程并回退。
+   final Duration timeout;
+ 
++  /// 是否真的会执行项目脚本。
++  bool get runsProjectScript => preferPython && allowProjectScript;
++
+   /// 取上下文；项目不是 Trellis 时返回空串。
+   Future<String> load(String projectRoot) async {
+     if (!TrellisProject.hasWorkflow(projectRoot)) return '';
+-    if (preferPython) {
++    if (runsProjectScript) {
+       final text = await _runScript(projectRoot);
+       if (text != null && text.trim().isNotEmpty) {
+         return compactScriptContext(text);
+@@ -139,7 +153,12 @@ class TrellisContextLoader {
+       '${Platform.pathSeparator}scripts'
+       '${Platform.pathSeparator}get_context.py',
+     );
+-    if (!script.existsSync()) return null;
++    // 只认 `.trellis/scripts` 下的普通文件：符号链接与目录都拒绝，避免把
++    // 项目里的任意可执行文件当脚本跑。
++    if (FileSystemEntity.typeSync(script.path, followLinks: false) !=
++        FileSystemEntityType.file) {
++      return null;
++    }
+     final supervisor = ProcessSupervisor();
+     try {
+       final process = await supervisor.start(pythonExecutable, [
+diff --git a/lib/trellis/trellis_panel.dart b/lib/trellis/trellis_panel.dart
+index c5062a860d07058a001da4323f421c845d9f16b2..d497fdfe71568d8008d7cac58da34e0193420252 100644
+--- a/lib/trellis/trellis_panel.dart
++++ b/lib/trellis/trellis_panel.dart
+@@ -46,11 +46,15 @@ class TrellisTaskPanel {
+   final String workflowPath;
+ 
+   /// 没有任何可显示内容。
+-  bool get isEmpty => currentTask == null && activeTasks.isEmpty;
++  bool get isEmpty =>
++      currentTask == null && activeTasks.isEmpty && specIndexes.isEmpty;
+ }
+ 
+-/// 由项目状态生成面板；不是 Trellis 项目时返回 null。
+-TrellisTaskPanel? buildTrellisTaskPanel(TrellisProject project) {
++/// 由项目状态生成面板。
++///
++/// 不是 Trellis 项目时 `TrellisProject.load` 已经返回 null，所以这里不返回
++/// null：调用方拿到空面板即可渲染“没有任务”。
++TrellisTaskPanel buildTrellisTaskPanel(TrellisProject project) {
+   final active = project.activeTasks;
+   final byName = {for (final task in active) task.dirName: task};
+   final children = <String>{};
+@@ -60,9 +64,12 @@ TrellisTaskPanel? buildTrellisTaskPanel(TrellisProject project) {
+     }
+   }
+   final rows = <TrellisPanelTask>[];
++  // 任务文件的 `children` 是手写 JSON，可能互指；用 visited 集合挡住环。
++  final seen = <String>{};
+   void append(String name, int indent) {
+     final task = byName[name];
+     if (task == null) return;
++    if (!seen.add(name)) return;
+     rows.add(TrellisPanelTask(task: task, indent: indent));
+     for (final child in task.children) {
+       append(child, indent + 1);
+diff --git a/lib/trellis/trellis_project.dart b/lib/trellis/trellis_project.dart
+index a69259284a273787e61a85580d4bb2599a6ce540..79f6ec2d81ffbcc8df4e4bdd991f1227e34bfa83 100644
+--- a/lib/trellis/trellis_project.dart
++++ b/lib/trellis/trellis_project.dart
+@@ -1,9 +1,9 @@
+ /// Trellis 项目读取：只读 `.trellis` 下的普通文件，不跟随符号链接。
+ ///
+ /// 识别条件是项目根目录存在普通 `.trellis` 目录，且其中有一份非空的
+-/// `workflow.md`。任务、开发者与规范索引都由本文件直接解析，不执行脚本。
+-/// 桌面版可另用 `python ./.trellis/scripts/get_context.py` 取上下文，失败时
+-/// 回退到这里的结果。
++/// `workflow.md`。任务、开发者与规范索引都由本文件直接解析——本文件**从不**
++/// 执行脚本。官方脚本 `get_context.py` 只在 `trellis_context.dart` 里、且两道
++/// 开关都打开时才会运行，否则回退到这里的结果。
+ library;
+ 
+ import 'dart:convert';
+diff --git a/lib/vibe_coding/vibe_agent_facade.dart b/lib/vibe_coding/vibe_agent_facade.dart
+index 8e5b31c0f92d80c6a703142a14a75b41f9b5a509..8e1a5b02c25c722ccbc4c34eea30b3ac613e8622 100644
+--- a/lib/vibe_coding/vibe_agent_facade.dart
++++ b/lib/vibe_coding/vibe_agent_facade.dart
+@@ -1167,6 +1167,8 @@ class VibeAgentRuntime implements AgentRuntime {
+     String Function()? configuredModel,
+     AgentRequestScheduler? scheduler,
+     Directory? cacheDir,
++    VibeSkillLibrary Function(String projectRoot, String language)?
++    skillLibraryFactory,
+     this.maxIdleFacades = 8,
+     this.pageSize = 60,
+   }) : _api = api,
+@@ -1180,7 +1182,8 @@ class VibeAgentRuntime implements AgentRuntime {
+        _interopRunnerOf = interopRunnerOf,
+        _configuredModel = configuredModel,
+        _scheduler = scheduler ?? AgentRequestScheduler(),
+-       _cacheDir = cacheDir {
++       _cacheDir = cacheDir,
++       _skillLibraryFactory = skillLibraryFactory {
+     _sessions.addListener(_onSessionsChanged);
+   }
+ 
+@@ -1205,6 +1208,10 @@ class VibeAgentRuntime implements AgentRuntime {
+   final AgentRequestScheduler _scheduler;
+   final Directory? _cacheDir;
+ 
++  /// 技能库工厂；测试可注入不扫用户目录的实例，避免结果依赖开发机。
++  final VibeSkillLibrary Function(String projectRoot, String language)?
++  _skillLibraryFactory;
++
+   final Map<String, VibeAgentFacade> _facades = {};
+ 
+   /// 正在打开中的会话。同一个 `sessionId` 的并发 `open()` 共用一次磁盘读，
+@@ -1338,12 +1345,16 @@ class VibeAgentRuntime implements AgentRuntime {
+ 
+   @override
+   Future<List<AgentSkillRef>> skills(String projectId) async {
+-    final library = VibeSkillLibrary(
+-      projectRoot: _projectRootOf(projectId),
+-      language: _languageOf?.call(projectId) ?? '',
+-      // 列表只要名称与描述，正文留给 use_skill。
+-      lazyBodies: true,
+-    );
++    final projectRoot = _projectRootOf(projectId);
++    final language = _languageOf?.call(projectId) ?? '';
++    final library =
++        _skillLibraryFactory?.call(projectRoot, language) ??
++        VibeSkillLibrary(
++          projectRoot: projectRoot,
++          language: language,
++          // 列表只要名称与描述，正文留给 use_skill。
++          lazyBodies: true,
++        );
+     final skills = await library.load();
+     return [
+       for (final skill in skills)
+diff --git a/lib/vibe_coding/vibe_coding_controller.dart b/lib/vibe_coding/vibe_coding_controller.dart
+index db97fbd8abc9399744a4b4cb2c5ab6b53309fb60..00559101376dbf4255684b139924bea6776a3371 100644
+--- a/lib/vibe_coding/vibe_coding_controller.dart
++++ b/lib/vibe_coding/vibe_coding_controller.dart
+@@ -89,8 +89,12 @@ class VibeProjectAgentContext
+   final TrellisContextLoader trellisLoader;
+ 
+   @override
+-  Future<List<VibeSkill>> skills() =>
+-      VibeSkillLibrary(projectRoot: projectRoot, language: language).load();
++  Future<List<VibeSkill>> skills() => VibeSkillLibrary(
++    projectRoot: projectRoot,
++    language: language,
++    // 索引只要名称与说明；正文由 use_skill 按需读盘。
++    lazyBodies: true,
++  ).load();
+ 
+   @override
+   Future<String> rules() async => loadVibeRules(projectRoot);
+@@ -472,8 +476,9 @@ class VibeCodingController extends ChangeNotifier {
+     final guard = VibeLoopGuard();
+     _finalizeOpenPlan(failed: true);
+     final budget = _maxRounds ?? vibeRoundBudget(prompt);
+-    _skills = await _agent.skills();
+-    _rules = await _agent.rules();
++    // 技能与规则读不到时退化为空，不阻断会话。
++    _skills = await _readSkills();
++    _rules = await _readRules();
+     await _loadTrellis();
+     final routed = await _routeSlashCommand(prompt);
+     if (_cancelRequested || _disposed) return;
+@@ -688,6 +693,24 @@ class VibeCodingController extends ChangeNotifier {
+     }
+   }
+ 
++  /// 读技能列表；读取失败时退化为空列表，不打断本轮。
++  Future<List<VibeSkill>> _readSkills() async {
++    try {
++      return await _agent.skills();
++    } on Object {
++      return const [];
++    }
++  }
++
++  /// 读项目规则；读取失败时退化为空串，不打断本轮。
++  Future<String> _readRules() async {
++    try {
++      return await _agent.rules();
++    } on Object {
++      return '';
++    }
++  }
++
+   /// Trellis 上下文来源；代理上下文没实现时返回 null。
+   VibeTrellisContextSource? get _trellisSource =>
+       _agent is VibeTrellisContextSource
+diff --git a/lib/vibe_coding/vibe_rules.dart b/lib/vibe_coding/vibe_rules.dart
+index bc97497cc2fc924498d6a7f06dec0fa031cacb6b..8193fcc93ec8f9eb9de7d2fe338b40f5fab602ed 100644
+--- a/lib/vibe_coding/vibe_rules.dart
++++ b/lib/vibe_coding/vibe_rules.dart
+@@ -10,6 +10,8 @@ import 'dart:io';
+ 
+ import 'package:path/path.dart' as p;
+ 
++import '../trellis/trellis_project.dart';
++
+ /// 单个规则文件的上限（字符）。
+ const int kVibeMaxRuleFileChars = 4 * 1024;
+ 
+@@ -82,26 +84,10 @@ String loadVibeRules(String projectRoot) {
+ 
+ /// 项目根下是否有可用的 Trellis 工作流。
+ ///
+-/// `.trellis` 目录与 `workflow.md` 都必须是普通条目；链接与空文件一律不算。
+-bool hasTrellisWorkflow(String projectRoot) {
+-  final directory = p.join(projectRoot, '.trellis');
+-  final workflow = File(p.join(directory, 'workflow.md'));
+-  try {
+-    if (FileSystemEntity.typeSync(directory, followLinks: false) !=
+-        FileSystemEntityType.directory) {
+-      return false;
+-    }
+-    if (FileSystemEntity.typeSync(workflow.path, followLinks: false) !=
+-        FileSystemEntityType.file) {
+-      return false;
+-    }
+-    return _readHead(workflow).trim().isNotEmpty;
+-  } on FileSystemException {
+-    return false;
+-  } on FormatException {
+-    return false;
+-  }
+-}
++/// 判断只有一份实现：委托 [TrellisProject.hasWorkflow]。`.trellis` 目录与
++/// `workflow.md` 都必须是普通条目；链接与空文件一律不算。
++bool hasTrellisWorkflow(String projectRoot) =>
++    TrellisProject.hasWorkflow(projectRoot);
+ 
+ /// 只读取文件开头，避免加载超大规则文件。
+ String _readHead(File file) {
+diff --git a/lib/vibe_coding/vibe_skills.dart b/lib/vibe_coding/vibe_skills.dart
+index bda1a63e91fbaef10b7813fb3dfeebf89944778d..5c252783ee583b4f9740c2e4d271e6d2a3d82258 100644
+--- a/lib/vibe_coding/vibe_skills.dart
++++ b/lib/vibe_coding/vibe_skills.dart
+@@ -405,7 +405,14 @@ class VibeSkillLibrary {
+     final type = FileSystemEntity.typeSync(dir, followLinks: false);
+     if (type != FileSystemEntityType.directory) return const [];
+     final skills = <VibeSkill>[];
+-    final entries = await Directory(dir).list(followLinks: false).toList();
++    final List<FileSystemEntity> entries;
++    try {
++      entries = await Directory(dir).list(followLinks: false).toList();
++    } on FileSystemException {
++      // 目录存在但列不出来（权限、占用、路径过长）时只跳过这一份，
++      // 不让整次技能加载失败。
++      return const [];
++    }
+     entries.sort((a, b) => a.path.compareTo(b.path));
+     for (final entry in entries) {
+       if (entry is! Directory) continue;
+diff --git a/test/studio_agent_host_test.dart b/test/studio_agent_host_test.dart
+index 625ea64ef1924d6e4d2848e06e7effb287d897ec..56e7f0e8eda480f136eec0e161201b5c47db4bde 100644
+--- a/test/studio_agent_host_test.dart
++++ b/test/studio_agent_host_test.dart
+@@ -155,13 +155,76 @@ void main() {
+       await seedSession();
+       final handle = await host.open('session-0');
+       final facade = runtime.facades['session-0']!;
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await pumpEventQueue();
+       facade.pendingApproval = const AgentWriteApproval(
+         path: 'a.txt',
+         summary: '写入 1 B',
+       );
+       await pumpEventQueue();
+-      await handle.reply(const HarnessReply(requestId: 'x', choice: 'deny'));
++      final approval = events.where((e) => e.requestId != null).last;
++
++      await handle.reply(
++        HarnessReply(requestId: approval.requestId!, choice: 'deny'),
++      );
+       expect(facade.approvals, [false]);
++      await subscription.cancel();
++      await handle.detach();
++    });
++
++    test('ignores a reply with a stale request id', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      facade.pendingApproval = const AgentWriteApproval(
++        path: 'b.txt',
++        summary: '写入 2 B',
++      );
++      await pumpEventQueue();
++
++      await handle.reply(
++        const HarnessReply(requestId: 'approval:old-key', choice: 'allow'),
++      );
++
++      expect(facade.approvals, isEmpty);
++      expect(facade.pendingApproval, isNotNull);
++      await handle.detach();
++    });
++
++    test('rejects an unknown choice instead of silently denying', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await pumpEventQueue();
++      facade.pendingApproval = const AgentWriteApproval(
++        path: 'c.txt',
++        summary: '写入 3 B',
++      );
++      await pumpEventQueue();
++      final approval = events.where((e) => e.requestId != null).last;
++
++      await expectLater(
++        handle.reply(
++          HarnessReply(requestId: approval.requestId!, choice: 'maybe'),
++        ),
++        throwsArgumentError,
++      );
++      expect(facade.approvals, isEmpty);
++      await subscription.cancel();
++      await handle.detach();
++    });
++
++    test('refuses to send a prompt while the session is busy', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      facade.state = AgentRunState.running;
++
++      await expectLater(handle.sendPrompt('再来一次'), throwsStateError);
++      expect(facade.sentTexts, isEmpty);
+       await handle.detach();
+     });
+ 
+@@ -176,14 +239,38 @@ void main() {
+       await handle.detach();
+     });
+ 
+-    test('status follows the runtime while the view is open', () async {
++    test(
++      'status follows the runtime even without a facade notification',
++      () async {
++        await seedSession();
++        final handle = await host.open('session-0');
++        // 只发运行时通知：排队进出与“完成/失败未读”只在这一侧变化。
++        runtime.liveStatuses['session-0'] = AgentLiveStatus.awaitingApproval;
++        runtime.notifyLive();
++        expect(handle.status.value, HarnessSessionStatus.blocked);
++
++        runtime.liveStatuses['session-0'] = AgentLiveStatus.finishedUnread;
++        runtime.notifyLive();
++        expect(handle.status.value, HarnessSessionStatus.done);
++        await handle.detach();
++      },
++    );
++
++    test('publishes a system entry when the run fails', () async {
+       await seedSession();
+       final handle = await host.open('session-0');
+-      runtime.liveStatuses['session-0'] = AgentLiveStatus.awaitingApproval;
+-      runtime.notifyLive();
+       final facade = runtime.facades['session-0']!;
+-      facade.notifyListeners();
+-      expect(handle.status.value, HarnessSessionStatus.blocked);
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await pumpEventQueue();
++
++      runtime.liveStatuses['session-0'] = AgentLiveStatus.failed;
++      facade.seedError(message: '余额不足');
++
++      final failure = events.where((e) => e.text == '余额不足').single;
++      expect(failure.role, TranscriptRole.system);
++      expect(handle.status.value, HarnessSessionStatus.unknown);
++      await subscription.cancel();
+       await handle.detach();
+     });
+   });
+@@ -211,6 +298,80 @@ void main() {
+         throwsArgumentError,
+       );
+     });
++
++    test('refuses a working directory outside the project', () async {
++      await expectLater(
++        host.launch(
++          const HarnessLaunchRequest(
++            providerId: kStudioProviderId,
++            cwd: '/tmp/other-project',
++          ),
++        ),
++        throwsUnsupportedError,
++      );
++      expect(host.snapshot(), isEmpty);
++    });
++
++    test('refuses launch arguments instead of ignoring them', () async {
++      await expectLater(
++        host.launch(
++          const HarnessLaunchRequest(
++            providerId: kStudioProviderId,
++            cwd: '/tmp/project',
++            args: ['--model', 'x'],
++          ),
++        ),
++        throwsUnsupportedError,
++      );
++    });
++
++    test('leaves no session record when the agent is signed out', () async {
++      final signedOut = FakeAgentRuntime(sessions: store, loginRequired: true);
++      final other = StudioAgentHost(
++        runtime: signedOut,
++        projectId: 'p1',
++        projectRoot: '/tmp/project',
++      );
++      addTearDown(other.dispose);
++
++      await expectLater(
++        other.launch(
++          const HarnessLaunchRequest(
++            providerId: kStudioProviderId,
++            cwd: '/tmp/project',
++          ),
++        ),
++        throwsA(isA<AgentLoginRequired>()),
++      );
++      expect(other.snapshot(), isEmpty);
++      expect(store.sessionsOf('p1'), isEmpty);
++    });
++
++    test('reports the provider as unavailable when signed out', () async {
++      final signedOut = StudioAgentHost(
++        runtime: FakeAgentRuntime(sessions: store, loginRequired: true),
++        projectId: 'p1',
++        projectRoot: '/tmp/project',
++        signedIn: () => false,
++      );
++      addTearDown(signedOut.dispose);
++
++      final providers = await signedOut.providers();
++      expect(providers.single.available, isFalse);
++    });
++  });
++
++  group('project boundary', () {
++    test('refuses to open a session of another project', () async {
++      final foreign = await store.create('p2', title: '别的项目');
++
++      await expectLater(host.open(foreign.id), throwsArgumentError);
++      expect(runtime.openedSessions, isEmpty);
++    });
++
++    test('refuses an unknown session id', () async {
++      await expectLater(host.open('missing'), throwsArgumentError);
++    });
+   });
+ 
+   group('dispose', () {
+diff --git a/test/trellis_context_test.dart b/test/trellis_context_test.dart
+index 0f82259c8a160bebbc2b1ca08b0ed701f97a14ec..78bf083a25db8a06923fa3f3307f481df7e9558f 100644
+--- a/test/trellis_context_test.dart
++++ b/test/trellis_context_test.dart
+@@ -1,7 +1,9 @@
++import 'dart:convert';
+ import 'dart:io';
+ 
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
+ import 'package:qfli_studio_core/trellis/trellis_commands.dart';
+ import 'package:qfli_studio_core/trellis/trellis_context.dart';
+ import 'package:qfli_studio_core/trellis/trellis_project.dart';
+@@ -115,6 +117,62 @@ void main() {
+       expect(text, contains('### Trellis 项目上下文'));
+       expect(text, contains('11-22-harness-hub'));
+     });
++
++    test('does not run the project script without explicit consent', () async {
++      final root = makeTrellisProject();
++      // 脚本被真正执行时才会写这个文件。
++      final marker = p.join(root.path, 'script-ran.txt');
++      writeFixture(
++        root,
++        '.trellis/scripts/get_context.py',
++        'open(${jsonEncode(marker)}, "w").write("ran")\n',
++      );
++
++      final text = await const TrellisContextLoader(
++        preferPython: true,
++      ).load(root.path);
++
++      expect(text, contains('### Trellis 项目上下文'));
++      expect(File(marker).existsSync(), isFalse);
++    });
++
++    test('runs the script only when both switches are on', () {
++      expect(
++        const TrellisContextLoader(preferPython: true).runsProjectScript,
++        isFalse,
++      );
++      expect(
++        const TrellisContextLoader(allowProjectScript: true).runsProjectScript,
++        isFalse,
++      );
++      expect(
++        const TrellisContextLoader(
++          preferPython: true,
++          allowProjectScript: true,
++        ).runsProjectScript,
++        isTrue,
++      );
++      expect(const TrellisContextLoader().runsProjectScript, isFalse);
++    });
++
++    test('ignores a symlinked get_context.py', () async {
++      final root = makeTrellisProject();
++      final outside = File(p.join(root.path, 'outside.py'))
++        ..writeAsStringSync('raise SystemExit(1)\n');
++      final link = Link(
++        p.join(root.path, '.trellis', 'scripts', 'get_context.py'),
++      );
++      Directory(link.parent.path).createSync(recursive: true);
++      link.createSync(outside.path);
++
++      final text = await const TrellisContextLoader(
++        preferPython: true,
++        allowProjectScript: true,
++      ).load(root.path);
++
++      // 链接被拒后回退到 Dart 解析，结果仍然可用。
++      expect(text, contains('### Trellis 项目上下文'));
++    });
+   });
+ 
+   group('project rules', () {
+diff --git a/test/trellis_project_test.dart b/test/trellis_project_test.dart
+index 3df8cb6c4b09599c4a9fcaf403d0cb5059d3dac8..aab1da2cb30e5ac58d88fd6778af44a90d2d9084 100644
+--- a/test/trellis_project_test.dart
++++ b/test/trellis_project_test.dart
+@@ -136,7 +136,7 @@ void main() {
+   group('panel', () {
+     test('puts parents before children and keeps my tasks', () async {
+       final project = await TrellisProject.load(makeTrellisProject().path);
+-      final panel = buildTrellisTaskPanel(project!)!;
++      final panel = buildTrellisTaskPanel(project!);
+       expect(panel.developer, 'lichengyu');
+       expect(panel.currentTask?.dirName, '11-22-harness-hub');
+       expect(panel.activeTasks.map((row) => row.task.dirName), [
+@@ -148,5 +148,51 @@ void main() {
+       expect(panel.workflowPath, '.trellis/workflow.md');
+       expect(panel.isEmpty, isFalse);
+     });
++
++    test('survives a task graph whose children point at each other', () async {
++      final root = Directory.systemTemp.createTempSync('trellis-loop-')
++        ..createSync(recursive: true);
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      writeFixture(root, '.trellis/workflow.md', '# Workflow\n');
++      writeFixtureTask(root, 'a', {
++        'id': 'a',
++        'title': '父任务',
++        'status': 'in_progress',
++        'children': ['b'],
++      });
++      // b 把自己当作子任务：不设环保护时 append 会一直递归。
++      writeFixtureTask(root, 'b', {
++        'id': 'b',
++        'title': '自指任务',
++        'status': 'planning',
++        'children': ['b'],
++      });
++
++      final project = await TrellisProject.load(root.path);
++      final panel = buildTrellisTaskPanel(project!);
++
++      expect(panel.activeTasks.map((row) => row.task.dirName).toList(), [
++        'a',
++        'b',
++      ]);
++    });
++
++    test('a project with only spec indexes is not empty', () async {
++      final root = Directory.systemTemp.createTempSync('trellis-spec-')
++        ..createSync(recursive: true);
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      writeFixture(root, '.trellis/workflow.md', '# Workflow\n');
++      writeFixture(root, '.trellis/spec/frontend/index.md', '# Frontend\n');
++
++      final project = await TrellisProject.load(root.path);
++      final panel = buildTrellisTaskPanel(project!);
++
++      expect(panel.specIndexes, isNotEmpty);
++      expect(panel.isEmpty, isFalse);
++    });
+   });
+ }
+diff --git a/test/vibe_agent_facade_test.dart b/test/vibe_agent_facade_test.dart
+index c152977fda349158357676caa813b35d48cf8869..f272e6ec8f5d2f0f001c0b91be06f41dd6fe0b8b 100644
+--- a/test/vibe_agent_facade_test.dart
++++ b/test/vibe_agent_facade_test.dart
+@@ -2,6 +2,7 @@ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+ 
++import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:http/http.dart' as http;
+ import 'package:http/testing.dart';
+@@ -11,9 +12,23 @@ import 'package:qfli_studio_core/services/studio_profile.dart';
+ import 'package:qfli_studio_core/session/agent_session.dart';
+ import 'package:qfli_studio_core/vibe_coding/agent_request_scheduler.dart';
+ import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_skills.dart';
+ 
+ import 'support/ai_relay_fixture.dart';
+ 
++/// 空资产包：测试不依赖打包的内置技能。
++class _EmptyAssetBundle extends CachingAssetBundle {
++  _EmptyAssetBundle();
++
++  @override
++  Future<ByteData> load(String key) async =>
++      throw StateError('no packaged asset $key');
++
++  @override
++  Future<String> loadString(String key, {bool cache = true}) async =>
++      throw StateError('no packaged asset $key');
++}
++
+ void main() {
+   late Directory root;
+   late Directory project;
+@@ -49,6 +64,14 @@ void main() {
+     projectRootOf: (_) => project.path,
+     languageOf: (_) => 'python',
+     configuredModel: configuredModel,
++    // 不扫开发机 $HOME：结果与耗时不能跟着机器变。
++    skillLibraryFactory: (String root, String language) => VibeSkillLibrary(
++      projectRoot: root,
++      language: language,
++      bundle: _EmptyAssetBundle(),
++      includeUserSkills: false,
++      lazyBodies: true,
++    ),
+     // 测试里不真的等 1/2/4 秒。
+     scheduler: AgentRequestScheduler(retryDelays: const []),
+     cacheDir: cacheDir,
+diff --git a/test/vibe_trellis_session_test.dart b/test/vibe_trellis_session_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e27a07fd7af0038c7b3cfc99797ec7ec38f8c7ee
+--- /dev/null
++++ b/test/vibe_trellis_session_test.dart
+@@ -0,0 +1,218 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:http/http.dart' as http;
++import 'package:http/testing.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/services/api_client.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/trellis/trellis_context.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_coding_controller.dart';
++
++import 'support/ai_relay_fixture.dart';
++import 'support/trellis_fixture.dart';
++
++/// 记录调用次数、可注入失败的可替换上下文。
++class _CountingContext extends VibeProjectAgentContext {
++  _CountingContext({
++    required super.projectRoot,
++    super.trellisLoader,
++    this.failSkills = false,
++    this.failRules = false,
++  });
++
++  final bool failSkills;
++  final bool failRules;
++
++  int skillCalls = 0;
++  int ruleCalls = 0;
++  int trellisCalls = 0;
++
++  @override
++  Future<List<VibeSkill>> skills() async {
++    skillCalls++;
++    if (failSkills) throw const FileSystemException('技能目录不可读');
++    return const <VibeSkill>[];
++  }
++
++  @override
++  Future<String> rules() async {
++    ruleCalls++;
++    if (failRules) throw const FileSystemException('规则文件不可读');
++    return '项目规则：不要改生成文件。';
++  }
++
++  @override
++  Future<String> trellisContext() async {
++    trellisCalls++;
++    return super.trellisContext();
++  }
++}
++
++void main() {
++  late Directory project;
++
++  setUp(() {
++    StudioProfile.current = null;
++    project = makeTrellisProject();
++  });
++
++  VibeCodingController build(
++    _FakeRelay relay, {
++    VibeProjectAgentContext? context,
++    int maxRounds = 2,
++  }) => VibeCodingController(
++    api: ApiClient(transport: relay.client),
++    tokenProvider: () => 'local-token',
++    projectRoot: project.path,
++    projectName: 'demo',
++    language: 'python',
++    maxRounds: maxRounds,
++    context:
++        context ??
++        VibeProjectAgentContext(
++          projectRoot: project.path,
++          trellisLoader: const TrellisContextLoader(),
++        ),
++  );
++
++  Future<void> settle(VibeCodingController controller, VibePhase phase) async {
++    for (var i = 0; i < 500 && controller.phase != phase; i++) {
++      await Future<void>.delayed(const Duration(milliseconds: 2));
++    }
++    expect(
++      controller.phase,
++      phase,
++      reason: controller.lastError ?? controller.phase.name,
++    );
++  }
++
++  test('injects the Trellis context once per session', () async {
++    final relay = _FakeRelay()
++      ..chatReplies.addAll([_textReply('第一轮'), _textReply('第二轮')]);
++    final context = _CountingContext(
++      projectRoot: project.path,
++      trellisLoader: const TrellisContextLoader(),
++    );
++    final controller = build(relay, context: context);
++
++    controller.send('先做第一步');
++    await settle(controller, VibePhase.succeeded);
++    controller.send('再做第二步');
++    await settle(controller, VibePhase.succeeded);
++
++    final system =
++        ((relay.chatBodies.first['messages'] as List).first as Map)['content']
++            as String;
++    expect(system, contains('### Trellis 项目上下文'));
++    expect(system, contains('项目规则：不要改生成文件。'));
++    // Trellis 一个会话只读一次；技能与规则每次 send 重新读（磁盘上的改动要能生效）。
++    expect(context.trellisCalls, 1);
++    expect(context.skillCalls, 2);
++    expect(context.ruleCalls, 2);
++  });
++
++  test(
++    'replaces the current user message for a Trellis slash command',
++    () async {
++      final relay = _FakeRelay()
++        ..chatReplies.addAll([_textReply('先回答'), _textReply('继续做了')]);
++      final controller = build(relay);
++
++      controller.send('普通提问');
++      await settle(controller, VibePhase.succeeded);
++      controller.send('/trellis:continue 接着做');
++      await settle(controller, VibePhase.succeeded);
++
++      final second = (relay.chatBodies.last['messages'] as List)
++          .cast<Map<String, dynamic>>();
++      final userMessages = second
++          .where((entry) => entry['role'] == 'user')
++          .map((entry) => entry['content'] as String)
++          .toList();
++
++      // 上一条用户消息原样保留，只有本轮输入被换成了展开后的指令。
++      expect(userMessages.first, '普通提问');
++      expect(userMessages.last, isNot('/trellis:continue 接着做'));
++      expect(userMessages.last, contains('接着做'));
++      // 气泡仍显示用户输入的那一行。
++      expect(
++        controller.messages.lastWhere((message) => message.isUser).text,
++        '/trellis:continue 接着做',
++      );
++    },
++  );
++
++  test('a failing skill or rule read does not stall the session', () async {
++    final relay = _FakeRelay()..chatReplies.add(_textReply('照常回答'));
++    final controller = build(
++      relay,
++      context: _CountingContext(
++        projectRoot: project.path,
++        failSkills: true,
++        failRules: true,
++      ),
++    );
++
++    controller.send('读不到技能也要能聊');
++    await settle(controller, VibePhase.succeeded);
++
++    expect(controller.lastError, isNull);
++    final messages = (relay.chatBodies.single['messages'] as List)
++        .cast<Map<String, dynamic>>();
++    expect(messages.first['content'] as String, isNot(contains('项目规则')));
++  });
++
++  test('a project without a workflow gets no Trellis context', () async {
++    final root = Directory.systemTemp.createTempSync('no-trellis-');
++    addTearDown(() {
++      if (root.existsSync()) root.deleteSync(recursive: true);
++    });
++    File(p.join(root.path, 'README.md')).writeAsStringSync('# demo\n');
++    final relay = _FakeRelay()..chatReplies.add(_textReply('好的'));
++    final controller = VibeCodingController(
++      api: ApiClient(transport: relay.client),
++      tokenProvider: () => 'local-token',
++      projectRoot: root.path,
++      projectName: 'demo',
++      language: 'python',
++      maxRounds: 1,
++    );
++
++    controller.send('你好');
++    await settle(controller, VibePhase.succeeded);
++
++    final system =
++        ((relay.chatBodies.single['messages'] as List).first as Map)['content']
++            as String;
++    expect(system, isNot(contains('Trellis')));
++  });
++}
++
++Map<String, dynamic> _textReply(String text) => {
++  'model': 'demo-model',
++  'message': {'role': 'assistant', 'content': text},
++};
++
++/// 只回答固定文本的假中继，记录每次请求体。
++class _FakeRelay {
++  _FakeRelay() {
++    client = MockClient.streaming((
++      http.BaseRequest request,
++      Stream<List<int>> body,
++    ) async {
++      final raw = await utf8.decoder.bind(body).join();
++      chatBodies.add(
++        raw.isEmpty
++            ? <String, dynamic>{}
++            : jsonDecode(raw) as Map<String, dynamic>,
++      );
++      return relayTurnResponse(chatReplies.removeAt(0));
++    });
++  }
++
++  late final http.Client client;
++  final List<Map<String, dynamic>> chatReplies = [];
++  final List<Map<String, dynamic>> chatBodies = [];
++}

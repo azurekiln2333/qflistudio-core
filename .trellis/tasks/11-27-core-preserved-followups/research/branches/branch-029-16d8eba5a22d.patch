@@ -1,0 +1,15 @@
+diff --git a/lib/harness/hub/harness_hosts.dart b/lib/harness/hub/harness_hosts.dart
+index b72b061fb280ab72022b6b7e9ec818f56de6890f..e0eb9951ec84ebeb8a2f9d7f3e278c7a93a5813b 100644
+--- a/lib/harness/hub/harness_hosts.dart
++++ b/lib/harness/hub/harness_hosts.dart
+@@ -33,6 +33,10 @@ class HubHostContext {
+ }
+ 
+ /// 返回主机列表的工厂。返回顺序就是界面上的顺序。
++///
++/// 工厂每次调用都应当返回**新的**主机实例：主机由 hub 持有，编辑页销毁时
++/// 会调用它们的 `dispose()`。要全应用共用的主机请由工厂自己缓存，并让它
++/// 的 `dispose()` 幂等、不杀掉共享资源。
+ typedef HarnessHostsFactory =
+     List<HarnessHost> Function(HubHostContext context);
+ 

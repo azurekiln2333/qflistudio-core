@@ -1,0 +1,483 @@
+diff --git a/lib/editor/editor_page.dart b/lib/editor/editor_page.dart
+index 0e7d6d03452a639a48e52b6dca35ab1b6ab667d1..39ec2f063c96705f787908108b6836f8104c2b7a 100644
+--- a/lib/editor/editor_page.dart
++++ b/lib/editor/editor_page.dart
+@@ -141,14 +141,16 @@ class _EditorCommandIntent extends Intent {
+   final _EditorCommand command;
+ }
+ 
+-/// Let the page handle Agent and save shortcuts while retaining all other
+-/// code-editor bindings. In particular, Ctrl/Cmd+L must not select a line.
++/// Delegate page-owned shortcuts without disabling an absent Agent's binding.
+ class _PageCodeShortcuts extends DefaultCodeShortcutsActivatorsBuilder {
+-  const _PageCodeShortcuts();
++  const _PageCodeShortcuts({required this.hasAgent});
++
++  final bool hasAgent;
+ 
+   @override
+   List<ShortcutActivator>? build(CodeShortcutType type) {
+-    if (type == CodeShortcutType.lineSelect || type == CodeShortcutType.save) {
++    if (type == CodeShortcutType.save ||
++        (hasAgent && type == CodeShortcutType.lineSelect)) {
+       return const [];
+     }
+     return super.build(type);
+@@ -436,6 +438,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+ 
+   /// Preferred desktop width; its drag handle clamps it to 320–720 dp.
+   double _agentPaneWidth = Breakpoints.agentPaneWidth;
++  double? _agentDragWidth;
+   final Map<String, Future<String?>> _branchLabels = {};
+   final Map<OpenFile, _WorkbenchSelectionToolbarController> _selectionMenus =
+       {};
+@@ -803,6 +806,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     }
+     final generation = ++_visibilityGeneration;
+     if (widget.retainedVisibility?.value != true) {
++      for (final menu in _selectionMenus.values) {
++        menu.hide(context);
++      }
+       if (_hiddenViews.isNotEmpty) return;
+       for (final file in _editor.files) {
+         final scroll = file.scrollController;
+@@ -1286,6 +1292,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   void didChangeDependencies() {
+     super.didChangeDependencies();
+     final largeScreen = LargeScreenScope.maybeOf(context);
++    // The shell can hide its retained center without changing editor identity.
++    if (largeScreen != null && !TickerMode.valuesOf(context).enabled) {
++      for (final menu in _selectionMenus.values) {
++        menu.hide(context);
++      }
++    }
+     if (!identical(largeScreen, _largeScreen)) {
+       _largeScreen?.unregisterFiles(this);
+       _largeScreen = largeScreen;
+@@ -1839,6 +1851,13 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     final host = _agentHost;
+     if (host != null) {
+       final pane = host.state.mainPane;
++      if (_largeScreen != null &&
++          pane == MainPane.agent &&
++          layoutOf(MediaQuery.sizeOf(context).width) != WorkbenchLayout.wide) {
++        for (final menu in _selectionMenus.values) {
++          menu.hide(context);
++        }
++      }
+       if (pane == MainPane.editor && _lastMainPane != MainPane.editor) {
+         unawaited(_recheckOpenTabsFromDisk());
+       }
+@@ -3593,10 +3612,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+               const _EditorCommandIntent(_EditorCommand.bottomPanel),
+           const SingleActivator(LogicalKeyboardKey.keyJ, meta: true):
+               const _EditorCommandIntent(_EditorCommand.bottomPanel),
+-          const SingleActivator(LogicalKeyboardKey.keyL, control: true):
+-              const _EditorCommandIntent(_EditorCommand.agent),
+-          const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
+-              const _EditorCommandIntent(_EditorCommand.agent),
++          if (_agentHost != null) ...{
++            const SingleActivator(LogicalKeyboardKey.keyL, control: true):
++                const _EditorCommandIntent(_EditorCommand.agent),
++            const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
++                const _EditorCommandIntent(_EditorCommand.agent),
++          },
+           const SingleActivator(LogicalKeyboardKey.keyW, control: true):
+               const _EditorCommandIntent(_EditorCommand.closeTab),
+           const SingleActivator(LogicalKeyboardKey.keyW, meta: true):
+@@ -4368,7 +4389,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                         ),
+                         if (agentEnabled && layout == WorkbenchLayout.wide) ...[
+                           if (_largeScreen != null && !agentCollapsed)
+-                            _buildAgentResizeHandle(context),
++                            _buildAgentResizeHandle(context, agentWidth),
+                           SizedBox(
+                             key: const ValueKey('workbench-agent-pane'),
+                             width: agentCollapsed
+@@ -4737,19 +4758,28 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     );
+   }
+ 
+-  Widget _buildAgentResizeHandle(BuildContext context) {
++  Widget _buildAgentResizeHandle(BuildContext context, double displayedWidth) {
+     final scheme = Theme.of(context).colorScheme;
+     return GestureDetector(
+       key: const ValueKey('agent-pane-resize-handle'),
+       behavior: HitTestBehavior.opaque,
+-      onDoubleTap: () =>
+-          setState(() => _agentPaneWidth = Breakpoints.agentPaneWidth),
++      onDoubleTap: () => setState(() {
++        _agentDragWidth = null;
++        _agentPaneWidth = Breakpoints.agentPaneWidth;
++      }),
++      // A shell-constrained pane may be narrower than its saved preference.
++      // Start at the visible separator, not at that hidden preferred width.
++      onHorizontalDragStart: (_) => _agentDragWidth = displayedWidth,
+       onHorizontalDragUpdate: (details) => setState(() {
+-        _agentPaneWidth = (_agentPaneWidth - details.delta.dx).clamp(
+-          320.0,
+-          720.0,
+-        );
++        _agentPaneWidth =
++            ((_agentDragWidth ?? displayedWidth) - details.delta.dx).clamp(
++              320.0,
++              720.0,
++            );
++        _agentDragWidth = _agentPaneWidth;
+       }),
++      onHorizontalDragEnd: (_) => _agentDragWidth = null,
++      onHorizontalDragCancel: () => _agentDragWidth = null,
+       child: MouseRegion(
+         cursor: SystemMouseCursors.resizeColumn,
+         child: SizedBox(
+@@ -4853,6 +4883,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     const editing = {'save', 'undo', 'find', 'goto', 'format'};
+     const workspace = {'git', 'cloud_pull', 'online_terminal'};
+     final actions = _workbenchMenuActions(context);
++    final host = _agentHost;
++    final runtime = host?.runtime;
+     final inline = _inlineDocumentFor(open);
+     final shortcuts = {
+       'save': LogicalKeyboardKey.keyS,
+@@ -4966,6 +4998,23 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                 : null,
+           ),
+         ],
++        if (host != null) ...[
++          const Divider(),
++          // Sessions live in the shell, and connection retry lives in the pane.
++          // Keep the quick bar's remaining Agent commands reachable here.
++          for (final id in ['agent-new-session', 'agent-stop'])
++            ListenableBuilder(
++              listenable: Listenable.merge([
++                host,
++                if (runtime != null) ...[runtime.sessions, runtime.liveChanges],
++              ]),
++              builder: (context, _) => actionItem(
++                _quickBarAgentActions().singleWhere(
++                  (action) => action.id == id,
++                ),
++              ),
++            ),
++        ],
+         if (actions.any((action) => action.id == 'close_editor')) ...[
+           const Divider(),
+           for (final action in actions)
+@@ -5629,7 +5678,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                     ),
+               scrollController: open.scrollController,
+               findController: open.findController,
+-              shortcutsActivatorsBuilder: const _PageCodeShortcuts(),
++              shortcutsActivatorsBuilder: _PageCodeShortcuts(
++                hasAgent: _agentHost != null,
++              ),
+               shortcutOverrideActions: {
+                 ...editorShortcutOverrides(open.controller),
+                 ...?contribution?.shortcutOverrideActions,
+@@ -5920,27 +5971,20 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                           (_analysis.pending
+                               ? '正在检查…'
+                               : '问题 ${_analysis.problems.length}'),
+-                      child: InkWell(
++                      child: SizedBox(
+                         key: const ValueKey('workbench-status-problems'),
+-                        mouseCursor: SystemMouseCursors.click,
+-                        onTap: () => _showPanel(_BottomPanel.problems),
+-                        child: SizedBox(
+-                          height: height,
+-                          child: Row(
+-                            mainAxisSize: MainAxisSize.min,
+-                            children: [
+-                              const Icon(
+-                                Icons.warning_amber_outlined,
+-                                size: 14,
+-                              ),
+-                              statusText(
+-                                _analysis.unavailableReason != null ||
+-                                        !_analysis.checked
+-                                    ? '—'
+-                                    : '${_analysis.problems.length}',
+-                              ),
+-                            ],
+-                          ),
++                        height: height,
++                        child: Row(
++                          mainAxisSize: MainAxisSize.min,
++                          children: [
++                            const Icon(Icons.warning_amber_outlined, size: 14),
++                            statusText(
++                              _analysis.unavailableReason != null ||
++                                      !_analysis.checked
++                                  ? '—'
++                                  : '${_analysis.problems.length}',
++                            ),
++                          ],
+                         ),
+                       ),
+                     ),
+diff --git a/test/editor_workbench_cleanup_test.dart b/test/editor_workbench_cleanup_test.dart
+index 4315e43a74ce28e06d5f1319bde38e7f7b95e653..c3e08174aa478ff0a6cf674e6cdae3f3c461b639 100644
+--- a/test/editor_workbench_cleanup_test.dart
++++ b/test/editor_workbench_cleanup_test.dart
+@@ -29,6 +29,7 @@ import 'package:qfli_studio_core/shell/shortcut_label.dart';
+ import 'package:qfli_studio_core/store/auth_store.dart';
+ import 'package:qfli_studio_core/store/project_store.dart';
+ import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
+ import 'package:re_editor/re_editor.dart';
+ 
+ import 'support/fake_agent.dart';
+@@ -100,6 +101,8 @@ void main() {
+     Size size = const Size(1280, 900),
+     Brightness brightness = Brightness.light,
+     double? editorWidth,
++    ValueNotifier<bool>? retainedVisibility,
++    ValueNotifier<bool>? centerVisible,
+   }) async {
+     tester.view.physicalSize = size;
+     tester.view.devicePixelRatio = 1;
+@@ -117,6 +120,7 @@ void main() {
+       initialOpenPath: p.join(root.path, 'main.dart'),
+       onMinimize: () {},
+       onClose: () {},
++      retainedVisibility: retainedVisibility,
+       agentEnabled: agent,
+       agentRuntime: runtime,
+       harnessHub: hub,
+@@ -132,6 +136,16 @@ void main() {
+         child: SizedBox(width: editorWidth, child: editor),
+       );
+     }
++    if (centerVisible != null) {
++      editor = ValueListenableBuilder<bool>(
++        valueListenable: centerVisible,
++        child: editor,
++        builder: (context, visible, child) => Offstage(
++          offstage: !visible,
++          child: TickerMode(enabled: visible, child: child!),
++        ),
++      );
++    }
+     await tester.pumpWidget(
+       MaterialApp(
+         theme: workbench
+@@ -784,6 +798,206 @@ void main() {
+     expect(tester.takeException(), isNull);
+   });
+ 
++  // Review regressions: these tests are authored for cloud CI, not run locally.
++  testWidgets('source shortcuts remain owned by the editor without an Agent', (
++    tester,
++  ) async {
++    await mount(tester);
++    final source = tester.widget<CodeEditor>(find.byType(CodeEditor));
++    final bindings = source.shortcutsActivatorsBuilder!;
++    const defaults = DefaultCodeShortcutsActivatorsBuilder();
++    for (final type in CodeShortcutType.values) {
++      expect(
++        bindings.build(type),
++        type == CodeShortcutType.save ? isEmpty : equals(defaults.build(type)),
++        reason: 'Only save delegates to the page when no Agent is installed',
++      );
++    }
++    final controller = editor(tester).current!.controller;
++    controller.selection = const CodeLineSelection.collapsed(
++      index: 0,
++      offset: 5,
++    );
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyL, meta: Platform.isMacOS);
++    await _frames(tester);
++    expect(controller.selection.isCollapsed, isFalse);
++    expect(controller.selectedText, contains('void main()'));
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('save shortcuts reach page persistence from focused code', (
++    tester,
++  ) async {
++    await mount(tester);
++    for (final meta in [false, true]) {
++      final changed = 'void main() { /* keyboard save $meta */ }\n';
++      editor(tester).current!.controller.text = changed;
++      await tester.pump();
++      expect(editor(tester).current!.dirty, isTrue);
++      await focusEditor(tester);
++      await _shortcut(tester, LogicalKeyboardKey.keyS, meta: meta);
++      await _waitFor(tester, () => !editor(tester).current!.dirty);
++      expect(File(p.join(root.path, 'main.dart')).readAsStringSync(), changed);
++    }
++    expect(tester.takeException(), isNull);
++  });
++
++  for (final size in [const Size(1440, 900), const Size(900, 900)]) {
++    testWidgets(
++      'More retains Agent new and stop-all actions at ${size.width}',
++      (tester) async {
++        final session = await runtime.sessions.create(project.id);
++        await mount(tester, agent: true, size: size);
++        await tester.tap(find.byKey(const ValueKey('editor-agent-toggle')));
++        await _frames(tester);
++        await tester.tap(find.byKey(const ValueKey('workbench-editor-more')));
++        await tester.pumpAndSettle();
++        final stop = find.byKey(const ValueKey('workbench-menu-agent-stop'));
++        expect(tester.widget<MenuItemButton>(stop).onPressed, isNull);
++        // Enablement must update even while the menu is already open.
++        runtime.liveStatuses[session.id] = AgentLiveStatus.running;
++        runtime.notifyLive();
++        await tester.pump();
++        expect(tester.widget<MenuItemButton>(stop).onPressed, isNotNull);
++        await tester.tap(stop);
++        await _frames(tester);
++        expect(runtime.cancelAllCount, 1);
++        final count = runtime.sessions.sessionsOf(project.id).length;
++        await tester.tap(find.byKey(const ValueKey('workbench-editor-more')));
++        await tester.pumpAndSettle();
++        await tester.tap(
++          find.byKey(const ValueKey('workbench-menu-agent-new-session')),
++        );
++        await _frames(tester);
++        expect(runtime.sessions.sessionsOf(project.id), hasLength(count + 1));
++        expect(find.byType(EditorQuickBar), findsNothing);
++        expect(tester.takeException(), isNull);
++      },
++    );
++  }
++
++  for (final hideWithTicker in [false, true]) {
++    testWidgets(
++      'selection menu closes when retained center hides ($hideWithTicker)',
++      (tester) async {
++        final visible = ValueNotifier(true);
++        final toolbarVisible = _TrackedVisibility(true);
++        await mount(
++          tester,
++          retainedVisibility: hideWithTicker ? null : visible,
++          centerVisible: hideWithTicker ? visible : null,
++        );
++        final source = tester.widget<CodeEditor>(find.byType(CodeEditor));
++        source.toolbarController!.show(
++          context: tester.element(find.byType(CodeEditor)),
++          controller: editor(tester).current!.controller,
++          anchors: const TextSelectionToolbarAnchors(
++            primaryAnchor: Offset(300, 300),
++          ),
++          layerLink: LayerLink(),
++          visibility: toolbarVisible,
++        );
++        await tester.pumpAndSettle();
++        expect(
++          find.byKey(const ValueKey('workbench-selection-menu')),
++          findsOneWidget,
++        );
++        visible.value = false;
++        await _frames(tester);
++        expect(
++          find.byKey(const ValueKey('workbench-selection-menu')),
++          findsNothing,
++        );
++        expect(toolbarVisible.listening, isFalse);
++        visible.value = true;
++        await _frames(tester);
++        expect(find.byType(CodeEditor), findsOneWidget);
++        await tester.pumpWidget(const SizedBox.shrink());
++        await _frames(tester);
++        visible.dispose();
++        toolbarVisible.dispose();
++        expect(tester.takeException(), isNull);
++      },
++    );
++  }
++
++  testWidgets('medium Agent switch closes the editor selection menu', (
++    tester,
++  ) async {
++    await mount(tester, agent: true, size: const Size(900, 900));
++    final source = tester.widget<CodeEditor>(find.byType(CodeEditor));
++    final visibility = _TrackedVisibility(true);
++    source.toolbarController!.show(
++      context: tester.element(find.byType(CodeEditor)),
++      controller: editor(tester).current!.controller,
++      anchors: const TextSelectionToolbarAnchors(
++        primaryAnchor: Offset(300, 300),
++      ),
++      layerLink: LayerLink(),
++      visibility: visibility,
++    );
++    await tester.pumpAndSettle();
++    expect(
++      find.byKey(const ValueKey('workbench-selection-menu')),
++      findsOneWidget,
++    );
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyL);
++    await _frames(tester);
++    expect(
++      find.byKey(const ValueKey('workbench-selection-menu')),
++      findsNothing,
++    );
++    expect(visibility.listening, isFalse);
++    visibility.dispose();
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('constrained Agent resize follows its visible separator', (
++    tester,
++  ) async {
++    await mount(tester, agent: true, editorWidth: 600);
++    await tester.tap(find.byKey(const ValueKey('editor-agent-toggle')));
++    await _frames(tester);
++    final handle = find.byKey(const ValueKey('agent-pane-resize-handle'));
++    final slot = find.byKey(const ValueKey('workbench-agent-pane'));
++    expect(tester.getSize(slot).width + 8, 360);
++    final start = tester.getCenter(handle);
++    final gesture = await tester.startGesture(
++      start,
++      kind: PointerDeviceKind.mouse,
++    );
++    await tester.pump(const Duration(milliseconds: 350));
++    await gesture.moveBy(const Offset(24, 0));
++    await tester.pump();
++    // Cross slop first, then measure an in-progress 12dp movement. Starting
++    // from the hidden 400dp preference incorrectly leaves the separator still.
++    final before = tester.getCenter(handle).dx;
++    await gesture.moveBy(const Offset(12, 0));
++    await tester.pump();
++    expect(tester.getCenter(handle).dx - before, closeTo(12, 0.1));
++    await gesture.up();
++    await _frames(tester);
++    expect(tester.getSize(slot).width + 8, inInclusiveRange(320, 348));
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('problem count is read-only beside the sole panel button', (
++    tester,
++  ) async {
++    await mount(tester);
++    final count = find.byKey(const ValueKey('workbench-status-problems'));
++    expect(tester.widget(count), isA<SizedBox>());
++    await tester.tap(count);
++    await _frames(tester);
++    expect(find.byType(EditorProblemsPanel), findsNothing);
++    await tester.tap(find.byKey(const ValueKey('workbench-panel-problems')));
++    await _frames(tester);
++    expect(find.byType(EditorProblemsPanel), findsOneWidget);
++    expect(tester.takeException(), isNull);
++  });
++
+   testWidgets('new file shortcut creates and opens a file; F5 uses runner', (
+     tester,
+   ) async {
+@@ -840,6 +1054,12 @@ Future<void> _waitFor(WidgetTester tester, bool Function() condition) async {
+   fail('Timed out waiting for editor I/O');
+ }
+ 
++class _TrackedVisibility extends ValueNotifier<bool> {
++  _TrackedVisibility(super.value);
++
++  bool get listening => hasListeners;
++}
++
+ class _MemoryDefaults implements ComposerDefaultsStore {
+   final _values = <String, ComposerDefaults>{};
+ 

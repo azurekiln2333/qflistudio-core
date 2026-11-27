@@ -1,0 +1,17 @@
+diff --git a/lib/harness/remote/remote_session.dart b/lib/harness/remote/remote_session.dart
+index 9d23d2373f42dcee0c287d816efa988e6979c615..29f74ac10d5d294923c437950f342c434c0f308c 100644
+--- a/lib/harness/remote/remote_session.dart
++++ b/lib/harness/remote/remote_session.dart
+@@ -192,7 +192,11 @@ class RemoteHerdrHandle implements HarnessSessionHandle {
+          remoteHerdrStatus(agent.status),
+        ) {
+     _terminal = HerdrSnapshotTerminal(
+-      readPane: () async => _herdr.paneText(paneId),
++      // Read the pane instead of replaying the push cache: the harness host owns
++      // no `HerdrPaneLease`, so it must not compete with the Remote Computer page
++      // for the one live subscription. A push, when one arrives, only makes the
++      // next repaint immediate.
++      readPane: () async => (await _herdr.read(paneId)).text,
+       sendText: (text) => _herdr.sendText(paneId, text),
+       sendKeys: (keys) => _herdr.sendKeys(paneId, keys),
+       changes: herdrPort.changes,

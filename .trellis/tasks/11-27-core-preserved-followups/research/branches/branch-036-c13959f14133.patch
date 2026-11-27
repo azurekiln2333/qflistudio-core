@@ -1,0 +1,800 @@
+diff --git a/lib/editor/file_explorer.dart b/lib/editor/file_explorer.dart
+index 6db1ef36bf8ba3fcda3ce4d4cd8491d8d5bec87d..2528ce58a3e374319223aae1602ac64c69777ec4 100644
+--- a/lib/editor/file_explorer.dart
++++ b/lib/editor/file_explorer.dart
+@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
+ import '../models/project.dart';
+ import '../store/project_store.dart';
+ import '../shell/large_screen_controller.dart';
++import '../shell/shortcut_label.dart';
+ import '../services/file_service.dart';
+ import '../editor/new_file_dialog.dart';
+ import '../store/settings_store.dart';
+@@ -1452,26 +1453,28 @@ class _FileExplorerState extends State<FileExplorer> {
+       builder: (context, constraints) => Column(
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+         children: [
+-          ConstrainedBox(
+-            // Grows instead of clipping when large text needs more than 48px,
+-            // so short panels only give up space from the tree below.
+-            constraints: const BoxConstraints(minHeight: 48),
+-            child: Row(
+-              children: [
+-                const SizedBox(width: 4),
+-                // 项目选择器在最左，开着标题栏剩余宽度。
+-                Expanded(child: _buildHeaderTitle(context, scheme, sections)),
+-                ..._buildHeaderActions(context, sections, constraints.maxWidth),
+-                // 文件/会话切换固定在右端，和动作按钮同一个尺寸。
+-                if (widget.headerTrailing case final trailing?) ...[trailing],
+-                const SizedBox(width: 4),
+-              ],
++          if (widget.largeScreen)
++            _buildLargeScreenHeader(context, constraints.maxWidth)
++          else
++            ConstrainedBox(
++              constraints: const BoxConstraints(minHeight: 48),
++              child: Row(
++                children: [
++                  const SizedBox(width: 4),
++                  Expanded(child: _buildHeaderTitle(context, scheme, sections)),
++                  ..._buildHeaderActions(
++                    context,
++                    sections,
++                    constraints.maxWidth,
++                  ),
++                  if (widget.headerTrailing case final trailing?) ...[trailing],
++                  const SizedBox(width: 4),
++                ],
++              ),
+             ),
+-          ),
+-          // Always visible: saving a workspace must stay reachable even when
+-          // the panel is short and the registry has a single project.
+-          if (sections == null ||
+-              sections.state.sidebarSection == SidebarSection.files)
++          if (!widget.largeScreen &&
++              (sections == null ||
++                  sections.state.sidebarSection == SidebarSection.files))
+             ConstrainedBox(
+               constraints: const BoxConstraints(minHeight: 40),
+               child: Padding(
+@@ -1525,6 +1528,165 @@ class _FileExplorerState extends State<FileExplorer> {
+     );
+   }
+ 
++  /// Compact large-screen chrome has no project picker or section switch.
++  /// Workspace settings and multi-member navigation live in the More menu.
++  Widget _buildLargeScreenHeader(BuildContext context, double availableWidth) {
++    final desktop = LargeScreenScope.isDesktop(context);
++    final headerHeight = desktop ? 40.0 : 48.0;
++    final buttonWidth = desktop ? 32.0 : 48.0;
++    // Reserve readable project identity before spending space on actions.
++    // Narrow tablet sidebars keep touch targets, not six squeezed buttons.
++    final titleWidth = desktop ? 80.0 : 96.0;
++    final fullActions = availableWidth >= titleWidth + buttonWidth * 6 + 4;
++    final showSearch = availableWidth >= titleWidth + buttonWidth * 4 + 4;
++    final labels = StudioLocalizations.of(context);
++    final controller = LargeScreenScope.maybeOf(context);
++    final projectListLabel = labels.isEnglish
++        ? 'Project list'
++        : labels.isTraditionalChinese
++        ? '專案列表'
++        : '项目列表';
++    final actionStyle = ButtonStyle(
++      minimumSize: WidgetStatePropertyAll(Size(buttonWidth, headerHeight)),
++      maximumSize: WidgetStatePropertyAll(Size(buttonWidth, headerHeight)),
++      padding: const WidgetStatePropertyAll(EdgeInsets.zero),
++      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++      visualDensity: VisualDensity.standard,
++    );
++    Widget action({
++      Key? key,
++      required String tooltip,
++      required IconData icon,
++      required VoidCallback? onPressed,
++    }) => IconButton(
++      key: key,
++      tooltip: tooltip,
++      style: actionStyle,
++      iconSize: 20,
++      onPressed: onPressed,
++      icon: Icon(icon),
++    );
++    void toggleSearch() => setState(() {
++      _searchOpen = !_searchOpen;
++      _searchQuery = '';
++      _searchController.clear();
++    });
++    MenuItemButton item({
++      Key? key,
++      required String label,
++      required VoidCallback onPressed,
++      Widget? trailingIcon,
++    }) => MenuItemButton(
++      key: key,
++      onPressed: onPressed,
++      trailingIcon: trailingIcon,
++      style: ButtonStyle(
++        minimumSize: WidgetStatePropertyAll(Size(0, desktop ? 32 : 48)),
++        visualDensity: VisualDensity.standard,
++        padding: const WidgetStatePropertyAll(
++          EdgeInsets.symmetric(horizontal: 12),
++        ),
++      ),
++      child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
++    );
++    final canManageWorkspace =
++        _savedWorkspace != null ||
++        supportsSavedWorkspaces ||
++        !isMainStudioRelease;
++    return SizedBox(
++      key: const ValueKey('file-explorer-header'),
++      height: headerHeight,
++      child: Row(
++        children: [
++          action(
++            key: const ValueKey('workbench-explorer-projects'),
++            tooltip: projectListLabel,
++            onPressed: controller?.showProjects,
++            icon: Icons.arrow_back,
++          ),
++          Expanded(
++            child: Text(
++              _browsing.name,
++              key: const ValueKey('file-explorer-header-project-name'),
++              maxLines: 1,
++              overflow: TextOverflow.ellipsis,
++              style: Theme.of(context).textTheme.titleSmall,
++            ),
++          ),
++          action(
++            tooltip: '新建文件 (${shortcutLabel('Ctrl+N')})',
++            icon: Icons.note_add_outlined,
++            onPressed: () => _create(null, false),
++          ),
++          if (fullActions)
++            action(
++              tooltip: '新建文件夹',
++              icon: Icons.create_new_folder_outlined,
++              onPressed: () => _create(null, true),
++            ),
++          if (showSearch)
++            action(
++              tooltip: _searchOpen ? '退出搜索' : '搜索文件',
++              icon: _searchOpen ? Icons.close : Icons.search,
++              onPressed: toggleSearch,
++            ),
++          if (fullActions)
++            action(tooltip: '刷新', icon: Icons.refresh, onPressed: _refresh),
++          MenuAnchor(
++            menuChildren: [
++              if (!showSearch)
++                item(
++                  label: _searchOpen ? '退出搜索' : '搜索文件',
++                  onPressed: toggleSearch,
++                ),
++              if (!fullActions) ...[
++                item(label: '新建文件夹', onPressed: () => _create(null, true)),
++                item(label: '刷新', onPressed: _refresh),
++                const Divider(),
++              ],
++              if (canManageWorkspace)
++                item(label: '工作区设置', onPressed: _manageWorkspace),
++              if (_savedWorkspace != null)
++                item(
++                  label: '添加项目到工作区',
++                  onPressed: _pickProjectsToAddToWorkspace,
++                ),
++              if (_workspace.length > 1) ...[
++                const Divider(),
++                for (final project in _workspace)
++                  item(
++                    key: ValueKey(
++                      'file-explorer-workspace-member-${project.id}',
++                    ),
++                    label: project.name,
++                    trailingIcon: p.equals(project.path, _browsing.path)
++                        ? const Icon(Icons.check, size: 18)
++                        : null,
++                    onPressed: () => _switchProject(project),
++                  ),
++                const Divider(),
++              ],
++              item(label: '全部折叠', onPressed: _collapseAll),
++            ],
++            builder: (context, menu, _) => action(
++              key: const ValueKey('file-explorer-more'),
++              tooltip: '更多文件操作',
++              icon: Icons.more_vert,
++              onPressed: () => menu.isOpen ? menu.close() : menu.open(),
++            ),
++          ),
++          const SizedBox(width: 4),
++        ],
++      ),
++    );
++  }
++
++  void _collapseAll() {
++    if (_expanded.isEmpty) return;
++    setState(_expanded.clear);
++    unawaited(_persistExpanded());
++  }
++
+   /// 共享标题栏左侧的主标题：文件段是项目选择器，会话段是会话标题。
+   ///
+   /// 两段用同一条左侧线、同一个字号：[_headerTitleInset] 与 `labelLarge`。
+diff --git a/lib/shell/workbench_explorer.dart b/lib/shell/workbench_explorer.dart
+index 7bee43f20229cb8ea4793ec6bc947244d31d71a5..27ec650ebb61beea3b7551bcf8e91e6e74c5898b 100644
+--- a/lib/shell/workbench_explorer.dart
++++ b/lib/shell/workbench_explorer.dart
+@@ -85,12 +85,6 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final l = StudioLocalizations.of(context);
+-    final projectsLabel = l.isEnglish
+-        ? 'Project list'
+-        : l.isTraditionalChinese
+-        ? '專案列表'
+-        : '项目列表';
+     return ClipRect(
+       child: LayoutBuilder(
+         builder: (context, constraints) => AnimatedBuilder(
+@@ -108,35 +102,7 @@ class _WorkbenchExplorerState extends State<WorkbenchExplorer>
+                 key: const ValueKey('workbench-explorer-files-page'),
+                 active: _target == 1,
+                 offset: (1 - _motion.value) * constraints.maxWidth,
+-                child: Column(
+-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+-                  children: [
+-                    SizedBox(
+-                      height: LargeScreenScope.isDesktop(context) ? 40 : 48,
+-                      child: Row(
+-                        children: [
+-                          IconButton(
+-                            key: WorkbenchExplorer.backKey,
+-                            tooltip: projectsLabel,
+-                            onPressed: widget.controller.showProjects,
+-                            icon: const Icon(Icons.arrow_back),
+-                          ),
+-                          Expanded(
+-                            child: Text(
+-                              widget.projectName ?? '',
+-                              maxLines: 1,
+-                              overflow: TextOverflow.ellipsis,
+-                              style: Theme.of(context).textTheme.titleSmall,
+-                            ),
+-                          ),
+-                          const SizedBox(width: 8),
+-                        ],
+-                      ),
+-                    ),
+-                    const Divider(height: 1),
+-                    Expanded(child: widget.files),
+-                  ],
+-                ),
++                child: widget.files,
+               ),
+             ],
+           ),
+diff --git a/test/editor_workbench_cleanup_test.dart b/test/editor_workbench_cleanup_test.dart
+index 61d0d1fb5376c799685c4c326eec299f1030b193..eba5d978e382b7195e445a73c38cb638c2bf3d48 100644
+--- a/test/editor_workbench_cleanup_test.dart
++++ b/test/editor_workbench_cleanup_test.dart
+@@ -1023,12 +1023,16 @@ void main() {
+         home: Scaffold(
+           body: SizedBox(
+             width: 320,
+-            child: FileExplorer(
+-              largeScreen: true,
+-              project: project,
+-              editor: controller,
+-              store: store,
+-              settings: settings,
++            child: LargeScreenScope(
++              controller: shell,
++              formFactor: AppFormFactor.desktop,
++              child: FileExplorer(
++                largeScreen: true,
++                project: project,
++                editor: controller,
++                store: store,
++                settings: settings,
++              ),
+             ),
+           ),
+         ),
+diff --git a/test/file_explorer_workbench_header_test.dart b/test/file_explorer_workbench_header_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c2d1154a074daa59960bf7ccf8690f1afdae8dd
+--- /dev/null
++++ b/test/file_explorer_workbench_header_test.dart
+@@ -0,0 +1,487 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/editor/editor_controller.dart';
++import 'package:qfli_studio_core/editor/file_explorer.dart';
++import 'package:qfli_studio_core/editor/project_history.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/shortcut_label.dart';
++import 'package:qfli_studio_core/shell/workbench_explorer.dart';
++import 'package:qfli_studio_core/shell/workbench_theme.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/workspace/saved_workspace.dart';
++import 'package:qfli_studio_core/workspace/workspace_store.dart';
++
++void main() {
++  late _Fixture fixture;
++  StudioProfile? previousProfile;
++
++  setUp(() async {
++    previousProfile = StudioProfile.current;
++    StudioProfile.current = const StudioProfile(
++      id: 'workbench-header-test',
++      appTitle: 'Explorer test',
++      templates: [],
++      productKey: StudioProductCatalog.qfliStudioKey,
++    );
++    fixture = await _Fixture.create();
++  });
++
++  tearDown(() => StudioProfile.current = previousProfile);
++
++  // R5/R14 and design 11.2: the files page has one header owned by the real
++  // FileExplorer, not another shell title plus a phone picker/summary strip.
++  for (final brightness in Brightness.values) {
++    for (final layout in [
++      (factor: AppFormFactor.desktop, width: 300.0),
++      (factor: AppFormFactor.desktop, width: 220.0),
++      (factor: AppFormFactor.tablet, width: 300.0),
++      (factor: AppFormFactor.tablet, width: 220.0),
++      (factor: AppFormFactor.tablet, width: 480.0),
++    ]) {
++      testWidgets(
++        'one ${layout.factor.name} files header at ${layout.width} in ${brightness.name}',
++        (tester) async {
++          await fixture.mount(
++            tester,
++            formFactor: layout.factor,
++            width: layout.width,
++            brightness: brightness,
++          );
++          final desktop = layout.factor == AppFormFactor.desktop;
++          final height = desktop ? 40.0 : 48.0;
++          final target = desktop ? 32.0 : 48.0;
++          final header = find.byKey(const ValueKey('file-explorer-header'));
++          final back = find.byKey(WorkbenchExplorer.backKey);
++          final title = find.byKey(
++            const ValueKey('file-explorer-header-project-name'),
++          );
++          final more = find.byKey(const ValueKey('file-explorer-more'));
++          final newFile = find.byTooltip('新建文件 (${shortcutLabel('Ctrl+N')})');
++          expect(tester.getSize(header), Size(layout.width, height));
++          expect(tester.getSize(back), Size(target, height));
++          expect(tester.getSize(more), Size(target, height));
++          expect(tester.getSize(newFile), Size(target, height));
++          expect(tester.getSize(title).width, greaterThanOrEqualTo(72));
++          final text = tester.widget<Text>(title);
++          expect(text.data, fixture.first.name);
++          expect(text.maxLines, 1);
++          expect(text.overflow, TextOverflow.ellipsis);
++          expect(
++            text.style,
++            Theme.of(tester.element(title)).textTheme.titleSmall,
++          );
++          expect(find.text(fixture.first.name), findsNWidgets(2));
++          expect(
++            find.byKey(const ValueKey('file-explorer-project-picker')),
++            findsNothing,
++          );
++          expect(find.textContaining('工作区 ·'), findsNothing);
++          expect(find.byTooltip('工作区项目'), findsNothing);
++          final root = find.byKey(ValueKey('file-row-${fixture.first.path}'));
++          expect(
++            tester.getTopLeft(root).dy,
++            tester.getTopLeft(header).dy + height + 3,
++          );
++          final fullActions = layout.width >= (desktop ? 276 : 388);
++          final showsSearch = layout.width >= (desktop ? 212 : 292);
++          expect(
++            find.byTooltip('新建文件夹'),
++            fullActions ? findsOneWidget : findsNothing,
++          );
++          expect(
++            find.byTooltip('刷新'),
++            fullActions ? findsOneWidget : findsNothing,
++          );
++          expect(
++            find.byTooltip('搜索文件'),
++            showsSearch ? findsOneWidget : findsNothing,
++          );
++          if (showsSearch) {
++            expect(
++              tester.getSize(find.byTooltip('搜索文件')),
++              Size(target, height),
++            );
++          }
++          final fileState = tester.state(find.byType(FileExplorer));
++          await tester.tap(more);
++          await tester.pumpAndSettle();
++          expect(find.text('工作区设置'), findsOneWidget);
++          expect(find.text('全部折叠'), findsOneWidget);
++          expect(
++            find.byKey(
++              ValueKey('file-explorer-workspace-member-${fixture.first.id}'),
++            ),
++            findsNothing,
++          );
++          if (!fullActions) {
++            expect(find.text('新建文件夹'), findsOneWidget);
++            expect(find.text('刷新'), findsOneWidget);
++          }
++          if (!showsSearch) expect(find.text('搜索文件'), findsOneWidget);
++          final collapse = find.widgetWithText(MenuItemButton, '全部折叠');
++          expect(tester.getSize(collapse).height, desktop ? 32 : 48);
++          await tester.tap(collapse);
++          await tester.pumpAndSettle();
++          expect(find.text('first.dart'), findsNothing);
++          expect(root, findsOneWidget);
++          expect(tester.state(find.byType(FileExplorer)), same(fileState));
++          await tester.tap(back);
++          await tester.pumpAndSettle();
++          expect(fixture.shell.explorerPage, ExplorerPage.projects);
++          expect(fixture.shell.activeEditor, same(fixture.editor));
++          fixture.shell.showFiles();
++          await tester.pumpAndSettle();
++          expect(tester.state(find.byType(FileExplorer)), same(fileState));
++          expect(tester.takeException(), isNull);
++        },
++      );
++    }
++  }
++
++  testWidgets(
++    'minimum tablet sidebar keeps search and refresh usable in More',
++    (tester) async {
++      await fixture.mount(tester, formFactor: AppFormFactor.tablet, width: 220);
++      final more = find.byKey(const ValueKey('file-explorer-more'));
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      await tester.tap(find.widgetWithText(MenuItemButton, '搜索文件'));
++      await tester.pumpAndSettle();
++      expect(find.byType(TextField), findsOneWidget);
++      await tester.enterText(find.byType(TextField), 'first.dart');
++      await _waitFor(
++        tester,
++        () => find.text('first.dart').evaluate().isNotEmpty,
++      );
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      await tester.tap(find.widgetWithText(MenuItemButton, '退出搜索'));
++      await tester.pumpAndSettle();
++      expect(find.byType(TextField), findsNothing);
++      await tester.runAsync(
++        () => File(
++          p.join(fixture.first.path, 'added.dart'),
++        ).writeAsString('const added = 1;'),
++      );
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      await tester.tap(find.widgetWithText(MenuItemButton, '刷新'));
++      await _waitFor(
++        tester,
++        () => find.text('added.dart').evaluate().isNotEmpty,
++      );
++      await tester.pumpAndSettle();
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets('workspace settings remain reachable without a summary strip', (
++    tester,
++  ) async {
++    await fixture.mount(tester);
++    final state = tester.state(find.byType(FileExplorer));
++    await tester.tap(find.byKey(const ValueKey('file-explorer-more')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.widgetWithText(MenuItemButton, '工作区设置'));
++    await _waitFor(
++      tester,
++      () => find.byType(AlertDialog).evaluate().isNotEmpty,
++    );
++    await tester.pumpAndSettle();
++    expect(find.byType(AlertDialog), findsOneWidget);
++    expect(find.byType(TextField), findsOneWidget);
++    await tester.tap(find.text('取消'));
++    await tester.pumpAndSettle();
++    expect(tester.state(find.byType(FileExplorer)), same(state));
++    expect(find.byTooltip('工作区项目'), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets(
++    'multi-member More switches browse identity and preserves editor ownership',
++    (tester) async {
++      late SavedWorkspace workspace;
++      await tester.runAsync(() async {
++        final result = await fixture.workspaces.save(
++          name: 'Header workspace',
++          primary: fixture.first,
++          members: [fixture.first, fixture.second],
++        );
++        workspace = result.workspace!;
++        await fixture.editor.openPath(p.join(fixture.first.path, 'first.dart'));
++      });
++      await fixture.mount(
++        tester,
++        formFactor: AppFormFactor.tablet,
++        workspace: workspace,
++      );
++      final state = tester.state(find.byType(FileExplorer));
++      final openFile = fixture.editor.current;
++      // Saved workspaces load every member root. Browsing a member changes
++      // creation targeting, not editor ownership or the already loaded tree.
++      final secondFile = find.byKey(
++        ValueKey('file-row-${p.join(fixture.second.path, 'second.dart')}'),
++      );
++      await _waitFor(
++        tester,
++        () => secondFile.evaluate().isNotEmpty,
++        operation: 'Initial second-member listing',
++      );
++      final firstRoot = find.byKey(ValueKey('file-row-${fixture.first.path}'));
++      final secondRoot = find.byKey(
++        ValueKey('file-row-${fixture.second.path}'),
++      );
++      final firstRootElement = tester.element(firstRoot);
++      final secondRootElement = tester.element(secondRoot);
++      final more = find.byKey(const ValueKey('file-explorer-more'));
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      expect(find.text('添加项目到工作区'), findsOneWidget);
++      final member = find.byKey(
++        ValueKey('file-explorer-workspace-member-${fixture.second.id}'),
++      );
++      expect(tester.getSize(member).height, 48);
++      expect(find.byTooltip('新建文件夹'), findsNothing);
++      await tester.tap(member);
++      await tester.pumpAndSettle();
++      expect(
++        tester
++            .widget<Text>(
++              find.byKey(const ValueKey('file-explorer-header-project-name')),
++            )
++            .data,
++        fixture.second.name,
++      );
++      expect(fixture.store.lastBrowsedProjectId, fixture.second.id);
++      expect(fixture.editor.current, same(openFile));
++      expect(fixture.editor.project, same(fixture.first));
++      expect(tester.state(find.byType(FileExplorer)), same(state));
++      expect(tester.element(firstRoot), same(firstRootElement));
++      expect(tester.element(secondRoot), same(secondRootElement));
++      expect(secondFile, findsOneWidget);
++      expect(find.textContaining('工作区 ·'), findsNothing);
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      expect(
++        find.descendant(of: member, matching: find.byIcon(Icons.check)),
++        findsOneWidget,
++      );
++      await tester.tap(find.widgetWithText(MenuItemButton, '添加项目到工作区'));
++      await tester.pumpAndSettle();
++      expect(find.byType(AlertDialog), findsOneWidget);
++      expect(find.text(fixture.third.name), findsOneWidget);
++      await tester.tap(find.text('取消'));
++      await tester.pumpAndSettle();
++      expect(fixture.workspaces.byId(workspace.id)!.members, hasLength(2));
++      expect(fixture.editor.current, same(openFile));
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      await tester.tap(find.widgetWithText(MenuItemButton, '添加项目到工作区'));
++      await tester.pumpAndSettle();
++      final addition = find.byKey(
++        ValueKey('workspace-add-${fixture.third.id}'),
++      );
++      final confirm = find.byKey(const ValueKey('workspace-add-confirm'));
++      expect(tester.widget<CheckboxListTile>(addition).value, isFalse);
++      expect(tester.widget<FilledButton>(confirm).onPressed, isNull);
++      await tester.tap(addition);
++      // The checkbox callback only schedules a rebuild. Confirm is disabled
++      // until that frame applies the selection to the button's onPressed.
++      await tester.pump();
++      expect(tester.widget<CheckboxListTile>(addition).value, isTrue);
++      expect(tester.widget<FilledButton>(confirm).onPressed, isNotNull);
++      await tester.tap(confirm);
++      await _waitFor(
++        tester,
++        () => fixture.workspaces.byId(workspace.id)!.members.length == 3,
++        operation: 'Workspace member persistence',
++      );
++      await tester.pumpAndSettle();
++      expect(find.byType(AlertDialog), findsNothing);
++      final thirdFile = find.byKey(
++        ValueKey('file-row-${p.join(fixture.third.path, 'third.dart')}'),
++      );
++      await _waitFor(
++        tester,
++        () => thirdFile.evaluate().isNotEmpty,
++        operation: 'Added-member tree reload',
++      );
++      await tester.ensureVisible(thirdFile);
++      await tester.pumpAndSettle();
++      expect(thirdFile.hitTestable(), findsOneWidget);
++      final persisted = (await tester.runAsync(() async {
++        final file = File(
++          p.join(fixture.root.path, 'workspaces', '${workspace.id}.json'),
++        );
++        return SavedWorkspace.fromJson(jsonDecode(await file.readAsString()))!;
++      }))!;
++      expect(persisted.id, workspace.id);
++      expect(persisted.name, workspace.name);
++      expect(persisted.members.map((member) => member.projectId), [
++        fixture.first.id,
++        fixture.second.id,
++        fixture.third.id,
++      ]);
++      expect(persisted.members.first.primary, isTrue);
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      expect(
++        find.byKey(
++          ValueKey('file-explorer-workspace-member-${fixture.third.id}'),
++        ),
++        findsOneWidget,
++      );
++      await tester.tap(more);
++      await tester.pumpAndSettle();
++      expect(fixture.editor.current, same(openFile));
++      expect(fixture.editor.project, same(fixture.first));
++      expect(fixture.store.lastBrowsedProjectId, fixture.second.id);
++      expect(tester.state(find.byType(FileExplorer)), same(state));
++      expect(tester.takeException(), isNull);
++    },
++  );
++}
++
++class _Fixture {
++  _Fixture(this.root, this.store, this.first, this.second, this.third)
++    : editor = EditorController(project: first),
++      settings = SettingsStore(
++        storageFile: File(p.join(root.path, 'settings.json')),
++      ),
++      workspaces = WorkspaceStore(
++        root: Directory(p.join(root.path, 'workspaces')),
++      );
++
++  final Directory root;
++  final ProjectStore store;
++  final Project first;
++  final Project second;
++  final Project third;
++  final EditorController editor;
++  final SettingsStore settings;
++  final WorkspaceStore workspaces;
++  final shell = LargeScreenController();
++
++  static Future<_Fixture> create() async {
++    final root = await Directory.systemTemp.createTemp(
++      'workbench_files_header_',
++    );
++    final store = ProjectStore(
++      storageFile: File(p.join(root.path, 'projects.json')),
++    );
++    await store.load();
++    for (final name in ['first', 'second', 'third']) {
++      final directory = Directory(p.join(root.path, name));
++      await directory.create();
++      await File(
++        p.join(directory.path, '$name.dart'),
++      ).writeAsString('const value = 1;');
++      await store.addExisting(directory.path);
++    }
++    final fixture = _Fixture(
++      root,
++      store,
++      store.projects.singleWhere((project) => project.name == 'first'),
++      store.projects.singleWhere((project) => project.name == 'second'),
++      store.projects.singleWhere((project) => project.name == 'third'),
++    );
++    await fixture.workspaces.load();
++    return fixture;
++  }
++
++  Future<void> mount(
++    WidgetTester tester, {
++    AppFormFactor formFactor = AppFormFactor.desktop,
++    double width = 300,
++    Brightness brightness = Brightness.light,
++    SavedWorkspace? workspace,
++  }) async {
++    tester.view.physicalSize = const Size(900, 700);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.reset);
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      var drained = false;
++      final pending = Future.wait([
++        for (final project in [first, second, third])
++          ProjectHistory.load(project.path),
++        store.refresh(),
++        workspaces.settle(),
++      ]);
++      pending.then((_) => drained = true);
++      await _waitFor(tester, () => drained, operation: 'Fixture IO drain');
++      await pending;
++      editor.dispose();
++      settings.dispose();
++      shell.dispose();
++      store.dispose();
++      workspaces.dispose();
++      await tester.runAsync(() => root.delete(recursive: true));
++    });
++    shell.activateFiles(editor);
++    shell.showFiles();
++    await tester.pumpWidget(
++      MaterialApp(
++        theme: WorkbenchTheme.from(
++          ThemeData(colorSchemeSeed: Colors.indigo, brightness: brightness),
++          formFactor: formFactor,
++        ),
++        home: Scaffold(
++          body: Align(
++            alignment: Alignment.topLeft,
++            child: SizedBox(
++              width: width,
++              height: 180,
++              child: LargeScreenScope(
++                controller: shell,
++                formFactor: formFactor,
++                child: WorkbenchExplorer(
++                  controller: shell,
++                  projectName: first.name,
++                  projects: const Text('Projects fixture'),
++                  files: FileExplorer(
++                    largeScreen: true,
++                    project: first,
++                    editor: editor,
++                    store: store,
++                    settings: settings,
++                    workspace: workspace,
++                    workspaceMembers: workspace == null
++                        ? const []
++                        : [first, second],
++                    workspaceStore: workspaces,
++                  ),
++                ),
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++    await _waitFor(tester, () => find.text('first.dart').evaluate().isNotEmpty);
++    await tester.pumpAndSettle();
++  }
++}
++
++Future<void> _waitFor(
++  WidgetTester tester,
++  bool Function() ready, {
++  String operation = 'Explorer IO',
++}) async {
++  for (var attempt = 0; attempt < 100 && !ready(); attempt++) {
++    await tester.runAsync(
++      () => Future<void>.delayed(const Duration(milliseconds: 5)),
++    );
++    // Real IO alone cannot advance callbacks queued in the fake-time zone.
++    await tester.pump(const Duration(milliseconds: 20));
++  }
++  expect(ready(), isTrue, reason: '$operation did not finish');
++}

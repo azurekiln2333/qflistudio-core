@@ -1,0 +1,73 @@
+diff --git a/lib/vibe_coding/vibe_rules.dart b/lib/vibe_coding/vibe_rules.dart
+--- a/lib/vibe_coding/vibe_rules.dart
++++ b/lib/vibe_coding/vibe_rules.dart
+@@ -2,6 +2,7 @@
+ ///
+ /// 来源按优先级读取：`AGENTS.md`、`CLAUDE.md`、`.qfli/rules.md`。每个文件
+ /// 与整体都有字符上限，超出时按行截断并标注。
++/// Trellis 项目先保留工作流入口，再按需读取正文。
+ library;
+ 
+ import 'dart:convert';
+@@ -22,12 +23,24 @@
+   '.qfli/rules.md',
+ ];
+ 
++const String _trellisBootstrap = '''### Trellis workflow
++This project uses Trellis. Before editing, use read_file to read .trellis/workflow.md.
++Read the applicable package and layer index.md under .trellis/spec/. Follow its links only for the current change.
++If a task is active, read its prd.md and any design.md or implement.md before editing.
++Use the available skill index and call use_skill when a project skill applies.
++Read workflow, specs and skill bodies on demand. Do not load every file at once.''';
++
+ /// 读取项目规则；没有规则时返回空串。
+ ///
+ /// 只读项目根目录下的普通文件。符号链接整份跳过，避免读出项目外内容。
+ String loadVibeRules(String projectRoot) {
+   final sections = <String>[];
+   var used = 0;
++  if (_hasTrellisWorkflow(projectRoot)) {
++    // 先预留入口预算，避免已有规则占满总上限。
++    sections.add(_trellisBootstrap);
++    used = _trellisBootstrap.length + 2;
++  }
+   for (final relative in kVibeRuleFiles) {
+     final file = File(p.joinAll([projectRoot, ...relative.split('/')]));
+     final type = FileSystemEntity.typeSync(file.path, followLinks: false);
+@@ -44,7 +57,8 @@
+     final header = '### $relative';
+     final budget = kVibeMaxRulesChars - used;
+     if (budget <= header.length + 40) {
+-      sections.add('（其余规则文件已达上限，未加载）');
++      const notice = '（其余规则文件已达上限，未加载）';
++      if (budget >= notice.length) sections.add(notice);
+       break;
+     }
+     const mark = '（规则已截断）';
+@@ -60,6 +74,26 @@
+     used += section.length + 2;
+   }
+   return sections.join('\n\n');
++}
++
++bool _hasTrellisWorkflow(String projectRoot) {
++  final directory = p.join(projectRoot, '.trellis');
++  final workflow = File(p.join(directory, 'workflow.md'));
++  try {
++    if (FileSystemEntity.typeSync(directory, followLinks: false) !=
++        FileSystemEntityType.directory) {
++      return false;
++    }
++    if (FileSystemEntity.typeSync(workflow.path, followLinks: false) !=
++        FileSystemEntityType.file) {
++      return false;
++    }
++    return _readHead(workflow).trim().isNotEmpty;
++  } on FileSystemException {
++    return false;
++  } on FormatException {
++    return false;
++  }
+ }
+ 
+ /// 只读取文件开头，避免加载超大规则文件。

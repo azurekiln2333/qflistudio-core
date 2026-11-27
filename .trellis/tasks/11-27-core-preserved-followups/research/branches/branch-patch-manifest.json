@@ -1,0 +1,3569 @@
+{
+  "baseline": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+  "created_utc": "2026-11-27T08:00:00Z",
+  "method": "Each patch is a first-parent original commit diff filtered to approved source/docs. It is not applied, rebased, or merged. Patch-ID equivalence is text-level only; semantic supersession is pending and no feature activation/adoption is implied.",
+  "allowed_extensions": [
+    ".dart",
+    ".java",
+    ".kt",
+    ".xml",
+    ".gradle",
+    ".properties",
+    ".md"
+  ],
+  "excluded_classes": [
+    "workflow/config",
+    "binary or generated assets",
+    "transcript/log/fixture payloads",
+    "absolute machine paths or credential-like additions"
+  ],
+  "branches": [
+    {
+      "ref": "local/ci/mobile-diag",
+      "tip": "8a03c3077c65c728dccf9c2841f75ad1cde7b6d4",
+      "original_commit_order": [
+        "8d512245b3650aadcc8434ca134ab9b7c923d00c",
+        "8a03c3077c65c728dccf9c2841f75ad1cde7b6d4"
+      ],
+      "patch_order": []
+    },
+    {
+      "ref": "local/harness/pi-a",
+      "tip": "0917c93ba97392b4d5ec183a918dd94baaa5941a",
+      "original_commit_order": [
+        "9c7f99f67b03598d3d4acdf42a497377c2892be0",
+        "d5305dcaaacfc22d823cb755198368058bcf61ec",
+        "0917c93ba97392b4d5ec183a918dd94baaa5941a"
+      ],
+      "patch_order": [
+        "branch-063-1739b0e6e9e2.patch",
+        "branch-050-7a79abd1718f.patch",
+        "branch-037-895d74cc3a43.patch"
+      ]
+    },
+    {
+      "ref": "local/harness/pi-b",
+      "tip": "21152822e74d229e3b29a558c28cc4f4fbcbad2a",
+      "original_commit_order": [
+        "c1625ad65f78bf1d35b0ec9547c3da01c4d8f3e9",
+        "09df701f254134bde411cdee9ab1912a2ce5ca88",
+        "21152822e74d229e3b29a558c28cc4f4fbcbad2a"
+      ],
+      "patch_order": [
+        "branch-039-e7f31261900e.patch",
+        "branch-047-5c2b938855ad.patch",
+        "branch-018-2622aba8b8ed.patch"
+      ]
+    },
+    {
+      "ref": "local/harness/pi-c",
+      "tip": "4f59dc08997a524ed9c29a5e6565b6df020e26ae",
+      "original_commit_order": [
+        "37e8108276270d4b373df5f62fa25dada8f39609",
+        "31a7d8b965cf0a51b9058947e94750beb80b593a",
+        "4f59dc08997a524ed9c29a5e6565b6df020e26ae"
+      ],
+      "patch_order": [
+        "branch-027-fce034514975.patch",
+        "branch-029-16d8eba5a22d.patch",
+        "branch-003-d8f7d39ad6a8.patch"
+      ]
+    },
+    {
+      "ref": "local/harness/pi-d",
+      "tip": "d73db50b468b16f5242a44c72bfa25fc6ddf934a",
+      "original_commit_order": [
+        "56da9afc2c2f106ad70d46dc4973083594ab3804",
+        "db47ef61c2d291ddbee7cc589a885548dd146c03",
+        "ec110b27ea5d7dd0f4604e6a6e9a818d966786ac",
+        "d73db50b468b16f5242a44c72bfa25fc6ddf934a"
+      ],
+      "patch_order": [
+        "branch-001-fe2bc66780d1.patch",
+        "branch-064-1210cbcdaff4.patch",
+        "branch-033-d13d32dbd7df.patch",
+        "branch-038-c66fe09b82eb.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix-a",
+      "tip": "cc833796654586ae362b455e34aebf80eaf287df",
+      "original_commit_order": [
+        "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+        "ba4143256be7a772fdfc1fe156e9e15e177888da",
+        "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+        "038596102c1141a97d2269d2e42c2bf2715d2d94",
+        "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+        "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+        "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+        "3849a5add102551a434db2cfa9de2f69b7795623",
+        "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+        "470692e9779df5425855f61d6a43bdcbe1a1760b",
+        "cc833796654586ae362b455e34aebf80eaf287df"
+      ],
+      "patch_order": [
+        "branch-053-97686ef988b3.patch",
+        "branch-030-11e6deb59d05.patch",
+        "branch-005-aaf220933b83.patch",
+        "branch-040-6a9553c2f5b9.patch",
+        "branch-020-f3da89f9f942.patch",
+        "branch-008-5b0831bc874b.patch",
+        "branch-055-8674c0ab3a97.patch",
+        "branch-044-b73667f5682c.patch",
+        "branch-042-15adb212d8d3.patch",
+        "branch-031-7f2900041340.patch",
+        "branch-012-500c552463cf.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix-b",
+      "tip": "8dd54c38a97d15903f9fea51afc758f22a0c08f3",
+      "original_commit_order": [
+        "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+        "ba4143256be7a772fdfc1fe156e9e15e177888da",
+        "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+        "038596102c1141a97d2269d2e42c2bf2715d2d94",
+        "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+        "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+        "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+        "3849a5add102551a434db2cfa9de2f69b7795623",
+        "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+        "a9fa4bebe1c51ef18756ca872ae7bf8fb9e879c5",
+        "b3471a56ce204007500315a56386a94c48d2b30c",
+        "6a311070f4d48127f4be1901527ec74673919754",
+        "8dd54c38a97d15903f9fea51afc758f22a0c08f3"
+      ],
+      "patch_order": [
+        "branch-053-97686ef988b3.patch",
+        "branch-030-11e6deb59d05.patch",
+        "branch-005-aaf220933b83.patch",
+        "branch-040-6a9553c2f5b9.patch",
+        "branch-020-f3da89f9f942.patch",
+        "branch-008-5b0831bc874b.patch",
+        "branch-055-8674c0ab3a97.patch",
+        "branch-044-b73667f5682c.patch",
+        "branch-042-15adb212d8d3.patch",
+        "branch-049-b178de41e869.patch",
+        "branch-004-086afbfcf7d7.patch",
+        "branch-034-8386afddcc7d.patch",
+        "branch-023-23b481239a8f.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix-ci",
+      "tip": "618fa2c1282684af04d0e11b6e5f08434aa264d3",
+      "original_commit_order": [
+        "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+        "ba4143256be7a772fdfc1fe156e9e15e177888da",
+        "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+        "038596102c1141a97d2269d2e42c2bf2715d2d94",
+        "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+        "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+        "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+        "3849a5add102551a434db2cfa9de2f69b7795623",
+        "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+        "618fa2c1282684af04d0e11b6e5f08434aa264d3"
+      ],
+      "patch_order": [
+        "branch-053-97686ef988b3.patch",
+        "branch-030-11e6deb59d05.patch",
+        "branch-005-aaf220933b83.patch",
+        "branch-040-6a9553c2f5b9.patch",
+        "branch-020-f3da89f9f942.patch",
+        "branch-008-5b0831bc874b.patch",
+        "branch-055-8674c0ab3a97.patch",
+        "branch-044-b73667f5682c.patch",
+        "branch-042-15adb212d8d3.patch",
+        "branch-059-28d1c2d6164f.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix-d",
+      "tip": "58a73d68ca7f42da103212162ad5b3c5469eef35",
+      "original_commit_order": [
+        "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+        "ba4143256be7a772fdfc1fe156e9e15e177888da",
+        "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+        "038596102c1141a97d2269d2e42c2bf2715d2d94",
+        "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+        "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+        "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+        "3849a5add102551a434db2cfa9de2f69b7795623",
+        "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+        "58a73d68ca7f42da103212162ad5b3c5469eef35"
+      ],
+      "patch_order": [
+        "branch-053-97686ef988b3.patch",
+        "branch-030-11e6deb59d05.patch",
+        "branch-005-aaf220933b83.patch",
+        "branch-040-6a9553c2f5b9.patch",
+        "branch-020-f3da89f9f942.patch",
+        "branch-008-5b0831bc874b.patch",
+        "branch-055-8674c0ab3a97.patch",
+        "branch-044-b73667f5682c.patch",
+        "branch-042-15adb212d8d3.patch",
+        "branch-016-777ac89fa449.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix2-a",
+      "tip": "27534dd30120bae0d4b2594d38ba68a0a528326e",
+      "original_commit_order": [
+        "a9636fd27edc84ad75a3cd452305666c1dde0750",
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+        "ab64565c22637ed9a6e872be19d1b3193fae269a",
+        "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+        "2842e852893788262113d0eced22c0e1956dbdc9",
+        "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+        "3a569bbec3fd3460f9784737f9f2b3a328760caa",
+        "27534dd30120bae0d4b2594d38ba68a0a528326e"
+      ],
+      "patch_order": [
+        "branch-067-e8f4ddd44398.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix2-b",
+      "tip": "2eca924bf83ae59b0b838b0c0942fed6b3267c68",
+      "original_commit_order": [
+        "a9636fd27edc84ad75a3cd452305666c1dde0750",
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+        "ab64565c22637ed9a6e872be19d1b3193fae269a",
+        "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+        "2842e852893788262113d0eced22c0e1956dbdc9",
+        "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+        "2eca924bf83ae59b0b838b0c0942fed6b3267c68"
+      ],
+      "patch_order": [
+        "branch-067-e8f4ddd44398.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix2-ci",
+      "tip": "cefdf23f026c883aceca565e92729c0ef4f281e1",
+      "original_commit_order": [
+        "a9636fd27edc84ad75a3cd452305666c1dde0750",
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+        "ab64565c22637ed9a6e872be19d1b3193fae269a",
+        "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+        "2842e852893788262113d0eced22c0e1956dbdc9",
+        "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+        "cefdf23f026c883aceca565e92729c0ef4f281e1"
+      ],
+      "patch_order": [
+        "branch-067-e8f4ddd44398.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix2-d",
+      "tip": "b731bf94a05e241cad2193abd629c58bedb69c2d",
+      "original_commit_order": [
+        "a9636fd27edc84ad75a3cd452305666c1dde0750",
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+        "ab64565c22637ed9a6e872be19d1b3193fae269a",
+        "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+        "2842e852893788262113d0eced22c0e1956dbdc9",
+        "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+        "ab1fe83ab4c09d53968dd0dcec152fdcc60b64b7",
+        "b731bf94a05e241cad2193abd629c58bedb69c2d"
+      ],
+      "patch_order": [
+        "branch-067-e8f4ddd44398.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/fix3-d",
+      "tip": "63c5cf63f4dbb54e11b6a658a790a7f6fefba7f1",
+      "original_commit_order": [
+        "dd5243ee4afa50abfaf9f14ec1912cd7fc338d6f",
+        "63c5cf63f4dbb54e11b6a658a790a7f6fefba7f1"
+      ],
+      "patch_order": [
+        "branch-025-2ff130f2876f.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/integration",
+      "tip": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "original_commit_order": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+        "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006",
+        "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+        "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5"
+      ],
+      "patch_order": [
+        "branch-026-203d5cba8639.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pfix-a",
+      "tip": "19a5845af9391a797d3d4b0aff5dd9703821153f",
+      "original_commit_order": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+        "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006",
+        "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+        "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+        "19a5845af9391a797d3d4b0aff5dd9703821153f"
+      ],
+      "patch_order": [
+        "branch-026-203d5cba8639.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pfix-b",
+      "tip": "3bba2332d8348c5e89e8c1916c05b388ef8d3613",
+      "original_commit_order": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+        "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006",
+        "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+        "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+        "3bba2332d8348c5e89e8c1916c05b388ef8d3613"
+      ],
+      "patch_order": [
+        "branch-026-203d5cba8639.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pfix-d",
+      "tip": "2299d639bb86b3a065aa5dd62dc91f2970e41273",
+      "original_commit_order": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+        "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006",
+        "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+        "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+        "2299d639bb86b3a065aa5dd62dc91f2970e41273"
+      ],
+      "patch_order": [
+        "branch-026-203d5cba8639.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pi-a",
+      "tip": "88ba03172abe7a6aa96789665e5c556b871e44cc",
+      "original_commit_order": [
+        "b24fdbef0088bab88c41e7b084f2f10de7c38c82",
+        "caf5bf5d3fcf0045c1cc0483f97b8e208a79cfd6",
+        "88ba03172abe7a6aa96789665e5c556b871e44cc"
+      ],
+      "patch_order": [
+        "branch-053-97686ef988b3.patch",
+        "branch-046-5c17e5f0ef81.patch",
+        "branch-019-1eda56f0ae0c.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pi-b",
+      "tip": "08fe626a56caf225df7d6abf23320fa13c3f1b03",
+      "original_commit_order": [
+        "cf026d880905756cb7a70a803b5d210f60d44c6c",
+        "bd4def39a28ed069c4c53a5fdcebc38d8033bbc2",
+        "08fe626a56caf225df7d6abf23320fa13c3f1b03"
+      ],
+      "patch_order": [
+        "branch-030-11e6deb59d05.patch",
+        "branch-010-c48b0b22d7d4.patch",
+        "branch-017-d05d37ffdf79.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pi-c",
+      "tip": "8101548999d419c84e78f965ad6630554a77dc8e",
+      "original_commit_order": [
+        "d1c58da941be2fdad950c3ba4398ebff1b58465c",
+        "36436d81fad1e679d283f1b5b6c41171571977c5",
+        "8101548999d419c84e78f965ad6630554a77dc8e"
+      ],
+      "patch_order": [
+        "branch-054-f72a156f1980.patch",
+        "branch-058-19fe8a524838.patch",
+        "branch-024-d97bd0b534da.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/pi-d",
+      "tip": "ec04ba7d356dd1d1f8550d93d3e47cfe96bc38e1",
+      "original_commit_order": [
+        "7bf2f0c7927c5c61214b39b15ef7d74436599a3e",
+        "b7745fd2d3d6a9e69fc177fb78aaa0621c847caa",
+        "ec04ba7d356dd1d1f8550d93d3e47cfe96bc38e1"
+      ],
+      "patch_order": [
+        "branch-040-6a9553c2f5b9.patch",
+        "branch-048-7e01b683fa93.patch",
+        "branch-043-dc34858be8ac.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/polish",
+      "tip": "e12e6b56966051a968a2dcdaa5e970be36bb526e",
+      "original_commit_order": [
+        "8ec1cabe7f5077a1213732411e837b8ee72467dc",
+        "d804d69f62d884afa832bcfbe6abb5fa827eba0e",
+        "ce57d0da59b0182ac0233c059a159fda1bec7aa5",
+        "e12e6b56966051a968a2dcdaa5e970be36bb526e"
+      ],
+      "patch_order": [
+        "branch-065-57a5953a8386.patch",
+        "branch-036-c13959f14133.patch",
+        "branch-062-29dc0d857fc1.patch",
+        "branch-056-cd7d05dac0d4.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/polish-a",
+      "tip": "cc7e88b97ab672e9bc2bea1c49f61cb3ffc90d64",
+      "original_commit_order": [
+        "cc7e88b97ab672e9bc2bea1c49f61cb3ffc90d64"
+      ],
+      "patch_order": [
+        "branch-028-1fabd6c42ef0.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/polish-b",
+      "tip": "d262af9e92f2361e72e04f614b4210b8b0593c7c",
+      "original_commit_order": [
+        "0f613969d69f2caf32a88fb6ea641abc1d2534c2",
+        "d262af9e92f2361e72e04f614b4210b8b0593c7c"
+      ],
+      "patch_order": [
+        "branch-006-d84e8c7267c8.patch",
+        "branch-041-c4c4663ef85a.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/polish-c",
+      "tip": "fd2dd927b2fb306f21dad203925d5d65eaafc689",
+      "original_commit_order": [
+        "fd2dd927b2fb306f21dad203925d5d65eaafc689"
+      ],
+      "patch_order": [
+        "branch-062-29dc0d857fc1.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/polish-d",
+      "tip": "ef69fbd80bb94daf2e7bbee6f92bff32186ffe2a",
+      "original_commit_order": [
+        "207b2ad6efa66625d04f52aa35e1933612498e80",
+        "ef69fbd80bb94daf2e7bbee6f92bff32186ffe2a"
+      ],
+      "patch_order": [
+        "branch-011-541668e96d38.patch",
+        "branch-015-cd06a4dafcf5.patch"
+      ]
+    },
+    {
+      "ref": "local/wsui/shots",
+      "tip": "a661f54ca9fe54276f39cabd119e4d61b5015d8e",
+      "original_commit_order": [
+        "a661f54ca9fe54276f39cabd119e4d61b5015d8e"
+      ],
+      "patch_order": [
+        "branch-032-6e85614804d4.patch"
+      ]
+    },
+    {
+      "ref": "remote/github/ci/mobile-diag",
+      "tip": "8a03c3077c65c728dccf9c2841f75ad1cde7b6d4",
+      "original_commit_order": [
+        "8d512245b3650aadcc8434ca134ab9b7c923d00c",
+        "8a03c3077c65c728dccf9c2841f75ad1cde7b6d4"
+      ],
+      "patch_order": []
+    },
+    {
+      "ref": "remote/github/wsui/integration",
+      "tip": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "original_commit_order": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+        "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006",
+        "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+        "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5"
+      ],
+      "patch_order": [
+        "branch-026-203d5cba8639.patch"
+      ]
+    }
+  ],
+  "commits": [
+    {
+      "commit": "db47ef61c2d291ddbee7cc589a885548dd146c03",
+      "parent": "56da9afc2c2f106ad70d46dc4973083594ab3804",
+      "subject": "fix(agent): read enough bytes for multi-byte skill bodies",
+      "refs": [
+        "local/harness/pi-d"
+      ],
+      "changed_paths": [
+        "lib/vibe_coding/vibe_skills.dart"
+      ],
+      "included_paths": [
+        "lib/vibe_coding/vibe_skills.dart"
+      ],
+      "excluded": [],
+      "patch_id": "1210cbcdaff4959d16f980d9388bde3546f85975",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-064-1210cbcdaff4.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "8101548999d419c84e78f965ad6630554a77dc8e",
+      "parent": "36436d81fad1e679d283f1b5b6c41171571977c5",
+      "subject": "fix(review): follow replacement session hubs",
+      "refs": [
+        "local/wsui/pi-c"
+      ],
+      "changed_paths": [
+        "lib/harness/ui/agents_entry.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/ui/agents_entry.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d97bd0b534da0509718bc6940c09bbaf30f08bcc",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-024-d97bd0b534da.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "d5305dcaaacfc22d823cb755198368058bcf61ec",
+      "parent": "9c7f99f67b03598d3d4acdf42a497377c2892be0",
+      "subject": "fix(harness): keep live session capabilities truthful",
+      "refs": [
+        "local/harness/pi-a"
+      ],
+      "changed_paths": [
+        "lib/harness/local/local_harness_host.dart",
+        "test/harness/local/local_harness_host_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/local/local_harness_host.dart",
+        "test/harness/local/local_harness_host_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7a79abd1718f216de08ba9f0ec7197ca0fe15820",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-050-7a79abd1718f.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "b7745fd2d3d6a9e69fc177fb78aaa0621c847caa",
+      "parent": "7bf2f0c7927c5c61214b39b15ef7d74436599a3e",
+      "subject": "feat(workbench): give the large-screen shell MD3 page chrome",
+      "refs": [
+        "local/wsui/pi-d"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7e01b683fa93b909cde73cfb35466a59517d5dd2",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-048-7e01b683fa93.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "131baedef643dd0992320577e6305a885e728701",
+      "parent": "329f1782318b047e9a86fc930a2c6320a765598d",
+      "subject": "feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "8b6fcc85e7ac5fc161cd87e0f4148eb18035f3d8",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701"
+      ]
+    },
+    {
+      "commit": "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+      "parent": "3849a5add102551a434db2cfa9de2f69b7795623",
+      "subject": "test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "15adb212d8d3c055ebfafcfe5543de906d6722a3",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-042-15adb212d8d3.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "d73db50b468b16f5242a44c72bfa25fc6ddf934a",
+      "parent": "ec110b27ea5d7dd0f4604e6a6e9a818d966786ac",
+      "subject": "fix(agent): honor review findings in skills, Trellis and studio host",
+      "refs": [
+        "local/harness/pi-d"
+      ],
+      "changed_paths": [
+        "lib/harness/studio/studio_agent_host.dart",
+        "lib/trellis/trellis_context.dart",
+        "lib/trellis/trellis_panel.dart",
+        "lib/trellis/trellis_project.dart",
+        "lib/vibe_coding/vibe_agent_facade.dart",
+        "lib/vibe_coding/vibe_coding_controller.dart",
+        "lib/vibe_coding/vibe_rules.dart",
+        "lib/vibe_coding/vibe_skills.dart",
+        "test/studio_agent_host_test.dart",
+        "test/trellis_context_test.dart",
+        "test/trellis_project_test.dart",
+        "test/vibe_agent_facade_test.dart",
+        "test/vibe_trellis_session_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/studio/studio_agent_host.dart",
+        "lib/trellis/trellis_context.dart",
+        "lib/trellis/trellis_panel.dart",
+        "lib/trellis/trellis_project.dart",
+        "lib/vibe_coding/vibe_agent_facade.dart",
+        "lib/vibe_coding/vibe_coding_controller.dart",
+        "lib/vibe_coding/vibe_rules.dart",
+        "lib/vibe_coding/vibe_skills.dart",
+        "test/studio_agent_host_test.dart",
+        "test/trellis_context_test.dart",
+        "test/trellis_project_test.dart",
+        "test/vibe_agent_facade_test.dart",
+        "test/vibe_trellis_session_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "c66fe09b82eb8b941a7e14bcb06271336efc9ec2",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-038-c66fe09b82eb.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "0917c93ba97392b4d5ec183a918dd94baaa5941a",
+      "parent": "d5305dcaaacfc22d823cb755198368058bcf61ec",
+      "subject": "fix(harness): address the local host review findings",
+      "refs": [
+        "local/harness/pi-a"
+      ],
+      "changed_paths": [
+        "lib/harness/local/README.md",
+        "lib/harness/local/claude_code_log_reader.dart",
+        "lib/harness/local/codex_log_reader.dart",
+        "lib/harness/local/harness_provider.dart",
+        "lib/harness/local/live_log_follower.dart",
+        "lib/harness/local/local_harness_host.dart",
+        "lib/harness/local/pi_log_reader.dart",
+        "lib/harness/local/provider_registry.dart",
+        "lib/harness/local/pty_process.dart",
+        "lib/harness/local/studio_mux.dart",
+        "lib/harness/local/transcript_log_reader.dart",
+        "test/harness/local/claude_code_log_reader_test.dart",
+        "test/harness/local/codex_log_reader_test.dart",
+        "test/harness/local/executable_locator_test.dart",
+        "test/harness/local/live_log_follower_test.dart",
+        "test/harness/local/local_harness_host_test.dart",
+        "test/harness/local/provider_registry_test.dart",
+        "test/harness/local/pty_process_test.dart",
+        "test/harness/local/studio_mux_test.dart",
+        "test/harness/local/support/fake_pty.dart"
+      ],
+      "included_paths": [
+        "lib/harness/local/README.md",
+        "lib/harness/local/claude_code_log_reader.dart",
+        "lib/harness/local/codex_log_reader.dart",
+        "lib/harness/local/harness_provider.dart",
+        "lib/harness/local/live_log_follower.dart",
+        "lib/harness/local/local_harness_host.dart",
+        "lib/harness/local/pi_log_reader.dart",
+        "lib/harness/local/provider_registry.dart",
+        "lib/harness/local/pty_process.dart",
+        "lib/harness/local/studio_mux.dart",
+        "lib/harness/local/transcript_log_reader.dart",
+        "test/harness/local/claude_code_log_reader_test.dart",
+        "test/harness/local/codex_log_reader_test.dart",
+        "test/harness/local/executable_locator_test.dart",
+        "test/harness/local/local_harness_host_test.dart",
+        "test/harness/local/provider_registry_test.dart",
+        "test/harness/local/pty_process_test.dart",
+        "test/harness/local/studio_mux_test.dart",
+        "test/harness/local/support/fake_pty.dart"
+      ],
+      "excluded": [
+        {
+          "path": "test/harness/local/live_log_follower_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        }
+      ],
+      "patch_id": "895d74cc3a43023df50c3b5518ca5fb1ffc679c9",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-037-895d74cc3a43.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ac057c6d0a4b1748900ad6ad7444771263e07381",
+      "parent": "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+      "subject": "fix(agents): open workbench sessions in their own project or chat",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "596a3866e1bbdf17e160af440cf3770b8c14d140",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381"
+      ]
+    },
+    {
+      "commit": "ba4143256be7a772fdfc1fe156e9e15e177888da",
+      "parent": "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+      "subject": "fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "11e6deb59d050f0e56a0d08581ae175bef0a182e",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-030-11e6deb59d05.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+      "parent": "b8feb3ec0d0626802dfc32844fa8e5a3418d4c61",
+      "subject": "fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "203d5cba8639a68e85237ec158c708abdddd9deb",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-026-203d5cba8639.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "36436d81fad1e679d283f1b5b6c41171571977c5",
+      "parent": "d1c58da941be2fdad950c3ba4398ebff1b58465c",
+      "subject": "feat(agents): apply workbench density and adaptive intake visuals",
+      "refs": [
+        "local/wsui/pi-c"
+      ],
+      "changed_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "included_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "19fe8a524838c0c128a67f2db8acb9438fb5b3a7",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-058-19fe8a524838.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+      "parent": "ab64565c22637ed9a6e872be19d1b3193fae269a",
+      "subject": "feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "cb4097efefb528d9b1cd3b7337d3d234c2fb1739",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381"
+      ]
+    },
+    {
+      "commit": "58a73d68ca7f42da103212162ad5b3c5469eef35",
+      "parent": "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+      "subject": "fixup! feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "777ac89fa449988719ae426735c441e00dc433c2",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-016-777ac89fa449.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "88ba03172abe7a6aa96789665e5c556b871e44cc",
+      "parent": "caf5bf5d3fcf0045c1cc0483f97b8e208a79cfd6",
+      "subject": "fix(review): avoid duplicate workbench project entries",
+      "refs": [
+        "local/wsui/pi-a"
+      ],
+      "changed_paths": [
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "included_paths": [
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "1eda56f0ae0c359d789675f1880bc36f239244bb",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-019-1eda56f0ae0c.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "56da9afc2c2f106ad70d46dc4973083594ab3804",
+      "parent": "f9b648537fe862e3c26835b430bef54dc53f061c",
+      "subject": "feat(agent): discover project skills and inject Trellis context",
+      "refs": [
+        "local/harness/pi-d"
+      ],
+      "changed_paths": [
+        "lib/harness/studio/studio_agent_host.dart",
+        "lib/trellis/trellis_commands.dart",
+        "lib/trellis/trellis_context.dart",
+        "lib/trellis/trellis_panel.dart",
+        "lib/trellis/trellis_project.dart",
+        "lib/trellis/trellis_task_panel_view.dart",
+        "lib/vibe_coding/vibe_agent_facade.dart",
+        "lib/vibe_coding/vibe_coding_controller.dart",
+        "lib/vibe_coding/vibe_rules.dart",
+        "lib/vibe_coding/vibe_skills.dart",
+        "test/studio_agent_host_test.dart",
+        "test/support/trellis_fixture.dart",
+        "test/trellis_context_test.dart",
+        "test/trellis_project_test.dart",
+        "test/vibe_coding_skills_test.dart",
+        "test/vibe_skill_discovery_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/studio/studio_agent_host.dart",
+        "lib/trellis/trellis_commands.dart",
+        "lib/trellis/trellis_context.dart",
+        "lib/trellis/trellis_panel.dart",
+        "lib/trellis/trellis_project.dart",
+        "lib/trellis/trellis_task_panel_view.dart",
+        "lib/vibe_coding/vibe_agent_facade.dart",
+        "lib/vibe_coding/vibe_coding_controller.dart",
+        "lib/vibe_coding/vibe_rules.dart",
+        "lib/vibe_coding/vibe_skills.dart",
+        "test/studio_agent_host_test.dart",
+        "test/support/trellis_fixture.dart",
+        "test/trellis_context_test.dart",
+        "test/trellis_project_test.dart",
+        "test/vibe_coding_skills_test.dart",
+        "test/vibe_skill_discovery_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "fe2bc66780d18001ce144aed7d248fd77fee42e9",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-001-fe2bc66780d1.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "a661f54ca9fe54276f39cabd119e4d61b5015d8e",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/shots"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "6e85614804d43f152023a4b018281b0dc07bf773",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-032-6e85614804d4.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+      "parent": "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+      "subject": "feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_controller.dart",
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_controller.dart",
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "95eb6b6d2993cac8bfb57107fcbc6e3296d964d2",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701"
+      ]
+    },
+    {
+      "commit": "207b2ad6efa66625d04f52aa35e1933612498e80",
+      "parent": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+      "subject": "fixup! feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/polish-d"
+      ],
+      "changed_paths": [
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "541668e96d38a3b93f566541147ac312f9e9652c",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-011-541668e96d38.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "038596102c1141a97d2269d2e42c2bf2715d2d94",
+      "parent": "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+      "subject": "feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "6a9553c2f5b9981d65553112e1e1407a9e949562",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-040-6a9553c2f5b9.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "6a311070f4d48127f4be1901527ec74673919754",
+      "parent": "b3471a56ce204007500315a56386a94c48d2b30c",
+      "subject": "fixup! fix(agents): open workbench sessions in their own project or chat",
+      "refs": [
+        "local/wsui/fix-b"
+      ],
+      "changed_paths": [
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "8386afddcc7dd0c0090b63de2cba5629c3f5814f",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-034-8386afddcc7d.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "a9fa4bebe1c51ef18756ca872ae7bf8fb9e879c5",
+      "parent": "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+      "subject": "fixup! fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/fix-b"
+      ],
+      "changed_paths": [
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "b178de41e8693dd8a9f55e5fa28041b3d8d73423",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-049-b178de41e869.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "2842e852893788262113d0eced22c0e1956dbdc9",
+      "parent": "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+      "subject": "feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "b73667f5682cb70812b547c54271c753c482d421",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "fd2dd927b2fb306f21dad203925d5d65eaafc689",
+      "parent": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+      "subject": "fixup! fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/polish-c"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "29dc0d857fc16d18c9b5a66796336955be0cdfc6",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-062-29dc0d857fc1.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "3134e1ab46850bed3a2dcdf32719b3d170948006",
+      "parent": "2a3e7d2f98321bb0ccd10efe316344279ac5b8a6",
+      "subject": "feat(agents): apply workbench density and adaptive intake visuals",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "included_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7bbf23f57a4480c7469b0db9b52b82bdcf2b2b13",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "0f613969d69f2caf32a88fb6ea641abc1d2534c2",
+      "parent": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+      "subject": "fixup! feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/polish-b"
+      ],
+      "changed_paths": [
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d84e8c7267c87920b9beb43a6a59dcf5d40c2f5b",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-006-d84e8c7267c8.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "3849a5add102551a434db2cfa9de2f69b7795623",
+      "parent": "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+      "subject": "feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "b73667f5682cb70812b547c54271c753c482d421",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-044-b73667f5682c.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ce57d0da59b0182ac0233c059a159fda1bec7aa5",
+      "parent": "d804d69f62d884afa832bcfbe6abb5fa827eba0e",
+      "subject": "style(agents): one Agent pane header and one new-session button",
+      "refs": [
+        "local/wsui/polish"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "test/harness/hub_ui_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "29dc0d857fc16d18c9b5a66796336955be0cdfc6",
+      "status": "deduplicated-identical-patch-id",
+      "patch_file": "branch-062-29dc0d857fc1.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "8a03c3077c65c728dccf9c2841f75ad1cde7b6d4",
+      "parent": "8d512245b3650aadcc8434ca134ab9b7c923d00c",
+      "subject": "test(agents): release semantics before widget test invariants",
+      "refs": [
+        "local/ci/mobile-diag",
+        "remote/github/ci/mobile-diag"
+      ],
+      "changed_paths": [
+        "test/harness/home_agents_tab_test.dart"
+      ],
+      "included_paths": [
+        "test/harness/home_agents_tab_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d66145efa3de872907ca75567450b139cbab9f7b",
+      "status": "test-content-equivalent-to-published-ancestor",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "d3d899571382121d3b5d69dd36b60222e5fa0b37"
+      ],
+      "equivalence_evidence": "test/harness/home_agents_tab_test.dart blob change 74cd815 to 9b8c916 matches published content; do not replay or duplicate"
+    },
+    {
+      "commit": "d804d69f62d884afa832bcfbe6abb5fa827eba0e",
+      "parent": "8ec1cabe7f5077a1213732411e837b8ee72467dc",
+      "subject": "style(explorer): one header for the Files page",
+      "refs": [
+        "local/wsui/polish"
+      ],
+      "changed_paths": [
+        "lib/editor/file_explorer.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/file_explorer.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart",
+        "test/file_explorer_workbench_header_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "c13959f14133ff41974ceeacaff01b65a689a385",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-036-c13959f14133.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+      "parent": "ac057c6d0a4b1748900ad6ad7444771263e07381",
+      "subject": "feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "5f0e316a0c0583ea84642072c2a13099c53e9b6f",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381"
+      ]
+    },
+    {
+      "commit": "329f1782318b047e9a86fc930a2c6320a765598d",
+      "parent": "c2ec08c722cb6e452217ba64261807bae6cf4af3",
+      "subject": "fix(agents): open workbench sessions in their own project or chat",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "596a3866e1bbdf17e160af440cf3770b8c14d140",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d"
+      ]
+    },
+    {
+      "commit": "8ec1cabe7f5077a1213732411e837b8ee72467dc",
+      "parent": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+      "subject": "style(workbench): MD3 menus, rail capsules and shortcut hints",
+      "refs": [
+        "local/wsui/polish"
+      ],
+      "changed_paths": [
+        "lib/chat/agent_context_indicator.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_explorer_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "included_paths": [
+        "lib/chat/agent_context_indicator.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_explorer_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "57a5953a8386436a9d65a59729f358a8c86d644e",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-065-57a5953a8386.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "08fe626a56caf225df7d6abf23320fa13c3f1b03",
+      "parent": "bd4def39a28ed069c4c53a5fdcebc38d8033bbc2",
+      "subject": "fix(review): preserve workbench actions and retained editor behavior",
+      "refs": [
+        "local/wsui/pi-b"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d05d37ffdf79038a4d5a656d6f06fc60be520e3c",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-017-d05d37ffdf79.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ec04ba7d356dd1d1f8550d93d3e47cfe96bc38e1",
+      "parent": "b7745fd2d3d6a9e69fc177fb78aaa0621c847caa",
+      "subject": "fix(review): correct workbench settings and content layouts",
+      "refs": [
+        "local/wsui/pi-d"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "dc34858be8ac47bcd5d522f2972e2c18fa7a6a8a",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-043-dc34858be8ac.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "parent": "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+      "subject": "test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "ad73d6ceb2e2e6cf72cbbfa82339f2588b245afa",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "9cb9e1b52ed01178f8f534ed562365b31594b51b",
+      "parent": "3134e1ab46850bed3a2dcdf32719b3d170948006",
+      "subject": "feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "a7372b19064b1c40fed53aaf561d1e65f7f008b8",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "c1625ad65f78bf1d35b0ec9547c3da01c4d8f3e9",
+      "parent": "f9b648537fe862e3c26835b430bef54dc53f061c",
+      "subject": "feat(harness): add the herdr host and the remote harness host",
+      "refs": [
+        "local/harness/pi-b"
+      ],
+      "changed_paths": [
+        "lib/harness/herdr/herdr.dart",
+        "lib/harness/herdr/herdr_cli.dart",
+        "lib/harness/herdr/herdr_host.dart",
+        "lib/harness/herdr/herdr_input.dart",
+        "lib/harness/herdr/herdr_models.dart",
+        "lib/harness/herdr/herdr_platform.dart",
+        "lib/harness/herdr/herdr_platform_io.dart",
+        "lib/harness/herdr/herdr_platform_stub.dart",
+        "lib/harness/herdr/herdr_session.dart",
+        "lib/harness/herdr/herdr_terminal.dart",
+        "lib/harness/pty/harness_pty.dart",
+        "lib/harness/remote/remote_harness.dart",
+        "lib/harness/remote/remote_harness_host.dart",
+        "lib/harness/remote/remote_mapping.dart",
+        "lib/harness/remote/remote_ports.dart",
+        "lib/harness/remote/remote_session.dart",
+        "lib/harness/remote/remote_terminal.dart",
+        "test/harness_herdr_cli_test.dart",
+        "test/harness_herdr_host_test.dart",
+        "test/harness_herdr_input_test.dart",
+        "test/harness_herdr_models_test.dart",
+        "test/harness_herdr_platform_test.dart",
+        "test/harness_remote_host_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/herdr/herdr.dart",
+        "lib/harness/herdr/herdr_cli.dart",
+        "lib/harness/herdr/herdr_host.dart",
+        "lib/harness/herdr/herdr_input.dart",
+        "lib/harness/herdr/herdr_models.dart",
+        "lib/harness/herdr/herdr_platform.dart",
+        "lib/harness/herdr/herdr_platform_io.dart",
+        "lib/harness/herdr/herdr_platform_stub.dart",
+        "lib/harness/herdr/herdr_session.dart",
+        "lib/harness/herdr/herdr_terminal.dart",
+        "lib/harness/pty/harness_pty.dart",
+        "lib/harness/remote/remote_harness.dart",
+        "lib/harness/remote/remote_harness_host.dart",
+        "lib/harness/remote/remote_mapping.dart",
+        "lib/harness/remote/remote_ports.dart",
+        "lib/harness/remote/remote_session.dart",
+        "lib/harness/remote/remote_terminal.dart",
+        "test/harness_herdr_cli_test.dart",
+        "test/harness_herdr_host_test.dart",
+        "test/harness_herdr_input_test.dart",
+        "test/harness_remote_host_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": "test/harness_herdr_models_test.dart",
+          "reason": "excluded embedded Herdr fixture: comment attributes fields to real command output; exact IDs, cwd/title/session values have unverified provenance, so the full file section is withheld and is not labeled synthetic."
+        },
+        {
+          "path": "test/harness_herdr_platform_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        }
+      ],
+      "original_patch_id": "29a0f00a7bbc903ecffa8d0a2cdc55a3b1387a64",
+      "patch_id": "581df5505cbdc5c1276e788ec6a98f37252f0dbb",
+      "status": "exported-with-unreviewed-fixture-excluded",
+      "patch_file": "branch-039-e7f31261900e.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "19a5845af9391a797d3d4b0aff5dd9703821153f",
+      "parent": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "subject": "test(workbench): align chrome checks with native lifecycles",
+      "refs": [
+        "local/wsui/pfix-a"
+      ],
+      "changed_paths": [
+        "test/workbench_chrome_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "included_paths": [
+        "test/workbench_chrome_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7ae1129152e03828cbdbc0494941ae3418778f8f",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "cc833796654586ae362b455e34aebf80eaf287df",
+      "parent": "470692e9779df5425855f61d6a43bdcbe1a1760b",
+      "subject": "fixup! feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/fix-a"
+      ],
+      "changed_paths": [
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_chrome_test.dart"
+      ],
+      "included_paths": [
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_chrome_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "500c552463cf609d5ac44a2d49532a7d1f5b2910",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-012-500c552463cf.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ec110b27ea5d7dd0f4604e6a6e9a818d966786ac",
+      "parent": "db47ef61c2d291ddbee7cc589a885548dd146c03",
+      "subject": "fix(agent): gate Trellis slash commands on a real workflow",
+      "refs": [
+        "local/harness/pi-d"
+      ],
+      "changed_paths": [
+        "lib/trellis/trellis_commands.dart"
+      ],
+      "included_paths": [
+        "lib/trellis/trellis_commands.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d13d32dbd7dfed00f7f966a878438235b52b9d74",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-033-d13d32dbd7df.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+      "parent": "a9636fd27edc84ad75a3cd452305666c1dde0750",
+      "subject": "fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "09277662cd15374897b29c9eef9573c05062c9a6",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0"
+      ]
+    },
+    {
+      "commit": "37e8108276270d4b373df5f62fa25dada8f39609",
+      "parent": "f9b648537fe862e3c26835b430bef54dc53f061c",
+      "subject": "feat(harness): add agents hub and unified Agents surface",
+      "refs": [
+        "local/harness/pi-c"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/session_list_view.dart",
+        "lib/editor/editor_page.dart",
+        "lib/editor/retained_editor_host.dart",
+        "lib/harness/hub/harness_hosts.dart",
+        "lib/harness/hub/harness_hub.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_chat_view.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "lib/harness/ui/hub_session_view.dart",
+        "lib/harness/ui/hub_status.dart",
+        "lib/harness/ui/hub_terminal_key_bar.dart",
+        "lib/harness/ui/hub_terminal_view.dart",
+        "lib/pages/devices_remote_page.dart",
+        "lib/pages/settings_page.dart",
+        "test/harness/harness_hub_test.dart",
+        "test/harness/hub_ui_test.dart",
+        "test/support/fake_harness_host.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/session_list_view.dart",
+        "lib/editor/editor_page.dart",
+        "lib/editor/retained_editor_host.dart",
+        "lib/harness/hub/harness_hosts.dart",
+        "lib/harness/hub/harness_hub.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_chat_view.dart",
+        "lib/harness/ui/hub_host_switcher.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "lib/harness/ui/hub_session_view.dart",
+        "lib/harness/ui/hub_status.dart",
+        "lib/harness/ui/hub_terminal_key_bar.dart",
+        "lib/harness/ui/hub_terminal_view.dart",
+        "lib/pages/devices_remote_page.dart",
+        "lib/pages/settings_page.dart",
+        "test/harness/harness_hub_test.dart",
+        "test/harness/hub_ui_test.dart",
+        "test/support/fake_harness_host.dart"
+      ],
+      "excluded": [],
+      "patch_id": "fce03451497510a4ac8da43ccc83b99b54e13313",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-027-fce034514975.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "fix(workbench): unify explorer and restore project navigation",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "97686ef988b3dcb33f6b60289db0722ad8d40d88",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-053-97686ef988b3.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "470692e9779df5425855f61d6a43bdcbe1a1760b",
+      "parent": "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+      "subject": "fixup! fix(workbench): unify explorer and restore project navigation",
+      "refs": [
+        "local/wsui/fix-a"
+      ],
+      "changed_paths": [
+        "test/large_screen_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "test/large_screen_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7f2900041340d904aea1548f491f493f0c4b365f",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-031-7f2900041340.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "27534dd30120bae0d4b2594d38ba68a0a528326e",
+      "parent": "3a569bbec3fd3460f9784737f9f2b3a328760caa",
+      "subject": "fixup! feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/fix2-a"
+      ],
+      "changed_paths": [
+        "test/retained_editor_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "included_paths": [
+        "test/retained_editor_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "3439a6565ac52c3543008d5107f11c157ab70b88",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "bd4def39a28ed069c4c53a5fdcebc38d8033bbc2",
+      "parent": "cf026d880905756cb7a70a803b5d210f60d44c6c",
+      "subject": "feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/pi-b"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "c48b0b22d7d4c0729c3ac08dbbc022c3e0bfe7f1",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-010-c48b0b22d7d4.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "b731bf94a05e241cad2193abd629c58bedb69c2d",
+      "parent": "ab1fe83ab4c09d53968dd0dcec152fdcc60b64b7",
+      "subject": "fixup! feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "included_paths": [
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "08b07c11cc2b4a0cbc199718799f7bcca267045b",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+      "parent": "038596102c1141a97d2269d2e42c2bf2715d2d94",
+      "subject": "feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "f3da89f9f942e282e1b63aa3162e9534a7f1cf39",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-020-f3da89f9f942.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "09df701f254134bde411cdee9ab1912a2ce5ca88",
+      "parent": "c1625ad65f78bf1d35b0ec9547c3da01c4d8f3e9",
+      "subject": "fix(harness): read remote herdr panes instead of a stale push cache",
+      "refs": [
+        "local/harness/pi-b"
+      ],
+      "changed_paths": [
+        "lib/harness/remote/remote_session.dart"
+      ],
+      "included_paths": [
+        "lib/harness/remote/remote_session.dart"
+      ],
+      "excluded": [],
+      "patch_id": "5c2b938855ad4d0f3130512d17a1114998382fb5",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-047-5c2b938855ad.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "a114dd6c518961c5e31e4185ff9cc29610c56f84",
+      "parent": "131baedef643dd0992320577e6305a885e728701",
+      "subject": "feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/integration",
+        "local/wsui/pfix-a",
+        "local/wsui/pfix-b",
+        "local/wsui/pfix-d",
+        "remote/github/wsui/integration"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/chat/agent_context_indicator.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart",
+        "test/workbench_explorer_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/chat/agent_context_indicator.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart",
+        "test/workbench_explorer_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "4dfbb3bda32742d81c771602ea500704547fbc20",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701"
+      ]
+    },
+    {
+      "commit": "e12e6b56966051a968a2dcdaa5e970be36bb526e",
+      "parent": "ce57d0da59b0182ac0233c059a159fda1bec7aa5",
+      "subject": "style(settings): category detail and more screenshot scenes",
+      "refs": [
+        "local/wsui/polish"
+      ],
+      "changed_paths": [
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/settings_page.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "cd7d05dac0d4d37fbf89618a649e016b192af0e0",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-056-cd7d05dac0d4.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ef69fbd80bb94daf2e7bbee6f92bff32186ffe2a",
+      "parent": "207b2ad6efa66625d04f52aa35e1933612498e80",
+      "subject": "fixup! test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/polish-d"
+      ],
+      "changed_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "cd06a4dafcf51c2c4483e96456b9c045fbf1d310",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-015-cd06a4dafcf5.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "cf026d880905756cb7a70a803b5d210f60d44c6c",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "fix(editor): simplify workbench chrome and add editor shortcuts",
+      "refs": [
+        "local/wsui/pi-b"
+      ],
+      "changed_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/agent/agent_dock.dart",
+        "lib/editor/editor_page.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "11e6deb59d050f0e56a0d08581ae175bef0a182e",
+      "status": "deduplicated-identical-patch-id",
+      "patch_file": "branch-030-11e6deb59d05.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "8d512245b3650aadcc8434ca134ab9b7c923d00c",
+      "parent": "45ff45449a9dc4b2cf3cd79f722c0f0709bafb92",
+      "subject": "ci(diagnostics): isolate mobile widget async failures",
+      "refs": [
+        "local/ci/mobile-diag",
+        "remote/github/ci/mobile-diag"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml"
+      ],
+      "included_paths": [],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": null,
+      "status": "excluded-no-safe-source-delta",
+      "patch_file": null,
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "9c7f99f67b03598d3d4acdf42a497377c2892be0",
+      "parent": "f9b648537fe862e3c26835b430bef54dc53f061c",
+      "subject": "feat(harness): add the local harness host",
+      "refs": [
+        "local/harness/pi-a"
+      ],
+      "changed_paths": [
+        "lib/harness/local/README.md",
+        "lib/harness/local/claude_code_log_reader.dart",
+        "lib/harness/local/codex_log_reader.dart",
+        "lib/harness/local/executable_locator.dart",
+        "lib/harness/local/harness_provider.dart",
+        "lib/harness/local/live_log_follower.dart",
+        "lib/harness/local/local_harness_host.dart",
+        "lib/harness/local/log_reader_factory.dart",
+        "lib/harness/local/pi_log_reader.dart",
+        "lib/harness/local/provider_registry.dart",
+        "lib/harness/local/pty_process.dart",
+        "lib/harness/local/studio_mux.dart",
+        "lib/harness/local/terminal_scrollback.dart",
+        "lib/harness/local/transcript_log_reader.dart",
+        "test/harness/local/claude_code_log_reader_test.dart",
+        "test/harness/local/codex_log_reader_test.dart",
+        "test/harness/local/executable_locator_test.dart",
+        "test/harness/local/fixtures/home/.claude/projects/-home-dev-proj/session-abc.jsonl",
+        "test/harness/local/fixtures/home/.codex/sessions/2026/11/20/rollout-2026-11-20T10-00-00-abc.jsonl",
+        "test/harness/local/fixtures/home/.codex/sessions/2026/11/21/rollout-2026-11-21T09-00-00-def.jsonl",
+        "test/harness/local/fixtures/home/.pi/agent/sessions/-home-dev-pi/2026-11-20_abc.jsonl",
+        "test/harness/local/live_log_follower_test.dart",
+        "test/harness/local/local_harness_host_test.dart",
+        "test/harness/local/pi_log_reader_test.dart",
+        "test/harness/local/provider_registry_test.dart",
+        "test/harness/local/studio_mux_test.dart",
+        "test/harness/local/support/fake_pty.dart",
+        "test/harness/local/terminal_scrollback_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/local/README.md",
+        "lib/harness/local/claude_code_log_reader.dart",
+        "lib/harness/local/codex_log_reader.dart",
+        "lib/harness/local/executable_locator.dart",
+        "lib/harness/local/harness_provider.dart",
+        "lib/harness/local/live_log_follower.dart",
+        "lib/harness/local/local_harness_host.dart",
+        "lib/harness/local/log_reader_factory.dart",
+        "lib/harness/local/pi_log_reader.dart",
+        "lib/harness/local/provider_registry.dart",
+        "lib/harness/local/pty_process.dart",
+        "lib/harness/local/studio_mux.dart",
+        "lib/harness/local/terminal_scrollback.dart",
+        "lib/harness/local/transcript_log_reader.dart",
+        "test/harness/local/local_harness_host_test.dart",
+        "test/harness/local/support/fake_pty.dart",
+        "test/harness/local/terminal_scrollback_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": "test/harness/local/fixtures/home/.claude/projects/-home-dev-proj/session-abc.jsonl",
+          "reason": "transcript/log/fixture payload withheld pending privacy review"
+        },
+        {
+          "path": "test/harness/local/fixtures/home/.codex/sessions/2026/11/20/rollout-2026-11-20T10-00-00-abc.jsonl",
+          "reason": "transcript/log/fixture payload withheld pending privacy review"
+        },
+        {
+          "path": "test/harness/local/fixtures/home/.codex/sessions/2026/11/21/rollout-2026-11-21T09-00-00-def.jsonl",
+          "reason": "transcript/log/fixture payload withheld pending privacy review"
+        },
+        {
+          "path": "test/harness/local/fixtures/home/.pi/agent/sessions/-home-dev-pi/2026-11-20_abc.jsonl",
+          "reason": "transcript/log/fixture payload withheld pending privacy review"
+        },
+        {
+          "path": "test/harness/local/claude_code_log_reader_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/codex_log_reader_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/executable_locator_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/live_log_follower_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/pi_log_reader_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/provider_registry_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        },
+        {
+          "path": "test/harness/local/studio_mux_test.dart",
+          "reason": "added absolute machine path or credential-like value; withheld pending sanitization"
+        }
+      ],
+      "patch_id": "1739b0e6e9e2d9054d62d02d61a8dbc19a04bd14",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-063-1739b0e6e9e2.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "d1c58da941be2fdad950c3ba4398ebff1b58465c",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "fix(agents): open workbench sessions in their own project or chat",
+      "refs": [
+        "local/wsui/pi-c"
+      ],
+      "changed_paths": [
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "f72a156f1980bd8e42c29b9a9d7c16406c7f6e66",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-054-f72a156f1980.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "31a7d8b965cf0a51b9058947e94750beb80b593a",
+      "parent": "37e8108276270d4b373df5f62fa25dada8f39609",
+      "subject": "docs(harness): document host factory ownership rules",
+      "refs": [
+        "local/harness/pi-c"
+      ],
+      "changed_paths": [
+        "lib/harness/hub/harness_hosts.dart"
+      ],
+      "included_paths": [
+        "lib/harness/hub/harness_hosts.dart"
+      ],
+      "excluded": [],
+      "patch_id": "16d8eba5a22da65edfd00fb329c514479344d042",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-029-16d8eba5a22d.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "dd5243ee4afa50abfaf9f14ec1912cd7fc338d6f",
+      "parent": "43b88ec9a08e37162ec32c74ad94b9d7e5ebd39c",
+      "subject": "feat(workbench): give large-screen pages MD3 layouts",
+      "refs": [
+        "local/wsui/fix3-d"
+      ],
+      "changed_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/local_content_pages.dart",
+        "lib/pages/profile_page.dart",
+        "lib/pages/quick_tools_page.dart",
+        "lib/pages/settings_page.dart",
+        "lib/widgets/tools_browser.dart",
+        "test/pi_d_ui_workbench_test.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/tools_browser_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "2ff130f2876f80ab62ddcc28f046e63ab03ea102",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-025-2ff130f2876f.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "7bf2f0c7927c5c61214b39b15ef7d74436599a3e",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/pi-d"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/settings_page.dart",
+        "lib/shell/ui_zoom.dart",
+        "test/settings_page_workbench_test.dart",
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "6a9553c2f5b9981d65553112e1e1407a9e949562",
+      "status": "deduplicated-identical-patch-id",
+      "patch_file": "branch-040-6a9553c2f5b9.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e",
+      "parent": "ba4143256be7a772fdfc1fe156e9e15e177888da",
+      "subject": "fix(agents): open workbench sessions in their own project or chat",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/harness_host.dart",
+        "lib/harness/ui/agents_entry.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/harness/agents_entry_workbench_test.dart",
+        "test/workbench_session_view_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "aaf220933b83dbcb45619220a89de89f2b099a5a",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-005-aaf220933b83.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "21152822e74d229e3b29a558c28cc4f4fbcbad2a",
+      "parent": "09df701f254134bde411cdee9ab1912a2ce5ca88",
+      "subject": "fix(harness): feed the remote terminal and reuse no dead handles",
+      "refs": [
+        "local/harness/pi-b"
+      ],
+      "changed_paths": [
+        "lib/harness/herdr/herdr_cli.dart",
+        "lib/harness/herdr/herdr_host.dart",
+        "lib/harness/herdr/herdr_input.dart",
+        "lib/harness/herdr/herdr_session.dart",
+        "lib/harness/herdr/herdr_terminal.dart",
+        "lib/harness/remote/remote_harness_host.dart",
+        "lib/harness/remote/remote_ports.dart",
+        "lib/harness/remote/remote_session.dart",
+        "lib/harness/remote/remote_terminal.dart",
+        "lib/remote_control/state/session_view.dart",
+        "test/harness_herdr_host_test.dart",
+        "test/harness_herdr_input_test.dart",
+        "test/harness_herdr_terminal_test.dart",
+        "test/harness_remote_host_test.dart"
+      ],
+      "included_paths": [
+        "lib/harness/herdr/herdr_cli.dart",
+        "lib/harness/herdr/herdr_host.dart",
+        "lib/harness/herdr/herdr_input.dart",
+        "lib/harness/herdr/herdr_session.dart",
+        "lib/harness/herdr/herdr_terminal.dart",
+        "lib/harness/remote/remote_harness_host.dart",
+        "lib/harness/remote/remote_ports.dart",
+        "lib/harness/remote/remote_session.dart",
+        "lib/harness/remote/remote_terminal.dart",
+        "lib/remote_control/state/session_view.dart",
+        "test/harness_herdr_host_test.dart",
+        "test/harness_herdr_input_test.dart",
+        "test/harness_herdr_terminal_test.dart",
+        "test/harness_remote_host_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "2622aba8b8ed16c3cc6c029c7e50787c84cee7b4",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-018-2622aba8b8ed.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "2eca924bf83ae59b0b838b0c0942fed6b3267c68",
+      "parent": "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+      "subject": "fixup! feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/fix2-b"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_controller.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_controller.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "90f5ae44af1c0be5f3d94c2f7c50bf9ed0fc1ea0",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "b3471a56ce204007500315a56386a94c48d2b30c",
+      "parent": "a9fa4bebe1c51ef18756ca872ae7bf8fb9e879c5",
+      "subject": "fixup! feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/fix-b"
+      ],
+      "changed_paths": [
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "086afbfcf7d7d93aa630b6edaf145a12765d3f58",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-004-086afbfcf7d7.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ab1fe83ab4c09d53968dd0dcec152fdcc60b64b7",
+      "parent": "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+      "subject": "fixup! feat(workbench): add global UI zoom and large-screen settings",
+      "refs": [
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "test/ui_zoom_test.dart"
+      ],
+      "included_paths": [
+        "test/ui_zoom_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "19d15ca3207ab320ea8276ea3e8aad871de3d6ac",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "19aa489760cbb58a1ce3ce1abb988394fe68861a",
+      "parent": "ecf5839b7cec0b13058a32e479f31b744eea91eb",
+      "subject": "feat(agents): apply workbench density and adaptive intake visuals",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "included_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "7bbf23f57a4480c7469b0db9b52b82bdcf2b2b13",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "b24fdbef0088bab88c41e7b084f2f10de7c38c82",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "fix(workbench): unify explorer and restore project navigation",
+      "refs": [
+        "local/wsui/pi-a"
+      ],
+      "changed_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "97686ef988b3dcb33f6b60289db0722ad8d40d88",
+      "status": "deduplicated-identical-patch-id",
+      "patch_file": "branch-053-97686ef988b3.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+      "parent": "2842e852893788262113d0eced22c0e1956dbdc9",
+      "subject": "test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "937ef1aef77328855103a50bf98215b2af59b4c1",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "a9636fd27edc84ad75a3cd452305666c1dde0750",
+      "parent": "6e22b5bbaadc8adeef9a027d561b22f9011c1de7",
+      "subject": "fix(workbench): unify explorer and restore project navigation",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "e8f4ddd4439809387c68b7bbc1596771ea7e4627",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-067-e8f4ddd44398.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "4f59dc08997a524ed9c29a5e6565b6df020e26ae",
+      "parent": "31a7d8b965cf0a51b9058947e94750beb80b593a",
+      "subject": "fix(harness): confirm before stopping a hub session and tighten host ownership",
+      "refs": [
+        "local/harness/pi-c"
+      ],
+      "changed_paths": [
+        "lib/harness/hub/harness_hosts.dart",
+        "lib/harness/hub/harness_hub.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_chat_view.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "lib/harness/ui/hub_session_view.dart",
+        "lib/harness/ui/hub_terminal_view.dart",
+        "lib/pages/devices_remote_page.dart",
+        "test/harness/harness_hub_test.dart",
+        "test/harness/hub_ui_test.dart",
+        "test/support/fake_harness_host.dart"
+      ],
+      "included_paths": [
+        "lib/harness/hub/harness_hosts.dart",
+        "lib/harness/hub/harness_hub.dart",
+        "lib/harness/ui/hub_agents_surface.dart",
+        "lib/harness/ui/hub_chat_view.dart",
+        "lib/harness/ui/hub_session_list.dart",
+        "lib/harness/ui/hub_session_view.dart",
+        "lib/harness/ui/hub_terminal_view.dart",
+        "lib/pages/devices_remote_page.dart",
+        "test/harness/harness_hub_test.dart",
+        "test/harness/hub_ui_test.dart",
+        "test/support/fake_harness_host.dart"
+      ],
+      "excluded": [],
+      "patch_id": "d8f7d39ad6a8b0a45f6431f13fd043a16c12add1",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-003-d8f7d39ad6a8.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "2299d639bb86b3a065aa5dd62dc91f2970e41273",
+      "parent": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "subject": "test(screenshots): restore Explorer through rail destination",
+      "refs": [
+        "local/wsui/pfix-d"
+      ],
+      "changed_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "9d9497607ed06ddee9640c78c9138065f3a05627",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+      "parent": "5f985a0e8f86fd8a8a68ea7938825f50b86147a1",
+      "subject": "feat(editor): finish Material 3 workbench visuals",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "lib/editor/editor_page.dart",
+        "lib/editor/file_explorer.dart",
+        "test/editor_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "5b0831bc874b97e8ed98bb123029debd2661d19f",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-008-5b0831bc874b.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3",
+      "parent": "c6b6052345e0b5e58b0bc4905256f5442b3b946e",
+      "subject": "feat(agents): apply workbench density and adaptive intake visuals",
+      "refs": [
+        "local/wsui/fix-a",
+        "local/wsui/fix-b",
+        "local/wsui/fix-ci",
+        "local/wsui/fix-d"
+      ],
+      "changed_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "included_paths": [
+        "lib/chat/attachment_picker.dart",
+        "lib/chat/composer_card.dart",
+        "lib/harness/ui/home_agents_tab.dart",
+        "lib/share/share_intake_sheet.dart",
+        "lib/shell/workbench_session_view.dart",
+        "test/chat_attachment_picker_workbench_test.dart",
+        "test/harness/home_agents_tab_workbench_visual_test.dart",
+        "test/share/share_intake_workbench_visual_test.dart",
+        "test/workbench_session_view_visual_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "8674c0ab3a97548b06397b4bac7ff39d7862992f",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-055-8674c0ab3a97.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "3bba2332d8348c5e89e8c1916c05b388ef8d3613",
+      "parent": "0defbf39d1ef35e4eae43717e1a910da0f9cfbe5",
+      "subject": "fix(tests): synchronize workbench explorer interactions",
+      "refs": [
+        "local/wsui/pfix-b"
+      ],
+      "changed_paths": [
+        "test/file_explorer_workbench_header_test.dart",
+        "test/large_screen_workbench_cleanup_test.dart"
+      ],
+      "included_paths": [
+        "test/file_explorer_workbench_header_test.dart",
+        "test/large_screen_workbench_cleanup_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "c3429568a98b82a62c9c5181596644bcd893400a",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "329f1782318b047e9a86fc930a2c6320a765598d",
+        "131baedef643dd0992320577e6305a885e728701",
+        "3134e1ab46850bed3a2dcdf32719b3d170948006"
+      ]
+    },
+    {
+      "commit": "618fa2c1282684af04d0e11b6e5f08434aa264d3",
+      "parent": "6bf08e17d0588bd524e4370d0a0718e6fb266da4",
+      "subject": "fixup! test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/fix-ci"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "28d1c2d6164f6888076ac8754622a3d3851718c7",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-059-28d1c2d6164f.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "caf5bf5d3fcf0045c1cc0483f97b8e208a79cfd6",
+      "parent": "b24fdbef0088bab88c41e7b084f2f10de7c38c82",
+      "subject": "feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/pi-a"
+      ],
+      "changed_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "included_paths": [
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "5c17e5f0ef81f100b90752ee14313a37e64f7cd4",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-046-5c17e5f0ef81.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "d262af9e92f2361e72e04f614b4210b8b0593c7c",
+      "parent": "0f613969d69f2caf32a88fb6ea641abc1d2534c2",
+      "subject": "fixup! feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/polish-b"
+      ],
+      "changed_paths": [
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "included_paths": [
+        "lib/shell/workbench_explorer.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/workbench_explorer_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "c4c4663ef85ae26ae411a76b652566ef60609c44",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-041-c4c4663ef85a.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "63c5cf63f4dbb54e11b6a658a790a7f6fefba7f1",
+      "parent": "dd5243ee4afa50abfaf9f14ec1912cd7fc338d6f",
+      "subject": "test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/fix3-d"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "7a37b1c3b5ff09d98203df9fc0e4d6d93052ddc9",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "63c5cf63f4dbb54e11b6a658a790a7f6fefba7f1"
+      ]
+    },
+    {
+      "commit": "cefdf23f026c883aceca565e92729c0ef4f281e1",
+      "parent": "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+      "subject": "fixup! test(screenshots): add opt-in workbench capture job",
+      "refs": [
+        "local/wsui/fix2-ci"
+      ],
+      "changed_paths": [
+        ".github/workflows/core-check.yml",
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "included_paths": [
+        "test/screenshots/workbench_screenshots_test.dart"
+      ],
+      "excluded": [
+        {
+          "path": ".github/workflows/core-check.yml",
+          "reason": "workflow/config withheld"
+        }
+      ],
+      "patch_id": "2ec391253b5d89d9f705f3d296090ef0048b6933",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "8dd54c38a97d15903f9fea51afc758f22a0c08f3",
+      "parent": "6a311070f4d48127f4be1901527ec74673919754",
+      "subject": "fixup! feat(agents): apply workbench density and adaptive intake visuals",
+      "refs": [
+        "local/wsui/fix-b"
+      ],
+      "changed_paths": [
+        "test/chat_attachment_picker_workbench_test.dart"
+      ],
+      "included_paths": [
+        "test/chat_attachment_picker_workbench_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "23b481239a8f40deb4260c99a4db50acdbbdca4d",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-023-23b481239a8f.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "3a569bbec3fd3460f9784737f9f2b3a328760caa",
+      "parent": "aee1f722678a7f878d6ea43ddbd7f81505e27259",
+      "subject": "fixup! fix(workbench): unify explorer and restore project navigation",
+      "refs": [
+        "local/wsui/fix2-a"
+      ],
+      "changed_paths": [
+        "test/workbench_explorer_test.dart"
+      ],
+      "included_paths": [
+        "test/workbench_explorer_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "86aba24d8dd1c5660a24e98906c02a3571901092",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381",
+        "19aa489760cbb58a1ce3ce1abb988394fe68861a"
+      ]
+    },
+    {
+      "commit": "cc7e88b97ab672e9bc2bea1c49f61cb3ffc90d64",
+      "parent": "476a30acee21dc486ee2849dd8064a7be665e4d5",
+      "subject": "fixup! feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/polish-a"
+      ],
+      "changed_paths": [
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "included_paths": [
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_menu_surface_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "1fabd6c42ef0569e348f17546f7fe903bf44cd95",
+      "status": "exported-original-parent-relative-inert",
+      "patch_file": "branch-028-1fabd6c42ef0.patch",
+      "published_equivalent_commits": []
+    },
+    {
+      "commit": "ab64565c22637ed9a6e872be19d1b3193fae269a",
+      "parent": "dbdda00072b6f0d92d194bb4287cfcb48ad50cab",
+      "subject": "feat(workbench): complete the MD3 shell and explorer",
+      "refs": [
+        "local/wsui/fix2-a",
+        "local/wsui/fix2-b",
+        "local/wsui/fix2-ci",
+        "local/wsui/fix2-d"
+      ],
+      "changed_paths": [
+        "lib/app.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "included_paths": [
+        "lib/app.dart",
+        "lib/pages/home_page.dart",
+        "lib/shell/large_screen_controller.dart",
+        "lib/shell/large_screen_workbench.dart",
+        "lib/shell/workbench_chrome.dart",
+        "lib/shell/workbench_explorer.dart",
+        "lib/shell/workbench_theme.dart",
+        "test/large_screen_workbench_cleanup_test.dart",
+        "test/retained_editor_test.dart",
+        "test/workbench_chrome_test.dart",
+        "test/workbench_density_test.dart"
+      ],
+      "excluded": [],
+      "patch_id": "9918a875e57a2b2ae7cdfe7c3303b335696243a4",
+      "status": "exact-patch-already-in-main",
+      "patch_file": null,
+      "published_equivalent_commits": [
+        "a277c140c2b17e9ee16371b9928f9eded3d4fbb0",
+        "ac057c6d0a4b1748900ad6ad7444771263e07381"
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "branch-048-7e01b683fa93.patch",
+      "patch_id": "7e01b683fa93b909cde73cfb35466a59517d5dd2",
+      "sha256": "ad8e449f43777fc938b5c78aa7d1c7553a5586d1ff07a3aa6ed4aa2c4df18fa5",
+      "bytes": 65199,
+      "commits": [
+        "b7745fd2d3d6a9e69fc177fb78aaa0621c847caa"
+      ]
+    },
+    {
+      "file": "branch-033-d13d32dbd7df.patch",
+      "patch_id": "d13d32dbd7dfed00f7f966a878438235b52b9d74",
+      "sha256": "fe4cf3750f939279bdb1b7df4e90131098258949e0a51c272ce8ba381b3fe60d",
+      "bytes": 926,
+      "commits": [
+        "ec110b27ea5d7dd0f4604e6a6e9a818d966786ac"
+      ]
+    },
+    {
+      "file": "branch-049-b178de41e869.patch",
+      "patch_id": "b178de41e8693dd8a9f55e5fa28041b3d8d73423",
+      "sha256": "7e8d71845ac2ee050c0f9d65534398fd0bac1a41ac90df57567fe990f8e8f1a8",
+      "bytes": 2783,
+      "commits": [
+        "a9fa4bebe1c51ef18756ca872ae7bf8fb9e879c5"
+      ]
+    },
+    {
+      "file": "branch-019-1eda56f0ae0c.patch",
+      "patch_id": "1eda56f0ae0c359d789675f1880bc36f239244bb",
+      "sha256": "a856b5d44005bec4185027673ed88d5ee77db3f3372eb853401b351cb9e6bd54",
+      "bytes": 13332,
+      "commits": [
+        "88ba03172abe7a6aa96789665e5c556b871e44cc"
+      ]
+    },
+    {
+      "file": "branch-001-fe2bc66780d1.patch",
+      "patch_id": "fe2bc66780d18001ce144aed7d248fd77fee42e9",
+      "sha256": "6c6d3cf360bd13d667a4635752ff2f8d947f6e569f46af7bc1a145e853586bbb",
+      "bytes": 110924,
+      "commits": [
+        "56da9afc2c2f106ad70d46dc4973083594ab3804"
+      ]
+    },
+    {
+      "file": "branch-046-5c17e5f0ef81.patch",
+      "patch_id": "5c17e5f0ef81f100b90752ee14313a37e64f7cd4",
+      "sha256": "f2ce2869f808ca9f8b705392b0bdc922ca342ab39b5ac399086566a54b1eca0c",
+      "bytes": 107392,
+      "commits": [
+        "caf5bf5d3fcf0045c1cc0483f97b8e208a79cfd6"
+      ]
+    },
+    {
+      "file": "branch-037-895d74cc3a43.patch",
+      "patch_id": "895d74cc3a43023df50c3b5518ca5fb1ffc679c9",
+      "sha256": "05d44596041baf2bb0c7837cb02ab48b820bcac89f5c6dcc94d98245d3a5ee8f",
+      "bytes": 70503,
+      "commits": [
+        "0917c93ba97392b4d5ec183a918dd94baaa5941a"
+      ]
+    },
+    {
+      "file": "branch-043-dc34858be8ac.patch",
+      "patch_id": "dc34858be8ac47bcd5d522f2972e2c18fa7a6a8a",
+      "sha256": "702be943ea3f542528997564eba027861d590b19b4633dcba6a3491fd619d60a",
+      "bytes": 29974,
+      "commits": [
+        "ec04ba7d356dd1d1f8550d93d3e47cfe96bc38e1"
+      ]
+    },
+    {
+      "file": "branch-020-f3da89f9f942.patch",
+      "patch_id": "f3da89f9f942e282e1b63aa3162e9534a7f1cf39",
+      "sha256": "92c11cce17b7d61a14a771290aa0bcb7fde14f8057da02ab03cf98bf0efebf1f",
+      "bytes": 118414,
+      "commits": [
+        "5f985a0e8f86fd8a8a68ea7938825f50b86147a1"
+      ]
+    },
+    {
+      "file": "branch-044-b73667f5682c.patch",
+      "patch_id": "b73667f5682cb70812b547c54271c753c482d421",
+      "sha256": "936a7e5b9cddb7c17302033733d500eab6c64cd2b37931fc5dca407ff5d88ee3",
+      "bytes": 83785,
+      "commits": [
+        "3849a5add102551a434db2cfa9de2f69b7795623"
+      ]
+    },
+    {
+      "file": "branch-027-fce034514975.patch",
+      "patch_id": "fce03451497510a4ac8da43ccc83b99b54e13313",
+      "sha256": "9516da6c63ecb441a0c8e1ce7cffc66081622c1a73553c81dc333d4e3ae05c99",
+      "bytes": 152726,
+      "commits": [
+        "37e8108276270d4b373df5f62fa25dada8f39609"
+      ]
+    },
+    {
+      "file": "branch-011-541668e96d38.patch",
+      "patch_id": "541668e96d38a3b93f566541147ac312f9e9652c",
+      "sha256": "4b5a82f6e496268d50a6504dbf3397588c6e9254f3376bb9fe8427bc9133ba19",
+      "bytes": 7952,
+      "commits": [
+        "207b2ad6efa66625d04f52aa35e1933612498e80"
+      ]
+    },
+    {
+      "file": "branch-058-19fe8a524838.patch",
+      "patch_id": "19fe8a524838c0c128a67f2db8acb9438fb5b3a7",
+      "sha256": "1220059971f58f0d6f3ef4118939fe2f08333bc4b1598fe9ea1837babe331897",
+      "bytes": 63708,
+      "commits": [
+        "36436d81fad1e679d283f1b5b6c41171571977c5"
+      ]
+    },
+    {
+      "file": "branch-064-1210cbcdaff4.patch",
+      "patch_id": "1210cbcdaff4959d16f980d9388bde3546f85975",
+      "sha256": "7077ccc3c07fc33a0241d659b2125f92a096bfc0baf3075c1d69c04d0915d0f9",
+      "bytes": 1746,
+      "commits": [
+        "db47ef61c2d291ddbee7cc589a885548dd146c03"
+      ]
+    },
+    {
+      "file": "branch-065-57a5953a8386.patch",
+      "patch_id": "57a5953a8386436a9d65a59729f358a8c86d644e",
+      "sha256": "800c0d2ca193502449d805fc3df66812bc6680adff7cca47f28269eb7f078f2f",
+      "bytes": 56323,
+      "commits": [
+        "8ec1cabe7f5077a1213732411e837b8ee72467dc"
+      ]
+    },
+    {
+      "file": "branch-036-c13959f14133.patch",
+      "patch_id": "c13959f14133ff41974ceeacaff01b65a689a385",
+      "sha256": "2a6cf1151f580b31c47232a1af96e390e2fb6e716f74a98d80a83232052d9b95",
+      "bytes": 32348,
+      "commits": [
+        "d804d69f62d884afa832bcfbe6abb5fa827eba0e"
+      ]
+    },
+    {
+      "file": "branch-042-15adb212d8d3.patch",
+      "patch_id": "15adb212d8d3c055ebfafcfe5543de906d6722a3",
+      "sha256": "e0657594318da603cc59bd8a819ab543a0d200ac189a1b0fce3cf1b72e5d9b9a",
+      "bytes": 16386,
+      "commits": [
+        "6bf08e17d0588bd524e4370d0a0718e6fb266da4"
+      ]
+    },
+    {
+      "file": "branch-016-777ac89fa449.patch",
+      "patch_id": "777ac89fa449988719ae426735c441e00dc433c2",
+      "sha256": "4d3ae9969a409717e370c36bc150031f79fc64fed164349865f58b2984f4bc87",
+      "bytes": 1414,
+      "commits": [
+        "58a73d68ca7f42da103212162ad5b3c5469eef35"
+      ]
+    },
+    {
+      "file": "branch-053-97686ef988b3.patch",
+      "patch_id": "97686ef988b3dcb33f6b60289db0722ad8d40d88",
+      "sha256": "a803cbb6585d4a44e685e1552c4c3698e610a30f6f5b9143543c61ec6c7f54c4",
+      "bytes": 57903,
+      "commits": [
+        "faebff2f82bbb5a9bb3a1040774824ddd3b97b8c",
+        "b24fdbef0088bab88c41e7b084f2f10de7c38c82"
+      ]
+    },
+    {
+      "file": "branch-050-7a79abd1718f.patch",
+      "patch_id": "7a79abd1718f216de08ba9f0ec7197ca0fe15820",
+      "sha256": "0b11d5e52deb2da563cfc573e931c9fb050a022389681f38a7f6acea36a9e9f7",
+      "bytes": 1679,
+      "commits": [
+        "d5305dcaaacfc22d823cb755198368058bcf61ec"
+      ]
+    },
+    {
+      "file": "branch-054-f72a156f1980.patch",
+      "patch_id": "f72a156f1980bd8e42c29b9a9d7c16406c7f6e66",
+      "sha256": "dd69e55fcccf56ad04b82a45493744d5ebe9c9bd1b3213f3c68ca24418c3df4c",
+      "bytes": 40517,
+      "commits": [
+        "d1c58da941be2fdad950c3ba4398ebff1b58465c"
+      ]
+    },
+    {
+      "file": "branch-031-7f2900041340.patch",
+      "patch_id": "7f2900041340d904aea1548f491f493f0c4b365f",
+      "sha256": "86aa245e0857d8b46c6eebda29086f8c280b9e1fea4c3a0823913c43ef51eb00",
+      "bytes": 4052,
+      "commits": [
+        "470692e9779df5425855f61d6a43bdcbe1a1760b"
+      ]
+    },
+    {
+      "file": "branch-023-23b481239a8f.patch",
+      "patch_id": "23b481239a8f40deb4260c99a4db50acdbbdca4d",
+      "sha256": "3dc2ea9fe917629eb675f912d8203e5a13c845248e2184ae0e1f993e931db28f",
+      "bytes": 3536,
+      "commits": [
+        "8dd54c38a97d15903f9fea51afc758f22a0c08f3"
+      ]
+    },
+    {
+      "file": "branch-006-d84e8c7267c8.patch",
+      "patch_id": "d84e8c7267c87920b9beb43a6a59dcf5d40c2f5b",
+      "sha256": "85335a6a1a63de590bfaa9fe3bd91f9dcb9a8ce3e4fe4c6bf5e1ccc9712d6060",
+      "bytes": 27057,
+      "commits": [
+        "0f613969d69f2caf32a88fb6ea641abc1d2534c2"
+      ]
+    },
+    {
+      "file": "branch-029-16d8eba5a22d.patch",
+      "patch_id": "16d8eba5a22da65edfd00fb329c514479344d042",
+      "sha256": "bfc3aa41f3e6316be95fae48513a3fbd57328da8adc6503967a00a8fdca44f78",
+      "bytes": 742,
+      "commits": [
+        "31a7d8b965cf0a51b9058947e94750beb80b593a"
+      ]
+    },
+    {
+      "file": "branch-032-6e85614804d4.patch",
+      "patch_id": "6e85614804d43f152023a4b018281b0dc07bf773",
+      "sha256": "45db39ddc78a1ed8e636cb976592870df2e463a1a213083f78577ee819411acf",
+      "bytes": 13323,
+      "commits": [
+        "a661f54ca9fe54276f39cabd119e4d61b5015d8e"
+      ]
+    },
+    {
+      "file": "branch-008-5b0831bc874b.patch",
+      "patch_id": "5b0831bc874b97e8ed98bb123029debd2661d19f",
+      "sha256": "30632a548279deb0ce78327ed5dc682d0ea101b624b1dca024c77333784e4755",
+      "bytes": 98072,
+      "commits": [
+        "c6b6052345e0b5e58b0bc4905256f5442b3b946e"
+      ]
+    },
+    {
+      "file": "branch-062-29dc0d857fc1.patch",
+      "patch_id": "29dc0d857fc16d18c9b5a66796336955be0cdfc6",
+      "sha256": "05321bb9c3f4f6bf9e1ce17fcf927d9cac2d1198e05aa5c55bd5d0a1760052fa",
+      "bytes": 39749,
+      "commits": [
+        "fd2dd927b2fb306f21dad203925d5d65eaafc689",
+        "ce57d0da59b0182ac0233c059a159fda1bec7aa5"
+      ]
+    },
+    {
+      "file": "branch-010-c48b0b22d7d4.patch",
+      "patch_id": "c48b0b22d7d4c0729c3ac08dbbc022c3e0bfe7f1",
+      "sha256": "2cb2355cae3677e6dafc4973af3ecec8f1a8b24ca9dc1af22a9c0eb2762148de",
+      "bytes": 77387,
+      "commits": [
+        "bd4def39a28ed069c4c53a5fdcebc38d8033bbc2"
+      ]
+    },
+    {
+      "file": "branch-040-6a9553c2f5b9.patch",
+      "patch_id": "6a9553c2f5b9981d65553112e1e1407a9e949562",
+      "sha256": "ce0a022bb3a4fd382bb708fce0663ad5148dc613b2ee3f5ad99215859be96a3b",
+      "bytes": 36026,
+      "commits": [
+        "038596102c1141a97d2269d2e42c2bf2715d2d94",
+        "7bf2f0c7927c5c61214b39b15ef7d74436599a3e"
+      ]
+    },
+    {
+      "file": "branch-024-d97bd0b534da.patch",
+      "patch_id": "d97bd0b534da0509718bc6940c09bbaf30f08bcc",
+      "sha256": "350b949dbaaf18d31d29658f915b8eeda7d22c6ca2fd9e8c61c00b45b616798e",
+      "bytes": 6491,
+      "commits": [
+        "8101548999d419c84e78f965ad6630554a77dc8e"
+      ]
+    },
+    {
+      "file": "branch-030-11e6deb59d05.patch",
+      "patch_id": "11e6deb59d050f0e56a0d08581ae175bef0a182e",
+      "sha256": "3c764f544f7f66e5d0cc2cb76bcee8f360c558f9069b3a9bc0a4f395eaf67eb7",
+      "bytes": 49609,
+      "commits": [
+        "ba4143256be7a772fdfc1fe156e9e15e177888da",
+        "cf026d880905756cb7a70a803b5d210f60d44c6c"
+      ]
+    },
+    {
+      "file": "branch-059-28d1c2d6164f.patch",
+      "patch_id": "28d1c2d6164f6888076ac8754622a3d3851718c7",
+      "sha256": "f1dbd8dd467d24dc148d3029fc050d5fcabbaadf5ec0086833a7f0c114ff0ea4",
+      "bytes": 8993,
+      "commits": [
+        "618fa2c1282684af04d0e11b6e5f08434aa264d3"
+      ]
+    },
+    {
+      "file": "branch-005-aaf220933b83.patch",
+      "patch_id": "aaf220933b83dbcb45619220a89de89f2b099a5a",
+      "sha256": "60afec62f2c78164174ef304fb0f8e5dbdb39f3ca3bb9e715f2ee85e7c152d6f",
+      "bytes": 44931,
+      "commits": [
+        "82944f3f01b09fcdb1af3b33a03fc94aa0ae433e"
+      ]
+    },
+    {
+      "file": "branch-018-2622aba8b8ed.patch",
+      "patch_id": "2622aba8b8ed16c3cc6c029c7e50787c84cee7b4",
+      "sha256": "29d8c6835b6949a294b0b1067bee7ca1e0a938e4af13f8278857c475f585ea65",
+      "bytes": 49682,
+      "commits": [
+        "21152822e74d229e3b29a558c28cc4f4fbcbad2a"
+      ]
+    },
+    {
+      "file": "branch-038-c66fe09b82eb.patch",
+      "patch_id": "c66fe09b82eb8b941a7e14bcb06271336efc9ec2",
+      "sha256": "67495ac0f8c260871adad43baa0cc34004a8a5a8919272785fe40e9508a131a2",
+      "bytes": 45655,
+      "commits": [
+        "d73db50b468b16f5242a44c72bfa25fc6ddf934a"
+      ]
+    },
+    {
+      "file": "branch-063-1739b0e6e9e2.patch",
+      "patch_id": "1739b0e6e9e2d9054d62d02d61a8dbc19a04bd14",
+      "sha256": "1eff4b569b7a16970d4d434e14447ee5508a31f7375a52b5d40a95df4cc198c1",
+      "bytes": 122559,
+      "commits": [
+        "9c7f99f67b03598d3d4acdf42a497377c2892be0"
+      ]
+    },
+    {
+      "file": "branch-012-500c552463cf.patch",
+      "patch_id": "500c552463cf609d5ac44a2d49532a7d1f5b2910",
+      "sha256": "c32a0a4a017843323c80c4bce0308e095d04f42d78716971ca4cea7e753d9f60",
+      "bytes": 8153,
+      "commits": [
+        "cc833796654586ae362b455e34aebf80eaf287df"
+      ]
+    },
+    {
+      "file": "branch-056-cd7d05dac0d4.patch",
+      "patch_id": "cd7d05dac0d4d37fbf89618a649e016b192af0e0",
+      "sha256": "fed97b405c67a27a385a0e14170ede3c5a70e379ff457bed09d790e531281aca",
+      "bytes": 17167,
+      "commits": [
+        "e12e6b56966051a968a2dcdaa5e970be36bb526e"
+      ]
+    },
+    {
+      "file": "branch-039-e7f31261900e.patch",
+      "original_patch_id": "29a0f00a7bbc903ecffa8d0a2cdc55a3b1387a64",
+      "patch_id": "581df5505cbdc5c1276e788ec6a98f37252f0dbb",
+      "sha256": "724ebf9523bfcde50890fe3149ca7232c10d3a53a8b83fa458011c2c001eae3e",
+      "bytes": 190767,
+      "commits": [
+        "c1625ad65f78bf1d35b0ec9547c3da01c4d8f3e9"
+      ],
+      "excluded_sections": [
+        {
+          "path": "test/harness_herdr_models_test.dart",
+          "reason": "unverified runtime-output values; exact identifiers, cwd/title/session values withheld"
+        }
+      ]
+    },
+    {
+      "file": "branch-017-d05d37ffdf79.patch",
+      "patch_id": "d05d37ffdf79038a4d5a656d6f06fc60be520e3c",
+      "sha256": "7156fc95d1936eb095a0444273b82034c9ad06893d27a1f73acb179968f30d81",
+      "bytes": 20949,
+      "commits": [
+        "08fe626a56caf225df7d6abf23320fa13c3f1b03"
+      ]
+    },
+    {
+      "file": "branch-067-e8f4ddd44398.patch",
+      "patch_id": "e8f4ddd4439809387c68b7bbc1596771ea7e4627",
+      "sha256": "7ce81a1d9f9724d954247a87295fe2a83de87ae50ac750e226cc05a61cbf8206",
+      "bytes": 58244,
+      "commits": [
+        "a9636fd27edc84ad75a3cd452305666c1dde0750"
+      ]
+    },
+    {
+      "file": "branch-034-8386afddcc7d.patch",
+      "patch_id": "8386afddcc7dd0c0090b63de2cba5629c3f5814f",
+      "sha256": "e06e08c1f9dcf00e7b7739216f5d21a028625ecd3b24fea9c1a28f3ea8245ced",
+      "bytes": 1609,
+      "commits": [
+        "6a311070f4d48127f4be1901527ec74673919754"
+      ]
+    },
+    {
+      "file": "branch-028-1fabd6c42ef0.patch",
+      "patch_id": "1fabd6c42ef0569e348f17546f7fe903bf44cd95",
+      "sha256": "4b18dea39d8b18401fc5ae953a55917dcccdbca1ad4481938937b994a9466fee",
+      "bytes": 42120,
+      "commits": [
+        "cc7e88b97ab672e9bc2bea1c49f61cb3ffc90d64"
+      ]
+    },
+    {
+      "file": "branch-004-086afbfcf7d7.patch",
+      "patch_id": "086afbfcf7d7d93aa630b6edaf145a12765d3f58",
+      "sha256": "efb4baafe3e23dd52a6d29f348b7f585ca7f8efc277befdae14ce4c249eaa5f7",
+      "bytes": 4372,
+      "commits": [
+        "b3471a56ce204007500315a56386a94c48d2b30c"
+      ]
+    },
+    {
+      "file": "branch-047-5c2b938855ad.patch",
+      "patch_id": "5c2b938855ad4d0f3130512d17a1114998382fb5",
+      "sha256": "a8d72eac20b3b0d676b32fe62a4df2d1ce92b2a2a803294c6d917cceffafe91f",
+      "bytes": 1004,
+      "commits": [
+        "09df701f254134bde411cdee9ab1912a2ce5ca88"
+      ]
+    },
+    {
+      "file": "branch-026-203d5cba8639.patch",
+      "patch_id": "203d5cba8639a68e85237ec158c708abdddd9deb",
+      "sha256": "c5a983b70cb7ac48c2d1f781f681c8a09e934493f334ea5f2de7b08b5110b201",
+      "bytes": 89554,
+      "commits": [
+        "c2ec08c722cb6e452217ba64261807bae6cf4af3"
+      ]
+    },
+    {
+      "file": "branch-015-cd06a4dafcf5.patch",
+      "patch_id": "cd06a4dafcf51c2c4483e96456b9c045fbf1d310",
+      "sha256": "feb68a205eb358faf9dbb306ed20685cfa596084a29226e01e8deb3d93daece2",
+      "bytes": 7293,
+      "commits": [
+        "ef69fbd80bb94daf2e7bbee6f92bff32186ffe2a"
+      ]
+    },
+    {
+      "file": "branch-055-8674c0ab3a97.patch",
+      "patch_id": "8674c0ab3a97548b06397b4bac7ff39d7862992f",
+      "sha256": "f9ee90d50664cac2a6c28afee2a25c16ee6a6fee75a9a1bb26f0c71181bd5152",
+      "bytes": 64618,
+      "commits": [
+        "3d0c4e67ed330481c18e1a93d9ad8ae13535afe3"
+      ]
+    },
+    {
+      "file": "branch-025-2ff130f2876f.patch",
+      "patch_id": "2ff130f2876f80ab62ddcc28f046e63ab03ea102",
+      "sha256": "c6ced7b753376a95ab88b349d11dcdfc59e6db8293e30566a810cd3f9f17a117",
+      "bytes": 83767,
+      "commits": [
+        "dd5243ee4afa50abfaf9f14ec1912cd7fc338d6f"
+      ]
+    },
+    {
+      "file": "branch-003-d8f7d39ad6a8.patch",
+      "patch_id": "d8f7d39ad6a8b0a45f6431f13fd043a16c12add1",
+      "sha256": "0c371b29c64913052a9ecfe71de07005c236cfb349f417a5f5ca66d1277d7d4e",
+      "bytes": 29661,
+      "commits": [
+        "4f59dc08997a524ed9c29a5e6565b6df020e26ae"
+      ]
+    },
+    {
+      "file": "branch-041-c4c4663ef85a.patch",
+      "patch_id": "c4c4663ef85ae26ae411a76b652566ef60609c44",
+      "sha256": "83ff220e081921f5687207d2b0fa1c3549d4422f93a249ffc08c3e11b26de0ff",
+      "bytes": 6029,
+      "commits": [
+        "d262af9e92f2361e72e04f614b4210b8b0593c7c"
+      ]
+    }
+  ],
+  "semantic_review": "Pending. Patch-ID and blob equivalence identify text/content matches only. Semantic supersession against current published implementation remains unreviewed; no feature activation/adoption is implied."
+}

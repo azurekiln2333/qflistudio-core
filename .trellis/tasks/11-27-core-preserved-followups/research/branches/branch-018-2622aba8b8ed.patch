@@ -1,0 +1,1367 @@
+diff --git a/lib/harness/herdr/herdr_cli.dart b/lib/harness/herdr/herdr_cli.dart
+index 2ec8b458d7449217f788c9f38528b2a3cc10ab06..83d3b5515f2e8b4da0b7fca03bd552155c1ab479 100644
+--- a/lib/harness/herdr/herdr_cli.dart
++++ b/lib/harness/herdr/herdr_cli.dart
+@@ -698,6 +698,7 @@ class HerdrProviderSpec {
+     required this.id,
+     required this.label,
+     required this.executable,
++    this.verified = true,
+   });
+ 
+   final String id;
+@@ -706,6 +707,11 @@ class HerdrProviderSpec {
+   /// Canonical executable Herdr launches for this kind.
+   final String executable;
+ 
++  /// Whether [executable] is a known-correct name. For a kind Herdr supports but
++  /// this table does not list, the executable is only a guess, so its absence
++  /// from PATH must not hide the entry.
++  final bool verified;
++
+   static const HerdrProviderSpec shell = HerdrProviderSpec(
+     id: 'shell',
+     label: 'Shell',
+@@ -719,7 +725,12 @@ class HerdrProviderSpec {
+     // An unknown-but-supported Herdr kind still gets a truthful entry: its
+     // executable name is the kind itself, which is how Herdr's manifests name
+     // most of them.
+-    return HerdrProviderSpec(id: kind, label: kind, executable: kind);
++    return HerdrProviderSpec(
++      id: kind,
++      label: kind,
++      executable: kind,
++      verified: false,
++    );
+   }
+ 
+   static const List<HerdrProviderSpec> _specs = <HerdrProviderSpec>[
+diff --git a/lib/harness/herdr/herdr_host.dart b/lib/harness/herdr/herdr_host.dart
+index 5d107578ac9729cf9b221262d77e942a2b909a86..91563d9c8b5cd748c14eb60c02e1bb31968a1711 100644
+--- a/lib/harness/herdr/herdr_host.dart
++++ b/lib/harness/herdr/herdr_host.dart
+@@ -157,7 +157,10 @@ class HerdrHost implements HarnessHost {
+           return HarnessProviderInfo(
+             id: spec.id,
+             label: spec.label,
+-            available: executableOnPath(spec.executable),
++            // Herdr resolves `agent start --kind`, so a missing binary here only
++            // means "this PATH has not got it"; for a kind Herdr knows but we do
++            // not, the executable name is a guess and must not hide the entry.
++            available: spec.verified ? executableOnPath(spec.executable) : true,
+             executable: spec.executable,
+             builtIn: true,
+           );
+@@ -167,6 +170,10 @@ class HerdrHost implements HarnessHost {
+     return _providers!;
+   }
+ 
++  /// Drops the cached provider list so a newly installed agent appears without
++  /// restarting Studio.
++  void refreshProviders() => _providers = null;
++
+   @override
+   Future<HarnessSessionHandle> open(String sessionId) async {
+     final cli = await _ensureInitialized();
+@@ -177,7 +184,13 @@ class HerdrHost implements HarnessHost {
+       );
+     }
+     final cached = _handles[sessionId];
+-    if (cached != null) return cached;
++    if (cached != null) {
++      // A stopped or detached handle still exists in the map until its owner
++      // releases it; returning it would show a closed terminal that swallows
++      // every keystroke.
++      if (!cached.isEnded) return cached;
++      _handles.remove(sessionId);
++    }
+ 
+     var agent = _agents[sessionId];
+     if (agent == null) {
+@@ -251,7 +264,8 @@ class HerdrHost implements HarnessHost {
+   Future<void> dispose() async {
+     if (_disposed) return;
+     _disposed = true;
+-    _wake?.complete();
++    final wake = _wake;
++    if (wake != null && !wake.isCompleted) wake.complete();
+     final handles = _handles.values.toList();
+     _handles.clear();
+     for (final handle in handles) {
+@@ -275,11 +289,24 @@ class HerdrHost implements HarnessHost {
+   Future<HerdrCli?> _initialize() async {
+     final executable = await _locator(explicitPath: _executablePath);
+     if (executable == null) {
+-      _installHint = const HerdrInstallHint(
+-        title: '未安装 Herdr',
+-        message:
+-            '没有找到 herdr。安装后重启 Studio 即可在这里管理 Herdr 工作区、面板和 agent；'
+-            '不安装也能用 Studio 自带的会话管理。',
++      final explicit = _executablePath?.trim() ?? '';
++      if (explicit.isNotEmpty) {
++        // The user pointed at a path: saying "not installed" would send them
++        // looking for a problem they have already solved once.
++        _installHint = HerdrInstallHint(
++          title: 'Herdr 路径无效',
++          message: '设置里指定的路径不能执行：$explicit。改回自动查找或换一个路径。',
++          resolvedPath: explicit,
++        );
++        _state.value = HarnessHostState.unsupported;
++        return null;
++      }
++      _installHint = HerdrInstallHint(
++        title: kIsWeb ? '此平台不支持 Herdr' : '未安装 Herdr',
++        message: kIsWeb
++            ? '网页版拿不到本机的 Herdr 进程，请用桌面版客户端。'
++            : '没有找到 herdr。安装后重启 Studio 即可在这里管理 Herdr 工作区、面板和 agent；'
++                  '不安装也能用 Studio 自带的会话管理。',
+       );
+       _state.value = HarnessHostState.unsupported;
+       return null;
+@@ -338,7 +365,13 @@ class HerdrHost implements HarnessHost {
+ 
+   Future<void> _runLoop() async {
+     while (!_disposed) {
+-      await _refresh();
++      // The loop owns the host's liveness: one unexpected error must never stop
++      // it while the host still claims to be online.
++      try {
++        await _refresh();
++      } catch (error) {
++        _lastError = '$error';
++      }
+       if (_disposed) return;
+       final busy = <HerdrAgentInfo>[
+         for (final agent in _agents.values)
+@@ -354,19 +387,18 @@ class HerdrHost implements HarnessHost {
+ 
+   /// Blocks until one busy agent leaves `working` (or the budget expires).
+   ///
+-  /// `Future.any` is right here: any pane finishing means the list is stale, and
+-  /// the next loop iteration re-reads everything anyway.
++  /// Exactly one `agent wait` runs at a time: the CLI has no cancel verb, so
++  /// racing N waits leaves N-1 orphan processes alive until their budget runs
++  /// out, and each loop iteration would add another batch. One waiter plus the
++  /// budget bounds staleness at [waitBudget].
+   Future<void> _waitForBusy(List<HerdrAgentInfo> busy) async {
+     final cli = _cli;
+     if (cli == null) {
+       await _sleep(idleRefresh);
+       return;
+     }
+-    final waits = <Future<void>>[
+-      for (final agent in busy) _waitQuietly(cli, agent),
+-    ];
+-    if (waits.isEmpty) return;
+-    await Future.any<void>(waits);
++    if (busy.isEmpty) return;
++    await _waitQuietly(cli, busy.first);
+   }
+ 
+   /// One long wait that must never break the loop: a timeout, a closed pane or a
+@@ -412,6 +444,7 @@ class HerdrHost implements HarnessHost {
+     try {
+       final agents = await cli.agents();
+       final workspaces = await _safeWorkspaces(cli);
++      if (_disposed) return;
+       _agents
+         ..clear()
+         ..addEntries(
+@@ -436,6 +469,7 @@ class HerdrHost implements HarnessHost {
+       }
+       _emit();
+     } on HerdrException catch (error) {
++      if (_disposed) return;
+       _lastError = error.message;
+       if (error.failure == HerdrFailure.unavailable) {
+         _state.value = HarnessHostState.unsupported;
+@@ -444,6 +478,11 @@ class HerdrHost implements HarnessHost {
+       } else {
+         _state.value = HarnessHostState.offline;
+       }
++    } catch (error) {
++      // A parse surprise is not a reason to kill the refresh loop: report it and
++      // keep the last known list.
++      if (_disposed) return;
++      _lastError = '$error';
+     }
+   }
+ 
+@@ -457,6 +496,7 @@ class HerdrHost implements HarnessHost {
+   }
+ 
+   void _emit() {
++    if (_disposed) return;
+     final infos = <HarnessSessionInfo>[
+       for (final agent in _agents.values) agent.toSessionInfo(hostId: id),
+     ];
+diff --git a/lib/harness/herdr/herdr_input.dart b/lib/harness/herdr/herdr_input.dart
+index eb58cdb986c89d89a19234d524f1b908c763f8af..dbab17a23eecf93757868c371b7e3994c567a9f8 100644
+--- a/lib/harness/herdr/herdr_input.dart
++++ b/lib/harness/herdr/herdr_input.dart
+@@ -71,6 +71,11 @@ class HerdrInputTranslator {
+         }
+         if (parsed.key != null) {
+           addKey(parsed.key!);
++        } else if (parsed.text != null) {
++          // Literal bytes Herdr has no key name for (Alt+char): keep the order
++          // around them, they merge with neighbouring text.
++          flushText();
++          ops.add(HerdrSendTextOp(parsed.text!));
+         }
+         // A recognised-but-unmapped sequence is consumed and dropped.
+         i = parsed.next;
+@@ -117,7 +122,12 @@ class HerdrInputTranslator {
+       return _Escape(_arrowFor(finalByte), start + 3);
+     }
+     if (next != 0x5b) {
+-      // ESC followed by a printable char is Alt+key; Herdr has no Alt verb.
++      // ESC followed by a printable char is Alt+key. Herdr has no Alt verb, but
++      // `pane send-text` writes literal bytes, so ESC+char reaches the pane as
++      // the same Alt combination a local terminal would send.
++      if (next >= 0x20 && next <= 0x7e) {
++        return _Escape(null, start + 2, text: '\u001b${data[start + 1]}');
++      }
+       return _Escape(null, start + 2);
+     }
+     // CSI: ESC [ params final.
+@@ -187,11 +197,14 @@ class HerdrInputTranslator {
+ }
+ 
+ class _Escape {
+-  const _Escape(this.key, this.next);
++  const _Escape(this.key, this.next, {this.text});
+ 
+   /// Key name, or null when the sequence is recognised but unmapped.
+   final String? key;
+ 
++  /// Literal bytes to type instead of a key press (Alt combinations).
++  final String? text;
++
+   /// Index just past the sequence.
+   final int next;
+ }
+diff --git a/lib/harness/herdr/herdr_session.dart b/lib/harness/herdr/herdr_session.dart
+index a87ade9fe7c584700d8afca3825285dc3a3fdf05..c58cc7fe7e1ba7f57b872897259cfb1486feb928 100644
+--- a/lib/harness/herdr/herdr_session.dart
++++ b/lib/harness/herdr/herdr_session.dart
+@@ -45,9 +45,14 @@ class HerdrSessionHandle implements HarnessSessionHandle {
+   HarnessSessionInfo? _info;
+   bool _detached = false;
+   bool _stopped = false;
++  bool _statusDisposed = false;
+ 
+   HerdrAgentInfo get agent => _agent;
+ 
++  /// Whether this handle is finished (stopped or released). [HerdrHost] drops
++  /// such a handle instead of handing a dead terminal to the next caller.
++  bool get isEnded => _stopped || _detached;
++
+   @override
+   HarnessSessionInfo get info => _info ??= _agent.toSessionInfo(hostId: hostId);
+ 
+@@ -59,18 +64,19 @@ class HerdrSessionHandle implements HarnessSessionHandle {
+   Stream<TranscriptEvent>? get transcript => null;
+ 
+   @override
+-  HarnessTerminalChannel? get terminal => _detached ? null : _terminal;
++  HarnessTerminalChannel? get terminal =>
++      (_stopped || _detached) ? null : _terminal;
+ 
+   /// Applies a fresher row from `herdr agent list`.
+   void update(HerdrAgentInfo agent) {
+     _agent = agent;
+     _info = agent.toSessionInfo(hostId: hostId);
+-    _status.value = harnessStatusFor(agent.status);
++    if (!_statusDisposed) _status.value = harnessStatusFor(agent.status);
+   }
+ 
+   /// Marks the pane as gone (closed outside Studio).
+   void markExited() {
+-    _status.value = HarnessSessionStatus.exited;
++    if (!_statusDisposed) _status.value = HarnessSessionStatus.exited;
+   }
+ 
+   @override
+@@ -106,7 +112,7 @@ class HerdrSessionHandle implements HarnessSessionHandle {
+     _stopped = true;
+     await _terminal.close();
+     await _cli.closePane(_agent.paneId);
+-    _status.value = HarnessSessionStatus.exited;
++    if (!_statusDisposed) _status.value = HarnessSessionStatus.exited;
+     unawaited(_onChanged());
+   }
+ 
+@@ -115,6 +121,7 @@ class HerdrSessionHandle implements HarnessSessionHandle {
+       _detached = true;
+       unawaited(_terminal.close());
+     }
++    _statusDisposed = true;
+     _status.dispose();
+   }
+ }
+diff --git a/lib/harness/herdr/herdr_terminal.dart b/lib/harness/herdr/herdr_terminal.dart
+index b6f16c9fca63dabd963c754cd15207978416badf..5fa350691ffa9a179063b5e56863665ed2396c77 100644
+--- a/lib/harness/herdr/herdr_terminal.dart
++++ b/lib/harness/herdr/herdr_terminal.dart
+@@ -166,6 +166,8 @@ class HerdrSnapshotTerminal implements HerdrTerminal {
+   String? _last;
+   bool _reading = false;
+   bool _closed = false;
++  final List<HerdrInputOp> _pending = <HerdrInputOp>[];
++  Future<void>? _draining;
+   int _columns;
+   int _rows;
+ 
+@@ -190,7 +192,12 @@ class HerdrSnapshotTerminal implements HerdrTerminal {
+   @override
+   void write(Uint8List data) {
+     if (_closed) return;
+-    unawaited(_dispatch(translator.translate(data)));
++    final ops = translator.translate(data);
++    if (ops.isEmpty) return;
++    // One queue for every chunk: the CLI calls are sequential, but two `write`s
++    // used to race, so `pane send-keys enter` could overtake the text before it.
++    _pending.addAll(ops);
++    _draining ??= _drain();
+   }
+ 
+   @override
+@@ -203,6 +210,7 @@ class HerdrSnapshotTerminal implements HerdrTerminal {
+   Future<void> close() async {
+     if (_closed) return;
+     _closed = true;
++    _pending.clear();
+     changes?.removeListener(_onChanges);
+     _timer?.cancel();
+     _timer = null;
+@@ -236,19 +244,54 @@ class HerdrSnapshotTerminal implements HerdrTerminal {
+     _output.add(Uint8List.fromList(utf8.encode(text)));
+   }
+ 
+-  Future<void> _dispatch(List<HerdrInputOp> ops) async {
+-    for (final op in ops) {
+-      if (_closed) return;
+-      try {
+-        switch (op) {
+-          case HerdrSendTextOp():
+-            await _sendText(op.text);
+-          case HerdrSendKeysOp():
+-            await _sendKeys(op.keys);
++  Future<void> _drain() async {
++    while (_pending.isNotEmpty && !_closed) {
++      // A short window lets a typing burst land in one batch: every key otherwise
++      // costs its own `herdr` process (50-200 ms on Windows), which makes the
++      // pane feel broken.
++      await Future<void>.delayed(const Duration(milliseconds: 12));
++      if (_closed || _pending.isEmpty) break;
++      final batch = List<HerdrInputOp>.of(_pending);
++      _pending.clear();
++      // Adjacent literal text is merged so a typed word is one `send-text` call;
++      // keys stay boundaries, so their order is unchanged.
++      for (final op in _coalesce(batch)) {
++        if (_closed) break;
++        try {
++          switch (op) {
++            case HerdrSendTextOp():
++              await _sendText(op.text);
++            case HerdrSendKeysOp():
++              await _sendKeys(op.keys);
++          }
++        } catch (error) {
++          onError?.call(error);
+         }
+-      } catch (error) {
+-        onError?.call(error);
+       }
+     }
++    _draining = null;
++  }
++
++  /// Merges consecutive literal-text ops, leaving key ops as boundaries.
++  static List<HerdrInputOp> _coalesce(List<HerdrInputOp> ops) {
++    final merged = <HerdrInputOp>[];
++    final text = StringBuffer();
++    void flush() {
++      if (text.isEmpty) return;
++      merged.add(HerdrSendTextOp(text.toString()));
++      text.clear();
++    }
++
++    for (final op in ops) {
++      switch (op) {
++        case HerdrSendTextOp():
++          text.write(op.text);
++        case HerdrSendKeysOp():
++          flush();
++          merged.add(op);
++      }
++    }
++    flush();
++    return merged;
+   }
+ }
+diff --git a/lib/harness/remote/remote_harness_host.dart b/lib/harness/remote/remote_harness_host.dart
+index 6127b9467972c4de0b1b1abc4fd28fe0858a714c..3f2a8aa5f3eec1753cd12a6f648131b52e131f24 100644
+--- a/lib/harness/remote/remote_harness_host.dart
++++ b/lib/harness/remote/remote_harness_host.dart
+@@ -27,9 +27,14 @@ class RemoteHarnessHost implements HarnessHost {
+     RemoteHerdrPort? herdr,
+     RemoteCodexPort? codex,
+     this.refreshInterval = const Duration(seconds: 20),
++    String? hostId,
+   }) : _remote = remote,
+        _herdr = herdr,
+        _codex = codex,
++       // Resolved once: `id` is a map key in the hub and is stamped into every
++       // `HarnessSessionInfo`, so it must not drift when pairing arrives later.
++       // Pass [hostId] when the pairing is not loaded yet.
++       _id = _resolveHostId(hostId ?? remote.hostId),
+        _state = ValueNotifier<HarnessHostState>(_stateFor(remote.phase)) {
+     _remote.changes.addListener(_onRemoteChanged);
+     _herdr?.changes.addListener(_onHerdrChanged);
+@@ -38,6 +43,14 @@ class RemoteHarnessHost implements HarnessHost {
+     if (_wasOnline) unawaited(_loadRemote());
+   }
+ 
++  static String _resolveHostId(String value) {
++    final key = value.trim();
++    if (key.isEmpty) return 'remote';
++    return key.startsWith('remote:') ? key : 'remote:$key';
++  }
++
++  final String _id;
++
+   /// How often the thread catalog is refreshed while the list is open. Sessions
+   /// themselves arrive as pushes, so this is only for the Codex catalog.
+   final Duration refreshInterval;
+@@ -64,12 +77,7 @@ class RemoteHarnessHost implements HarnessHost {
+   Timer? _codexTimer;
+ 
+   @override
+-  String get id {
+-    // One host per paired computer: the hub registers several, so a constant id
+-    // would collide in its map. The pairing id is stable across reconnects.
+-    final key = _remote.hostId.trim();
+-    return key.isEmpty ? 'remote' : 'remote:$key';
+-  }
++  String get id => _id;
+ 
+   @override
+   String get label {
+@@ -98,22 +106,38 @@ class RemoteHarnessHost implements HarnessHost {
+ 
+   @override
+   Stream<List<HarnessSessionInfo>> watchSessions() {
+-    if (_codexTimer == null && !_disposed) {
+-      _codexTimer = Timer.periodic(refreshInterval, (_) {
+-        if (_remote.isOnline) unawaited(_loadCodex());
+-      });
+-    }
+     return Stream.multi((controller) {
++      _watchCount += 1;
++      _startCodexTimer();
+       controller.add(_latest);
+       final subscription = _sessions.stream.listen(
+         controller.add,
+         onError: controller.addError,
+         onDone: controller.close,
+       );
+-      controller.onCancel = subscription.cancel;
++      controller.onCancel = () {
++        subscription.cancel();
++        _watchCount -= 1;
++        // No listener, no polling: the catalog is only for the visible list.
++        if (_watchCount <= 0) _stopCodexTimer();
++      };
++    });
++  }
++
++  int _watchCount = 0;
++
++  void _startCodexTimer() {
++    if (_codexTimer != null || _disposed) return;
++    _codexTimer = Timer.periodic(refreshInterval, (_) {
++      if (_remote.isOnline) unawaited(_loadCodex());
+     });
+   }
+ 
++  void _stopCodexTimer() {
++    _codexTimer?.cancel();
++    _codexTimer = null;
++  }
++
+   @override
+   Future<List<HarnessProviderInfo>> providers() async {
+     // Both entries are launchable on the desktop through the existing agent
+@@ -142,7 +166,14 @@ class RemoteHarnessHost implements HarnessHost {
+         _sessionHandles[sessionId] ??
+         _herdrHandles[sessionId] ??
+         _codexHandles[sessionId];
+-    if (existing != null) return existing;
++    if (existing != null) {
++      // A stopped or released handle can linger until its owner lets go; reuse
++      // it only while it is still live.
++      if (!_isEnded(existing)) return existing;
++      _sessionHandles.remove(sessionId);
++      _herdrHandles.remove(sessionId);
++      _codexHandles.remove(sessionId);
++    }
+ 
+     if (sessionId.startsWith('session:')) {
+       final rawId = sessionId.substring('session:'.length);
+@@ -155,7 +186,9 @@ class RemoteHarnessHost implements HarnessHost {
+         session: session,
+         hostId: id,
+         onDetached: (detached) async {
+-          _sessionHandles.remove(sessionId);
++          if (identical(_sessionHandles[sessionId], detached)) {
++            _sessionHandles.remove(sessionId);
++          }
+           detached.dispose();
+         },
+       );
+@@ -178,7 +211,9 @@ class RemoteHarnessHost implements HarnessHost {
+         agent: agent,
+         hostId: id,
+         onDetached: (detached) async {
+-          _herdrHandles.remove(sessionId);
++          if (identical(_herdrHandles[sessionId], detached)) {
++            _herdrHandles.remove(sessionId);
++          }
+           detached.dispose();
+         },
+       );
+@@ -201,7 +236,9 @@ class RemoteHarnessHost implements HarnessHost {
+         view: port.openThread(thread),
+         hostId: id,
+         onDetached: (detached) async {
+-          _codexHandles.remove(sessionId);
++          if (identical(_codexHandles[sessionId], detached)) {
++            _codexHandles.remove(sessionId);
++          }
+           await detached.dispose();
+         },
+       );
+@@ -212,11 +249,24 @@ class RemoteHarnessHost implements HarnessHost {
+     throw StateError('无法识别的会话：$sessionId');
+   }
+ 
++  /// Whether a cached handle is finished, without widening the shared contract.
++  static bool _isEnded(HarnessSessionHandle handle) => switch (handle) {
++    RemoteSessionHandle() => handle.isEnded,
++    RemoteHerdrHandle() => handle.isEnded,
++    RemoteCodexThreadHandle() => handle.isEnded,
++    _ => false,
++  };
++
+   @override
+   Future<HarnessSessionHandle> launch(HarnessLaunchRequest request) async {
+     if (!_remote.isOnline) {
+       throw StateError('电脑未连接，无法新建会话');
+     }
++    if (request.args.isNotEmpty) {
++      // The wire verbs take no extra arguments: dropping them would make a
++      // "start with these flags" request look successful but run differently.
++      throw UnsupportedError('远程电脑暂不支持启动参数，请在桌面端启动该会话。');
++    }
+     final protocol.SessionInfo created;
+     switch (request.providerId) {
+       case 'shell':
+@@ -234,8 +284,7 @@ class RemoteHarnessHost implements HarnessHost {
+   Future<void> dispose() async {
+     if (_disposed) return;
+     _disposed = true;
+-    _codexTimer?.cancel();
+-    _codexTimer = null;
++    _stopCodexTimer();
+     _remote.changes.removeListener(_onRemoteChanged);
+     _herdr?.changes.removeListener(_onHerdrChanged);
+     final sessionHandles = _sessionHandles.values.toList();
+diff --git a/lib/harness/remote/remote_ports.dart b/lib/harness/remote/remote_ports.dart
+index 7c95b14b5643427f1d5eb456832429e90197637e..6442c1a20dc39e7890ebb2fd9427350e907363c6 100644
+--- a/lib/harness/remote/remote_ports.dart
++++ b/lib/harness/remote/remote_ports.dart
+@@ -12,7 +12,12 @@
+ import 'package:flutter/foundation.dart';
+ 
+ import '../../remote_control/models/herdr.dart'
+-    show HerdrActionReport, HerdrAgent, HerdrOutput, HerdrReadSource;
++    show
++        HerdrActionReport,
++        HerdrActions,
++        HerdrAgent,
++        HerdrOutput,
++        HerdrReadSource;
+ import '../../remote_control/models/protocol.dart'
+     show
+         CodexPage,
+@@ -221,10 +226,9 @@ class HerdrControllerAdapter implements RemoteHerdrPort {
+ 
+   @override
+   Future<void> closePane(String paneId) async {
+-    await remote.herdrAct(<String, dynamic>{
+-      'kind': 'pane_close',
+-      'paneId': paneId,
+-    });
++    // HerdrActions owns the wire shape; hand-building the map here would go
++    // silently wrong the day a field is renamed.
++    await remote.herdrAct(HerdrActions.paneClose(paneId));
+   }
+ }
+ 
+diff --git a/lib/harness/remote/remote_session.dart b/lib/harness/remote/remote_session.dart
+index 29f74ac10d5d294923c437950f342c434c0f308c..342d00ac470e7d71d48c9619d5e904df399cb4ee 100644
+--- a/lib/harness/remote/remote_session.dart
++++ b/lib/harness/remote/remote_session.dart
+@@ -80,8 +80,16 @@ class RemoteSessionHandle implements HarnessSessionHandle {
+   @override
+   Stream<TranscriptEvent>? get transcript => _transcript?.stream;
+ 
++  /// Null once the view is released or the session ended, matching
++  /// [HerdrSessionHandle]: the channel is closed, so handing it out would look
++  /// like a live terminal that drops every keystroke.
+   @override
+-  HarnessTerminalChannel? get terminal => _terminal;
++  HarnessTerminalChannel? get terminal =>
++      (_stopped || _detached) ? null : _terminal;
++
++  /// Whether this handle can no longer be reused. The host drops such a handle
++  /// so reopening the same id builds a live one instead of returning a corpse.
++  bool get isEnded => _stopped || _detached;
+ 
+   @override
+   Future<void> sendPrompt(String text) async {
+@@ -212,18 +220,22 @@ class RemoteHerdrHandle implements HarnessSessionHandle {
+   herdr.HerdrAgent _agent;
+   bool _detached = false;
+   bool _stopped = false;
++  bool _statusDisposed = false;
++
++  /// See [RemoteSessionHandle.isEnded].
++  bool get isEnded => _stopped || _detached;
+ 
+   String get paneId => _agent.paneId;
+ 
+   /// Applies a fresher row from the desktop's Herdr push.
+   void update(herdr.HerdrAgent agent) {
+     _agent = agent;
+-    _status.value = remoteHerdrStatus(agent.status);
++    if (!_statusDisposed) _status.value = remoteHerdrStatus(agent.status);
+   }
+ 
+   /// The pane vanished from the desktop's list (closed elsewhere).
+   void markExited() {
+-    _status.value = HarnessSessionStatus.exited;
++    if (!_statusDisposed) _status.value = HarnessSessionStatus.exited;
+   }
+ 
+   @override
+@@ -238,7 +250,8 @@ class RemoteHerdrHandle implements HarnessSessionHandle {
+   Stream<TranscriptEvent>? get transcript => null;
+ 
+   @override
+-  HarnessTerminalChannel? get terminal => _terminal;
++  HarnessTerminalChannel? get terminal =>
++      (_stopped || _detached) ? null : _terminal;
+ 
+   @override
+   Future<void> sendPrompt(String text) async {
+@@ -267,7 +280,7 @@ class RemoteHerdrHandle implements HarnessSessionHandle {
+     await _terminal?.close();
+     _terminal = null;
+     await _herdr.closePane(_agent.paneId);
+-    _status.value = HarnessSessionStatus.exited;
++    if (!_statusDisposed) _status.value = HarnessSessionStatus.exited;
+   }
+ 
+   void dispose() {
+@@ -276,6 +289,7 @@ class RemoteHerdrHandle implements HarnessSessionHandle {
+       unawaited(_terminal?.close());
+       _terminal = null;
+     }
++    _statusDisposed = true;
+     _status.dispose();
+   }
+ }
+@@ -295,6 +309,9 @@ class RemoteCodexThreadHandle implements HarnessSessionHandle {
+       remoteCodexStatus(view.thread.status),
+     );
+     _feed = _CodexTranscriptFeed(view: view);
++    // The thread is pushed, not polled: without this listener the row would keep
++    // showing the status the thread had when it was opened.
++    view.changes.addListener(_syncStatus);
+     unawaited(_view.load(refresh: true));
+   }
+ 
+@@ -306,6 +323,16 @@ class RemoteCodexThreadHandle implements HarnessSessionHandle {
+   late final _CodexTranscriptFeed _feed;
+   bool _detached = false;
+   bool _stopped = false;
++  bool _statusDisposed = false;
++
++  /// See [RemoteSessionHandle.isEnded].
++  bool get isEnded => _stopped || _detached;
++
++  void _syncStatus() {
++    if (_statusDisposed) return;
++    final next = remoteCodexStatus(_view.thread.status);
++    if (next != _status.value) _status.value = next;
++  }
+ 
+   @override
+   HarnessSessionInfo get info =>
+@@ -366,6 +393,7 @@ class RemoteCodexThreadHandle implements HarnessSessionHandle {
+   Future<void> detach() async {
+     if (_detached) return;
+     _detached = true;
++    _view.changes.removeListener(_syncStatus);
+     await _feed.close();
+     await _onDetached(this);
+   }
+@@ -389,7 +417,9 @@ class RemoteCodexThreadHandle implements HarnessSessionHandle {
+       _detached = true;
+       await _feed.close();
+     }
++    _view.changes.removeListener(_syncStatus);
+     await _view.dispose();
++    _statusDisposed = true;
+     _status.dispose();
+   }
+ }
+diff --git a/lib/harness/remote/remote_terminal.dart b/lib/harness/remote/remote_terminal.dart
+index 5ebf3fb4ab3a16495115933f96f01d3996e97f12..62c65112928345a5161385966399dee1af2929a9 100644
+--- a/lib/harness/remote/remote_terminal.dart
++++ b/lib/harness/remote/remote_terminal.dart
+@@ -17,6 +17,10 @@ import 'remote_mapping.dart';
+ import 'remote_ports.dart';
+ 
+ /// Replays terminal bytes from a remote PTY session.
++///
++/// Bytes never live in [SessionView.events] (the view writes them straight into
++/// its emulator), so this subscribes to the raw-output callback instead of
++/// scanning the event list.
+ class RemoteTerminalChannel implements HarnessTerminalChannel {
+   RemoteTerminalChannel({
+     required SessionView view,
+@@ -24,24 +28,29 @@ class RemoteTerminalChannel implements HarnessTerminalChannel {
+     required String sessionId,
+   }) : _view = view,
+        _port = port,
+-       _sessionId = sessionId {
+-    _view.addListener(_pump);
+-    // The backlog may already hold output; replay it so opening the terminal a
+-    // second time still shows the screen instead of an empty one.
+-    for (final event in _view.events) {
+-      if (event is protocol.TerminalOutputEvent) _emit(event.data);
+-      _lastSeq = event.seq;
+-    }
+-  }
++       _sessionId = sessionId;
+ 
+   final SessionView _view;
+   final RemoteSessionPort _port;
+   final String _sessionId;
+-  final StreamController<Uint8List> _output =
+-      StreamController<Uint8List>.broadcast();
+-  int _lastSeq = 0;
++
++  /// Attaches on the first listener, not in the constructor: the controller is a
++  /// broadcast stream, so a replay emitted before anyone listens is dropped —
++  /// and that replay is the whole screen of an idle session.
++  late final StreamController<Uint8List> _output =
++      StreamController<Uint8List>.broadcast(onListen: _attach);
++  bool _attached = false;
+   bool _closed = false;
+ 
++  void _attach() {
++    if (_closed || _attached) return;
++    _attached = true;
++    for (final chunk in _view.terminalLog) {
++      _emit(chunk);
++    }
++    _view.addTerminalOutputListener(_onOutput, onReset: _onReset);
++  }
++
+   @override
+   Stream<Uint8List> get output => _output.stream;
+ 
+@@ -65,14 +74,11 @@ class RemoteTerminalChannel implements HarnessTerminalChannel {
+     );
+   }
+ 
+-  void _pump() {
+-    if (_closed) return;
+-    for (final event in _view.events) {
+-      if (event.seq <= _lastSeq) continue;
+-      _lastSeq = event.seq;
+-      if (event is protocol.TerminalOutputEvent) _emit(event.data);
+-    }
+-  }
++  void _onOutput(String data) => _emit(data);
++
++  /// A resubscribe replays the session from scratch: clear first, or the same
++  /// screen would be appended to the old one.
++  void _onReset() => _emit('\u001b[2J\u001b[H');
+ 
+   void _emit(String data) {
+     if (_closed || data.isEmpty) return;
+@@ -82,7 +88,7 @@ class RemoteTerminalChannel implements HarnessTerminalChannel {
+   Future<void> close() async {
+     if (_closed) return;
+     _closed = true;
+-    _view.removeListener(_pump);
++    if (_attached) _view.removeTerminalOutputListener(_onOutput);
+     await _output.close();
+   }
+ }
+@@ -115,6 +121,7 @@ class RemoteTranscriptFeed {
+       );
+ 
+   int _lastSeq = 0;
++  int _seenRevision = -1;
+   bool _started = false;
+   bool _closed = false;
+ 
+@@ -139,6 +146,16 @@ class RemoteTranscriptFeed {
+ 
+   void _pump() {
+     if (_closed) return;
++    // Streaming text notifies on every token; only a stored event can carry a
++    // transcript entry, so skip the scan when the list did not move.
++    final revision = _view.eventRevision;
++    if (revision == _seenRevision) return;
++    _seenRevision = revision;
++    // A resubscribe restarts the view's sequence numbering; follow it, or every
++    // later entry would look like a duplicate.
++    if (_view.lastSeq < _lastSeq) {
++      _lastSeq = 0;
++    }
+     for (final event in _view.events) {
+       if (event.seq <= _lastSeq) continue;
+       _lastSeq = event.seq;
+diff --git a/lib/remote_control/state/session_view.dart b/lib/remote_control/state/session_view.dart
+index a13394a5da0d7d66fb6cd4eeadc9036923826024..150c50e72f0c14dd90105a961ff6f0029650c482 100644
+--- a/lib/remote_control/state/session_view.dart
++++ b/lib/remote_control/state/session_view.dart
+@@ -43,6 +43,40 @@ class SessionView extends ChangeNotifier {
+   Terminal? _terminal;
+   void Function(String)? onTerminalInput;
+ 
++  /// Bumped whenever the stored event list changes. A harness pump reads this
++  /// first: streaming text and status changes notify without touching it.
++  int _revision = 0;
++  int get eventRevision => _revision;
++
++  /// Raw terminal bytes kept so a host that renders its own emulator (the
++  /// harness hub) can show the screen it missed. Bounded, never a full log.
++  static const int _terminalLogLimit = 32 * 1024;
++  final List<String> _terminalLog = <String>[];
++  int _terminalLogChars = 0;
++  final List<_TerminalOutputListener> _terminalOutputListeners =
++      <_TerminalOutputListener>[];
++
++  /// Recent raw output, oldest first, for a listener that attaches late.
++  List<String> get terminalLog => List<String>.unmodifiable(_terminalLog);
++
++  /// Calls [onData] with every raw chunk, live and replayed from backlog.
++  ///
++  /// [onReset] fires when the backlog restarts from scratch, so a second
++  /// emulator clears before the replay instead of stacking two screens.
++  /// [terminal] is still fed, so both kinds of view can coexist.
++  void addTerminalOutputListener(
++    void Function(String data) onData, {
++    void Function()? onReset,
++  }) {
++    _terminalOutputListeners.add(_TerminalOutputListener(onData, onReset));
++  }
++
++  void removeTerminalOutputListener(void Function(String data) onData) {
++    _terminalOutputListeners.removeWhere(
++      (listener) => listener.onData == onData,
++    );
++  }
++
+   /// Keep the parsed screen across navigation, never an unbounded raw log.
+   Terminal get terminal => _terminal ??= _createTerminal();
+ 
+@@ -101,6 +135,16 @@ class SessionView extends ChangeNotifier {
+       _results.clear();
+       _resolved.clear();
+       _streaming = '';
++      _revision += 1;
++      if (_terminalLog.isNotEmpty) {
++        _terminalLog.clear();
++        _terminalLogChars = 0;
++      }
++      for (final listener in List<_TerminalOutputListener>.of(
++        _terminalOutputListeners,
++      )) {
++        listener.onReset?.call();
++      }
+     }
+     _replaying = true;
+     try {
+@@ -129,9 +173,11 @@ class SessionView extends ChangeNotifier {
+     _lastSeq = e.seq;
+     if (e is TerminalOutputEvent) {
+       terminal.write(e.data);
++      _recordTerminalOutput(e.data);
+       return true;
+     }
+     _events.add(e);
++    _revision += 1;
+     if (_info.isTerminal && _events.length > 100) _events.removeAt(0);
+     switch (e) {
+       case ToolResultEvent():
+@@ -146,4 +192,26 @@ class SessionView extends ChangeNotifier {
+     }
+     return true;
+   }
++
++  void _recordTerminalOutput(String data) {
++    if (data.isEmpty) return;
++    _terminalLog.add(data);
++    _terminalLogChars += data.length;
++    while (_terminalLogChars > _terminalLogLimit && _terminalLog.length > 1) {
++      _terminalLogChars -= _terminalLog.removeAt(0).length;
++    }
++    for (final listener in List<_TerminalOutputListener>.of(
++      _terminalOutputListeners,
++    )) {
++      listener.onData(data);
++    }
++  }
++}
++
++/// One harness view that renders raw terminal bytes itself.
++class _TerminalOutputListener {
++  const _TerminalOutputListener(this.onData, this.onReset);
++
++  final void Function(String data) onData;
++  final void Function()? onReset;
+ }
+diff --git a/test/harness_herdr_host_test.dart b/test/harness_herdr_host_test.dart
+index 25efe8772707575aec84171143783afbe8d501f8..c88305032dff21360b69362933d7c95a82f2f37a 100644
+--- a/test/harness_herdr_host_test.dart
++++ b/test/harness_herdr_host_test.dart
+@@ -173,6 +173,28 @@ class _FailingPtyFactory implements HarnessPtyFactory {
+   }) async => throw const HarnessPtyException('没有可用的 PTY');
+ }
+ 
++/// Fails the first `agent list` with an error the CLI layer does not model.
++class _FlakyHerdrCli extends _FakeHerdrCli {
++  bool broken = true;
++
++  @override
++  Future<HerdrProcessResult> run(
++    List<String> command, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) {
++    if (broken && command.join(' ') == 'agent list') {
++      broken = false;
++      throw StateError('unexpected shape');
++    }
++    return super.run(
++      command,
++      workingDirectory: workingDirectory,
++      timeout: timeout,
++    );
++  }
++}
++
+ HerdrHost _host(
+   _FakeHerdrCli fake, {
+   HarnessPtyFactory? pty,
+@@ -430,6 +452,75 @@ void main() {
+     expect(host.installHint, isNotNull);
+     await host.dispose();
+   });
++
++  test(
++    'an explicit path that cannot run is not called "not installed"',
++    () async {
++      final host = HerdrHost(
++        executablePath: 'D:/tools/herdr.exe',
++        locator: ({String? explicitPath}) async => null,
++      );
++      await host.providers();
++      expect(host.state.value, HarnessHostState.unsupported);
++      expect(host.installHint!.title, 'Herdr 路径无效');
++      expect(host.installHint!.resolvedPath, 'D:/tools/herdr.exe');
++      await host.dispose();
++    },
++  );
++
++  test('a stopped pane reopens with a live terminal', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake);
++    await _sessions(host, min: 2);
++
++    final handle = await host.open('w37:p14');
++    await handle.stop();
++    expect(
++      fake.argv.where((argv) => argv.join(' ') == 'pane close w37:p14'),
++      hasLength(1),
++    );
++
++    // The pane is still in the agent list while the desktop catches up; the
++    // second open must not return the closed handle.
++    final again = await host.open('w37:p14');
++    expect(identical(again, handle), isFalse);
++    expect(again.terminal, isNotNull);
++
++    await again.detach();
++    await host.dispose();
++  });
++
++  test('a kind herdr knows but we do not is not hidden', () async {
++    final host = _host(_FakeHerdrCli());
++    final providers = await host.providers();
++    final byId = <String, HarnessProviderInfo>{
++      for (final provider in providers) provider.id: provider,
++    };
++    // The table has no executable name for these, so a PATH probe would be a
++    // guess; `agent start --kind` is what actually decides.
++    for (final kind in const <String>[
++      'agy',
++      'maki',
++      'muse',
++      'hermes',
++      'kilo',
++      'qodercli',
++      'letta',
++      'mastracode',
++      'kiro',
++    ]) {
++      expect(byId[kind]?.available, isTrue, reason: kind);
++    }
++    await host.dispose();
++  });
++
++  test('an unexpected refresh error does not stop the loop', () async {
++    final host = _host(_FlakyHerdrCli());
++    // The first `agent list` throws a plain StateError; the list still arrives.
++    final list = await _sessions(host, min: 2);
++    expect(list, hasLength(2));
++    await host.dispose();
++  });
+ }
+ 
+ /// A runner whose binary cannot be started; the host must report `unsupported`.
+diff --git a/test/harness_herdr_input_test.dart b/test/harness_herdr_input_test.dart
+index 13dce33e18ed544b970325c15f0748690155a5cb..5ad202b0f048abe5ba0d185ecca33d7c59a1216f 100644
+--- a/test/harness_herdr_input_test.dart
++++ b/test/harness_herdr_input_test.dart
+@@ -61,6 +61,23 @@ void main() {
+     expect(ops, isEmpty);
+   });
+ 
++  test('Alt+letter keeps the ESC prefix as literal text', () {
++    // Herdr has no `alt+x` key name, but `pane send-text` writes literal bytes,
++    // so ESC+char still reaches the app as the same Alt combination.
++    final ops = translator.translate(bytes('\u001bb'));
++    expect(ops, hasLength(1));
++    expect(ops.single, isA<HerdrSendTextOp>());
++    expect((ops.single as HerdrSendTextOp).text, '\u001bb');
++  });
++
++  test('Alt between typed text keeps its place', () {
++    final ops = translator.translate(bytes('ab\u001bxc'));
++    expect(
++      ops.whereType<HerdrSendTextOp>().map((op) => op.text).toList(),
++      <String>['ab', '\u001bx', 'c'],
++    );
++  });
++
+   test('Delete, PageUp and PageDown use herdr names', () {
+     final ops = translator.translate(bytes('\u001b[3~\u001b[5~\u001b[6~'));
+     expect(
+diff --git a/test/harness_herdr_terminal_test.dart b/test/harness_herdr_terminal_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b26abdcfc654ae2c8052ce1b3978d6c84f55ee9c
+--- /dev/null
++++ b/test/harness_herdr_terminal_test.dart
+@@ -0,0 +1,101 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_terminal.dart';
++
++Uint8List bytes(String text) => Uint8List.fromList(utf8.encode(text));
++
++/// Snapshot terminal with a controllable sender: every call is recorded and can
++/// be held open, so a test can prove one call finishes before the next starts.
++class _Recorder {
++  _Recorder();
++
++  final List<String> calls = <String>[];
++  Completer<void>? gate;
++
++  Future<void> sendText(String text) async {
++    calls.add('text:$text');
++    final pending = gate;
++    if (pending != null) await pending.future;
++  }
++
++  Future<void> sendKeys(List<String> keys) async {
++    calls.add('keys:${keys.join(',')}');
++    final pending = gate;
++    if (pending != null) await pending.future;
++  }
++
++  HerdrSnapshotTerminal terminal() => HerdrSnapshotTerminal(
++    readPane: () async => '',
++    sendText: sendText,
++    sendKeys: sendKeys,
++  );
++}
++
++void main() {
++  test('a key typed after text waits for the text call', () async {
++    final recorder = _Recorder()..gate = Completer<void>();
++    final terminal = recorder.terminal();
++
++    terminal.write(bytes('hello'));
++    terminal.write(bytes('\r'));
++    // The first call is in flight; the Enter behind it must not start yet, or
++    // `pane send-keys enter` can overtake `pane send-text hello`.
++    await Future<void>.delayed(const Duration(milliseconds: 30));
++    expect(recorder.calls, <String>['text:hello']);
++
++    recorder.gate!.complete();
++    await Future<void>.delayed(const Duration(milliseconds: 30));
++    expect(recorder.calls, <String>['text:hello', 'keys:enter']);
++
++    await terminal.close();
++  });
++
++  test('a burst of chunks becomes one send-text and one key', () async {
++    final recorder = _Recorder();
++    final terminal = recorder.terminal();
++
++    for (final chunk in <String>['h', 'el', 'lo']) {
++      terminal.write(bytes(chunk));
++    }
++    terminal.write(bytes('\r'));
++    await Future<void>.delayed(const Duration(milliseconds: 40));
++    expect(recorder.calls, <String>['text:hello', 'keys:enter']);
++
++    await terminal.close();
++  });
++
++  test('a failed call is reported and does not block the next one', () async {
++    final errors = <Object>[];
++    final calls = <String>[];
++    final terminal = HerdrSnapshotTerminal(
++      readPane: () async => '',
++      sendText: (text) async {
++        calls.add('text:$text');
++        throw StateError('pane gone');
++      },
++      sendKeys: (keys) async => calls.add('keys:${keys.join(',')}'),
++      onError: errors.add,
++    );
++
++    terminal.write(bytes('x'));
++    terminal.write(bytes('\r'));
++    await Future<void>.delayed(const Duration(milliseconds: 40));
++
++    expect(calls, <String>['text:x', 'keys:enter']);
++    expect(errors, hasLength(1));
++
++    await terminal.close();
++  });
++
++  test('writing after close is dropped', () async {
++    final recorder = _Recorder();
++    final terminal = recorder.terminal();
++    await terminal.close();
++    terminal.write(bytes('late'));
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(recorder.calls, isEmpty);
++  });
++}
+diff --git a/test/harness_remote_host_test.dart b/test/harness_remote_host_test.dart
+index e16311e1e593d745b2f55dad984984a875df3056..ec0e70c89550fd711c2e2e0ca4e34e5aa48778da 100644
+--- a/test/harness_remote_host_test.dart
++++ b/test/harness_remote_host_test.dart
+@@ -49,8 +49,10 @@ class FakeRemoteSessionPort extends ChangeNotifier
+   @override
+   final String hostLabel;
+ 
++  /// Mutable on purpose: a test can simulate pairing arriving after the host was
++  /// constructed.
+   @override
+-  final String hostId;
++  String hostId;
+ 
+   final Map<String, protocol.SessionInfo> sessionsById =
+       <String, protocol.SessionInfo>{};
+@@ -223,7 +225,22 @@ class FakeCodexThreadView extends ChangeNotifier
+     implements RemoteCodexThreadView {
+   FakeCodexThreadView(this._thread);
+ 
+-  final protocol.CodexThread _thread;
++  protocol.CodexThread _thread;
++
++  /// Pushes a new thread status the way the desktop does: through [changes].
++  void setStatus(String status) {
++    _thread = protocol.CodexThread(
++      id: _thread.id,
++      title: _thread.title,
++      cwd: _thread.cwd,
++      updatedAt: _thread.updatedAt,
++      status: status,
++      canAcceptDirectInput: _thread.canAcceptDirectInput,
++      canResume: _thread.canResume,
++    );
++    notifyListeners();
++  }
++
+   final List<protocol.CodexTurn> turnList = <protocol.CodexTurn>[];
+   final List<protocol.CodexPendingRequest> pendingList =
+       <protocol.CodexPendingRequest>[];
+@@ -236,7 +253,6 @@ class FakeCodexThreadView extends ChangeNotifier
+ 
+   @override
+   protocol.CodexThread get thread => _thread;
+-
+   @override
+   List<protocol.CodexTurn> get turns => turnList;
+ 
+@@ -561,6 +577,131 @@ void main() {
+     await host.dispose();
+   });
+ 
++  test('a terminal replays the screen it missed and clears on reset', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 't1', kind: 'terminal'));
++    final host = RemoteHarnessHost(remote: remote);
++
++    final first = await host.open('session:t1');
++    final live = <String>[];
++    final firstSub = first.terminal!.output.listen(
++      (data) => live.add(String.fromCharCodes(data)),
++    );
++    remote.pushEvent(
++      't1',
++      protocol.TerminalOutputEvent(
++        1,
++        DateTime.fromMillisecondsSinceEpoch(1),
++        'PS> ',
++      ),
++    );
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(live.join(), 'PS> ');
++    await firstSub.cancel();
++    await first.detach();
++
++    // Reopening builds a fresh channel; the screen so far must come back, or an
++    // idle shell would look like an empty terminal.
++    final second = await host.open('session:t1');
++    final replay = <String>[];
++    final secondSub = second.terminal!.output.listen(
++      (data) => replay.add(String.fromCharCodes(data)),
++    );
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(replay.join(), 'PS> ');
++
++    // A resubscribe replays from scratch: the view must say so, or the same
++    // screen would be appended to the old one.
++    remote
++        .view(remote.sessionsById['t1']!)
++        .applyBacklog(<protocol.SessionEvent>[
++          protocol.TerminalOutputEvent(
++            1,
++            DateTime.fromMillisecondsSinceEpoch(1),
++            'PS> ',
++          ),
++        ], reset: true);
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(replay.join(), 'PS> \u001b[2J\u001b[HPS> ');
++
++    await secondSub.cancel();
++    await second.detach();
++    await host.dispose();
++  });
++
++  test('a stopped session does not hand out a dead handle', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 's1'));
++    final host = RemoteHarnessHost(remote: remote);
++    final handle = await host.open('session:s1');
++    await handle.stop();
++
++    // The desktop dropped the session, so reopening reports that instead of
++    // returning a handle whose terminal is already closed.
++    await expectLater(host.open('session:s1'), throwsA(isA<StateError>()));
++    await host.dispose();
++  });
++
++  test('a stopped Herdr pane reopens with a live handle', () async {
++    final remote = FakeRemoteSessionPort();
++    final herdrPort = FakeRemoteHerdrPort()..agentList.add(_agent());
++    final host = RemoteHarnessHost(remote: remote, herdr: herdrPort);
++    await _waitForCount(host, 1);
++
++    final handle = await host.open('herdr:w37:p14');
++    await handle.stop();
++    expect(herdrPort.calls, contains('closePane:w37:p14'));
++
++    // The pane row can still be listed while the desktop catches up; a second
++    // open must build a new terminal rather than return the closed one.
++    final again = await host.open('herdr:w37:p14');
++    expect(identical(again, handle), isFalse);
++    expect(again.terminal, isNotNull);
++    await again.detach();
++    await host.dispose();
++  });
++
++  test('the host id is resolved once and namespaced once', () async {
++    final remote = FakeRemoteSessionPort(hostId: '');
++    final host = RemoteHarnessHost(remote: remote);
++    expect(host.id, 'remote');
++    // Pairing arrives after construction: the id must not change under the hub.
++    remote.hostId = 'agent-42';
++    expect(host.id, 'remote');
++
++    final named = RemoteHarnessHost(remote: remote);
++    expect(named.id, 'remote:agent-42');
++
++    final explicit = RemoteHarnessHost(remote: remote, hostId: 'remote:pc-9');
++    expect(explicit.id, 'remote:pc-9');
++
++    await host.dispose();
++    await named.dispose();
++    await explicit.dispose();
++  });
++
++  test('a Codex row follows the thread status', () async {
++    final remote = FakeRemoteSessionPort();
++    final codex = FakeRemoteCodexPort(
++      threads: <protocol.CodexThread>[_thread(status: 'active')],
++    );
++    final host = RemoteHarnessHost(remote: remote, codex: codex);
++    await _waitForCount(host, 1);
++    final handle = await host.open('codex:thread-1');
++    expect(handle.status.value, HarnessSessionStatus.working);
++
++    codex.views['thread-1']!.setStatus('blocked');
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(handle.status.value, HarnessSessionStatus.blocked);
++
++    codex.views['thread-1']!.setStatus('done');
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(handle.status.value, HarnessSessionStatus.done);
++
++    await handle.detach();
++    await host.dispose();
++  });
++
+   test('stop closes the session; detach does not', () async {
+     final remote = FakeRemoteSessionPort();
+     remote.put(_session(id: 's1'));

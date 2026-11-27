@@ -1,0 +1,5924 @@
+diff --git a/lib/harness/herdr/herdr.dart b/lib/harness/herdr/herdr.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..21fc80856111fc0838c99d418baa113963c72d8a
+--- /dev/null
++++ b/lib/harness/herdr/herdr.dart
+@@ -0,0 +1,11 @@
++// Import surface for the Herdr host.
++//
++// `herdr_platform.dart` is included because callers that want to show "where is
++// Herdr" need the same discovery the host uses.
++export 'herdr_cli.dart';
++export 'herdr_host.dart';
++export 'herdr_input.dart';
++export 'herdr_models.dart';
++export 'herdr_platform.dart';
++export 'herdr_session.dart';
++export 'herdr_terminal.dart';
+diff --git a/lib/harness/herdr/herdr_cli.dart b/lib/harness/herdr/herdr_cli.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ec8b458d7449217f788c9f38528b2a3cc10ab06
+--- /dev/null
++++ b/lib/harness/herdr/herdr_cli.dart
+@@ -0,0 +1,758 @@
++// The only place that speaks to the `herdr` CLI.
++//
++// Everything goes through the public command surface (`agent list`, `agent
++// prompt`, `pane read`, ...). HerdrHost never reads Herdr's socket, config or
++// state files: those are private to Herdr, and a version bump may move them.
++//
++// Process creation is injected as [HerdrProcessRunner] so tests assert argv and
++// parse fixtures without spawning anything. `herdr` is never run through a
++// shell: every argument is one argv element, so text that contains spaces,
++// quotes or `;` reaches Herdr literally.
++
++import 'dart:async';
++import 'dart:convert';
++
++import '../harness_host.dart' show HarnessCapability;
++import 'herdr_models.dart';
++
++typedef Json = Map<String, dynamic>;
++
++/// Outcome of one CLI invocation.
++class HerdrProcessResult {
++  const HerdrProcessResult({
++    required this.exitCode,
++    this.stdout = '',
++    this.stderr = '',
++    this.timedOut = false,
++    this.spawnError,
++  });
++
++  final int exitCode;
++  final String stdout;
++  final String stderr;
++  final bool timedOut;
++
++  /// `ENOENT` when the binary vanished between discovery and the call.
++  final String? spawnError;
++
++  bool get succeeded => !timedOut && spawnError == null && exitCode == 0;
++}
++
++/// Starts `herdr` with [argv] and captures its output.
++///
++/// Implementations must not run a shell, must bound captured output and must
++/// kill the child when [timeout] expires.
++typedef HerdrProcessRunner =
++    Future<HerdrProcessResult> Function(
++      List<String> argv, {
++      String? workingDirectory,
++      required Duration timeout,
++    });
++
++/// Whether [path] exists and is executable. Injected so discovery is testable
++/// without touching the real filesystem.
++typedef HerdrPathProbe = bool Function(String path);
++
++/// Lists the subdirectories of [path]; empty when it does not exist.
++typedef HerdrDirectoryLister = List<String> Function(String path);
++
++/// Resolves the Herdr executable, or null when it is not installed.
++///
++/// The optional arguments of the platform implementation are deliberately not
++/// part of the type: a host only says "use the user setting if there is one".
++typedef HerdrExecutableLocator =
++    Future<String?> Function({String? explicitPath});
++
++/// Why a Herdr call failed, so the UI can branch without parsing prose.
++enum HerdrFailure {
++  /// The executable is missing or cannot run.
++  unavailable,
++
++  /// Herdr is installed but its server is not running.
++  serverDown,
++  invalidArgument,
++  notFound,
++  agentBlocked,
++  agentNotReady,
++  promptStalled,
++  timeout,
++  failed,
++}
++
++class HerdrException implements Exception {
++  const HerdrException(this.failure, this.message, {this.herdrCode});
++
++  final HerdrFailure failure;
++
++  /// Chinese, user-facing: the Agents surface shows this verbatim.
++  final String message;
++
++  /// Raw Herdr code (`agent_blocked`, `pane_not_found`, ...) when there is one.
++  final String? herdrCode;
++
++  @override
++  String toString() => message;
++}
++
++/// Typed wrapper over the `herdr` command line.
++class HerdrCli {
++  HerdrCli({
++    required this.executable,
++    required HerdrProcessRunner runner,
++    this.timeout = const Duration(seconds: 30),
++  }) : _runner = runner;
++
++  /// Absolute path, or the bare name when PATH resolution is intended.
++  final String executable;
++  final Duration timeout;
++  final HerdrProcessRunner _runner;
++
++  /// Herdr's own agent kinds. Reused from the remote-control mirror so the two
++  /// layers cannot drift.
++  static const List<String> agentKinds = <String>[
++    'pi',
++    'claude',
++    'codex',
++    'gemini',
++    'cursor',
++    'devin',
++    'agy',
++    'cline',
++    'omp',
++    'mastracode',
++    'opencode',
++    'copilot',
++    'kimi',
++    'kiro',
++    'droid',
++    'amp',
++    'grok',
++    'hermes',
++    'kilo',
++    'qodercli',
++    'qwen',
++    'letta',
++    'maki',
++    'muse',
++  ];
++
++  /// Logical key names accepted by `agent send-keys` / `pane send-keys`.
++  static const List<String> keyNames = <String>[
++    'enter',
++    'esc',
++    'tab',
++    'shift+tab',
++    'backspace',
++    'delete',
++    'up',
++    'down',
++    'left',
++    'right',
++    'home',
++    'end',
++    'pageup',
++    'pagedown',
++    'ctrl+a',
++    'ctrl+b',
++    'ctrl+c',
++    'ctrl+d',
++    'ctrl+e',
++    'ctrl+k',
++    'ctrl+l',
++    'ctrl+n',
++    'ctrl+p',
++    'ctrl+r',
++    'ctrl+u',
++    'ctrl+w',
++  ];
++
++  static final RegExp _paneId = RegExp(r'^w[0-9A-Za-z]+:p[0-9A-Za-z]+$');
++
++  static final RegExp _ctrlKey = RegExp(r'^ctrl\+[a-z]$');
++
++  static bool isPaneId(String value) => _paneId.hasMatch(value);
++
++  // -------------------------------------------------------------------------
++  // Discovery and health
++  // -------------------------------------------------------------------------
++
++  /// `herdr --version` → `0.9.3`, or throws [HerdrFailure.unavailable].
++  Future<String> version() async {
++    final result = await _invoke(const <String>['--version']);
++    if (result.timedOut) {
++      throw const HerdrException(HerdrFailure.timeout, '检查 Herdr 版本超时');
++    }
++    final match = RegExp(
++      r'^herdr\s+(\S+)\s*$',
++      multiLine: true,
++    ).firstMatch(result.stdout);
++    if (!result.succeeded || match == null) {
++      throw HerdrException(
++        HerdrFailure.unavailable,
++        _firstLine(result.stderr).isEmpty
++            ? '无法运行 Herdr（退出码 ${result.exitCode}）'
++            : '无法运行 Herdr：${_firstLine(result.stderr)}',
++      );
++    }
++    return match.group(1)!;
++  }
++
++  /// `herdr status` prints indented `key: value` text, not JSON.
++  Future<HerdrServerStatus> serverStatus() async {
++    final result = await _invoke(const <String>['status']);
++    if (!result.succeeded) {
++      throw HerdrException(
++        HerdrFailure.serverDown,
++        'Herdr 服务不可用：${_firstLine(result.stderr).isEmpty ? '退出码 ${result.exitCode}' : _firstLine(result.stderr)}',
++      );
++    }
++    return _parseStatus(result.stdout);
++  }
++
++  static HerdrServerStatus _parseStatus(String text) {
++    String? clientVersion;
++    int? clientProtocol;
++    String? serverVersion;
++    String? socket;
++    var serverRunning = false;
++    var section = '';
++    for (final rawLine in text.split(RegExp(r'\r?\n'))) {
++      if (rawLine.trim().isEmpty) continue;
++      final indented = RegExp(r'^\s').hasMatch(rawLine);
++      final match = RegExp(
++        r'^\s*([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$',
++      ).firstMatch(rawLine);
++      if (match == null) continue;
++      final key = match.group(1)!.toLowerCase();
++      final value = match.group(2)!.trim();
++      if (!indented && value.isEmpty) {
++        section = key;
++        continue;
++      }
++      if (section == 'client') {
++        if (key == 'version') clientVersion = value;
++        if (key == 'protocol') clientProtocol = int.tryParse(value);
++      } else if (section == 'server') {
++        if (key == 'status') serverRunning = value.toLowerCase() == 'running';
++        if (key == 'version') serverVersion = value;
++        if (key == 'socket') socket = value;
++      }
++    }
++    return HerdrServerStatus(
++      clientVersion: clientVersion,
++      clientProtocol: clientProtocol,
++      serverRunning: serverRunning,
++      serverVersion: serverVersion,
++      socket: socket,
++    );
++  }
++
++  // -------------------------------------------------------------------------
++  // Reads
++  // -------------------------------------------------------------------------
++
++  Future<List<HerdrAgentInfo>> agents() async {
++    final result = await _json(const <String>['agent', 'list']);
++    return _asList(result['agents']).map(HerdrAgentInfo.fromJson).toList();
++  }
++
++  Future<List<HerdrWorkspaceInfo>> workspaces() async {
++    final result = await _json(const <String>['workspace', 'list']);
++    return _asList(
++      result['workspaces'],
++    ).map(HerdrWorkspaceInfo.fromJson).toList();
++  }
++
++  Future<HerdrAgentInfo> agent(String target) async {
++    final result = await _json(<String>[
++      'agent',
++      'get',
++      _requireTarget(target),
++    ]);
++    final raw = result['agent'];
++    if (raw is! Json) {
++      throw const HerdrException(HerdrFailure.failed, 'Herdr 未返回 agent 信息');
++    }
++    return HerdrAgentInfo.fromJson(raw);
++  }
++
++  /// `pane read` prints raw screen text, not JSON.
++  Future<String> readPane(
++    String paneId, {
++    String source = 'recent',
++    int lines = 200,
++    bool ansi = false,
++  }) async {
++    final result = await _invoke(<String>[
++      'pane',
++      'read',
++      _requirePaneId(paneId),
++      '--source',
++      _requireReadSource(source),
++      '--lines',
++      '${lines < 1 ? 1 : lines}',
++      if (ansi) '--ansi',
++    ], timeout: timeout);
++    if (result.timedOut) {
++      throw HerdrException(HerdrFailure.timeout, '读取面板 $paneId 超时');
++    }
++    final raw = result.stdout;
++    // A failed read still prints a JSON error envelope; never show that as
++    // terminal output.
++    final error = _errorEnvelope(raw);
++    if (error != null) {
++      throw _failureFromEnvelope(error);
++    }
++    if (!result.succeeded && raw.trim().isEmpty) {
++      throw HerdrException(
++        HerdrFailure.failed,
++        _firstLine(result.stderr).isEmpty
++            ? '读取面板失败（退出码 ${result.exitCode}）'
++            : _firstLine(result.stderr),
++      );
++    }
++    return raw;
++  }
++
++  // -------------------------------------------------------------------------
++  // Input
++  // -------------------------------------------------------------------------
++
++  /// Submits [text] as a task to the agent in [target].
++  ///
++  /// Never retried by callers: Herdr rejects a blocked agent before writing
++  /// anything, and a stalled submission must be inspected on the desktop.
++  Future<HerdrCommandReport> prompt(
++    String target,
++    String text, {
++    bool wait = false,
++    int? timeoutMs,
++  }) async {
++    final args = <String>['agent', 'prompt', _requireTarget(target), text];
++    var budget = timeout;
++    if (timeoutMs != null) {
++      args.addAll(<String>['--timeout', '$timeoutMs']);
++      budget = Duration(milliseconds: timeoutMs + 10000);
++    }
++    if (wait) {
++      args.add('--wait');
++      if (timeoutMs == null) {
++        args.addAll(<String>['--timeout', '120000']);
++        budget = const Duration(milliseconds: 130000);
++      }
++    }
++    final result = await _json(args, timeout: budget);
++    return HerdrCommandReport.fromResult(result, '已向 $target 发送提示词');
++  }
++
++  /// Types literal text into a pane (terminal semantics, not a prompt).
++  Future<HerdrCommandReport> sendText(String paneId, String text) async {
++    final result = await _json(<String>[
++      'pane',
++      'send-text',
++      _requirePaneId(paneId),
++      text,
++    ], allowEmpty: true);
++    return HerdrCommandReport.fromResult(result, '已写入面板 $paneId');
++  }
++
++  /// Sends logical keys to a pane (pane id) or to a named agent.
++  ///
++  /// The two are different verbs: `agent send-keys` needs an agent, so a shell
++  /// pane — which hosts none — could never receive Enter or an arrow key.
++  Future<HerdrCommandReport> sendKeys(String target, List<String> keys) async {
++    final t = _requireTarget(target);
++    final list = <String>[for (final key in keys) _requireKey(key)];
++    if (list.isEmpty) {
++      throw const HerdrException(HerdrFailure.invalidArgument, '没有要发送的按键');
++    }
++    final argv = isPaneId(t)
++        ? <String>['pane', 'send-keys', t, ...list]
++        : <String>['agent', 'send-keys', t, ...list];
++    final result = await _json(argv, allowEmpty: true);
++    return HerdrCommandReport.fromResult(result, '已发送按键 ${list.join(' ')}');
++  }
++
++  /// Blocks until [target] reaches one of [until] (default: idle/done/blocked).
++  ///
++  /// This is the status-refresh primitive: a long wait instead of tight polling.
++  /// A timeout is normal and reported as [HerdrFailure.timeout] so the caller can
++  /// simply refresh the list and wait again.
++  Future<HerdrCommandReport> wait(
++    String target, {
++    List<HerdrAgentStatus> until = const <HerdrAgentStatus>[],
++    Duration budget = const Duration(seconds: 20),
++  }) async {
++    final args = <String>['agent', 'wait', _requireTarget(target)];
++    for (final status in until) {
++      args.addAll(<String>['--until', status.name]);
++    }
++    args.addAll(<String>['--timeout', '${budget.inMilliseconds}']);
++    final result = await _json(
++      args,
++      timeout: budget + const Duration(seconds: 5),
++    );
++    return HerdrCommandReport.fromResult(result, '$target 已到达等待状态');
++  }
++
++  // -------------------------------------------------------------------------
++  // Lifecycle
++  // -------------------------------------------------------------------------
++
++  /// Creates a workspace and returns its root pane id.
++  Future<String> createWorkspace({
++    required String cwd,
++    String? label,
++    bool focus = false,
++  }) async {
++    final result = await _json(<String>[
++      'workspace',
++      'create',
++      '--cwd',
++      cwd,
++      if (label != null && label.trim().isNotEmpty) ...<String>[
++        '--label',
++        label.trim(),
++      ],
++      focus ? '--focus' : '--no-focus',
++    ], timeout: const Duration(seconds: 60));
++    final pane = result['root_pane'];
++    final paneId = pane is Json ? pane['pane_id'] : null;
++    if (paneId is! String || paneId.isEmpty) {
++      throw const HerdrException(HerdrFailure.failed, 'Herdr 未返回新工作区的面板');
++    }
++    return paneId;
++  }
++
++  /// Starts a supported agent in an existing interactive pane.
++  Future<HerdrAgentInfo> startAgent({
++    required String name,
++    required String kind,
++    required String paneId,
++    List<String> args = const <String>[],
++  }) async {
++    if (!agentKinds.contains(kind)) {
++      throw HerdrException(
++        HerdrFailure.invalidArgument,
++        'Herdr 不支持 $kind 这个 agent',
++      );
++    }
++    final result = await _json(<String>[
++      'agent',
++      'start',
++      _requireAgentName(name),
++      '--kind',
++      kind,
++      '--pane',
++      _requirePaneId(paneId),
++      if (args.isNotEmpty) ...<String>['--', ...args],
++    ], timeout: const Duration(seconds: 320));
++    final raw = result['agent'];
++    if (raw is! Json) {
++      throw const HerdrException(HerdrFailure.failed, 'Herdr 未返回启动后的 agent 信息');
++    }
++    return HerdrAgentInfo.fromJson(raw);
++  }
++
++  /// Closes [paneId]. Ending a session; the caller must have confirmed first.
++  Future<void> closePane(String paneId) async {
++    await _json(<String>['pane', 'close', _requirePaneId(paneId)]);
++  }
++
++  // -------------------------------------------------------------------------
++  // Plumbing
++  // -------------------------------------------------------------------------
++
++  Future<HerdrProcessResult> _invoke(
++    List<String> argv, {
++    Duration? timeout,
++    String? workingDirectory,
++  }) async {
++    final result = await _runner(
++      argv,
++      workingDirectory: workingDirectory,
++      timeout: timeout ?? this.timeout,
++    );
++    if (result.spawnError != null) {
++      throw HerdrException(
++        HerdrFailure.unavailable,
++        result.spawnError == 'ENOENT'
++            ? '找不到 Herdr，请先安装或设置 Herdr 路径'
++            : '无法启动 Herdr：${result.spawnError}',
++      );
++    }
++    return result;
++  }
++
++  Future<Json> _json(
++    List<String> argv, {
++    Duration? timeout,
++    bool allowEmpty = false,
++  }) async {
++    final result = await _invoke(argv, timeout: timeout);
++    if (result.timedOut) {
++      throw HerdrException(HerdrFailure.timeout, 'herdr ${argv.first} 超时');
++    }
++    final text = result.stdout.trim();
++    if (text.isEmpty) {
++      // Void mutations legitimately print nothing on success.
++      if (allowEmpty && result.succeeded) return const <String, dynamic>{};
++      throw HerdrException(
++        HerdrFailure.failed,
++        'Herdr 没有返回内容（${_firstLine(result.stderr).ifEmpty('退出码 ${result.exitCode}')}）',
++      );
++    }
++    final decoded = _tryDecode(text);
++    final error = _errorEnvelope(text);
++    if (error != null) throw _failureFromEnvelope(error);
++    if (decoded == null) {
++      throw HerdrException(
++        HerdrFailure.failed,
++        'Herdr 返回了无法解析的内容：${_firstLine(text)}',
++      );
++    }
++    final parsed = decoded['result'];
++    if (parsed is! Json) {
++      throw const HerdrException(
++        HerdrFailure.failed,
++        'Herdr 返回的内容缺少 result 字段',
++      );
++    }
++    return parsed;
++  }
++
++  HerdrException _failureFromEnvelope(_HerdrErrorEnvelope error) {
++    final code = error.code;
++    switch (code) {
++      case 'pane_not_found':
++        return HerdrException(
++          HerdrFailure.notFound,
++          '面板不存在或已关闭（${error.message}）',
++          herdrCode: code,
++        );
++      case 'agent_not_found':
++        return HerdrException(
++          HerdrFailure.notFound,
++          '找不到该 agent，可能已退出或改名（${error.message}）',
++          herdrCode: code,
++        );
++      case 'agent_blocked':
++        return HerdrException(
++          HerdrFailure.agentBlocked,
++          'agent 正在等待确认或提问，请先在电脑上处理（${error.message}）',
++          herdrCode: code,
++        );
++      case 'agent_not_ready':
++        return HerdrException(
++          HerdrFailure.agentNotReady,
++          'agent 还没准备好接收输入，请稍候再试（${error.message}）',
++          herdrCode: code,
++        );
++      case 'agent_prompt_stalled':
++        return HerdrException(
++          HerdrFailure.promptStalled,
++          '提示已发送但未观察到 agent 开始工作，请到电脑上确认，不要重复发送（${error.message}）',
++          herdrCode: code,
++        );
++      case 'pane_send_failed':
++        return HerdrException(
++          HerdrFailure.failed,
++          '无法向面板写入，请检查当前面板状态和终端内容以确认输入是否已送达；不会自动重发（${error.message}）',
++          herdrCode: code,
++        );
++      case 'connection_closed':
++        return HerdrException(
++          HerdrFailure.failed,
++          '输入连接已断开，无法确认本次输入是否送达；不会自动重发（${error.message}）',
++          herdrCode: code,
++        );
++      case 'timeout':
++        return HerdrException(
++          HerdrFailure.timeout,
++          '等待超时（${error.message}）',
++          herdrCode: code,
++        );
++      default:
++        return HerdrException(
++          HerdrFailure.failed,
++          error.message.isEmpty ? 'Herdr 返回了未知错误' : error.message,
++          herdrCode: code,
++        );
++    }
++  }
++
++  static String _requireTarget(String value) {
++    final trimmed = value.trim();
++    if (trimmed.isEmpty) {
++      throw const HerdrException(HerdrFailure.invalidArgument, '缺少 agent 目标');
++    }
++    // A leading dash would be read as a flag by the CLI, and control characters
++    // break Herdr's own single-line labels.
++    if (trimmed.startsWith('-') ||
++        trimmed.contains(RegExp(r'[\u0000-\u001f]'))) {
++      throw const HerdrException(HerdrFailure.invalidArgument, 'agent 目标不合法');
++    }
++    return trimmed;
++  }
++
++  static String _requireAgentName(String value) {
++    final trimmed = value.trim();
++    if (trimmed.isEmpty ||
++        trimmed.startsWith('-') ||
++        trimmed.contains(RegExp(r'[\u0000-\u001f]'))) {
++      throw const HerdrException(HerdrFailure.invalidArgument, 'agent 名称不合法');
++    }
++    return trimmed;
++  }
++
++  static String _requirePaneId(String value) {
++    if (!isPaneId(value)) {
++      throw HerdrException(HerdrFailure.invalidArgument, '面板 ID 不合法：$value');
++    }
++    return value;
++  }
++
++  static String _requireKey(String key) {
++    if (!keyNames.contains(key) && !_ctrlKey.hasMatch(key)) {
++      throw HerdrException(HerdrFailure.invalidArgument, '不支持的按键：$key');
++    }
++    return key;
++  }
++
++  static String _requireReadSource(String source) {
++    const sources = <String>[
++      'visible',
++      'recent',
++      'recent-unwrapped',
++      'detection',
++    ];
++    if (!sources.contains(source)) {
++      throw HerdrException(HerdrFailure.invalidArgument, '不支持的读取来源：$source');
++    }
++    return source;
++  }
++
++  static List<Json> _asList(Object? value) => <Json>[
++    if (value is List)
++      for (final item in value)
++        if (item is Json) item,
++  ];
++
++  static Json? _tryDecode(String text) {
++    try {
++      final decoded = jsonDecode(text);
++      return decoded is Json ? decoded : null;
++    } on FormatException {
++      return null;
++    }
++  }
++
++  static _HerdrErrorEnvelope? _errorEnvelope(String text) {
++    final trimmed = text.trim();
++    if (!trimmed.startsWith('{') || !trimmed.contains('"error"')) return null;
++    final decoded = _tryDecode(trimmed);
++    if (decoded == null) return null;
++    final error = decoded['error'];
++    if (error is! Json) return null;
++    return _HerdrErrorEnvelope(
++      code: error['code'] is String ? error['code'] as String : null,
++      message: error['message'] is String ? error['message'] as String : '',
++    );
++  }
++
++  static String _firstLine(String text) {
++    for (final line in text.split(RegExp(r'\r?\n'))) {
++      if (line.trim().isNotEmpty) return line.trim();
++    }
++    return '';
++  }
++}
++
++class _HerdrErrorEnvelope {
++  const _HerdrErrorEnvelope({required this.code, required this.message});
++
++  final String? code;
++  final String message;
++}
++
++/// Summary of a completed control action, as far as the harness layer needs it.
++class HerdrCommandReport {
++  const HerdrCommandReport({required this.action, required this.summary});
++
++  factory HerdrCommandReport.fromResult(Json result, String fallback) {
++    final type = result['type'] is String ? result['type'] as String : 'ok';
++    return HerdrCommandReport(action: type, summary: fallback);
++  }
++
++  final String action;
++  final String summary;
++}
++
++extension on String {
++  String ifEmpty(String fallback) => isEmpty ? fallback : this;
++}
++
++/// Provider descriptor for one Herdr agent kind.
++class HerdrProviderSpec {
++  const HerdrProviderSpec({
++    required this.id,
++    required this.label,
++    required this.executable,
++  });
++
++  final String id;
++  final String label;
++
++  /// Canonical executable Herdr launches for this kind.
++  final String executable;
++
++  static const HerdrProviderSpec shell = HerdrProviderSpec(
++    id: 'shell',
++    label: 'Shell',
++    executable: '',
++  );
++
++  static HerdrProviderSpec forKind(String kind) {
++    for (final spec in _specs) {
++      if (spec.id == kind) return spec;
++    }
++    // An unknown-but-supported Herdr kind still gets a truthful entry: its
++    // executable name is the kind itself, which is how Herdr's manifests name
++    // most of them.
++    return HerdrProviderSpec(id: kind, label: kind, executable: kind);
++  }
++
++  static const List<HerdrProviderSpec> _specs = <HerdrProviderSpec>[
++    HerdrProviderSpec(id: 'pi', label: 'Pi', executable: 'pi'),
++    HerdrProviderSpec(id: 'claude', label: 'Claude Code', executable: 'claude'),
++    HerdrProviderSpec(id: 'codex', label: 'Codex', executable: 'codex'),
++    HerdrProviderSpec(id: 'gemini', label: 'Gemini CLI', executable: 'gemini'),
++    HerdrProviderSpec(
++      id: 'cursor',
++      label: 'Cursor',
++      executable: 'cursor-agent',
++    ),
++    HerdrProviderSpec(
++      id: 'opencode',
++      label: 'OpenCode',
++      executable: 'opencode',
++    ),
++    HerdrProviderSpec(id: 'copilot', label: 'Copilot', executable: 'copilot'),
++    HerdrProviderSpec(id: 'qwen', label: 'Qwen Code', executable: 'qwen'),
++    HerdrProviderSpec(id: 'amp', label: 'Amp', executable: 'amp'),
++    HerdrProviderSpec(id: 'cline', label: 'Cline', executable: 'cline'),
++    HerdrProviderSpec(id: 'kimi', label: 'Kimi', executable: 'kimi'),
++    HerdrProviderSpec(id: 'droid', label: 'Droid', executable: 'droid'),
++    HerdrProviderSpec(id: 'grok', label: 'Grok', executable: 'grok'),
++    HerdrProviderSpec(id: 'omp', label: 'omp', executable: 'omp'),
++    HerdrProviderSpec(id: 'devin', label: 'Devin', executable: 'devin'),
++  ];
++
++  /// Capabilities every Herdr session has; kept next to the provider so a UI
++  /// can render the menu without opening a session.
++  static const Set<HarnessCapability> capabilities = <HarnessCapability>{
++    HarnessCapability.terminal,
++    HarnessCapability.prompt,
++    HarnessCapability.stop,
++  };
++}
+diff --git a/lib/harness/herdr/herdr_host.dart b/lib/harness/herdr/herdr_host.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d107578ac9729cf9b221262d77e942a2b909a86
+--- /dev/null
++++ b/lib/harness/herdr/herdr_host.dart
+@@ -0,0 +1,551 @@
++// HerdrHost: every Herdr agent pane on this computer, as a HarnessHub host.
++//
++// Herdr is a separate local host rather than part of StudioMux because its
++// panes outlive Studio: the user's terminals, their scrollback and their agents
++// all live in Herdr's server. Studio therefore never owns these sessions — it
++// lists them, attaches a view, and can close a pane only after explicit user
++// confirmation.
++//
++// Status refresh is wait-driven, not a tight poll: while any agent is working the
++// loop blocks in `herdr agent wait` (which returns when that agent leaves the
++// working state), and an idle environment only needs a slow safety refresh.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../harness_host.dart';
++import '../pty/harness_pty.dart';
++import 'herdr_cli.dart';
++import 'herdr_models.dart';
++import 'herdr_platform.dart';
++import 'herdr_session.dart';
++import 'herdr_terminal.dart';
++
++/// What the Agents UI shows when Herdr is not installed.
++@immutable
++class HerdrInstallHint {
++  const HerdrInstallHint({
++    required this.title,
++    required this.message,
++    this.url = 'https://herdr.dev',
++    this.resolvedPath,
++  });
++
++  final String title;
++  final String message;
++  final String url;
++
++  /// Path Studio did find, when the executable exists but cannot run.
++  final String? resolvedPath;
++}
++
++class HerdrHost implements HarnessHost {
++  HerdrHost({
++    String? executablePath,
++    HerdrCli? cli,
++    HerdrCliRunner? runner,
++    HarnessPtyFactory? ptyFactory,
++    HerdrExecutableLocator? locator,
++    this.idleRefresh = const Duration(seconds: 30),
++    this.waitBudget = const Duration(seconds: 20),
++    this.attachTakeover = false,
++  }) : _executablePath = executablePath,
++       _cli = cli,
++       _runner = cli == null ? (runner ?? HerdrCliRunner()) : null,
++       _ownsRunner = cli == null && runner == null,
++       _ptyFactory = ptyFactory,
++       _locator = locator ?? locateHerdrExecutable;
++
++  /// Safety refresh while nothing is working. Long on purpose; a change in an
++  /// agent's state wakes the loop far sooner through `agent wait`.
++  final Duration idleRefresh;
++
++  /// How long one `agent wait` blocks before the loop re-reads the list.
++  final Duration waitBudget;
++
++  /// Pass `--takeover` to `agent attach`. Off by default: Studio must not steal
++  /// the pane from the user's own Herdr client.
++  final bool attachTakeover;
++
++  final String? _executablePath;
++  HerdrCli? _cli;
++  final HerdrCliRunner? _runner;
++  final bool _ownsRunner;
++  final HarnessPtyFactory? _ptyFactory;
++  final HerdrExecutableLocator _locator;
++
++  final ValueNotifier<HarnessHostState> _state =
++      ValueNotifier<HarnessHostState>(HarnessHostState.offline);
++  final StreamController<List<HarnessSessionInfo>> _sessions =
++      StreamController<List<HarnessSessionInfo>>.broadcast();
++  final Map<String, HerdrAgentInfo> _agents = <String, HerdrAgentInfo>{};
++  final Map<String, HerdrSessionHandle> _handles =
++      <String, HerdrSessionHandle>{};
++  List<HarnessSessionInfo> _latest = const <HarnessSessionInfo>[];
++  List<HarnessProviderInfo>? _providers;
++
++  Future<HerdrCli?>? _initializing;
++  Future<void>? _loop;
++  Future<void>? _refreshing;
++  Completer<void>? _wake;
++  bool _disposed = false;
++  String? _lastError;
++  String? _version;
++  HerdrServerStatus? _serverStatus;
++  HerdrInstallHint? _installHint;
++  final Map<String, String> _workspaceLabels = <String, String>{};
++
++  @override
++  String get id => 'herdr';
++
++  @override
++  String get label => 'Herdr';
++
++  @override
++  HarnessHostKind get kind => HarnessHostKind.local;
++
++  @override
++  ValueListenable<HarnessHostState> get state => _state;
++
++  /// Install guidance for the UI; null once Herdr works.
++  HerdrInstallHint? get installHint => _installHint;
++
++  /// Last failure, already user-facing.
++  String? get lastError => _lastError;
++
++  /// Herdr version found during detection.
++  String? get version => _version;
++
++  /// `herdr status` snapshot from detection.
++  HerdrServerStatus? get serverStatus => _serverStatus;
++
++  /// Current session list, for a UI that mounts after the first refresh.
++  List<HarnessSessionInfo> get currentSessions => _latest;
++
++  // -------------------------------------------------------------------------
++  // HarnessHost
++  // -------------------------------------------------------------------------
++
++  @override
++  Stream<List<HarnessSessionInfo>> watchSessions() {
++    unawaited(_ensureLoop());
++    return Stream.multi((controller) {
++      controller.add(_latest);
++      final subscription = _sessions.stream.listen(
++        controller.add,
++        onError: controller.addError,
++        onDone: controller.close,
++      );
++      controller.onCancel = subscription.cancel;
++    });
++  }
++
++  @override
++  Future<List<HarnessProviderInfo>> providers() async {
++    final cli = await _ensureInitialized();
++    if (cli == null) return const <HarnessProviderInfo>[];
++    final cached = _providers;
++    if (cached != null) return cached;
++    // Only agent kinds: HerdrHost lists the panes Herdr reports as agents, so a
++    // bare shell pane would be invisible in the list and a "new terminal" entry
++    // would create a session nobody can see. `shell` is therefore not offered.
++    final list = <HarnessProviderInfo>[
++      for (final kind in HerdrCli.agentKinds)
++        () {
++          final spec = HerdrProviderSpec.forKind(kind);
++          return HarnessProviderInfo(
++            id: spec.id,
++            label: spec.label,
++            available: executableOnPath(spec.executable),
++            executable: spec.executable,
++            builtIn: true,
++          );
++        }(),
++    ];
++    _providers = List<HarnessProviderInfo>.unmodifiable(list);
++    return _providers!;
++  }
++
++  @override
++  Future<HarnessSessionHandle> open(String sessionId) async {
++    final cli = await _ensureInitialized();
++    if (cli == null) {
++      throw const HerdrException(
++        HerdrFailure.unavailable,
++        '这台电脑没有安装 Herdr，无法打开该会话。',
++      );
++    }
++    final cached = _handles[sessionId];
++    if (cached != null) return cached;
++
++    var agent = _agents[sessionId];
++    if (agent == null) {
++      // The list may be stale (a pane opened after the last refresh).
++      await refreshNow();
++      agent = _agents[sessionId];
++    }
++    if (agent == null) {
++      throw const HerdrException(HerdrFailure.notFound, '找不到该 Herdr 面板，可能已关闭。');
++    }
++    final terminal = await _createTerminal(agent);
++    final handle = HerdrSessionHandle(
++      cli: cli,
++      agent: agent,
++      terminal: terminal,
++      hostId: id,
++      onChanged: refreshNow,
++      onDetached: (detached) async {
++        if (identical(_handles[sessionId], detached)) {
++          _handles.remove(sessionId);
++          detached.dispose();
++        }
++      },
++    );
++    _handles[sessionId] = handle;
++    return handle;
++  }
++
++  @override
++  Future<HarnessSessionHandle> launch(HarnessLaunchRequest request) async {
++    final cli = await _ensureInitialized();
++    if (cli == null) {
++      throw const HerdrException(
++        HerdrFailure.unavailable,
++        '这台电脑没有安装 Herdr，无法新建会话。',
++      );
++    }
++    if (request.providerId == 'shell') {
++      // HerdrHost lists agents, and `agent list` never shows a bare shell pane:
++      // a workspace created here would silently vanish from the list. Say so
++      // instead of returning a session that disappears on the next refresh.
++      throw const HerdrException(
++        HerdrFailure.invalidArgument,
++        'Herdr 只管理 agent 面板，普通终端请在“本机”主机里新建。',
++      );
++    }
++    final title = request.title?.trim();
++    final label = (title == null || title.isEmpty) ? null : title;
++    // A Herdr session needs a workspace to live in; `--no-focus` keeps the
++    // user's current pane focused while Studio prepares the new one.
++    final paneId = await cli.createWorkspace(
++      cwd: request.cwd,
++      label: label,
++      focus: false,
++    );
++    final started = await cli.startAgent(
++      name: _agentNameFor(request.providerId, label),
++      kind: request.providerId,
++      paneId: paneId,
++      args: request.args,
++    );
++    // Refresh first so the host cache is current, then keep the freshly started
++    // agent even if the list push has not arrived yet.
++    await refreshNow();
++    _agents[started.paneId] = started;
++    _emit();
++    return open(started.paneId);
++  }
++
++  @override
++  Future<void> dispose() async {
++    if (_disposed) return;
++    _disposed = true;
++    _wake?.complete();
++    final handles = _handles.values.toList();
++    _handles.clear();
++    for (final handle in handles) {
++      handle.dispose();
++    }
++    await _sessions.close();
++    _state.dispose();
++    if (_ownsRunner) await _runner?.dispose();
++  }
++
++  // -------------------------------------------------------------------------
++  // Detection
++  // -------------------------------------------------------------------------
++
++  Future<HerdrCli?> _ensureInitialized() {
++    final cli = _cli;
++    if (cli != null) return Future<HerdrCli?>.value(cli);
++    return _initializing ??= _initialize();
++  }
++
++  Future<HerdrCli?> _initialize() async {
++    final executable = await _locator(explicitPath: _executablePath);
++    if (executable == null) {
++      _installHint = const HerdrInstallHint(
++        title: '未安装 Herdr',
++        message:
++            '没有找到 herdr。安装后重启 Studio 即可在这里管理 Herdr 工作区、面板和 agent；'
++            '不安装也能用 Studio 自带的会话管理。',
++      );
++      _state.value = HarnessHostState.unsupported;
++      return null;
++    }
++    final runner = _runner;
++    final cli = _cli = HerdrCli(executable: executable, runner: runner!.call);
++    try {
++      _version = await cli.version();
++      final status = await cli.serverStatus();
++      _serverStatus = status;
++      if (!status.serverRunning) {
++        _lastError = 'Herdr 服务未运行。请在电脑上打开一次 Herdr，或在终端运行 herdr server。';
++        _state.value = HarnessHostState.offline;
++        _installHint = HerdrInstallHint(
++          title: 'Herdr 服务未运行',
++          message: _lastError!,
++          resolvedPath: executable,
++        );
++        return cli;
++      }
++      _installHint = null;
++      _state.value = HarnessHostState.online;
++      return cli;
++    } on HerdrException catch (error) {
++      _lastError = error.message;
++      _installHint = HerdrInstallHint(
++        title: 'Herdr 无法使用',
++        message: error.message,
++        resolvedPath: executable,
++      );
++      _state.value = error.failure == HerdrFailure.unavailable
++          ? HarnessHostState.unsupported
++          : HarnessHostState.offline;
++      return cli;
++    }
++  }
++
++  // -------------------------------------------------------------------------
++  // Refresh loop
++  // -------------------------------------------------------------------------
++
++  Future<void> _ensureLoop() {
++    return _loop ??= _runLoop();
++  }
++
++  /// Wakes the loop immediately (pull-to-refresh, after an action).
++  Future<void> refreshNow() async {
++    if (_disposed) return;
++    await _ensureInitialized();
++    final wake = _wake;
++    if (wake != null && !wake.isCompleted) {
++      wake.complete();
++    }
++    await _refresh();
++  }
++
++  Future<void> _runLoop() async {
++    while (!_disposed) {
++      await _refresh();
++      if (_disposed) return;
++      final busy = <HerdrAgentInfo>[
++        for (final agent in _agents.values)
++          if (agent.status == HerdrAgentStatus.working) agent,
++      ];
++      if (busy.isEmpty) {
++        await _sleep(idleRefresh);
++      } else {
++        await _waitForBusy(busy);
++      }
++    }
++  }
++
++  /// Blocks until one busy agent leaves `working` (or the budget expires).
++  ///
++  /// `Future.any` is right here: any pane finishing means the list is stale, and
++  /// the next loop iteration re-reads everything anyway.
++  Future<void> _waitForBusy(List<HerdrAgentInfo> busy) async {
++    final cli = _cli;
++    if (cli == null) {
++      await _sleep(idleRefresh);
++      return;
++    }
++    final waits = <Future<void>>[
++      for (final agent in busy) _waitQuietly(cli, agent),
++    ];
++    if (waits.isEmpty) return;
++    await Future.any<void>(waits);
++  }
++
++  /// One long wait that must never break the loop: a timeout, a closed pane or a
++  /// transient CLI failure all mean "refresh and try again".
++  Future<void> _waitQuietly(HerdrCli cli, HerdrAgentInfo agent) async {
++    try {
++      await cli.wait(
++        agent.target,
++        until: const <HerdrAgentStatus>[
++          HerdrAgentStatus.idle,
++          HerdrAgentStatus.done,
++          HerdrAgentStatus.blocked,
++          HerdrAgentStatus.unknown,
++        ],
++        budget: waitBudget,
++      );
++    } on HerdrException {
++      // Expected: the budget expired, or the pane went away.
++    }
++  }
++
++  Future<void> _sleep(Duration duration) async {
++    if (_disposed) return;
++    final wake = _wake = Completer<void>();
++    await Future.any<void>(<Future<void>>[
++      Future<void>.delayed(duration),
++      wake.future,
++    ]);
++    if (identical(_wake, wake)) _wake = null;
++  }
++
++  Future<void> _refresh() {
++    // A user-triggered refresh can land while the loop is already reading; share
++    // the in-flight read instead of spawning a second `agent list`.
++    return _refreshing ??= _refreshOnce().whenComplete(() {
++      _refreshing = null;
++    });
++  }
++
++  Future<void> _refreshOnce() async {
++    final cli = await _ensureInitialized();
++    if (cli == null || _disposed) return;
++    try {
++      final agents = await cli.agents();
++      final workspaces = await _safeWorkspaces(cli);
++      _agents
++        ..clear()
++        ..addEntries(
++          agents.map(
++            (agent) => MapEntry<String, HerdrAgentInfo>(agent.paneId, agent),
++          ),
++        );
++      _workspaceLabels
++        ..clear()
++        ..addEntries(
++          workspaces.map(
++            (workspace) => MapEntry<String, String>(
++              workspace.workspaceId,
++              workspace.label,
++            ),
++          ),
++        );
++      _lastError = null;
++      if (_state.value != HarnessHostState.online) {
++        _state.value = HarnessHostState.online;
++        _installHint = null;
++      }
++      _emit();
++    } on HerdrException catch (error) {
++      _lastError = error.message;
++      if (error.failure == HerdrFailure.unavailable) {
++        _state.value = HarnessHostState.unsupported;
++      } else if (error.failure == HerdrFailure.serverDown) {
++        _state.value = HarnessHostState.offline;
++      } else {
++        _state.value = HarnessHostState.offline;
++      }
++    }
++  }
++
++  /// Workspace labels are decoration: a failure must not hide the agents.
++  Future<List<HerdrWorkspaceInfo>> _safeWorkspaces(HerdrCli cli) async {
++    try {
++      return await cli.workspaces();
++    } on HerdrException {
++      return const <HerdrWorkspaceInfo>[];
++    }
++  }
++
++  void _emit() {
++    final infos = <HarnessSessionInfo>[
++      for (final agent in _agents.values) agent.toSessionInfo(hostId: id),
++    ];
++    infos.sort(_compareSessions);
++    _latest = List<HarnessSessionInfo>.unmodifiable(infos);
++    for (final entry in _handles.entries.toList()) {
++      final agent = _agents[entry.key];
++      if (agent == null) {
++        entry.value.markExited();
++      } else {
++        entry.value.update(agent);
++      }
++    }
++    if (!_sessions.isClosed) _sessions.add(_latest);
++  }
++
++  /// Attention first, then most recently completed: `blocked`/`done` are the
++  /// two states that need the user; `working` needs nothing.
++  static int _compareSessions(HarnessSessionInfo a, HarnessSessionInfo b) {
++    int rank(HarnessSessionStatus status) {
++      switch (status) {
++        case HarnessSessionStatus.blocked:
++          return 0;
++        case HarnessSessionStatus.done:
++          return 1;
++        case HarnessSessionStatus.working:
++          return 2;
++        case HarnessSessionStatus.idle:
++          return 3;
++        case HarnessSessionStatus.unknown:
++          return 4;
++        case HarnessSessionStatus.exited:
++          return 5;
++      }
++    }
++
++    final byRank = rank(a.status).compareTo(rank(b.status));
++    if (byRank != 0) return byRank;
++    return a.title.toLowerCase().compareTo(b.title.toLowerCase());
++  }
++
++  // -------------------------------------------------------------------------
++  // Terminal creation
++  // -------------------------------------------------------------------------
++
++  Future<HerdrTerminal> _createTerminal(HerdrAgentInfo agent) async {
++    final cli = _cli!;
++    final factory = _ptyFactory;
++    if (factory != null) {
++      try {
++        return await HerdrPtyTerminal.start(
++          factory: factory,
++          argv: <String>[
++            cli.executable,
++            'agent',
++            'attach',
++            agent.target,
++            if (attachTakeover) '--takeover',
++          ],
++          workingDirectory: agent.cwd,
++        );
++      } on HarnessPtyException catch (error) {
++        // A PTY failure must not make the session unopenable: the snapshot
++        // fallback still shows the pane and can type into it.
++        _lastError = error.message;
++      }
++    }
++    return HerdrSnapshotTerminal(
++      readPane: () => cli.readPane(agent.paneId),
++      sendText: (text) => cli.sendText(agent.paneId, text),
++      sendKeys: (keys) => cli.sendKeys(agent.target, keys),
++      onError: (error) {
++        _lastError = error is HerdrException ? error.message : '$error';
++      },
++    )..start();
++  }
++
++  /// A short, Herdr-legal agent name. Herdr labels are single-line and are also
++  /// used as prompt targets, so control characters and dashes-out-front go away.
++  static String _agentNameFor(String providerId, String? label) {
++    final base = (label == null || label.trim().isEmpty)
++        ? providerId
++        : label.trim();
++    final cleaned = base
++        .replaceAll(RegExp(r'[\u0000-\u001f]'), ' ')
++        .replaceAll(RegExp(r'[^A-Za-z0-9._\u4e00-\u9fff-]+'), '-')
++        .replaceAll(RegExp(r'-{2,}'), '-')
++        .replaceAll(RegExp(r'^-+|-+$'), '');
++    final name = cleaned.isEmpty ? providerId : cleaned;
++    return name.length <= 40 ? name : name.substring(0, 40);
++  }
++}
+diff --git a/lib/harness/herdr/herdr_input.dart b/lib/harness/herdr/herdr_input.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb58cdb986c89d89a19234d524f1b908c763f8af
+--- /dev/null
++++ b/lib/harness/herdr/herdr_input.dart
+@@ -0,0 +1,197 @@
++// Turns terminal input bytes into Herdr input operations.
++//
++// A Herdr pane is driven through two different CLI verbs: literal text goes to
++// `pane send-text`, and keys go to `pane send-keys` by name. Raw terminal input
++// from the key bar or a hardware keyboard is a byte string, so something has to
++// decide which bytes are text and which are keys — this file, in one place, so
++// the local host and the remote host cannot disagree.
++//
++// Unknown escape sequences are dropped instead of forwarded as text: sending
++// `ESC [ 1 5 ~` literally into a shell would type garbage, whereas dropping it
++// only loses a key Herdr never advertised.
++
++import 'dart:convert';
++import 'dart:typed_data';
++
++/// One thing to do with a chunk of terminal input.
++sealed class HerdrInputOp {
++  const HerdrInputOp();
++}
++
++/// Type this text literally.
++final class HerdrSendTextOp extends HerdrInputOp {
++  const HerdrSendTextOp(this.text);
++
++  final String text;
++}
++
++/// Press these logical keys, in order.
++final class HerdrSendKeysOp extends HerdrInputOp {
++  const HerdrSendKeysOp(this.keys);
++
++  final List<String> keys;
++}
++
++/// Converts raw terminal bytes into [HerdrInputOp]s.
++class HerdrInputTranslator {
++  const HerdrInputTranslator();
++
++  /// Translates [data]. Never returns empty ops for printable input, and merges
++  /// consecutive printable characters into a single text op so typing a word is
++  /// one `pane send-text` call instead of one per character.
++  List<HerdrInputOp> translate(Uint8List data) =>
++      translateText(utf8.decode(data, allowMalformed: true));
++
++  /// Same as [translate] for already-decoded input (xterm hands out strings).
++  List<HerdrInputOp> translateText(String data) {
++    final ops = <HerdrInputOp>[];
++    final text = StringBuffer();
++    var i = 0;
++
++    void flushText() {
++      if (text.isEmpty) return;
++      ops.add(HerdrSendTextOp(text.toString()));
++      text.clear();
++    }
++
++    void addKey(String key) {
++      flushText();
++      ops.add(HerdrSendKeysOp(<String>[key]));
++    }
++
++    while (i < data.length) {
++      final code = data.codeUnitAt(i);
++      if (code == 0x1b) {
++        final parsed = _parseEscape(data, i);
++        if (parsed == null) {
++          // Lone ESC (or an unknown sequence ending here): Escape key.
++          addKey('esc');
++          i += 1;
++          continue;
++        }
++        if (parsed.key != null) {
++          addKey(parsed.key!);
++        }
++        // A recognised-but-unmapped sequence is consumed and dropped.
++        i = parsed.next;
++        continue;
++      }
++      if (code == 0x0d || code == 0x0a) {
++        addKey('enter');
++        i += 1;
++        continue;
++      }
++      if (code == 0x09) {
++        addKey('tab');
++        i += 1;
++        continue;
++      }
++      if (code == 0x7f || code == 0x08) {
++        addKey('backspace');
++        i += 1;
++        continue;
++      }
++      if (code >= 0x01 && code <= 0x1a) {
++        // Ctrl-A..Ctrl-Z, except the special cases handled above.
++        addKey('ctrl+${String.fromCharCode(0x60 + code)}');
++        i += 1;
++        continue;
++      }
++      text.writeCharCode(code);
++      i += 1;
++    }
++    flushText();
++    return ops;
++  }
++
++  /// Parses one escape sequence starting at [start].
++  ///
++  /// Returns null when this is a bare ESC, so the caller reports Escape.
++  _Escape? _parseEscape(String data, int start) {
++    if (start + 1 >= data.length) return null;
++    final next = data.codeUnitAt(start + 1);
++    // SS3: ESC O A..D (application cursor mode).
++    if (next == 0x4f) {
++      if (start + 2 >= data.length) return null;
++      final finalByte = data.codeUnitAt(start + 2);
++      return _Escape(_arrowFor(finalByte), start + 3);
++    }
++    if (next != 0x5b) {
++      // ESC followed by a printable char is Alt+key; Herdr has no Alt verb.
++      return _Escape(null, start + 2);
++    }
++    // CSI: ESC [ params final.
++    var i = start + 2;
++    final params = StringBuffer();
++    while (i < data.length) {
++      final code = data.codeUnitAt(i);
++      if (code >= 0x40 && code <= 0x7e) {
++        final key = _keyForCsi(params.toString(), String.fromCharCode(code));
++        return _Escape(key, i + 1);
++      }
++      params.writeCharCode(code);
++      i += 1;
++    }
++    return _Escape(null, i);
++  }
++
++  static String? _arrowFor(int finalByte) {
++    switch (finalByte) {
++      case 0x41:
++        return 'up';
++      case 0x42:
++        return 'down';
++      case 0x43:
++        return 'right';
++      case 0x44:
++        return 'left';
++      case 0x48:
++        return 'home';
++      case 0x46:
++        return 'end';
++      default:
++        return null;
++    }
++  }
++
++  static String? _keyForCsi(String params, String finalByte) {
++    if (finalByte == 'A') return 'up';
++    if (finalByte == 'B') return 'down';
++    if (finalByte == 'C') return 'right';
++    if (finalByte == 'D') return 'left';
++    if (finalByte == 'H') return 'home';
++    if (finalByte == 'F') return 'end';
++    if (finalByte == 'Z') return 'shift+tab';
++    if (finalByte == '~') {
++      switch (params) {
++        case '1':
++        case '7':
++          return 'home';
++        case '2':
++          return null; // Insert: Herdr has no key name for it.
++        case '3':
++          return 'delete';
++        case '4':
++        case '8':
++          return 'end';
++        case '5':
++          return 'pageup';
++        case '6':
++          return 'pagedown';
++        default:
++          return null;
++      }
++    }
++    return null;
++  }
++}
++
++class _Escape {
++  const _Escape(this.key, this.next);
++
++  /// Key name, or null when the sequence is recognised but unmapped.
++  final String? key;
++
++  /// Index just past the sequence.
++  final int next;
++}
+diff --git a/lib/harness/herdr/herdr_models.dart b/lib/harness/herdr/herdr_models.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..00b2b01b8c2050a0b8108293976dfa4e39162aec
+--- /dev/null
++++ b/lib/harness/herdr/herdr_models.dart
+@@ -0,0 +1,220 @@
++// Typed mirror of the `herdr agent list` / `workspace list` JSON that HerdrHost
++// reads. Field names are the ones herdr 0.9.x actually prints (snake_case, and
++// nullable where the schema says nullable) so a rename on Herdr's side breaks a
++// parsing test instead of shipping as an empty label.
++//
++// Deliberately no `agent_session` here: that object carries the agent's private
++// session-log path, and HerdrHost has no business holding it. Log reading
++// belongs to the local host's readers.
++
++import 'package:flutter/foundation.dart';
++
++import '../harness_host.dart';
++
++/// Lifecycle as Herdr reports it. `idle` and `done` both accept input.
++enum HerdrAgentStatus { idle, working, blocked, done, unknown }
++
++/// Unknown statuses degrade to [HerdrAgentStatus.unknown] so a newer Herdr
++/// never makes an older Studio throw.
++HerdrAgentStatus parseHerdrAgentStatus(Object? value) {
++  for (final status in HerdrAgentStatus.values) {
++    if (status.name == value) return status;
++  }
++  return HerdrAgentStatus.unknown;
++}
++
++/// Herdr status → harness status.
++///
++/// `idle` and `done` are both "ready for input", but they are not the same
++/// thing to a user: `done` means the last turn finished and nobody has looked
++/// at it yet, while `idle` means the agent is simply waiting. Keeping them
++/// apart lets the Agents list show a completion badge.
++HarnessSessionStatus harnessStatusFor(HerdrAgentStatus status) {
++  switch (status) {
++    case HerdrAgentStatus.idle:
++      return HarnessSessionStatus.idle;
++    case HerdrAgentStatus.working:
++      return HarnessSessionStatus.working;
++    case HerdrAgentStatus.blocked:
++      return HarnessSessionStatus.blocked;
++    case HerdrAgentStatus.done:
++      return HarnessSessionStatus.done;
++    case HerdrAgentStatus.unknown:
++      return HarnessSessionStatus.unknown;
++  }
++}
++
++/// One agent pane as returned by `herdr agent list`.
++@immutable
++class HerdrAgentInfo {
++  const HerdrAgentInfo({
++    required this.paneId,
++    required this.workspaceId,
++    required this.tabId,
++    required this.agentKind,
++    required this.status,
++    required this.focused,
++    this.cwd,
++    this.name,
++    this.title,
++    this.interactiveReady,
++    this.completionSeq,
++    this.stateChangeSeq,
++    this.revision,
++    this.launchPending = false,
++  });
++
++  factory HerdrAgentInfo.fromJson(Map<String, dynamic> json) => HerdrAgentInfo(
++    paneId: _str(json['pane_id']) ?? '',
++    workspaceId: _str(json['workspace_id']) ?? '',
++    tabId: _str(json['tab_id']) ?? '',
++    agentKind: _str(json['agent']) ?? _str(json['display_agent']) ?? '',
++    status: parseHerdrAgentStatus(json['agent_status']),
++    focused: json['focused'] == true,
++    cwd: _str(json['cwd']),
++    name: _str(json['name']),
++    title:
++        _str(json['terminal_title_stripped']) ??
++        _str(json['terminal_title']) ??
++        _str(json['title']),
++    interactiveReady: json['interactive_ready'] == true,
++    completionSeq: _int(json['completion_seq']),
++    stateChangeSeq: _int(json['state_change_seq']),
++    revision: _int(json['revision']),
++    launchPending: json['launch_pending'] == true,
++  );
++
++  final String paneId;
++  final String workspaceId;
++  final String tabId;
++
++  /// Agent label Herdr detected in the pane (`claude`, `codex`, `pi`, ...).
++  final String agentKind;
++  final HerdrAgentStatus status;
++  final bool focused;
++  final String? cwd;
++
++  /// User-assigned pane name; also the preferred prompt target.
++  final String? name;
++
++  /// Stripped terminal title, e.g. `执行 A D 盘独立构建 | analysis`.
++  final String? title;
++  final bool? interactiveReady;
++  final int? completionSeq;
++  final int? stateChangeSeq;
++  final int? revision;
++  final bool launchPending;
++
++  /// `agent prompt` / `send-keys` target: the pane name when the user gave one,
++  /// otherwise the pane id. A bare kind label is never a legal target.
++  String get target => (name != null && name!.isNotEmpty) ? name! : paneId;
++
++  /// Harness provider id used for grouping: the detected agent kind, or the
++  /// host's shell when the pane hosts no agent.
++  String get providerId => agentKind.isEmpty ? 'shell' : agentKind;
++
++  /// Session title: terminal title, then the pane name, then a readable id.
++  String get displayTitle {
++    final titleText = title;
++    if (titleText != null && titleText.isNotEmpty) return titleText;
++    final nameText = name;
++    if (nameText != null && nameText.isNotEmpty) return nameText;
++    return agentKind.isEmpty ? paneId : '$agentKind · $paneId';
++  }
++
++  /// A Herdr pane can be typed into, prompted, and its pane closed. There is no
++  /// structured transcript and no approval API: approvals happen in the pane.
++  static const Set<HarnessCapability> capabilities = <HarnessCapability>{
++    HarnessCapability.terminal,
++    HarnessCapability.prompt,
++    HarnessCapability.stop,
++  };
++
++  HarnessSessionInfo toSessionInfo({required String hostId}) =>
++      HarnessSessionInfo(
++        id: paneId,
++        hostId: hostId,
++        providerId: providerId,
++        title: displayTitle,
++        status: harnessStatusFor(status),
++        capabilities: capabilities,
++        cwd: cwd,
++        sourceRef: paneId,
++      );
++
++  HerdrAgentInfo copyWith({HerdrAgentStatus? status}) => HerdrAgentInfo(
++    paneId: paneId,
++    workspaceId: workspaceId,
++    tabId: tabId,
++    agentKind: agentKind,
++    status: status ?? this.status,
++    focused: focused,
++    cwd: cwd,
++    name: name,
++    title: title,
++    interactiveReady: interactiveReady,
++    completionSeq: completionSeq,
++    stateChangeSeq: stateChangeSeq,
++    revision: revision,
++    launchPending: launchPending,
++  );
++}
++
++/// One workspace as returned by `herdr workspace list`.
++@immutable
++class HerdrWorkspaceInfo {
++  const HerdrWorkspaceInfo({
++    required this.workspaceId,
++    required this.label,
++    required this.number,
++    required this.focused,
++    required this.status,
++    required this.paneCount,
++    required this.tabCount,
++  });
++
++  factory HerdrWorkspaceInfo.fromJson(Map<String, dynamic> json) =>
++      HerdrWorkspaceInfo(
++        workspaceId: _str(json['workspace_id']) ?? '',
++        label: _str(json['label']) ?? '',
++        number: _int(json['number']) ?? 0,
++        focused: json['focused'] == true,
++        status: parseHerdrAgentStatus(json['agent_status']),
++        paneCount: _int(json['pane_count']) ?? 0,
++        tabCount: _int(json['tab_count']) ?? 0,
++      );
++
++  final String workspaceId;
++  final String label;
++  final int number;
++  final bool focused;
++  final HerdrAgentStatus status;
++  final int paneCount;
++  final int tabCount;
++
++  /// Workspace label with a stable fallback, for grouping headers.
++  String get displayLabel => label.isEmpty ? workspaceId : label;
++}
++
++/// Result of `herdr status`: a two-section `key: value` text dump, not JSON.
++@immutable
++class HerdrServerStatus {
++  const HerdrServerStatus({
++    this.clientVersion,
++    this.clientProtocol,
++    this.serverRunning = false,
++    this.serverVersion,
++    this.socket,
++  });
++
++  final String? clientVersion;
++  final int? clientProtocol;
++  final bool serverRunning;
++  final String? serverVersion;
++  final String? socket;
++}
++
++/// Nullable-safe string field: Herdr prints `null` for absent texts.
++String? _str(Object? value) => value is String ? value : null;
++
++int? _int(Object? value) => value is num ? value.toInt() : null;
+diff --git a/lib/harness/herdr/herdr_platform.dart b/lib/harness/herdr/herdr_platform.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e70efccb48c07696fe79b7fd85e69154602588eb
+--- /dev/null
++++ b/lib/harness/herdr/herdr_platform.dart
+@@ -0,0 +1,3 @@
++// Conditional export: desktop/CLI resolves the process-backed platform layer,
++// web resolves a stub that reports the limitation instead of crashing.
++export 'herdr_platform_stub.dart' if (dart.library.io) 'herdr_platform_io.dart';
+diff --git a/lib/harness/herdr/herdr_platform_io.dart b/lib/harness/herdr/herdr_platform_io.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..99e21167433c37980bd4c43723d03176022c0f48
+--- /dev/null
++++ b/lib/harness/herdr/herdr_platform_io.dart
+@@ -0,0 +1,351 @@
++// Desktop/CLI platform layer for Herdr: executable discovery and process runs.
++//
++// Two rules shape this file:
++//
++//   * Discovery describes reality. The host must be able to say "Herdr is not
++//     installed" instead of offering a menu that fails on click, so nothing is
++//     guessed: a candidate is returned only when the probe succeeds.
++//   * Every argument is one argv element. Herdr is started with `runInShell:
++//     false`, so text containing spaces or quotes reaches it literally and can
++//     never become shell syntax.
++//
++// Process ownership follows `process-lifecycle.md`: runs go through
++// [ProcessSupervisor] (Windows tree kill, drain both streams, await exit), and
++// [HerdrCliRunner.dispose] releases whatever is still alive.
++
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:typed_data';
++
++import '../../services/process_supervisor.dart';
++import 'herdr_cli.dart';
++
++/// Refuse to hold more than this per stream; a runaway command must not
++/// exhaust memory. Real Herdr JSON for a few dozen agents is far below it.
++const int _maxCapturedBytes = 2 * 1024 * 1024;
++
++/// Where the user may point Studio at a Herdr build that is not on PATH.
++const String herdrPathEnvironmentVariable = 'QFLI_HERDR_PATH';
++
++/// Locates the Herdr executable.
++///
++/// Order: explicit user setting → `QFLI_HERDR_PATH` → `PATH` → the platform's
++/// usual install directories. Returns null when Herdr is not installed; the
++/// host then reports `unsupported` with an install hint.
++Future<String?> locateHerdrExecutable({
++  String? explicitPath,
++  Map<String, String>? environment,
++  HerdrPathProbe? isExecutable,
++  HerdrDirectoryLister? listDirectory,
++  bool? isWindows,
++  bool? isMacOS,
++}) async {
++  final env = environment ?? Platform.environment;
++  final windows = isWindows ?? Platform.isWindows;
++  final macos = isMacOS ?? Platform.isMacOS;
++  final probe = isExecutable ?? _defaultIsExecutable;
++  final binary = windows ? 'herdr.exe' : 'herdr';
++
++  final explicit = explicitPath?.trim() ?? '';
++  if (explicit.isNotEmpty) {
++    return probe(explicit) ? explicit : null;
++  }
++
++  final fromEnv = env[herdrPathEnvironmentVariable]?.trim() ?? '';
++  if (fromEnv.isNotEmpty && probe(fromEnv)) return fromEnv;
++
++  final fromPath = _findOnPath(
++    binary,
++    env: env,
++    probe: probe,
++    windows: windows,
++  );
++  if (fromPath != null) return fromPath;
++
++  final lister = listDirectory ?? _defaultListDirectory;
++  for (final candidate in _commonHerdrLocations(
++    env: env,
++    windows: windows,
++    macos: macos,
++    listDirectory: lister,
++  )) {
++    if (probe(candidate)) return candidate;
++  }
++  return null;
++}
++
++/// Whether [name] (an agent CLI, not Herdr itself) can be launched.
++///
++/// Used to mark a provider unavailable instead of offering a menu entry whose
++/// launch would fail. Covers PATH plus the package-manager bins agents are
++/// usually installed into.
++bool executableOnPath(
++  String name, {
++  Map<String, String>? environment,
++  HerdrPathProbe? isExecutable,
++  HerdrDirectoryLister? listDirectory,
++  bool? isWindows,
++  bool? isMacOS,
++}) {
++  if (name.trim().isEmpty) return false;
++  final env = environment ?? Platform.environment;
++  final windows = isWindows ?? Platform.isWindows;
++  final macos = isMacOS ?? Platform.isMacOS;
++  final probe = isExecutable ?? _defaultIsExecutable;
++  if (_findOnPath(name, env: env, probe: probe, windows: windows) != null) {
++    return true;
++  }
++  final lister = listDirectory ?? _defaultListDirectory;
++  for (final directory in _agentBinDirectories(
++    env: env,
++    windows: windows,
++    macos: macos,
++    listDirectory: lister,
++  )) {
++    for (final candidate in _executableNames(name, windows)) {
++      if (probe(_join(directory, candidate))) return true;
++    }
++  }
++  return false;
++}
++
++List<String> _commonHerdrLocations({
++  required Map<String, String> env,
++  required bool windows,
++  required bool macos,
++  required HerdrDirectoryLister listDirectory,
++}) {
++  final home = _home(env, windows);
++  if (windows) {
++    final locations = <String>[];
++    // `herdr update` installs beside the running binary, e.g.
++    // `%ProgramFiles%\herdr-windows-x86_64\herdr.exe`, and a version bump adds
++    // a new suffixed directory instead of overwriting the old one.
++    for (final base in <String?>[
++      env['ProgramFiles'],
++      env['ProgramFiles(x86)'],
++      env['LOCALAPPDATA'] == null
++          ? null
++          : _join(env['LOCALAPPDATA']!, 'Programs'),
++    ]) {
++      if (base == null || base.isEmpty) continue;
++      for (final entry in listDirectory(base)) {
++        final leaf = entry.split(RegExp(r'[/\\]')).last;
++        if (leaf.toLowerCase().startsWith('herdr-')) {
++          locations.add(_join(entry, 'herdr.exe'));
++        }
++      }
++    }
++    for (final directory in <String?>[
++      env['LOCALAPPDATA'] == null
++          ? null
++          : _join(env['LOCALAPPDATA']!, 'Programs'),
++      env['USERPROFILE'] == null
++          ? null
++          : _join(env['USERPROFILE']!, 'scoop', 'shims'),
++      home == null ? null : _join(home, '.cargo', 'bin'),
++    ]) {
++      if (directory != null && directory.isNotEmpty) {
++        locations.add(_join(directory, 'herdr.exe'));
++      }
++    }
++    return locations;
++  }
++  return <String>[
++    if (macos) '/opt/homebrew/bin/herdr',
++    '/usr/local/bin/herdr',
++    '/usr/bin/herdr',
++    if (!macos) '/bin/herdr',
++    if (home != null) _join(home, '.local/bin/herdr'),
++    if (home != null) _join(home, '.cargo/bin/herdr'),
++  ];
++}
++
++List<String> _agentBinDirectories({
++  required Map<String, String> env,
++  required bool windows,
++  required bool macos,
++  required HerdrDirectoryLister listDirectory,
++}) {
++  final home = _home(env, windows);
++  return <String>[
++    if (windows && env['APPDATA'] != null) _join(env['APPDATA']!, 'npm'),
++    if (windows && env['LOCALAPPDATA'] != null)
++      _join(env['LOCALAPPDATA']!, 'Programs'),
++    if (home != null) _join(home, '.local', 'bin'),
++    if (home != null) _join(home, '.bun', 'bin'),
++    if (home != null) _join(home, '.cargo', 'bin'),
++    if (home != null) _join(home, '.volta', 'bin'),
++    if (macos) '/opt/homebrew/bin',
++  ];
++}
++
++String? _findOnPath(
++  String name, {
++  required Map<String, String> env,
++  required HerdrPathProbe probe,
++  required bool windows,
++}) {
++  final path = env['PATH'] ?? env['Path'] ?? '';
++  if (path.isEmpty) return null;
++  final separator = windows ? ';' : ':';
++  for (final rawDirectory in path.split(separator)) {
++    var directory = rawDirectory.trim();
++    if (directory.isEmpty) continue;
++    if (directory.length > 1 &&
++        directory.startsWith('"') &&
++        directory.endsWith('"')) {
++      directory = directory.substring(1, directory.length - 1);
++    }
++    for (final candidate in _executableNames(name, windows)) {
++      final full = _join(directory, candidate);
++      if (probe(full)) return full;
++    }
++  }
++  return null;
++}
++
++List<String> _executableNames(String name, bool windows) {
++  if (!windows) return <String>[name];
++  if (name.contains('.')) return <String>[name];
++  // npm/pip shims are `.cmd`, standalone installers `.exe`.
++  return <String>['$name.exe', '$name.cmd', '$name.bat', '$name.com'];
++}
++
++String? _home(Map<String, String> env, bool windows) {
++  final value = windows
++      ? (env['USERPROFILE'] ?? env['HOMEDRIVE'])
++      : env['HOME'];
++  return value == null || value.isEmpty ? null : value;
++}
++
++String _join(String base, String leaf, [String? more]) {
++  final separator = Platform.pathSeparator;
++  final prefix = base.endsWith('/') || base.endsWith(r'\')
++      ? base
++      : '$base$separator';
++  return more == null ? '$prefix$leaf' : '$prefix$leaf$separator$more';
++}
++
++bool _defaultIsExecutable(String path) {
++  try {
++    final type = FileSystemEntity.typeSync(path);
++    if (type != FileSystemEntityType.file) return false;
++    if (Platform.isWindows) return true;
++    final mode = FileStat.statSync(path).mode;
++    return mode & 0x49 != 0; // owner/group/other execute
++  } on FileSystemException {
++    return false;
++  }
++}
++
++List<String> _defaultListDirectory(String path) {
++  try {
++    return <String>[
++      for (final entry in Directory(path).listSync(followLinks: false))
++        if (entry is Directory) entry.path,
++    ];
++  } on FileSystemException {
++    return const <String>[];
++  }
++}
++
++/// Runs `herdr` under [ProcessSupervisor].
++///
++/// One instance per host, so a host disposal cannot disturb another host's
++/// child processes.
++class HerdrCliRunner {
++  HerdrCliRunner({ProcessSupervisor? supervisor})
++    : _supervisor = supervisor ?? ProcessSupervisor();
++
++  final ProcessSupervisor _supervisor;
++  bool _disposed = false;
++
++  Future<HerdrProcessResult> call(
++    List<String> argv, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) async {
++    if (argv.isEmpty) {
++      throw ArgumentError.value(argv, 'argv', 'must not be empty');
++    }
++    if (_disposed) {
++      return const HerdrProcessResult(exitCode: -1, spawnError: 'disposed');
++    }
++    final stdout = _BoundedBytes(_maxCapturedBytes);
++    final stderr = _BoundedBytes(_maxCapturedBytes);
++    try {
++      final process = await _supervisor.start(
++        argv.first,
++        argv.sublist(1),
++        workingDirectory: workingDirectory,
++        runInShell: false,
++      );
++      final stdoutDone = process.stdout.listen(stdout.add).asFuture<void>();
++      final stderrDone = process.stderr.listen(stderr.add).asFuture<void>();
++      var timedOut = false;
++      int code;
++      try {
++        code = await process.exitCode.timeout(timeout);
++      } on TimeoutException {
++        timedOut = true;
++        await process.cancel();
++        code = await process.exitCode;
++      }
++      await Future.wait<void>(<Future<void>>[stdoutDone, stderrDone]);
++      return HerdrProcessResult(
++        exitCode: code,
++        stdout: stdout.decode(),
++        stderr: stderr.decode(),
++        timedOut: timedOut,
++      );
++    } on ProcessException catch (error) {
++      return HerdrProcessResult(
++        exitCode: -1,
++        stderr: error.message,
++        spawnError: _looksMissing(error) ? 'ENOENT' : error.message,
++      );
++    } on StateError {
++      // Supervisor disposed while the call was in flight.
++      return const HerdrProcessResult(exitCode: -1, spawnError: 'disposed');
++    }
++  }
++
++  /// Releases children still running. Idempotent.
++  Future<void> dispose() async {
++    if (_disposed) return;
++    _disposed = true;
++    await _supervisor.dispose();
++  }
++
++  static bool _looksMissing(ProcessException error) {
++    if (error.errorCode == 2) return true;
++    final message = error.message.toLowerCase();
++    return message.contains('no such file') ||
++        message.contains('cannot find the file') ||
++        message.contains('not found');
++  }
++}
++
++/// Byte buffer with a hard cap, so a chatty child cannot exhaust memory.
++class _BoundedBytes {
++  _BoundedBytes(this.limit);
++
++  final int limit;
++  final BytesBuilder _builder = BytesBuilder(copy: false);
++  bool _overflowed = false;
++
++  void add(List<int> chunk) {
++    if (_overflowed) return;
++    final remaining = limit - _builder.length;
++    if (chunk.length <= remaining) {
++      _builder.add(chunk);
++      return;
++    }
++    if (remaining > 0) _builder.add(chunk.sublist(0, remaining));
++    _overflowed = true;
++  }
++
++  String decode() => utf8.decode(_builder.takeBytes(), allowMalformed: true);
++}
+diff --git a/lib/harness/herdr/herdr_platform_stub.dart b/lib/harness/herdr/herdr_platform_stub.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e380b67c1d33c599370feb1176f30dafb95ce08
+--- /dev/null
++++ b/lib/harness/herdr/herdr_platform_stub.dart
+@@ -0,0 +1,39 @@
++// Web build: no processes and no filesystem, so Herdr cannot exist here.
++//
++// Signatures must match `herdr_platform_io.dart` exactly; both are selected by
++// `herdr_platform.dart`.
++
++import 'herdr_cli.dart';
++
++/// No `dart:io`, so nothing can be launched.
++Future<String?> locateHerdrExecutable({
++  String? explicitPath,
++  Map<String, String>? environment,
++  HerdrPathProbe? isExecutable,
++  HerdrDirectoryLister? listDirectory,
++  bool? isWindows,
++  bool? isMacOS,
++}) async => null;
++
++/// No PATH to inspect.
++bool executableOnPath(
++  String name, {
++  Map<String, String>? environment,
++  HerdrPathProbe? isExecutable,
++  HerdrDirectoryLister? listDirectory,
++  bool? isWindows,
++  bool? isMacOS,
++}) => false;
++
++/// A runner that reports the platform limitation on every call.
++class HerdrCliRunner {
++  HerdrCliRunner();
++
++  Future<HerdrProcessResult> call(
++    List<String> argv, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) async => const HerdrProcessResult(exitCode: -1, spawnError: 'ENOENT');
++
++  Future<void> dispose() async {}
++}
+diff --git a/lib/harness/herdr/herdr_session.dart b/lib/harness/herdr/herdr_session.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..a87ade9fe7c584700d8afca3825285dc3a3fdf05
+--- /dev/null
++++ b/lib/harness/herdr/herdr_session.dart
+@@ -0,0 +1,120 @@
++// One open Herdr pane view.
++//
++// The handle is the only object the Agents UI holds. It owns the raw terminal
++// (attach PTY or snapshot fallback) and translates the contract verbs onto herdr
++// commands. It never approves anything: Herdr has no approval API, so an agent
++// waiting on a dialog is answered in the pane itself and the session shows up as
++// `blocked`.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../harness_host.dart';
++import 'herdr_cli.dart';
++import 'herdr_models.dart';
++import 'herdr_terminal.dart';
++
++class HerdrSessionHandle implements HarnessSessionHandle {
++  HerdrSessionHandle({
++    required HerdrCli cli,
++    required HerdrAgentInfo agent,
++    required HerdrTerminal terminal,
++    required Future<void> Function() onChanged,
++    required Future<void> Function(HerdrSessionHandle handle) onDetached,
++    this.hostId = 'herdr',
++  }) : _cli = cli,
++       _agent = agent,
++       _terminal = terminal,
++       _onChanged = onChanged,
++       _onDetached = onDetached,
++       _status = ValueNotifier<HarnessSessionStatus>(
++         harnessStatusFor(agent.status),
++       );
++
++  final HerdrCli _cli;
++  final HerdrTerminal _terminal;
++  final Future<void> Function() _onChanged;
++  final Future<void> Function(HerdrSessionHandle handle) _onDetached;
++  final ValueNotifier<HarnessSessionStatus> _status;
++
++  /// Host id stamped into [HarnessSessionInfo].
++  final String hostId;
++
++  HerdrAgentInfo _agent;
++  HarnessSessionInfo? _info;
++  bool _detached = false;
++  bool _stopped = false;
++
++  HerdrAgentInfo get agent => _agent;
++
++  @override
++  HarnessSessionInfo get info => _info ??= _agent.toSessionInfo(hostId: hostId);
++
++  @override
++  ValueListenable<HarnessSessionStatus> get status => _status;
++
++  /// Herdr has no structured transcript; the terminal is the transcript.
++  @override
++  Stream<TranscriptEvent>? get transcript => null;
++
++  @override
++  HarnessTerminalChannel? get terminal => _detached ? null : _terminal;
++
++  /// Applies a fresher row from `herdr agent list`.
++  void update(HerdrAgentInfo agent) {
++    _agent = agent;
++    _info = agent.toSessionInfo(hostId: hostId);
++    _status.value = harnessStatusFor(agent.status);
++  }
++
++  /// Marks the pane as gone (closed outside Studio).
++  void markExited() {
++    _status.value = HarnessSessionStatus.exited;
++  }
++
++  @override
++  Future<void> sendPrompt(String text) async {
++    if (text.trim().isEmpty) return;
++    // A rejected submission (blocked agent) is reported, never retried: Herdr
++    // may already have written part of the input.
++    await _cli.prompt(_agent.target, text);
++    unawaited(_onChanged());
++  }
++
++  @override
++  Future<void> reply(HarnessReply reply) async {
++    // Approvals are not representable here. Answering with keys would guess
++    // which dialog is on screen, which is exactly how a wrong choice gets
++    // applied silently.
++    throw UnsupportedError('Herdr 会话没有结构化审批，请在终端中直接回答。');
++  }
++
++  /// Releases the view only: the pane and its agent keep running.
++  @override
++  Future<void> detach() async {
++    if (_detached) return;
++    _detached = true;
++    await _terminal.close();
++    await _onDetached(this);
++  }
++
++  /// Ends the session by closing its pane. Callers confirm first.
++  @override
++  Future<void> stop() async {
++    if (_stopped) return;
++    _stopped = true;
++    await _terminal.close();
++    await _cli.closePane(_agent.paneId);
++    _status.value = HarnessSessionStatus.exited;
++    unawaited(_onChanged());
++  }
++
++  void dispose() {
++    if (!_detached) {
++      _detached = true;
++      unawaited(_terminal.close());
++    }
++    _status.dispose();
++  }
++}
+diff --git a/lib/harness/herdr/herdr_terminal.dart b/lib/harness/herdr/herdr_terminal.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6f16c9fca63dabd963c754cd15207978416badf
+--- /dev/null
++++ b/lib/harness/herdr/herdr_terminal.dart
+@@ -0,0 +1,254 @@
++// The raw terminal behind a Herdr session.
++//
++// Two implementations share one interface:
++//
++//   * [HerdrPtyTerminal] runs `herdr agent attach <target>` inside a real PTY.
++//     That is the live view: bytes flow continuously, input reaches the pane
++//     with no round trip through a snapshot, and closing it only detaches —
++//     the pane and its agent keep running.
++//   * [HerdrSnapshotTerminal] is the fallback for builds without a PTY layer.
++//     It replays `pane read` snapshots and turns typed bytes into
++//     `pane send-text` / `pane send-keys` calls.
++//
++// Both feed the same contract type, so the Agents terminal tab does not care
++// which one is underneath. Neither implementation stops the session: `close()`
++// releases the view only, matching `HarnessSessionHandle.detach()`.
++
++import 'dart:async';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter/foundation.dart' show Listenable;
++
++import '../../remote_control/models/herdr.dart' show HerdrPaneSnapshot;
++import '../harness_host.dart' show HarnessTerminalChannel;
++import '../pty/harness_pty.dart';
++import 'herdr_input.dart';
++
++/// A Herdr terminal plus an explicit release step.
++abstract interface class HerdrTerminal implements HarnessTerminalChannel {
++  /// Releases this view. The pane keeps running.
++  Future<void> close();
++
++  /// Last known geometry, for snapshot replay fallbacks.
++  int get columns;
++  int get rows;
++}
++
++/// Live terminal through `herdr agent attach` in a PTY.
++class HerdrPtyTerminal implements HerdrTerminal {
++  HerdrPtyTerminal._(this._pty, this._output, this._columns, this._rows);
++
++  /// Starts the attach client. [argv] is the full command, including the Herdr
++  /// executable, so the caller owns path resolution.
++  static Future<HerdrPtyTerminal> start({
++    required HarnessPtyFactory factory,
++    required List<String> argv,
++    String? workingDirectory,
++    int columns = 100,
++    int rows = 30,
++  }) async {
++    final pty = await factory.start(
++      argv: argv,
++      workingDirectory: workingDirectory,
++      columns: columns,
++      rows: rows,
++    );
++    final output = StreamController<Uint8List>.broadcast();
++    final terminal = HerdrPtyTerminal._(pty, output, columns, rows);
++    terminal._listen();
++    return terminal;
++  }
++
++  final HarnessPty _pty;
++  final StreamController<Uint8List> _output;
++  StreamSubscription<Uint8List>? _subscription;
++  bool _closed = false;
++
++  void _listen() {
++    _subscription = _pty.output.listen(
++      (data) {
++        if (!_closed) _output.add(data);
++      },
++      onError: (Object _) {},
++      onDone: () {
++        if (!_closed) unawaited(_output.close());
++      },
++    );
++  }
++
++  int? get pid => _pty.pid;
++
++  @override
++  Stream<Uint8List> get output => _output.stream;
++
++  @override
++  void write(Uint8List data) {
++    if (_closed) return;
++    _pty.write(data);
++  }
++
++  @override
++  void resize(int columns, int rows) {
++    if (_closed) return;
++    _pty.resize(columns, rows);
++    _columns = columns;
++    _rows = rows;
++  }
++
++  int _columns;
++  int _rows;
++
++  @override
++  int get columns => _columns;
++
++  @override
++  int get rows => _rows;
++
++  /// Detaches: kills the attach client only. The pane keeps running.
++  @override
++  Future<void> close() async {
++    if (_closed) return;
++    _closed = true;
++    await _subscription?.cancel();
++    _subscription = null;
++    await _pty.kill();
++    await _output.close();
++  }
++}
++
++/// Snapshot-backed terminal for builds without a PTY.
++///
++/// Herdr has no incremental output stream on the CLI: `pane read` returns the
++/// screen. Replaying the whole screen when it changes is therefore correct
++/// rather than lossy — and the replay is normalised by [HerdrPaneSnapshot],
++/// which is the same code the remote Herdr view uses, so line endings and grid
++/// padding behave identically.
++class HerdrSnapshotTerminal implements HerdrTerminal {
++  HerdrSnapshotTerminal({
++    required Future<String> Function() readPane,
++    required Future<void> Function(String text) sendText,
++    required Future<void> Function(List<String> keys) sendKeys,
++    this.interval = const Duration(milliseconds: 1500),
++    this.translator = const HerdrInputTranslator(),
++    this.onError,
++    this.changes,
++    int columns = 100,
++    int rows = 30,
++  }) : _readPane = readPane,
++       _sendText = sendText,
++       _sendKeys = sendKeys,
++       _columns = columns,
++       _rows = rows;
++
++  /// How often the screen is re-read while the view is open.
++  ///
++  /// One CLI call per interval per open pane, and none while reading. The live
++  /// path is the PTY attach; this is the fallback, so "slow" is the right
++  /// trade-off against a tight poll loop.
++  final Duration interval;
++  final HerdrInputTranslator translator;
++
++  /// Reports input failures so the UI can show them instead of dropping keys.
++  final void Function(Object error)? onError;
++
++  /// Optional change source (a controller push, not a poll). When given, a
++  /// change repaints immediately instead of waiting for [interval].
++  final Listenable? changes;
++
++  final Future<String> Function() _readPane;
++  final Future<void> Function(String text) _sendText;
++  final Future<void> Function(List<String> keys) _sendKeys;
++
++  final StreamController<Uint8List> _output =
++      StreamController<Uint8List>.broadcast();
++  Timer? _timer;
++  String? _last;
++  bool _reading = false;
++  bool _closed = false;
++  int _columns;
++  int _rows;
++
++  void start() {
++    if (_closed || _timer != null) return;
++    _timer = Timer.periodic(interval, (_) => unawaited(_pump()));
++    changes?.addListener(_onChanges);
++    unawaited(_pump());
++  }
++
++  void _onChanges() => unawaited(_pump());
++
++  @override
++  Stream<Uint8List> get output => _output.stream;
++
++  @override
++  int get columns => _columns;
++
++  @override
++  int get rows => _rows;
++
++  @override
++  void write(Uint8List data) {
++    if (_closed) return;
++    unawaited(_dispatch(translator.translate(data)));
++  }
++
++  @override
++  void resize(int columns, int rows) {
++    _columns = columns;
++    _rows = rows;
++  }
++
++  @override
++  Future<void> close() async {
++    if (_closed) return;
++    _closed = true;
++    changes?.removeListener(_onChanges);
++    _timer?.cancel();
++    _timer = null;
++    await _output.close();
++  }
++
++  Future<void> _pump() async {
++    if (_closed || _reading) return;
++    _reading = true;
++    try {
++      final text = await _readPane();
++      if (_closed || text == _last) return;
++      _last = text;
++      final snapshot = HerdrPaneSnapshot.fromText(
++        text,
++        fallbackColumns: _columns,
++      );
++      // Clear then replay: a snapshot is a screen, not a stream, so anything
++      // else would stack old and new screens.
++      _emit('\u001b[2J\u001b[H');
++      _emit(snapshot.replayText);
++    } catch (_) {
++      // A transient read failure keeps the last screen; the next tick retries.
++    } finally {
++      _reading = false;
++    }
++  }
++
++  void _emit(String text) {
++    if (_closed) return;
++    _output.add(Uint8List.fromList(utf8.encode(text)));
++  }
++
++  Future<void> _dispatch(List<HerdrInputOp> ops) async {
++    for (final op in ops) {
++      if (_closed) return;
++      try {
++        switch (op) {
++          case HerdrSendTextOp():
++            await _sendText(op.text);
++          case HerdrSendKeysOp():
++            await _sendKeys(op.keys);
++        }
++      } catch (error) {
++        onError?.call(error);
++      }
++    }
++  }
++}
+diff --git a/lib/harness/pty/harness_pty.dart b/lib/harness/pty/harness_pty.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..092660f25b7e732e3cc3c1704a382ce0d2c84477
+--- /dev/null
++++ b/lib/harness/pty/harness_pty.dart
+@@ -0,0 +1,59 @@
++// Pseudo-terminal seam shared by harness hosts.
++//
++// A harness host that has to run an interactive program (`herdr agent attach`,
++// an agent CLI, a login shell) needs a real PTY: a pipe pair has no terminal
++// semantics, so full-screen clients either refuse to start or render garbage.
++// Core has no PTY implementation of its own; StudioMux (the local host) owns
++// the ConPTY / forkpty layer. Hosts depend on this interface instead of on that
++// implementation, so the platform code stays in one place and tests can inject
++// a structural fake.
++//
++// Bytes are terminal output, never line-split, and `write` is raw input: no
++// trimming, no appended newline, no key reinterpretation.
++
++import 'dart:async';
++import 'dart:typed_data';
++
++/// One running pseudo-terminal.
++abstract interface class HarnessPty {
++  /// Operating-system process id once the child has started.
++  int? get pid;
++
++  /// Raw terminal output. Never line-split.
++  Stream<Uint8List> get output;
++
++  /// Completes with the child's exit code.
++  Future<int> get exitCode;
++
++  /// Writes raw bytes to the child's terminal.
++  void write(Uint8List data);
++
++  /// Applies a new terminal geometry.
++  void resize(int columns, int rows);
++
++  /// Ends the child and releases the PTY. Idempotent.
++  Future<void> kill();
++}
++
++/// Starts a process attached to a new pseudo-terminal.
++abstract interface class HarnessPtyFactory {
++  Future<HarnessPty> start({
++    required List<String> argv,
++
++    /// Working directory for the child; null means "where Studio runs".
++    String? workingDirectory,
++    Map<String, String>? environment,
++    int columns,
++    int rows,
++  });
++}
++
++/// The PTY could not be created (no platform support, spawn failure).
++class HarnessPtyException implements Exception {
++  const HarnessPtyException(this.message);
++
++  final String message;
++
++  @override
++  String toString() => message;
++}
+diff --git a/lib/harness/remote/remote_harness.dart b/lib/harness/remote/remote_harness.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ba2de59116a6cd259cff950ee5e1377eca92337
+--- /dev/null
++++ b/lib/harness/remote/remote_harness.dart
+@@ -0,0 +1,6 @@
++// Import surface for the paired-computer host.
++export 'remote_harness_host.dart';
++export 'remote_mapping.dart';
++export 'remote_ports.dart';
++export 'remote_session.dart';
++export 'remote_terminal.dart';
+diff --git a/lib/harness/remote/remote_harness_host.dart b/lib/harness/remote/remote_harness_host.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..6127b9467972c4de0b1b1abc4fd28fe0858a714c
+--- /dev/null
++++ b/lib/harness/remote/remote_harness_host.dart
+@@ -0,0 +1,413 @@
++// RemoteHarnessHost: one paired computer as a HarnessHub host.
++//
++// This is an adapter, not a second protocol implementation. Every action lands on
++// the module that already owns it (`RemoteController`, `HerdrController`,
++// `CodexThreadView`), so the wire format, request ids, reconnect and replay
++// behaviour, and the "approvals only from an explicit reply" rule are exactly the
++// ones the Remote Computer page uses.
++//
++// Sessions from all three remote surfaces are merged into one list because the
++// Agents surface shows "what runs on that computer", not "which sub-module".
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../../remote_control/models/herdr.dart' as herdr;
++import '../../remote_control/models/protocol.dart' as protocol;
++import '../../remote_control/state/remote_controller.dart' show ConnectionPhase;
++import '../harness_host.dart';
++import 'remote_mapping.dart';
++import 'remote_ports.dart';
++import 'remote_session.dart';
++
++class RemoteHarnessHost implements HarnessHost {
++  RemoteHarnessHost({
++    required RemoteSessionPort remote,
++    RemoteHerdrPort? herdr,
++    RemoteCodexPort? codex,
++    this.refreshInterval = const Duration(seconds: 20),
++  }) : _remote = remote,
++       _herdr = herdr,
++       _codex = codex,
++       _state = ValueNotifier<HarnessHostState>(_stateFor(remote.phase)) {
++    _remote.changes.addListener(_onRemoteChanged);
++    _herdr?.changes.addListener(_onHerdrChanged);
++    _state.value = _stateFor(_remote.phase);
++    _wasOnline = remote.isOnline;
++    if (_wasOnline) unawaited(_loadRemote());
++  }
++
++  /// How often the thread catalog is refreshed while the list is open. Sessions
++  /// themselves arrive as pushes, so this is only for the Codex catalog.
++  final Duration refreshInterval;
++
++  final RemoteSessionPort _remote;
++  final RemoteHerdrPort? _herdr;
++  final RemoteCodexPort? _codex;
++  final ValueNotifier<HarnessHostState> _state;
++  final StreamController<List<HarnessSessionInfo>> _sessions =
++      StreamController<List<HarnessSessionInfo>>.broadcast();
++  final Map<String, RemoteSessionHandle> _sessionHandles =
++      <String, RemoteSessionHandle>{};
++  final Map<String, RemoteHerdrHandle> _herdrHandles =
++      <String, RemoteHerdrHandle>{};
++  final Map<String, RemoteCodexThreadHandle> _codexHandles =
++      <String, RemoteCodexThreadHandle>{};
++  final List<protocol.CodexThread> _codexThreads = <protocol.CodexThread>[];
++
++  List<HarnessSessionInfo> _latest = const <HarnessSessionInfo>[];
++  bool _wasOnline = false;
++  bool _disposed = false;
++  bool _loadingCodex = false;
++  String? _lastError;
++  Timer? _codexTimer;
++
++  @override
++  String get id {
++    // One host per paired computer: the hub registers several, so a constant id
++    // would collide in its map. The pairing id is stable across reconnects.
++    final key = _remote.hostId.trim();
++    return key.isEmpty ? 'remote' : 'remote:$key';
++  }
++
++  @override
++  String get label {
++    final name = _remote.hostLabel;
++    return name.isEmpty ? '远程电脑' : name;
++  }
++
++  @override
++  HarnessHostKind get kind => HarnessHostKind.remote;
++
++  @override
++  ValueListenable<HarnessHostState> get state => _state;
++
++  /// Last failure, already user-facing.
++  String? get lastError => _lastError;
++
++  /// Phase of the underlying pairing, for a host switcher's status dot.
++  ConnectionPhase get phase => _remote.phase;
++
++  /// Snapshot for a UI that mounts after the first push.
++  List<HarnessSessionInfo> get currentSessions => _latest;
++
++  // -------------------------------------------------------------------------
++  // HarnessHost
++  // -------------------------------------------------------------------------
++
++  @override
++  Stream<List<HarnessSessionInfo>> watchSessions() {
++    if (_codexTimer == null && !_disposed) {
++      _codexTimer = Timer.periodic(refreshInterval, (_) {
++        if (_remote.isOnline) unawaited(_loadCodex());
++      });
++    }
++    return Stream.multi((controller) {
++      controller.add(_latest);
++      final subscription = _sessions.stream.listen(
++        controller.add,
++        onError: controller.addError,
++        onDone: controller.close,
++      );
++      controller.onCancel = subscription.cancel;
++    });
++  }
++
++  @override
++  Future<List<HarnessProviderInfo>> providers() async {
++    // Both entries are launchable on the desktop through the existing agent
++    // protocol. Herdr panes are listed as sessions but cannot be started from
++    // here (the wire protocol has no Herdr start verb), so they are not offered.
++    return const <HarnessProviderInfo>[
++      HarnessProviderInfo(
++        id: 'claude',
++        label: 'Claude Code',
++        available: true,
++        executable: 'claude',
++        builtIn: true,
++      ),
++      HarnessProviderInfo(
++        id: 'shell',
++        label: '终端',
++        available: true,
++        builtIn: true,
++      ),
++    ];
++  }
++
++  @override
++  Future<HarnessSessionHandle> open(String sessionId) async {
++    final existing =
++        _sessionHandles[sessionId] ??
++        _herdrHandles[sessionId] ??
++        _codexHandles[sessionId];
++    if (existing != null) return existing;
++
++    if (sessionId.startsWith('session:')) {
++      final rawId = sessionId.substring('session:'.length);
++      final session = _sessionById(rawId);
++      if (session == null) {
++        throw StateError('找不到该会话，可能已在电脑上关闭');
++      }
++      final handle = RemoteSessionHandle(
++        port: _remote,
++        session: session,
++        hostId: id,
++        onDetached: (detached) async {
++          _sessionHandles.remove(sessionId);
++          detached.dispose();
++        },
++      );
++      _sessionHandles[sessionId] = handle;
++      return handle;
++    }
++
++    if (sessionId.startsWith('herdr:')) {
++      final paneId = sessionId.substring('herdr:'.length);
++      final port = _herdr;
++      if (port == null) {
++        throw StateError('当前电脑没有 Herdr 面板');
++      }
++      final agent = _agentByPane(paneId);
++      if (agent == null) {
++        throw StateError('找不到该 Herdr 面板，可能已关闭');
++      }
++      final handle = RemoteHerdrHandle(
++        herdrPort: port,
++        agent: agent,
++        hostId: id,
++        onDetached: (detached) async {
++          _herdrHandles.remove(sessionId);
++          detached.dispose();
++        },
++      );
++      _herdrHandles[sessionId] = handle;
++      return handle;
++    }
++
++    if (sessionId.startsWith('codex:')) {
++      final threadId = sessionId.substring('codex:'.length);
++      final port = _codex;
++      if (port == null) {
++        throw StateError('当前电脑没有 Codex 会话');
++      }
++      final thread = _threadById(threadId);
++      if (thread == null) {
++        throw StateError('找不到该 Codex 会话');
++      }
++      final handle = RemoteCodexThreadHandle(
++        codex: port,
++        view: port.openThread(thread),
++        hostId: id,
++        onDetached: (detached) async {
++          _codexHandles.remove(sessionId);
++          await detached.dispose();
++        },
++      );
++      _codexHandles[sessionId] = handle;
++      return handle;
++    }
++
++    throw StateError('无法识别的会话：$sessionId');
++  }
++
++  @override
++  Future<HarnessSessionHandle> launch(HarnessLaunchRequest request) async {
++    if (!_remote.isOnline) {
++      throw StateError('电脑未连接，无法新建会话');
++    }
++    final protocol.SessionInfo created;
++    switch (request.providerId) {
++      case 'shell':
++        created = await _remote.createTerminal(cwd: request.cwd);
++      case 'claude':
++        created = await _remote.createSession(cwd: request.cwd);
++      default:
++        throw StateError('远程电脑暂不支持启动 ${request.providerId} 会话');
++    }
++    await _remote.refreshSessions();
++    return open('session:${created.id}');
++  }
++
++  @override
++  Future<void> dispose() async {
++    if (_disposed) return;
++    _disposed = true;
++    _codexTimer?.cancel();
++    _codexTimer = null;
++    _remote.changes.removeListener(_onRemoteChanged);
++    _herdr?.changes.removeListener(_onHerdrChanged);
++    final sessionHandles = _sessionHandles.values.toList();
++    _sessionHandles.clear();
++    for (final handle in sessionHandles) {
++      handle.dispose();
++    }
++    final herdrHandles = _herdrHandles.values.toList();
++    _herdrHandles.clear();
++    for (final handle in herdrHandles) {
++      handle.dispose();
++    }
++    final codexHandles = _codexHandles.values.toList();
++    _codexHandles.clear();
++    for (final handle in codexHandles) {
++      await handle.dispose();
++    }
++    await _sessions.close();
++    _state.dispose();
++  }
++
++  // -------------------------------------------------------------------------
++  // State and refresh
++  // -------------------------------------------------------------------------
++
++  void _onRemoteChanged() {
++    if (_disposed) return;
++    _state.value = _stateFor(_remote.phase);
++    final online = _remote.isOnline;
++    if (online && !_wasOnline) {
++      // A fresh connection: the desktop may have restarted, so re-read
++      // everything rather than trusting the pre-disconnect caches.
++      _wasOnline = true;
++      unawaited(_loadRemote());
++    } else if (!online) {
++      _wasOnline = false;
++    }
++    _emit();
++  }
++
++  void _onHerdrChanged() {
++    if (_disposed) return;
++    _syncHerdrHandles();
++    _emit();
++  }
++
++  Future<void> _loadRemote() async {
++    try {
++      await _remote.refreshSessions();
++      final herdrPort = _herdr;
++      if (herdrPort != null && herdrPort.canControl) {
++        await herdrPort.refresh();
++      }
++      await _loadCodex();
++      _lastError = null;
++    } catch (error) {
++      _lastError = '$error';
++    }
++    _emit();
++  }
++
++  /// Codex catalog refresh. Failures are recorded but never block the list: a
++  /// computer without Codex is a normal computer.
++  Future<void> _loadCodex() async {
++    final port = _codex;
++    if (port == null || _disposed || _loadingCodex) return;
++    if (!_remote.isOnline || !port.available) return;
++    _loadingCodex = true;
++    try {
++      final threads = await port.recentThreads();
++      _codexThreads
++        ..clear()
++        ..addAll(threads.take(50));
++      _emit();
++    } catch (error) {
++      _lastError = '$error';
++    } finally {
++      _loadingCodex = false;
++    }
++  }
++
++  void _emit() {
++    final infos = <HarnessSessionInfo>[
++      for (final session in _remote.sessions)
++        remoteSessionInfo(hostId: id, session: session),
++      if (_herdr?.canControl == true)
++        for (final agent in _herdr!.agents)
++          remoteHerdrSessionInfo(hostId: id, agent: agent),
++      for (final thread in _codexThreads)
++        remoteCodexSessionInfo(hostId: id, thread: thread),
++    ];
++    infos.sort(_compareSessions);
++    _latest = List<HarnessSessionInfo>.unmodifiable(infos);
++    _syncHerdrHandles();
++    if (!_sessions.isClosed) _sessions.add(_latest);
++  }
++
++  void _syncHerdrHandles() {
++    if (_herdr == null) return;
++    for (final entry in _herdrHandles.entries.toList()) {
++      final paneId = entry.key.substring('herdr:'.length);
++      final agent = _agentByPane(paneId);
++      if (agent == null) {
++        // The pane is gone; the row keeps its last title and shows as exited.
++        entry.value.markExited();
++      } else {
++        entry.value.update(agent);
++      }
++    }
++  }
++
++  /// Attention first: blocked/done need a human, working does not.
++  static int _compareSessions(HarnessSessionInfo a, HarnessSessionInfo b) {
++    int rank(HarnessSessionStatus status) {
++      switch (status) {
++        case HarnessSessionStatus.blocked:
++          return 0;
++        case HarnessSessionStatus.done:
++          return 1;
++        case HarnessSessionStatus.working:
++          return 2;
++        case HarnessSessionStatus.idle:
++          return 3;
++        case HarnessSessionStatus.unknown:
++          return 4;
++        case HarnessSessionStatus.exited:
++          return 5;
++      }
++    }
++
++    final byRank = rank(a.status).compareTo(rank(b.status));
++    if (byRank != 0) return byRank;
++    final at = a.updatedAt;
++    final bt = b.updatedAt;
++    if (at != null && bt != null && at != bt) return bt.compareTo(at);
++    return a.title.toLowerCase().compareTo(b.title.toLowerCase());
++  }
++
++  protocol.SessionInfo? _sessionById(String id) {
++    for (final session in _remote.sessions) {
++      if (session.id == id) return session;
++    }
++    return null;
++  }
++
++  herdr.HerdrAgent? _agentByPane(String paneId) {
++    final port = _herdr;
++    if (port == null) return null;
++    for (final agent in port.agents) {
++      if (agent.paneId == paneId) return agent;
++    }
++    return null;
++  }
++
++  protocol.CodexThread? _threadById(String id) {
++    for (final thread in _codexThreads) {
++      if (thread.id == id) return thread;
++    }
++    return null;
++  }
++
++  static HarnessHostState _stateFor(ConnectionPhase phase) {
++    switch (phase) {
++      case ConnectionPhase.online:
++        return HarnessHostState.online;
++      case ConnectionPhase.connecting:
++        return HarnessHostState.connecting;
++      case ConnectionPhase.unpaired:
++      case ConnectionPhase.agentOffline:
++      case ConnectionPhase.authFailed:
++      case ConnectionPhase.disconnected:
++        return HarnessHostState.offline;
++    }
++  }
++}
+diff --git a/lib/harness/remote/remote_mapping.dart b/lib/harness/remote/remote_mapping.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..44ab4e948b256d9ec58c46e98b9e41a05129c3ab
+--- /dev/null
++++ b/lib/harness/remote/remote_mapping.dart
+@@ -0,0 +1,299 @@
++// Mapping from the remote-control wire types onto the harness vocabulary.
++//
++// Pure functions only: these are the rules a reviewer can check without a
++// socket, and the tests assert them directly. Everything here is read-only
++// interpretation — no wire field is renamed and no request is invented.
++
++import '../../remote_control/models/herdr.dart' as herdr;
++import '../../remote_control/models/protocol.dart' as protocol;
++import '../harness_host.dart';
++
++/// Remote session status → harness status.
++///
++/// `error` is deliberately `unknown`: the session still exists and can accept
++/// another prompt, so `exited` would be false, while `idle` would hide a failure
++/// the user may need to see.
++HarnessSessionStatus remoteSessionStatus(protocol.SessionStatus status) {
++  switch (status) {
++    case protocol.SessionStatus.starting:
++      return HarnessSessionStatus.working;
++    case protocol.SessionStatus.running:
++      return HarnessSessionStatus.working;
++    case protocol.SessionStatus.waiting:
++      return HarnessSessionStatus.blocked;
++    case protocol.SessionStatus.idle:
++      return HarnessSessionStatus.idle;
++    case protocol.SessionStatus.error:
++      return HarnessSessionStatus.unknown;
++    case protocol.SessionStatus.closed:
++      return HarnessSessionStatus.exited;
++  }
++}
++
++/// Herdr agent status → harness status, shared with the local host so both
++/// paths colour a pane the same way.
++HarnessSessionStatus remoteHerdrStatus(herdr.HerdrAgentStatus status) {
++  switch (status) {
++    case herdr.HerdrAgentStatus.idle:
++      return HarnessSessionStatus.idle;
++    case herdr.HerdrAgentStatus.working:
++      return HarnessSessionStatus.working;
++    case herdr.HerdrAgentStatus.blocked:
++      return HarnessSessionStatus.blocked;
++    case herdr.HerdrAgentStatus.done:
++      return HarnessSessionStatus.done;
++    case herdr.HerdrAgentStatus.unknown:
++      return HarnessSessionStatus.unknown;
++  }
++}
++
++/// Codex thread status is a free-form desktop string.
++HarnessSessionStatus remoteCodexStatus(String status) {
++  switch (status.toLowerCase()) {
++    case 'active':
++    case 'running':
++    case 'working':
++    case 'inprogress':
++    case 'in_progress':
++      return HarnessSessionStatus.working;
++    case 'idle':
++    case 'waiting':
++    case 'ready':
++      return HarnessSessionStatus.idle;
++    case 'done':
++    case 'complete':
++    case 'completed':
++    case 'finished':
++      return HarnessSessionStatus.done;
++    case 'blocked':
++    case 'needsattention':
++    case 'needs_attention':
++    case 'approval':
++      return HarnessSessionStatus.blocked;
++    default:
++      return HarnessSessionStatus.unknown;
++  }
++}
++
++/// One remote Claude/terminal session as a hub row.
++///
++/// The id is prefixed so a session and a Codex thread with the same uuid can
++/// never collide inside one host, and so `open()` can route on the prefix alone.
++HarnessSessionInfo remoteSessionInfo({
++  required String hostId,
++  required protocol.SessionInfo session,
++}) {
++  final terminal = session.isTerminal;
++  return HarnessSessionInfo(
++    id: 'session:${session.id}',
++    hostId: hostId,
++    providerId: terminal ? 'shell' : 'claude',
++    title: session.title.isEmpty
++        ? (terminal ? '终端' : 'Claude Code')
++        : session.title,
++    status: remoteSessionStatus(session.status),
++    capabilities: terminal
++        ? const <HarnessCapability>{
++            HarnessCapability.terminal,
++            HarnessCapability.prompt,
++            HarnessCapability.stop,
++          }
++        : const <HarnessCapability>{
++            HarnessCapability.transcript,
++            HarnessCapability.prompt,
++            HarnessCapability.approve,
++            HarnessCapability.stop,
++          },
++    cwd: session.cwd.isEmpty ? null : session.cwd,
++    updatedAt: session.updatedAt,
++    sourceRef: session.id,
++  );
++}
++
++/// One Herdr pane on the paired computer.
++HarnessSessionInfo remoteHerdrSessionInfo({
++  required String hostId,
++  required herdr.HerdrAgent agent,
++}) => HarnessSessionInfo(
++  id: 'herdr:${agent.paneId}',
++  hostId: hostId,
++  providerId: agent.agentKind.isEmpty ? 'herdr' : agent.agentKind,
++  title: agent.terminalTitle.isNotEmpty
++      ? agent.terminalTitle
++      : (agent.name?.isNotEmpty == true ? agent.name! : agent.displayName),
++  status: remoteHerdrStatus(agent.status),
++  capabilities: const <HarnessCapability>{
++    HarnessCapability.terminal,
++    HarnessCapability.prompt,
++    HarnessCapability.stop,
++  },
++  cwd: agent.cwd.isEmpty ? null : agent.cwd,
++  sourceRef: agent.paneId,
++);
++
++/// One Codex thread from the paired computer's catalog.
++HarnessSessionInfo remoteCodexSessionInfo({
++  required String hostId,
++  required protocol.CodexThread thread,
++}) => HarnessSessionInfo(
++  id: 'codex:${thread.id}',
++  hostId: hostId,
++  providerId: 'codex',
++  title: thread.title.isEmpty ? 'Codex' : thread.title,
++  status: remoteCodexStatus(thread.status),
++  capabilities: const <HarnessCapability>{
++    HarnessCapability.transcript,
++    HarnessCapability.prompt,
++    HarnessCapability.approve,
++  },
++  cwd: thread.cwd.isEmpty ? null : thread.cwd,
++  updatedAt: thread.updatedAt,
++  sourceRef: thread.id,
++);
++
++/// One stored session event as a transcript entry, or null when the event is
++/// not conversation (terminal bytes belong to the terminal channel).
++TranscriptEvent? transcriptFromSessionEvent(
++  protocol.SessionEvent event,
++  String sessionId,
++) {
++  final id = '$sessionId:${event.seq}';
++  final at = event.ts;
++  switch (event) {
++    case protocol.UserEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.user,
++        text: event.text,
++        at: at,
++      );
++    case protocol.AssistantEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.assistant,
++        text: event.text,
++        at: at,
++      );
++    case protocol.ThinkingEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.assistant,
++        text: event.text,
++        at: at,
++      );
++    case protocol.ToolUseEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.tool,
++        text: event.summary.isEmpty ? event.name : event.summary,
++        at: at,
++      );
++    case protocol.ToolResultEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.tool,
++        text: event.content,
++        at: at,
++      );
++    case protocol.PermissionRequestEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.tool,
++        text: event.title.isEmpty
++            ? (event.description ?? event.toolName)
++            : event.title,
++        at: at,
++        requestId: event.requestId,
++        options: _permissionOptions(event),
++      );
++    case protocol.PermissionResolvedEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.system,
++        text: '已处理权限请求：${event.decision}',
++        at: at,
++      );
++    case protocol.ResultEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.system,
++        text: event.text,
++        at: at,
++      );
++    case protocol.SystemEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.system,
++        text: event.text,
++        at: at,
++      );
++    case protocol.ErrorEvent():
++      return TranscriptEvent(
++        id: id,
++        role: TranscriptRole.system,
++        text: event.text,
++        at: at,
++      );
++    case protocol.TerminalOutputEvent():
++      return null;
++    case protocol.UnknownEvent():
++      return null;
++  }
++}
++
++/// Options a reply can carry for one permission card.
++///
++/// A question only accepts its listed labels; a plain permission request accepts
++/// the three wire decisions. Approval is never implied — the caller has to send
++/// an explicit [HarnessReply].
++List<String> _permissionOptions(protocol.PermissionRequestEvent event) {
++  final questions = event.questions;
++  if (questions != null && questions.isNotEmpty) {
++    return <String>[
++      for (final question in questions)
++        for (final option in question.options) option.label,
++    ];
++  }
++  return <String>['allow', if (event.canAlwaysAllow) 'allow_always', 'deny'];
++}
++
++/// One Codex transcript item as a harness transcript entry.
++TranscriptEvent codexItemTranscript(
++  protocol.CodexTurn turn,
++  protocol.CodexItem item, {
++  required String threadId,
++}) {
++  final kind = item.kind.toLowerCase();
++  final role = switch (kind) {
++    'user' || 'usermessage' => TranscriptRole.user,
++    'assistant' || 'agentmessage' || 'message' => TranscriptRole.assistant,
++    'reasoning' || 'thinking' => TranscriptRole.assistant,
++    'tool' || 'toolcall' || 'tooluse' || 'command' => TranscriptRole.tool,
++    _ => TranscriptRole.system,
++  };
++  return TranscriptEvent(
++    id: '$threadId:${turn.id}:${item.id}',
++    role: role,
++    text: item.text,
++  );
++}
++
++/// One pending Codex approval as a transcript entry that can be replied to.
++TranscriptEvent codexPendingTranscript(
++  protocol.CodexPendingRequest request, {
++  required String threadId,
++}) {
++  final options = <String>[
++    for (final question in request.questions)
++      for (final option in question.options) option.label,
++  ];
++  return TranscriptEvent(
++    id: '$threadId:request:${request.requestId}',
++    role: TranscriptRole.tool,
++    text: request.title.isEmpty
++        ? (request.description ?? request.kind)
++        : request.title,
++    requestId: request.requestId,
++    options: options.isEmpty ? const <String>['accept', 'deny'] : options,
++  );
++}
+diff --git a/lib/harness/remote/remote_ports.dart b/lib/harness/remote/remote_ports.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c95b14b5643427f1d5eb456832429e90197637e
+--- /dev/null
++++ b/lib/harness/remote/remote_ports.dart
+@@ -0,0 +1,368 @@
++// Narrow ports over the existing remote-control module.
++//
++// RemoteHarnessHost must not reach into RemoteController's internals, and it
++// must be testable without a socket, a relay or a paired computer. These three
++// interfaces are the whole surface the harness layer uses; the `...Adapter`
++// classes below delegate to the real controllers and hold no logic of their own.
++//
++// Deliberately unchanged by this file: the wire protocol, request ids, reconnect
++// and replay semantics, and the rule that approvals only ever follow an explicit
++// user reply. The adapters forward and nothing else.
++
++import 'package:flutter/foundation.dart';
++
++import '../../remote_control/models/herdr.dart'
++    show HerdrActionReport, HerdrAgent, HerdrOutput, HerdrReadSource;
++import '../../remote_control/models/protocol.dart'
++    show
++        CodexPage,
++        CodexPendingRequest,
++        CodexProject,
++        CodexThread,
++        CodexTranscript,
++        CodexTurn,
++        SessionInfo;
++import '../../remote_control/state/codex_thread_view.dart';
++import '../../remote_control/state/herdr_controller.dart';
++import '../../remote_control/state/remote_controller.dart';
++import '../../remote_control/state/session_view.dart';
++
++/// Everything the harness layer needs from one paired computer's sessions.
++abstract interface class RemoteSessionPort {
++  /// Fires when the connection, the agent or the session list changes.
++  Listenable get changes;
++
++  bool get isOnline;
++
++  ConnectionPhase get phase;
++
++  /// Computer name to show as the host label.
++  String get hostLabel;
++
++  /// Stable pairing id; falls back to the relay host when unnamed.
++  String get hostId;
++
++  List<SessionInfo> get sessions;
++
++  SessionView view(SessionInfo info);
++
++  Future<void> refreshSessions();
++
++  Future<void> subscribe(String id, {required Object owner});
++
++  void unsubscribe(String id, {required Object owner});
++
++  Future<void> send(String id, String text);
++
++  Future<void> respondPermission(
++    String id,
++    String requestId,
++    String decision, {
++    String? message,
++    Map<String, String>? answers,
++  });
++
++  Future<void> terminalInput(String id, String data);
++
++  Future<void> terminalResize(String id, int cols, int rows);
++
++  Future<void> closeSession(String id);
++
++  Future<SessionInfo> createSession({required String cwd, String? prompt});
++
++  Future<SessionInfo> createTerminal({required String cwd});
++}
++
++/// Delegates to the real [RemoteController]; no behaviour is added.
++class RemoteControllerSessionAdapter implements RemoteSessionPort {
++  RemoteControllerSessionAdapter(this.controller);
++
++  final RemoteController controller;
++
++  @override
++  Listenable get changes => controller;
++
++  @override
++  bool get isOnline => controller.isOnline;
++
++  @override
++  ConnectionPhase get phase => controller.phase;
++
++  @override
++  String get hostLabel => controller.agentName;
++
++  @override
++  String get hostId {
++    final pairing = controller.pairing;
++    if (pairing != null && pairing.agentId.isNotEmpty) return pairing.agentId;
++    return controller.agent?.host ?? 'remote';
++  }
++
++  @override
++  List<SessionInfo> get sessions => controller.sessions;
++
++  @override
++  SessionView view(SessionInfo info) => controller.view(info);
++
++  @override
++  Future<void> refreshSessions() => controller.refreshSessions();
++
++  @override
++  Future<void> subscribe(String id, {required Object owner}) =>
++      controller.subscribe(id, owner: owner);
++
++  @override
++  void unsubscribe(String id, {required Object owner}) =>
++      controller.unsubscribe(id, owner: owner);
++
++  @override
++  Future<void> send(String id, String text) => controller.send(id, text);
++
++  @override
++  Future<void> respondPermission(
++    String id,
++    String requestId,
++    String decision, {
++    String? message,
++    Map<String, String>? answers,
++  }) => controller.respondPermission(
++    id,
++    requestId,
++    decision,
++    message: message,
++    answers: answers,
++  );
++
++  @override
++  Future<void> terminalInput(String id, String data) =>
++      controller.terminalInput(id, data);
++
++  @override
++  Future<void> terminalResize(String id, int cols, int rows) =>
++      controller.terminalResize(id, cols, rows);
++
++  @override
++  Future<void> closeSession(String id) => controller.closeSession(id);
++
++  @override
++  Future<SessionInfo> createSession({required String cwd, String? prompt}) =>
++      controller.createSession(cwd: cwd, prompt: prompt);
++
++  @override
++  Future<SessionInfo> createTerminal({required String cwd}) =>
++      controller.createTerminal(cwd: cwd);
++}
++
++/// Herdr panes on the paired computer.
++abstract interface class RemoteHerdrPort {
++  Listenable get changes;
++
++  bool get canControl;
++
++  List<HerdrAgent> get agents;
++
++  /// Last pushed screen text for [paneId]; empty before the first push.
++  String paneText(String paneId);
++
++  Future<void> refresh();
++
++  Future<HerdrOutput> read(String paneId, {HerdrReadSource source, int lines});
++
++  Future<HerdrActionReport> sendText(String paneId, String text);
++
++  Future<HerdrActionReport> sendKeys(String paneId, List<String> keys);
++
++  Future<HerdrActionReport> prompt(String paneId, String text);
++
++  /// Closes a pane (ending the session). Callers confirm first.
++  Future<void> closePane(String paneId);
++}
++
++/// Delegates to the existing [HerdrController].
++class HerdrControllerAdapter implements RemoteHerdrPort {
++  HerdrControllerAdapter({required this.controller, required this.remote});
++
++  final HerdrController controller;
++  final RemoteController remote;
++
++  @override
++  Listenable get changes => controller;
++
++  @override
++  bool get canControl => controller.canControl;
++
++  @override
++  List<HerdrAgent> get agents => controller.agents;
++
++  @override
++  String paneText(String paneId) => controller.paneText(paneId);
++
++  @override
++  Future<void> refresh() => controller.refresh();
++
++  @override
++  Future<HerdrOutput> read(
++    String paneId, {
++    HerdrReadSource source = HerdrReadSource.recent,
++    int lines = 200,
++  }) => controller.read(paneId, source: source, lines: lines);
++
++  @override
++  Future<HerdrActionReport> sendText(String paneId, String text) =>
++      controller.sendText(paneId, text);
++
++  @override
++  Future<HerdrActionReport> sendKeys(String paneId, List<String> keys) =>
++      controller.sendKeys(paneId, keys);
++
++  @override
++  Future<HerdrActionReport> prompt(String paneId, String text) =>
++      controller.prompt(paneId, text);
++
++  @override
++  Future<void> closePane(String paneId) async {
++    await remote.herdrAct(<String, dynamic>{
++      'kind': 'pane_close',
++      'paneId': paneId,
++    });
++  }
++}
++
++/// The desktop Codex catalog and thread transcript.
++abstract interface class RemoteCodexPort {
++  bool get available;
++
++  bool get canControl;
++
++  /// First page of the most recent threads, newest first as the desktop ranks
++  /// them.
++  Future<List<CodexThread>> recentThreads();
++
++  Future<CodexTranscript> read(String threadId, {String? cursor});
++
++  Future<void> send(String threadId, String text, {String? turnId});
++
++  Future<void> respond(
++    String threadId,
++    String requestId,
++    String decision, {
++    Map<String, List<String>>? answers,
++  });
++
++  Future<void> interrupt(String threadId, String turnId);
++
++  Future<CodexPage<CodexProject>> projects({String? cursor});
++
++  /// Opens one thread transcript. Reuses the module's [CodexThreadView] rather
++  /// than re-implementing paging, notices and its polling fallback.
++  RemoteCodexThreadView openThread(CodexThread thread);
++}
++
++/// One Codex thread as the harness layer sees it.
++abstract interface class RemoteCodexThreadView {
++  Listenable get changes;
++
++  CodexThread get thread;
++
++  List<CodexTurn> get turns;
++
++  List<CodexPendingRequest> get pendingRequests;
++
++  String? get error;
++
++  bool get loaded;
++
++  bool get canControl;
++
++  bool get canSend;
++
++  Future<void> load({bool refresh});
++
++  Future<void> dispose();
++}
++
++/// Adapts the real [CodexThreadView].
++class CodexThreadViewAdapter implements RemoteCodexThreadView {
++  CodexThreadViewAdapter(this._view);
++
++  final CodexThreadView _view;
++
++  @override
++  Listenable get changes => _view;
++
++  @override
++  CodexThread get thread => _view.thread;
++
++  @override
++  List<CodexTurn> get turns => List<CodexTurn>.unmodifiable(_view.turns);
++
++  @override
++  List<CodexPendingRequest> get pendingRequests =>
++      List<CodexPendingRequest>.unmodifiable(_view.pendingRequests);
++
++  @override
++  String? get error => _view.error;
++
++  @override
++  bool get loaded => _view.loaded;
++
++  @override
++  bool get canControl => _view.canControl;
++
++  @override
++  bool get canSend => _view.canSend;
++
++  @override
++  Future<void> load({bool refresh = false}) => _view.load(refresh: refresh);
++
++  @override
++  Future<void> dispose() async => _view.dispose();
++}
++
++/// Delegates to the existing [RemoteController] Codex calls.
++class RemoteControllerCodexAdapter implements RemoteCodexPort {
++  RemoteControllerCodexAdapter(this.controller);
++
++  final RemoteController controller;
++
++  @override
++  bool get available => controller.agent?.codex?.available == true;
++
++  @override
++  bool get canControl => controller.agent?.codex?.canControl == true;
++
++  @override
++  Future<List<CodexThread>> recentThreads() async {
++    final page = await controller.codexThreads();
++    return page.items;
++  }
++
++  @override
++  Future<CodexTranscript> read(String threadId, {String? cursor}) =>
++      controller.codexRead(threadId, cursor: cursor);
++
++  @override
++  Future<void> send(String threadId, String text, {String? turnId}) =>
++      controller.codexSend(threadId, text, turnId: turnId);
++
++  @override
++  Future<void> respond(
++    String threadId,
++    String requestId,
++    String decision, {
++    Map<String, List<String>>? answers,
++  }) =>
++      controller.codexRespond(threadId, requestId, decision, answers: answers);
++
++  @override
++  Future<void> interrupt(String threadId, String turnId) =>
++      controller.codexInterrupt(threadId, turnId);
++
++  @override
++  Future<CodexPage<CodexProject>> projects({String? cursor}) =>
++      controller.codexProjects(cursor: cursor);
++
++  @override
++  RemoteCodexThreadView openThread(CodexThread thread) =>
++      CodexThreadViewAdapter(CodexThreadView(controller, thread));
++}
+diff --git a/lib/harness/remote/remote_session.dart b/lib/harness/remote/remote_session.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d23d2373f42dcee0c287d816efa988e6979c615
+--- /dev/null
++++ b/lib/harness/remote/remote_session.dart
+@@ -0,0 +1,453 @@
++// Open handles for the paired computer.
++//
++// Three kinds share one contract: a Claude/terminal session, a Herdr pane, and a
++// Codex thread. They differ only in which remote controller answers the verb:
++//
++//   * Claude/terminal → RemoteController.send / respondPermission /
++//     terminalInput / closeSession
++//   * Herdr pane      → HerdrController.sendText / sendKeys / prompt, pane_close
++//   * Codex thread    → RemoteController.codexSend / codexRespond
++//
++// Two invariants hold in all three:
++//   * `detach()` releases the view. It never sends `session_close` or closes a
++//     pane, so the session keeps running on the desktop.
++//   * `reply()` is the only path that sends an approval, and an unknown decision
++//     is treated as a refusal — never as consent.
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../../remote_control/models/herdr.dart' as herdr;
++import '../../remote_control/models/protocol.dart' as protocol;
++import '../../remote_control/state/session_view.dart';
++import '../harness_host.dart';
++import '../herdr/herdr_terminal.dart';
++import 'remote_mapping.dart';
++import 'remote_ports.dart';
++import 'remote_terminal.dart';
++
++/// A Claude or shell session on the paired computer.
++class RemoteSessionHandle implements HarnessSessionHandle {
++  RemoteSessionHandle({
++    required RemoteSessionPort port,
++    required protocol.SessionInfo session,
++    required String hostId,
++    required Future<void> Function(RemoteSessionHandle handle) onDetached,
++  }) : _port = port,
++       _session = session,
++       _hostId = hostId,
++       _onDetached = onDetached,
++       _owner = Object() {
++    _view = port.view(session);
++    _status = RemoteSessionStatusNotifier(view: _view, initial: session.status);
++    if (session.isTerminal) {
++      _terminal = RemoteTerminalChannel(
++        view: _view,
++        port: port,
++        sessionId: session.id,
++      );
++    } else {
++      _transcript = RemoteTranscriptFeed(
++        view: _view,
++        port: port,
++        sessionId: session.id,
++        owner: _owner,
++      );
++    }
++  }
++
++  final RemoteSessionPort _port;
++  final protocol.SessionInfo _session;
++  final String _hostId;
++  final Future<void> Function(RemoteSessionHandle handle) _onDetached;
++  final Object _owner;
++
++  late final SessionView _view;
++  late final RemoteSessionStatusNotifier _status;
++  RemoteTranscriptFeed? _transcript;
++  RemoteTerminalChannel? _terminal;
++  bool _detached = false;
++  bool _stopped = false;
++
++  @override
++  HarnessSessionInfo get info =>
++      remoteSessionInfo(hostId: _hostId, session: _view.info);
++
++  @override
++  ValueListenable<HarnessSessionStatus> get status => _status;
++
++  @override
++  Stream<TranscriptEvent>? get transcript => _transcript?.stream;
++
++  @override
++  HarnessTerminalChannel? get terminal => _terminal;
++
++  @override
++  Future<void> sendPrompt(String text) async {
++    if (text.trim().isEmpty) return;
++    if (_session.isTerminal) {
++      // A shell has no prompt verb: type the line and press Enter.
++      await _port.terminalInput(_session.id, '${text.trim()}\r');
++      return;
++    }
++    await _port.send(_session.id, text);
++  }
++
++  @override
++  Future<void> reply(HarnessReply reply) async {
++    final request = _pendingRequest(reply.requestId);
++    if (request == null) {
++      throw StateError('该权限请求已失效或已被处理');
++    }
++    if (request.isQuestion) {
++      final answers = <String, String>{};
++      final chosen = reply.choice.trim();
++      for (final question in request.questions!) {
++        final matches = question.options.any(
++          (option) => option.label == chosen,
++        );
++        final answer = matches ? chosen : (reply.text?.trim() ?? '');
++        if (answer.isNotEmpty) answers[question.question] = answer;
++      }
++      if (answers.isEmpty) {
++        throw StateError('请先填写问题答案');
++      }
++      await _port.respondPermission(
++        _session.id,
++        reply.requestId,
++        'allow',
++        answers: answers,
++      );
++      return;
++    }
++    const decisions = <String>{'allow', 'allow_always', 'deny'};
++    // Anything unrecognised is a refusal: failing closed is the only safe
++    // default for an approval.
++    final decision = decisions.contains(reply.choice) ? reply.choice : 'deny';
++    await _port.respondPermission(
++      _session.id,
++      reply.requestId,
++      decision,
++      message: reply.text,
++    );
++  }
++
++  protocol.PermissionRequestEvent? _pendingRequest(String requestId) {
++    for (final event in _view.events.reversed) {
++      if (event is protocol.PermissionRequestEvent &&
++          event.requestId == requestId &&
++          _view.resolutionFor(requestId) == null) {
++        return event;
++      }
++    }
++    return null;
++  }
++
++  /// Releases the view only. The desktop session keeps running.
++  @override
++  Future<void> detach() async {
++    if (_detached) return;
++    _detached = true;
++    await _transcript?.close();
++    await _terminal?.close();
++    _port.unsubscribe(_session.id, owner: _owner);
++    await _onDetached(this);
++  }
++
++  /// Ends the desktop session. Callers confirm first.
++  @override
++  Future<void> stop() async {
++    if (_stopped) return;
++    _stopped = true;
++    await _transcript?.close();
++    await _terminal?.close();
++    await _port.closeSession(_session.id);
++    _status.value = HarnessSessionStatus.exited;
++  }
++
++  void dispose() {
++    if (!_detached) {
++      _detached = true;
++      unawaited(_transcript?.close());
++      unawaited(_terminal?.close());
++      _port.unsubscribe(_session.id, owner: _owner);
++    }
++    _status.dispose();
++  }
++}
++
++/// A Herdr pane on the paired computer.
++class RemoteHerdrHandle implements HarnessSessionHandle {
++  RemoteHerdrHandle({
++    required RemoteHerdrPort herdrPort,
++    required herdr.HerdrAgent agent,
++    required String hostId,
++    required Future<void> Function(RemoteHerdrHandle handle) onDetached,
++  }) : _herdr = herdrPort,
++       _agent = agent,
++       _hostId = hostId,
++       _onDetached = onDetached,
++       _status = ValueNotifier<HarnessSessionStatus>(
++         remoteHerdrStatus(agent.status),
++       ) {
++    _terminal = HerdrSnapshotTerminal(
++      readPane: () async => _herdr.paneText(paneId),
++      sendText: (text) => _herdr.sendText(paneId, text),
++      sendKeys: (keys) => _herdr.sendKeys(paneId, keys),
++      changes: herdrPort.changes,
++    )..start();
++  }
++
++  final RemoteHerdrPort _herdr;
++  final String _hostId;
++  final Future<void> Function(RemoteHerdrHandle handle) _onDetached;
++  final ValueNotifier<HarnessSessionStatus> _status;
++  HerdrSnapshotTerminal? _terminal;
++
++  herdr.HerdrAgent _agent;
++  bool _detached = false;
++  bool _stopped = false;
++
++  String get paneId => _agent.paneId;
++
++  /// Applies a fresher row from the desktop's Herdr push.
++  void update(herdr.HerdrAgent agent) {
++    _agent = agent;
++    _status.value = remoteHerdrStatus(agent.status);
++  }
++
++  /// The pane vanished from the desktop's list (closed elsewhere).
++  void markExited() {
++    _status.value = HarnessSessionStatus.exited;
++  }
++
++  @override
++  HarnessSessionInfo get info =>
++      remoteHerdrSessionInfo(hostId: _hostId, agent: _agent);
++
++  @override
++  ValueListenable<HarnessSessionStatus> get status => _status;
++
++  /// Herdr has no structured transcript on the wire either.
++  @override
++  Stream<TranscriptEvent>? get transcript => null;
++
++  @override
++  HarnessTerminalChannel? get terminal => _terminal;
++
++  @override
++  Future<void> sendPrompt(String text) async {
++    if (text.trim().isEmpty) return;
++    await _herdr.prompt(_agent.paneId, text);
++  }
++
++  @override
++  Future<void> reply(HarnessReply reply) async {
++    throw UnsupportedError('Herdr 面板没有结构化审批，请在终端中直接回答。');
++  }
++
++  @override
++  Future<void> detach() async {
++    if (_detached) return;
++    _detached = true;
++    await _terminal?.close();
++    _terminal = null;
++    await _onDetached(this);
++  }
++
++  @override
++  Future<void> stop() async {
++    if (_stopped) return;
++    _stopped = true;
++    await _terminal?.close();
++    _terminal = null;
++    await _herdr.closePane(_agent.paneId);
++    _status.value = HarnessSessionStatus.exited;
++  }
++
++  void dispose() {
++    if (!_detached) {
++      _detached = true;
++      unawaited(_terminal?.close());
++      _terminal = null;
++    }
++    _status.dispose();
++  }
++}
++
++/// A Codex thread on the paired computer.
++class RemoteCodexThreadHandle implements HarnessSessionHandle {
++  RemoteCodexThreadHandle({
++    required RemoteCodexPort codex,
++    required RemoteCodexThreadView view,
++    required String hostId,
++    required Future<void> Function(RemoteCodexThreadHandle handle) onDetached,
++  }) : _codex = codex,
++       _view = view,
++       _hostId = hostId,
++       _onDetached = onDetached {
++    _status = ValueNotifier<HarnessSessionStatus>(
++      remoteCodexStatus(view.thread.status),
++    );
++    _feed = _CodexTranscriptFeed(view: view);
++    unawaited(_view.load(refresh: true));
++  }
++
++  final RemoteCodexPort _codex;
++  final RemoteCodexThreadView _view;
++  final String _hostId;
++  final Future<void> Function(RemoteCodexThreadHandle handle) _onDetached;
++  late final ValueNotifier<HarnessSessionStatus> _status;
++  late final _CodexTranscriptFeed _feed;
++  bool _detached = false;
++  bool _stopped = false;
++
++  @override
++  HarnessSessionInfo get info =>
++      remoteCodexSessionInfo(hostId: _hostId, thread: _view.thread);
++
++  @override
++  ValueListenable<HarnessSessionStatus> get status => _status;
++
++  @override
++  Stream<TranscriptEvent>? get transcript => _feed.stream;
++
++  @override
++  HarnessTerminalChannel? get terminal => null;
++
++  @override
++  Future<void> sendPrompt(String text) async {
++    if (text.trim().isEmpty) return;
++    final thread = _view.thread;
++    await _codex.send(thread.id, text, turnId: thread.activeTurnId);
++    await _view.load(refresh: true);
++  }
++
++  @override
++  Future<void> reply(HarnessReply reply) async {
++    protocol.CodexPendingRequest? pending;
++    for (final request in _view.pendingRequests) {
++      if (request.requestId == reply.requestId) {
++        pending = request;
++        break;
++      }
++    }
++    if (pending == null) {
++      throw StateError('该审批已失效或已被处理');
++    }
++    final chosen = reply.choice.trim();
++    final isAccept =
++        chosen == 'accept' || chosen == 'allow' || chosen == 'allow_always';
++    final answers = <String, List<String>>{};
++    if (isAccept && pending.questions.isNotEmpty) {
++      for (final question in pending.questions) {
++        final matches = question.options.any(
++          (option) => option.label == chosen,
++        );
++        final answer = matches ? chosen : (reply.text?.trim() ?? '');
++        if (answer.isNotEmpty) answers[question.id] = <String>[answer];
++      }
++    }
++    await _codex.respond(
++      _view.thread.id,
++      reply.requestId,
++      isAccept ? 'accept' : 'deny',
++      answers: answers.isEmpty ? null : answers,
++    );
++    await _view.load(refresh: true);
++  }
++
++  @override
++  Future<void> detach() async {
++    if (_detached) return;
++    _detached = true;
++    await _feed.close();
++    await _onDetached(this);
++  }
++
++  /// A Codex thread is a conversation, not a process: interrupting the active
++  /// turn is the closest safe equivalent of "stop".
++  @override
++  Future<void> stop() async {
++    if (_stopped) return;
++    _stopped = true;
++    final thread = _view.thread;
++    final turnId = thread.activeTurnId;
++    if (turnId != null) {
++      await _codex.interrupt(thread.id, turnId);
++    }
++    await detach();
++  }
++
++  Future<void> dispose() async {
++    if (!_detached) {
++      _detached = true;
++      await _feed.close();
++    }
++    await _view.dispose();
++    _status.dispose();
++  }
++}
++
++/// Emits the Codex transcript as harness entries, including pending approvals.
++class _CodexTranscriptFeed {
++  _CodexTranscriptFeed({required RemoteCodexThreadView view}) : _view = view {
++    _controller = StreamController<TranscriptEvent>.broadcast(
++      onListen: _start,
++      onCancel: _stop,
++    );
++  }
++
++  final RemoteCodexThreadView _view;
++  late final StreamController<TranscriptEvent> _controller;
++  final Set<String> _emitted = <String>{};
++  bool _listening = false;
++  bool _closed = false;
++
++  Stream<TranscriptEvent> get stream => _controller.stream;
++
++  void _start() {
++    if (_closed || _listening) return;
++    _listening = true;
++    _view.changes.addListener(_pump);
++    _pump();
++  }
++
++  void _stop() {
++    if (!_listening) return;
++    _listening = false;
++    _view.changes.removeListener(_pump);
++  }
++
++  void _pump() {
++    if (_closed) return;
++    final thread = _view.thread;
++    for (final turn in _view.turns) {
++      for (final item in turn.items) {
++        final entry = codexItemTranscript(turn, item, threadId: thread.id);
++        if (_emitted.add(entry.id)) _controller.add(entry);
++      }
++    }
++    for (final request in _view.pendingRequests) {
++      final entry = codexPendingTranscript(request, threadId: thread.id);
++      if (_emitted.add(entry.id)) _controller.add(entry);
++    }
++    final error = _view.error;
++    if (error != null && error.isNotEmpty) {
++      final entry = TranscriptEvent(
++        id: '${thread.id}:error:$error',
++        role: TranscriptRole.system,
++        text: error,
++      );
++      if (_emitted.add(entry.id)) _controller.add(entry);
++    }
++  }
++
++  Future<void> close() async {
++    if (_closed) return;
++    _closed = true;
++    _stop();
++    await _controller.close();
++  }
++}
+diff --git a/lib/harness/remote/remote_terminal.dart b/lib/harness/remote/remote_terminal.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ebf3fb4ab3a16495115933f96f01d3996e97f12
+--- /dev/null
++++ b/lib/harness/remote/remote_terminal.dart
+@@ -0,0 +1,188 @@
++// Raw terminal and transcript feeds over an open remote session.
++//
++// Both are views: they subscribe to what the screen already receives and never
++// start or stop desktop work. Releasing one (`close`/`detach`) cancels the local
++// listener and releases the route's subscription owner; it sends no
++// `session_close`, so the agent keeps running and reappears on reconnect.
++
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/foundation.dart';
++
++import '../../remote_control/models/protocol.dart' as protocol;
++import '../../remote_control/state/session_view.dart';
++import '../harness_host.dart';
++import 'remote_mapping.dart';
++import 'remote_ports.dart';
++
++/// Replays terminal bytes from a remote PTY session.
++class RemoteTerminalChannel implements HarnessTerminalChannel {
++  RemoteTerminalChannel({
++    required SessionView view,
++    required RemoteSessionPort port,
++    required String sessionId,
++  }) : _view = view,
++       _port = port,
++       _sessionId = sessionId {
++    _view.addListener(_pump);
++    // The backlog may already hold output; replay it so opening the terminal a
++    // second time still shows the screen instead of an empty one.
++    for (final event in _view.events) {
++      if (event is protocol.TerminalOutputEvent) _emit(event.data);
++      _lastSeq = event.seq;
++    }
++  }
++
++  final SessionView _view;
++  final RemoteSessionPort _port;
++  final String _sessionId;
++  final StreamController<Uint8List> _output =
++      StreamController<Uint8List>.broadcast();
++  int _lastSeq = 0;
++  bool _closed = false;
++
++  @override
++  Stream<Uint8List> get output => _output.stream;
++
++  @override
++  void write(Uint8List data) {
++    if (_closed || data.isEmpty) return;
++    // The wire carries exact bytes as a string; malformed sequences are kept
++    // rather than dropped, because a truncated key sequence is still input.
++    unawaited(
++      _port
++          .terminalInput(_sessionId, utf8.decode(data, allowMalformed: true))
++          .catchError((Object _) {}),
++    );
++  }
++
++  @override
++  void resize(int columns, int rows) {
++    if (_closed) return;
++    unawaited(
++      _port.terminalResize(_sessionId, columns, rows).catchError((Object _) {}),
++    );
++  }
++
++  void _pump() {
++    if (_closed) return;
++    for (final event in _view.events) {
++      if (event.seq <= _lastSeq) continue;
++      _lastSeq = event.seq;
++      if (event is protocol.TerminalOutputEvent) _emit(event.data);
++    }
++  }
++
++  void _emit(String data) {
++    if (_closed || data.isEmpty) return;
++    _output.add(Uint8List.fromList(utf8.encode(data)));
++  }
++
++  Future<void> close() async {
++    if (_closed) return;
++    _closed = true;
++    _view.removeListener(_pump);
++    await _output.close();
++  }
++}
++
++/// Conversation feed for a remote Claude session.
++///
++/// A broadcast controller with lazy subscription: nothing is subscribed on the
++/// desktop until a widget actually listens, and the first listener gets the
++/// existing history followed by live events.
++class RemoteTranscriptFeed {
++  RemoteTranscriptFeed({
++    required SessionView view,
++    required RemoteSessionPort port,
++    required String sessionId,
++    required Object owner,
++  }) : _view = view,
++       _port = port,
++       _sessionId = sessionId,
++       _owner = owner;
++
++  final SessionView _view;
++  final RemoteSessionPort _port;
++  final String _sessionId;
++  final Object _owner;
++
++  late final StreamController<TranscriptEvent> _controller =
++      StreamController<TranscriptEvent>.broadcast(
++        onListen: _start,
++        onCancel: _stop,
++      );
++
++  int _lastSeq = 0;
++  bool _started = false;
++  bool _closed = false;
++
++  Stream<TranscriptEvent> get stream => _controller.stream;
++
++  void _start() {
++    if (_closed || _started) return;
++    _started = true;
++    _view.addListener(_pump);
++    unawaited(
++      _port.subscribe(_sessionId, owner: _owner).catchError((Object _) {}),
++    );
++    _pump();
++  }
++
++  void _stop() {
++    if (!_started) return;
++    _started = false;
++    _view.removeListener(_pump);
++    _port.unsubscribe(_sessionId, owner: _owner);
++  }
++
++  void _pump() {
++    if (_closed) return;
++    for (final event in _view.events) {
++      if (event.seq <= _lastSeq) continue;
++      _lastSeq = event.seq;
++      final entry = transcriptFromSessionEvent(event, _sessionId);
++      if (entry != null) _controller.add(entry);
++    }
++  }
++
++  Future<void> close() async {
++    if (_closed) return;
++    _closed = true;
++    _stop();
++    await _controller.close();
++  }
++}
++
++/// Live status of one remote session, kept in a [ValueNotifier] as the contract
++/// asks. Listens to the view so a status change repaints only that row.
++class RemoteSessionStatusNotifier extends ValueNotifier<HarnessSessionStatus> {
++  RemoteSessionStatusNotifier({
++    required SessionView view,
++    required protocol.SessionStatus initial,
++  }) : _view = view,
++       super(remoteSessionStatus(initial)) {
++    _view.addListener(_sync);
++  }
++
++  final SessionView _view;
++
++  void _sync() {
++    if (_disposed) return;
++    if (_view.gone) {
++      value = HarnessSessionStatus.exited;
++      return;
++    }
++    value = remoteSessionStatus(_view.info.status);
++  }
++
++  bool _disposed = false;
++
++  @override
++  void dispose() {
++    _disposed = true;
++    _view.removeListener(_sync);
++    super.dispose();
++  }
++}
+diff --git a/test/harness_herdr_cli_test.dart b/test/harness_herdr_cli_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..f834e9cd38b8999a26fbe31e82b0bcb4850887b4
+--- /dev/null
++++ b/test/harness_herdr_cli_test.dart
+@@ -0,0 +1,266 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_cli.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_models.dart';
++
++/// Records argv and replays canned responses, so the tests assert the exact
++/// command Herdr receives without spawning anything.
++class _FakeHerdr {
++  _FakeHerdr({this.responses = const <String, HerdrProcessResult>{}});
++
++  final Map<String, HerdrProcessResult> responses;
++  final List<List<String>> argv = <List<String>>[];
++
++  Future<HerdrProcessResult> run(
++    List<String> command, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) async {
++    argv.add(List<String>.unmodifiable(command));
++    final key = command.join(' ');
++    for (final entry in responses.entries) {
++      if (key.startsWith(entry.key)) return entry.value;
++    }
++    return const HerdrProcessResult(exitCode: 0, stdout: '{"result":{}}');
++  }
++
++  HerdrCli cli() => HerdrCli(executable: 'C:/herdr/herdr.exe', runner: run);
++}
++
++HerdrProcessResult ok(String stdout) =>
++    HerdrProcessResult(exitCode: 0, stdout: stdout);
++
++void main() {
++  test('parses the success envelope and unwraps result', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'agent list': ok(
++          '{"id":"cli:agent:list","result":{"agents":[{"pane_id":"w1:p1",'
++          '"workspace_id":"w1","tab_id":"w1:t1","agent":"pi",'
++          '"agent_status":"idle","focused":false}],"type":"agent_list"}}',
++        ),
++      },
++    );
++    final agents = await fake.cli().agents();
++    expect(agents, hasLength(1));
++    expect(agents.single.paneId, 'w1:p1');
++    expect(fake.argv.single, <String>['agent', 'list']);
++  });
++
++  test('a void mutation may print nothing', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'pane send-keys': const HerdrProcessResult(exitCode: 0),
++      },
++    );
++    await fake.cli().sendKeys('w1:p1', <String>['enter']);
++    expect(fake.argv.single, <String>['pane', 'send-keys', 'w1:p1', 'enter']);
++  });
++
++  test(
++    'a named agent uses agent send-keys, a pane uses pane send-keys',
++    () async {
++      final fake = _FakeHerdr();
++      final cli = fake.cli();
++      await cli.sendKeys('pi-ui', <String>['esc']);
++      await cli.sendKeys('w37:p14', <String>['ctrl+c']);
++      expect(fake.argv[0], <String>['agent', 'send-keys', 'pi-ui', 'esc']);
++      expect(fake.argv[1], <String>['pane', 'send-keys', 'w37:p14', 'ctrl+c']);
++    },
++  );
++
++  test('prompt passes the text as one argv element and can wait', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'agent prompt': ok(
++          '{"result":{"type":"agent_prompted","agent":{"pane_id":"w1:p1",'
++          '"workspace_id":"w1","tab_id":"w1:t1","agent":"pi",'
++          '"agent_status":"working","focused":false}}}',
++        ),
++      },
++    );
++    final report = await fake.cli().prompt(
++      'w1:p1',
++      '修复 登录 页面 ; rm -rf /',
++      wait: true,
++      timeoutMs: 1000,
++    );
++    expect(fake.argv.single.take(2), <String>['agent', 'prompt']);
++    expect(fake.argv.single[3], '修复 登录 页面 ; rm -rf /');
++    expect(fake.argv.single, contains('--wait'));
++    expect(fake.argv.single, contains('1000'));
++    expect(report.action, 'agent_prompted');
++  });
++
++  test('wait sends every requested until state and a budget', () async {
++    final fake = _FakeHerdr();
++    await fake.cli().wait(
++      'w1:p1',
++      until: const <HerdrAgentStatus>[
++        HerdrAgentStatus.idle,
++        HerdrAgentStatus.done,
++        HerdrAgentStatus.blocked,
++      ],
++      budget: const Duration(milliseconds: 1500),
++    );
++    expect(fake.argv.single, <String>[
++      'agent',
++      'wait',
++      'w1:p1',
++      '--until',
++      'idle',
++      '--until',
++      'done',
++      '--until',
++      'blocked',
++      '--timeout',
++      '1500',
++    ]);
++  });
++
++  test('pane read returns raw screen text, not JSON', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'pane read': ok('line one\r\nline two\r\n'),
++      },
++    );
++    final text = await fake.cli().readPane('w1:p1', lines: 120);
++    expect(text, 'line one\r\nline two\r\n');
++    expect(fake.argv.single, <String>[
++      'pane',
++      'read',
++      'w1:p1',
++      '--source',
++      'recent',
++      '--lines',
++      '120',
++    ]);
++  });
++
++  test('an error envelope inside pane read becomes a HerdrException', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'pane read': ok(
++          '{"error":{"code":"pane_not_found","message":"w1:p9"}}',
++        ),
++      },
++    );
++    await expectLater(
++      fake.cli().readPane('w1:p1'),
++      throwsA(
++        isA<HerdrException>()
++            .having((e) => e.failure, 'failure', HerdrFailure.notFound)
++            .having((e) => e.herdrCode, 'code', 'pane_not_found'),
++      ),
++    );
++  });
++
++  test('a blocked prompt keeps the raw code for the UI', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'agent prompt': ok(
++          '{"error":{"code":"agent_blocked","message":"等待确认"}}',
++        ),
++      },
++    );
++    await expectLater(
++      fake.cli().prompt('w1:p1', '继续'),
++      throwsA(
++        isA<HerdrException>()
++            .having((e) => e.failure, 'failure', HerdrFailure.agentBlocked)
++            .having((e) => e.herdrCode, 'code', 'agent_blocked')
++            .having((e) => e.message, 'message', contains('等待确认')),
++      ),
++    );
++  });
++
++  test('a spawn failure is reported as unavailable', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'agent list': const HerdrProcessResult(
++          exitCode: -1,
++          spawnError: 'ENOENT',
++        ),
++      },
++    );
++    await expectLater(
++      fake.cli().agents(),
++      throwsA(
++        isA<HerdrException>().having(
++          (e) => e.failure,
++          'failure',
++          HerdrFailure.unavailable,
++        ),
++      ),
++    );
++  });
++
++  test('invalid targets and pane ids never reach the CLI', () async {
++    final fake = _FakeHerdr();
++    final cli = fake.cli();
++    await expectLater(cli.prompt('-rf', 'x'), throwsA(isA<HerdrException>()));
++    await expectLater(
++      cli.readPane('not-a-pane'),
++      throwsA(isA<HerdrException>()),
++    );
++    await expectLater(
++      cli.sendKeys('w1:p1', <String>['f13']),
++      throwsA(isA<HerdrException>()),
++    );
++    expect(fake.argv, isEmpty);
++  });
++
++  test('version and status come from herdr text output', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        '--version': ok('herdr 0.9.3\n'),
++        'status': ok(
++          'client:\n'
++          '  version: 0.9.3\n'
++          '  channel: stable\n'
++          '  protocol: 22\n\n'
++          'server:\n'
++          '  status: running\n'
++          '  version: 0.9.3\n'
++          "  socket: D:\\AppData\\Roaming\\herdr\\herdr.sock\n",
++        ),
++      },
++    );
++    final cli = fake.cli();
++    expect(await cli.version(), '0.9.3');
++    final status = await cli.serverStatus();
++    expect(status.serverRunning, isTrue);
++    expect(status.clientProtocol, 22);
++    expect(status.socket, r'D:\AppData\Roaming\herdr\herdr.sock');
++  });
++
++  test('workspace create returns the root pane id', () async {
++    final fake = _FakeHerdr(
++      responses: <String, HerdrProcessResult>{
++        'workspace create': ok(
++          '{"result":{"type":"workspace_created",'
++          '"workspace":{"workspace_id":"w9","number":9,"label":"qflistudio",'
++          '"focused":false,"pane_count":1,"tab_count":1,"active_tab_id":"w9:t1",'
++          '"agent_status":"unknown"},'
++          '"tab":{"tab_id":"w9:t1"},'
++          '"root_pane":{"pane_id":"w9:p1","terminal_id":"t","workspace_id":"w9",'
++          '"tab_id":"w9:t1","focused":false,"agent_status":"unknown",'
++          '"revision":1}}}',
++        ),
++      },
++    );
++    final paneId = await fake.cli().createWorkspace(
++      cwd: r'D:\MyNewProjects\qflistudio',
++      label: 'qflistudio',
++    );
++    expect(paneId, 'w9:p1');
++    expect(fake.argv.single, <String>[
++      'workspace',
++      'create',
++      '--cwd',
++      r'D:\MyNewProjects\qflistudio',
++      '--label',
++      'qflistudio',
++      '--no-focus',
++    ]);
++  });
++}
+diff --git a/test/harness_herdr_host_test.dart b/test/harness_herdr_host_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..25efe8772707575aec84171143783afbe8d501f8
+--- /dev/null
++++ b/test/harness_herdr_host_test.dart
+@@ -0,0 +1,446 @@
++import 'dart:async';
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_cli.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_host.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_platform.dart';
++import 'package:qfli_studio_core/harness/pty/harness_pty.dart';
++
++const String _agentsJson =
++    '{"result":{"type":"agent_list","agents":['
++    '{"agent":"pi","agent_status":"working","cwd":"D:\\\\work","focused":true,'
++    '"name":"pi-ui","pane_id":"w37:p14","workspace_id":"w37","tab_id":"w37:t1",'
++    '"terminal_title":"π - work","terminal_title_stripped":"π - work"},'
++    '{"agent":"claude","agent_status":"done","cwd":"D:\\\\work","focused":false,'
++    '"pane_id":"w37:p15","workspace_id":"w37","tab_id":"w37:t1",'
++    '"terminal_title":"Herdr 会话","terminal_title_stripped":"Herdr 会话"}'
++    ']}}';
++
++const String _workspacesJson =
++    '{"result":{"type":"workspace_list","workspaces":['
++    '{"workspace_id":"w37","label":"qflistudio","number":3,"focused":true,'
++    '"agent_status":"done","pane_count":2,"tab_count":1,"active_tab_id":"w37:t1"}'
++    ']}}';
++
++/// Canned CLI that records argv, so the tests assert the exact command.
++class _FakeHerdrCli {
++  final List<List<String>> argv = <List<String>>[];
++  final List<List<String>> waitRequests = <List<String>>[];
++
++  Future<HerdrProcessResult> run(
++    List<String> command, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) async {
++    argv.add(List<String>.unmodifiable(command));
++    final key = command.join(' ');
++    if (key == '--version') {
++      return const HerdrProcessResult(exitCode: 0, stdout: 'herdr 0.9.3\n');
++    }
++    if (key == 'status') {
++      return const HerdrProcessResult(
++        exitCode: 0,
++        stdout:
++            'client:\n  version: 0.9.3\n  protocol: 22\n\n'
++            'server:\n  status: running\n  socket: /tmp/herdr.sock\n',
++      );
++    }
++    if (key == 'agent list') {
++      return const HerdrProcessResult(exitCode: 0, stdout: _agentsJson);
++    }
++    if (key == 'workspace list') {
++      return const HerdrProcessResult(exitCode: 0, stdout: _workspacesJson);
++    }
++    if (command.length > 2 && command[0] == 'agent' && command[1] == 'wait') {
++      waitRequests.add(List<String>.unmodifiable(command));
++      // Behave like a short wait that timed out: the loop refreshes and waits
++      // again instead of spinning.
++      return const HerdrProcessResult(
++        exitCode: 1,
++        stdout: '{"error":{"code":"timeout","message":"150ms"}}',
++      );
++    }
++    if (key.startsWith('agent prompt')) {
++      return const HerdrProcessResult(
++        exitCode: 0,
++        stdout:
++            '{"result":{"type":"agent_prompted",'
++            '"agent":{"pane_id":"w37:p14","workspace_id":"w37",'
++            '"tab_id":"w37:t1","agent":"pi","agent_status":"working",'
++            '"focused":false}}}',
++      );
++    }
++    if (key.startsWith('pane close')) {
++      return const HerdrProcessResult(
++        exitCode: 0,
++        stdout: '{"result":{"type":"ok"}}',
++      );
++    }
++    if (key.startsWith('workspace create')) {
++      return const HerdrProcessResult(
++        exitCode: 0,
++        stdout:
++            '{"result":{"type":"workspace_created",'
++            '"workspace":{"workspace_id":"w9","number":9,"label":"new",'
++            '"focused":false,"pane_count":1,"tab_count":1,'
++            '"active_tab_id":"w9:t1","agent_status":"unknown"},'
++            '"tab":{"tab_id":"w9:t1"},'
++            '"root_pane":{"pane_id":"w9:p1","terminal_id":"t",'
++            '"workspace_id":"w9","tab_id":"w9:t1","focused":false,'
++            '"agent_status":"unknown","revision":1}}}',
++      );
++    }
++    if (key.startsWith('agent start')) {
++      return const HerdrProcessResult(
++        exitCode: 0,
++        stdout:
++            '{"result":{"type":"agent_started","argv":["claude"],'
++            '"agent":{"pane_id":"w9:p1","workspace_id":"w9","tab_id":"w9:t1",'
++            '"agent":"claude","agent_status":"idle","focused":false,'
++            '"terminal_title":"新项目","terminal_title_stripped":"新项目"}}}',
++      );
++    }
++    if (key.startsWith('pane send-text') || key.startsWith('pane send-keys')) {
++      return const HerdrProcessResult(exitCode: 0);
++    }
++    if (key.startsWith('pane read')) {
++      return const HerdrProcessResult(exitCode: 0, stdout: 'screen\n');
++    }
++    return const HerdrProcessResult(exitCode: 0, stdout: '{"result":{}}');
++  }
++
++  HerdrCli cli() => HerdrCli(executable: 'herdr', runner: run);
++}
++
++/// PTY factory that records the attach command and streams output.
++class _FakePtyFactory implements HarnessPtyFactory {
++  final List<List<String>> starts = <List<String>>[];
++  final StreamController<Uint8List> output =
++      StreamController<Uint8List>.broadcast();
++  final List<Uint8List> writes = <Uint8List>[];
++  final List<(int, int)> resizes = <(int, int)>[];
++  bool killed = false;
++
++  @override
++  Future<HarnessPty> start({
++    required List<String> argv,
++    String? workingDirectory,
++    Map<String, String>? environment,
++    int columns = 80,
++    int rows = 24,
++  }) async {
++    starts.add(List<String>.unmodifiable(argv));
++    return _FakePty(this);
++  }
++}
++
++class _FakePty implements HarnessPty {
++  _FakePty(this.owner);
++
++  final _FakePtyFactory owner;
++
++  @override
++  int? get pid => 4242;
++
++  @override
++  Stream<Uint8List> get output => owner.output.stream;
++
++  @override
++  Future<int> get exitCode => Future<int>.value(0);
++
++  @override
++  void write(Uint8List data) => owner.writes.add(data);
++
++  @override
++  void resize(int columns, int rows) => owner.resizes.add((columns, rows));
++
++  @override
++  Future<void> kill() async {
++    owner.killed = true;
++  }
++}
++
++class _FailingPtyFactory implements HarnessPtyFactory {
++  @override
++  Future<HarnessPty> start({
++    required List<String> argv,
++    String? workingDirectory,
++    Map<String, String>? environment,
++    int columns = 80,
++    int rows = 24,
++  }) async => throw const HarnessPtyException('没有可用的 PTY');
++}
++
++HerdrHost _host(
++  _FakeHerdrCli fake, {
++  HarnessPtyFactory? pty,
++  Duration idleRefresh = const Duration(milliseconds: 20),
++  Duration waitBudget = const Duration(milliseconds: 150),
++}) => HerdrHost(
++  cli: fake.cli(),
++  ptyFactory: pty,
++  locator: ({String? explicitPath}) async => 'herdr',
++  idleRefresh: idleRefresh,
++  waitBudget: waitBudget,
++);
++
++/// The host publishes its first list after the first refresh; poll the snapshot
++/// instead of depending on which event a broadcast stream happens to deliver.
++Future<List<HarnessSessionInfo>> _sessions(
++  HerdrHost host, {
++  int min = 1,
++}) async {
++  host.watchSessions().listen((_) {});
++  for (var attempt = 0; attempt < 200; attempt++) {
++    final list = host.currentSessions;
++    if (list.length >= min) return list;
++    await Future<void>.delayed(const Duration(milliseconds: 5));
++  }
++  return host.currentSessions;
++}
++
++void main() {
++  test(
++    'reports unsupported with an install hint when herdr is missing',
++    () async {
++      final host = HerdrHost(locator: ({String? explicitPath}) async => null);
++      expect(host.state.value, HarnessHostState.offline);
++      await host.providers();
++      expect(host.state.value, HarnessHostState.unsupported);
++      expect(host.installHint, isNotNull);
++      expect(host.installHint!.message, contains('herdr'));
++      await host.dispose();
++    },
++  );
++
++  test('lists agent panes with mapped status, cwd and provider', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake);
++    final list = await _sessions(host, min: 2);
++    expect(list, hasLength(2));
++    final byId = <String, HarnessSessionInfo>{
++      for (final info in list) info.id: info,
++    };
++    final pi = byId['w37:p14']!;
++    expect(pi.providerId, 'pi');
++    expect(pi.status, HarnessSessionStatus.working);
++    expect(pi.cwd, r'D:\work');
++    expect(pi.title, 'π - work');
++    expect(
++      pi.capabilities,
++      containsAll(<HarnessCapability>[
++        HarnessCapability.terminal,
++        HarnessCapability.prompt,
++        HarnessCapability.stop,
++      ]),
++    );
++    expect(
++      byId['w37:p15']!.status,
++      HarnessSessionStatus.done,
++      reason: 'done means the turn finished and needs attention',
++    );
++    expect(
++      list.first.id,
++      'w37:p15',
++      reason: 'a finished turn ranks above a busy one: it needs the user',
++    );
++    expect(host.state.value, HarnessHostState.online);
++    await host.dispose();
++  });
++
++  test('drives status refresh through agent wait, not tight polling', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake);
++    await _sessions(host, min: 2);
++    for (var attempt = 0; attempt < 100; attempt++) {
++      if (fake.waitRequests.isNotEmpty) break;
++      await Future<void>.delayed(const Duration(milliseconds: 5));
++    }
++    expect(fake.waitRequests, isNotEmpty);
++    expect(fake.waitRequests.first[2], 'pi-ui');
++    expect(
++      fake.waitRequests.first,
++      containsAllInOrder(<String>['agent', 'wait', 'pi-ui', '--until']),
++    );
++    await host.dispose();
++  });
++
++  test('providers list herdr agent kinds, not a bare shell', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake);
++    final providers = await host.providers();
++    expect(providers, isNotEmpty);
++    final ids = providers.map((provider) => provider.id).toList();
++    expect(ids, containsAll(<String>['pi', 'claude', 'codex', 'opencode']));
++    expect(
++      ids,
++      isNot(contains('shell')),
++      reason: 'agent list never shows a bare shell pane',
++    );
++    await host.dispose();
++  });
++
++  test('open attaches the pane in a PTY and forwards bytes', () async {
++    final fake = _FakeHerdrCli();
++    final pty = _FakePtyFactory();
++    final host = _host(fake, pty: pty);
++    await _sessions(host, min: 2);
++
++    final handle = await host.open('w37:p14');
++    expect(handle.info.title, 'π - work');
++    expect(handle.transcript, isNull);
++    expect(handle.terminal, isNotNull);
++    expect(pty.starts.single.take(3), <String>['herdr', 'agent', 'attach']);
++    expect(pty.starts.single[3], 'pi-ui');
++
++    handle.terminal!.write(Uint8List.fromList(<int>[0x6c, 0x73]));
++    expect(pty.writes.single, <int>[0x6c, 0x73]);
++    handle.terminal!.resize(120, 40);
++    expect(pty.resizes.single, (120, 40));
++
++    // Detaching releases the view only: no pane command is sent.
++    await handle.detach();
++    expect(pty.killed, isTrue);
++    expect(
++      fake.argv.any((argv) => argv.join(' ').startsWith('pane close')),
++      isFalse,
++    );
++    await host.dispose();
++  });
++
++  test(
++    'sendPrompt submits through agent prompt; reply needs a terminal',
++    () async {
++      final fake = _FakeHerdrCli();
++      final host = _host(fake, pty: _FakePtyFactory());
++      await _sessions(host, min: 2);
++      final handle = await host.open('w37:p14');
++
++      await handle.sendPrompt('继续 修复');
++      final prompt = fake.argv.firstWhere(
++        (argv) => argv.length > 1 && argv[0] == 'agent' && argv[1] == 'prompt',
++      );
++      expect(prompt[2], 'pi-ui');
++      expect(prompt[3], '继续 修复');
++
++      await expectLater(
++        handle.reply(const HarnessReply(requestId: 'r1', choice: 'allow')),
++        throwsA(isA<UnsupportedError>()),
++      );
++      await handle.detach();
++      await host.dispose();
++    },
++  );
++
++  test('stop closes the pane after an explicit call', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake, pty: _FakePtyFactory());
++    await _sessions(host, min: 2);
++    final handle = await host.open('w37:p14');
++    await handle.stop();
++    expect(
++      fake.argv.where((argv) => argv.join(' ') == 'pane close w37:p14'),
++      hasLength(1),
++    );
++    await host.dispose();
++  });
++
++  test('launch creates a workspace and starts the requested agent', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake, pty: _FakePtyFactory());
++    await _sessions(host, min: 2);
++
++    final handle = await host.launch(
++      const HarnessLaunchRequest(
++        providerId: 'claude',
++        cwd: r'D:\work\new-project',
++        title: '新项目',
++      ),
++    );
++    expect(handle.info.id, 'w9:p1');
++    expect(handle.info.providerId, 'claude');
++
++    final create = fake.argv.firstWhere(
++      (argv) => argv.join(' ').startsWith('workspace create'),
++    );
++    expect(
++      create,
++      containsAllInOrder(<String>['workspace', 'create', '--cwd']),
++    );
++    expect(create, contains('--no-focus'));
++    final start = fake.argv.firstWhere(
++      (argv) => argv.join(' ').startsWith('agent start'),
++    );
++    expect(start, containsAllInOrder(<String>['--kind', 'claude']));
++    expect(start, containsAllInOrder(<String>['--pane', 'w9:p1']));
++    await host.dispose();
++  });
++
++  test('a plain shell is refused on the herdr host', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake);
++    await _sessions(host, min: 2);
++    await expectLater(
++      host.launch(
++        const HarnessLaunchRequest(providerId: 'shell', cwd: r'D:\work'),
++      ),
++      throwsA(isA<HerdrException>()),
++    );
++    expect(
++      fake.argv.any((argv) => argv.join(' ').startsWith('workspace create')),
++      isFalse,
++    );
++    await host.dispose();
++  });
++
++  test('a failing PTY falls back to the snapshot terminal', () async {
++    final fake = _FakeHerdrCli();
++    final host = _host(fake, pty: _FailingPtyFactory());
++    await _sessions(host, min: 2);
++    final handle = await host.open('w37:p14');
++    expect(handle.terminal, isNotNull);
++    for (var attempt = 0; attempt < 100; attempt++) {
++      if (fake.argv.any((argv) => argv.join(' ').startsWith('pane read'))) {
++        break;
++      }
++      await Future<void>.delayed(const Duration(milliseconds: 5));
++    }
++    expect(
++      fake.argv.any((argv) => argv.join(' ').startsWith('pane read')),
++      isTrue,
++      reason: 'the snapshot fallback reads the pane text',
++    );
++    await handle.detach();
++    await host.dispose();
++  });
++
++  test('a broken executable is reported as unsupported, not online', () async {
++    final host = HerdrHost(
++      locator: ({String? explicitPath}) async => 'C:/broken/herdr.exe',
++      runner: _MissingRunner(),
++    );
++    host.watchSessions().listen((_) {});
++    for (var attempt = 0; attempt < 100; attempt++) {
++      if (host.state.value == HarnessHostState.unsupported) break;
++      await Future<void>.delayed(const Duration(milliseconds: 5));
++    }
++    expect(host.state.value, HarnessHostState.unsupported);
++    expect(host.installHint, isNotNull);
++    await host.dispose();
++  });
++}
++
++/// A runner whose binary cannot be started; the host must report `unsupported`.
++class _MissingRunner extends HerdrCliRunner {
++  @override
++  Future<HerdrProcessResult> call(
++    List<String> argv, {
++    String? workingDirectory,
++    required Duration timeout,
++  }) async => const HerdrProcessResult(exitCode: -1, spawnError: 'ENOENT');
++
++  @override
++  Future<void> dispose() async {}
++}
+diff --git a/test/harness_herdr_input_test.dart b/test/harness_herdr_input_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..13dce33e18ed544b970325c15f0748690155a5cb
+--- /dev/null
++++ b/test/harness_herdr_input_test.dart
+@@ -0,0 +1,76 @@
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/herdr/herdr_input.dart';
++
++Uint8List bytes(String text) => Uint8List.fromList(utf8.encode(text));
++
++void main() {
++  const translator = HerdrInputTranslator();
++
++  test('printable typing becomes one text operation', () {
++    final ops = translator.translate(bytes('git status'));
++    expect(ops, hasLength(1));
++    expect(ops.single, isA<HerdrSendTextOp>());
++    expect((ops.single as HerdrSendTextOp).text, 'git status');
++  });
++
++  test('Enter, Tab and Backspace are keys, not text', () {
++    final ops = translator.translate(bytes('\r\t\u007f'));
++    expect(
++      ops.whereType<HerdrSendKeysOp>().map((op) => op.keys.single).toList(),
++      <String>['enter', 'tab', 'backspace'],
++    );
++  });
++
++  test('control bytes map to Ctrl combinations', () {
++    final ops = translator.translate(bytes('\u0003'));
++    expect((ops.single as HerdrSendKeysOp).keys, <String>['ctrl+c']);
++    final letter = translator.translate(bytes('\u0006'));
++    expect((letter.single as HerdrSendKeysOp).keys, <String>['ctrl+f']);
++  });
++
++  test('arrow escape sequences become named keys', () {
++    final ops = translator.translate(bytes('\u001b[A\u001b[B\u001b[C\u001b[D'));
++    expect(
++      ops.whereType<HerdrSendKeysOp>().map((op) => op.keys.single).toList(),
++      <String>['up', 'down', 'right', 'left'],
++    );
++  });
++
++  test('application-mode arrows (ESC O) are understood', () {
++    final ops = translator.translate(bytes('\u001bOA'));
++    expect((ops.single as HerdrSendKeysOp).keys, <String>['up']);
++  });
++
++  test('a lone Escape reports Escape', () {
++    final ops = translator.translate(bytes('\u001b'));
++    expect((ops.single as HerdrSendKeysOp).keys, <String>['esc']);
++  });
++
++  test('text and keys keep their order', () {
++    final ops = translator.translate(bytes('ls\r'));
++    expect(ops, hasLength(2));
++    expect((ops[0] as HerdrSendTextOp).text, 'ls');
++    expect((ops[1] as HerdrSendKeysOp).keys, <String>['enter']);
++  });
++
++  test('unknown CSI sequences are dropped rather than typed literally', () {
++    final ops = translator.translate(bytes('\u001b[15~'));
++    expect(ops, isEmpty);
++  });
++
++  test('Delete, PageUp and PageDown use herdr names', () {
++    final ops = translator.translate(bytes('\u001b[3~\u001b[5~\u001b[6~'));
++    expect(
++      ops.whereType<HerdrSendKeysOp>().map((op) => op.keys.single).toList(),
++      <String>['delete', 'pageup', 'pagedown'],
++    );
++  });
++
++  test('Chinese input is sent as text, not split into bytes', () {
++    final ops = translator.translate(bytes('修复登录'));
++    expect((ops.single as HerdrSendTextOp).text, '修复登录');
++  });
++}
+diff --git a/test/harness_remote_host_test.dart b/test/harness_remote_host_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..e16311e1e593d745b2f55dad984984a875df3056
+--- /dev/null
++++ b/test/harness_remote_host_test.dart
+@@ -0,0 +1,720 @@
++import 'package:flutter/foundation.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/remote/remote_harness.dart';
++import 'package:qfli_studio_core/remote_control/models/herdr.dart' as herdr;
++import 'package:qfli_studio_core/remote_control/models/protocol.dart'
++    as protocol;
++import 'package:qfli_studio_core/remote_control/state/remote_controller.dart'
++    show ConnectionPhase;
++import 'package:qfli_studio_core/remote_control/state/session_view.dart';
++
++protocol.SessionInfo _session({
++  required String id,
++  protocol.SessionStatus status = protocol.SessionStatus.running,
++  String kind = 'claude',
++  String title = '修复登录',
++  String cwd = r'D:\work',
++  int pending = 0,
++}) => protocol.SessionInfo(
++  id: id,
++  title: title,
++  cwd: cwd,
++  status: status,
++  mode: 'default',
++  createdAt: DateTime.fromMillisecondsSinceEpoch(1000),
++  updatedAt: DateTime.fromMillisecondsSinceEpoch(2000),
++  kind: kind,
++  pending: pending,
++);
++
++class FakeRemoteSessionPort extends ChangeNotifier
++    implements RemoteSessionPort {
++  FakeRemoteSessionPort({
++    this.isOnline = true,
++    this.phase = ConnectionPhase.online,
++    this.hostLabel = '办公室电脑',
++    this.hostId = 'agent-42',
++  });
++
++  @override
++  Listenable get changes => this;
++
++  @override
++  bool isOnline;
++
++  @override
++  ConnectionPhase phase;
++
++  @override
++  final String hostLabel;
++
++  @override
++  final String hostId;
++
++  final Map<String, protocol.SessionInfo> sessionsById =
++      <String, protocol.SessionInfo>{};
++  final Map<String, SessionView> views = <String, SessionView>{};
++  final List<String> calls = <String>[];
++
++  @override
++  List<protocol.SessionInfo> get sessions => sessionsById.values.toList();
++
++  @override
++  SessionView view(protocol.SessionInfo info) =>
++      views.putIfAbsent(info.id, () => SessionView(info));
++
++  void put(protocol.SessionInfo info) {
++    sessionsById[info.id] = info;
++    views.putIfAbsent(info.id, () => SessionView(info)).updateInfo(info);
++    notifyListeners();
++  }
++
++  void pushEvent(String sessionId, protocol.SessionEvent event) {
++    view(sessionsById[sessionId]!).applyEvent(event);
++  }
++
++  @override
++  Future<void> refreshSessions() async => calls.add('refreshSessions');
++
++  @override
++  Future<void> subscribe(String id, {required Object owner}) async =>
++      calls.add('subscribe:$id');
++
++  @override
++  void unsubscribe(String id, {required Object owner}) =>
++      calls.add('unsubscribe:$id');
++
++  @override
++  Future<void> send(String id, String text) async =>
++      calls.add('send:$id:$text');
++
++  @override
++  Future<void> respondPermission(
++    String id,
++    String requestId,
++    String decision, {
++    String? message,
++    Map<String, String>? answers,
++  }) async => calls.add(
++    'respond:$id:$requestId:$decision:${answers ?? const <String, String>{}}',
++  );
++
++  @override
++  Future<void> terminalInput(String id, String data) async =>
++      calls.add('input:$id:${data.replaceAll('\r', '<CR>')}');
++
++  @override
++  Future<void> terminalResize(String id, int cols, int rows) async =>
++      calls.add('resize:$id:$cols:$rows');
++
++  @override
++  Future<void> closeSession(String id) async {
++    calls.add('closeSession:$id');
++    sessionsById.remove(id);
++    notifyListeners();
++  }
++
++  @override
++  Future<protocol.SessionInfo> createSession({
++    required String cwd,
++    String? prompt,
++  }) async {
++    calls.add('createSession:$cwd');
++    final created = _session(
++      id: 'new-claude',
++      status: protocol.SessionStatus.starting,
++      title: '新会话',
++      cwd: cwd,
++    );
++    put(created);
++    return created;
++  }
++
++  @override
++  Future<protocol.SessionInfo> createTerminal({required String cwd}) async {
++    calls.add('createTerminal:$cwd');
++    final created = _session(
++      id: 'new-terminal',
++      status: protocol.SessionStatus.starting,
++      kind: 'terminal',
++      title: '终端',
++      cwd: cwd,
++    );
++    put(created);
++    return created;
++  }
++}
++
++herdr.HerdrAgent _agent({
++  String paneId = 'w37:p14',
++  String kind = 'pi',
++  herdr.HerdrAgentStatus status = herdr.HerdrAgentStatus.idle,
++  String title = 'π - qflistudio',
++}) => herdr.HerdrAgent(
++  target: paneId,
++  paneId: paneId,
++  workspaceId: 'w37',
++  tabId: 'w37:t1',
++  cwd: r'D:\MyNewProjects\qflistudio',
++  agentKind: kind,
++  status: status,
++  focused: false,
++  terminalTitle: title,
++);
++
++class FakeRemoteHerdrPort extends ChangeNotifier implements RemoteHerdrPort {
++  FakeRemoteHerdrPort({this.canControl = true});
++
++  @override
++  Listenable get changes => this;
++
++  @override
++  bool canControl;
++
++  final List<herdr.HerdrAgent> agentList = <herdr.HerdrAgent>[];
++  final Map<String, String> paneTexts = <String, String>{};
++  final List<String> calls = <String>[];
++
++  @override
++  List<herdr.HerdrAgent> get agents =>
++      List<herdr.HerdrAgent>.unmodifiable(agentList);
++
++  @override
++  String paneText(String paneId) => paneTexts[paneId] ?? '';
++
++  @override
++  Future<void> refresh() async => calls.add('refresh');
++
++  @override
++  Future<herdr.HerdrOutput> read(
++    String paneId, {
++    herdr.HerdrReadSource source = herdr.HerdrReadSource.recent,
++    int lines = 200,
++  }) async =>
++      herdr.HerdrOutput(paneId: paneId, source: source, text: paneText(paneId));
++
++  @override
++  Future<herdr.HerdrActionReport> sendText(String paneId, String text) async {
++    calls.add('sendText:$paneId:$text');
++    return const herdr.HerdrActionReport(action: 'ok', summary: '');
++  }
++
++  @override
++  Future<herdr.HerdrActionReport> sendKeys(
++    String paneId,
++    List<String> keys,
++  ) async {
++    calls.add('sendKeys:$paneId:${keys.join(',')}');
++    return const herdr.HerdrActionReport(action: 'ok', summary: '');
++  }
++
++  @override
++  Future<herdr.HerdrActionReport> prompt(String paneId, String text) async {
++    calls.add('prompt:$paneId:$text');
++    return const herdr.HerdrActionReport(action: 'ok', summary: '');
++  }
++
++  @override
++  Future<void> closePane(String paneId) async => calls.add('closePane:$paneId');
++}
++
++class FakeCodexThreadView extends ChangeNotifier
++    implements RemoteCodexThreadView {
++  FakeCodexThreadView(this._thread);
++
++  final protocol.CodexThread _thread;
++  final List<protocol.CodexTurn> turnList = <protocol.CodexTurn>[];
++  final List<protocol.CodexPendingRequest> pendingList =
++      <protocol.CodexPendingRequest>[];
++  String? errorText;
++  bool loadedValue = false;
++  bool disposed = false;
++
++  @override
++  Listenable get changes => this;
++
++  @override
++  protocol.CodexThread get thread => _thread;
++
++  @override
++  List<protocol.CodexTurn> get turns => turnList;
++
++  @override
++  List<protocol.CodexPendingRequest> get pendingRequests => pendingList;
++
++  @override
++  String? get error => errorText;
++
++  @override
++  bool get loaded => loadedValue;
++
++  @override
++  bool get canControl => true;
++
++  @override
++  bool get canSend => true;
++
++  @override
++  Future<void> load({bool refresh = false}) async {
++    loadedValue = true;
++  }
++
++  @override
++  Future<void> dispose() async {
++    disposed = true;
++    super.dispose();
++  }
++}
++
++class FakeRemoteCodexPort implements RemoteCodexPort {
++  FakeRemoteCodexPort({
++    this.available = true,
++    List<protocol.CodexThread>? threads,
++  }) : threadList = threads ?? <protocol.CodexThread>[];
++
++  @override
++  bool available;
++
++  @override
++  bool canControl = true;
++
++  final List<protocol.CodexThread> threadList;
++  final Map<String, FakeCodexThreadView> views =
++      <String, FakeCodexThreadView>{};
++  final List<String> calls = <String>[];
++
++  @override
++  Future<List<protocol.CodexThread>> recentThreads() async => threadList;
++
++  @override
++  Future<protocol.CodexTranscript> read(
++    String threadId, {
++    String? cursor,
++  }) async => protocol.CodexTranscript(
++    thread: threadList.firstWhere((thread) => thread.id == threadId),
++    turns: const <protocol.CodexTurn>[],
++  );
++
++  @override
++  Future<void> send(String threadId, String text, {String? turnId}) async =>
++      calls.add('send:$threadId:$text');
++
++  @override
++  Future<void> respond(
++    String threadId,
++    String requestId,
++    String decision, {
++    Map<String, List<String>>? answers,
++  }) async => calls.add('respond:$threadId:$requestId:$decision:$answers');
++
++  @override
++  Future<void> interrupt(String threadId, String turnId) async =>
++      calls.add('interrupt:$threadId:$turnId');
++
++  @override
++  Future<protocol.CodexPage<protocol.CodexProject>> projects({
++    String? cursor,
++  }) async => const protocol.CodexPage<protocol.CodexProject>(
++    <protocol.CodexProject>[],
++    null,
++  );
++
++  @override
++  RemoteCodexThreadView openThread(protocol.CodexThread thread) =>
++      views.putIfAbsent(thread.id, () => FakeCodexThreadView(thread));
++}
++
++protocol.CodexThread _thread({
++  String id = 'thread-1',
++  String status = 'idle',
++  String title = '重构 登录',
++}) => protocol.CodexThread(
++  id: id,
++  title: title,
++  cwd: r'D:\work',
++  updatedAt: DateTime.fromMillisecondsSinceEpoch(3000),
++  status: status,
++  canAcceptDirectInput: true,
++  canResume: true,
++);
++
++/// Sessions arrive from pushes, so wait for the snapshot instead of depending on
++/// which broadcast event a test happens to observe.
++Future<List<HarnessSessionInfo>> _waitFor(
++  RemoteHarnessHost host,
++  bool Function(List<HarnessSessionInfo>) predicate,
++) async {
++  for (var attempt = 0; attempt < 200; attempt++) {
++    final list = host.currentSessions;
++    if (predicate(list)) return list;
++    await Future<void>.delayed(const Duration(milliseconds: 5));
++  }
++  return host.currentSessions;
++}
++
++Future<List<HarnessSessionInfo>> _waitForCount(
++  RemoteHarnessHost host,
++  int count,
++) => _waitFor(host, (list) => list.length >= count);
++
++void main() {
++  test('merges Claude, Herdr and Codex sessions into one list', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 's1', pending: 1));
++    remote.put(
++      _session(
++        id: 's2',
++        kind: 'terminal',
++        title: 'PowerShell',
++        status: protocol.SessionStatus.idle,
++      ),
++    );
++    final herdrPort = FakeRemoteHerdrPort()..agentList.add(_agent());
++    final codex = FakeRemoteCodexPort(
++      threads: <protocol.CodexThread>[_thread()],
++    );
++    final host = RemoteHarnessHost(
++      remote: remote,
++      herdr: herdrPort,
++      codex: codex,
++    );
++
++    final list = await _waitForCount(host, 4);
++    final ids = list.map((session) => session.id).toList();
++    expect(
++      ids,
++      containsAll(<String>[
++        'session:s1',
++        'session:s2',
++        'herdr:w37:p14',
++        'codex:thread-1',
++      ]),
++    );
++    expect(host.state.value, HarnessHostState.online);
++    expect(host.label, '办公室电脑');
++    await host.dispose();
++  });
++
++  test('maps statuses and capabilities per surface', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 's1', status: protocol.SessionStatus.waiting));
++    remote.put(
++      _session(
++        id: 's2',
++        kind: 'terminal',
++        status: protocol.SessionStatus.closed,
++      ),
++    );
++    final host = RemoteHarnessHost(
++      remote: remote,
++      herdr: FakeRemoteHerdrPort()
++        ..agentList.add(_agent(status: herdr.HerdrAgentStatus.blocked)),
++    );
++    final list = await _waitForCount(host, 3);
++    final byId = <String, HarnessSessionInfo>{
++      for (final info in list) info.id: info,
++    };
++    expect(byId['session:s1']!.status, HarnessSessionStatus.blocked);
++    expect(
++      byId['session:s1']!.capabilities,
++      contains(HarnessCapability.approve),
++    );
++    expect(byId['session:s2']!.status, HarnessSessionStatus.exited);
++    expect(byId['session:s2']!.providerId, 'shell');
++    expect(
++      byId['session:s2']!.capabilities,
++      isNot(contains(HarnessCapability.transcript)),
++    );
++    expect(byId['herdr:w37:p14']!.status, HarnessSessionStatus.blocked);
++    await host.dispose();
++  });
++
++  test(
++    'a Claude transcript streams history and keeps approvals explicit',
++    () async {
++      final remote = FakeRemoteSessionPort();
++      remote.put(_session(id: 's1'));
++      final host = RemoteHarnessHost(remote: remote);
++      final handle = await host.open('session:s1');
++      expect(handle.transcript, isNotNull);
++
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++
++      remote.pushEvent(
++        's1',
++        protocol.UserEvent(1, DateTime.fromMillisecondsSinceEpoch(10), '你好'),
++      );
++      remote.pushEvent(
++        's1',
++        protocol.AssistantEvent(
++          2,
++          DateTime.fromMillisecondsSinceEpoch(11),
++          '在',
++        ),
++      );
++      remote.pushEvent(
++        's1',
++        protocol.PermissionRequestEvent(
++          3,
++          DateTime.fromMillisecondsSinceEpoch(12),
++          requestId: 'r7',
++          toolName: 'Bash',
++          title: '允许执行 rm -rf build?',
++          input: null,
++          canAlwaysAllow: true,
++        ),
++      );
++      await Future<void>.delayed(const Duration(milliseconds: 10));
++
++      expect(
++        events.map((event) => event.text),
++        containsAll(<String>['你好', '在']),
++      );
++      final request = events.firstWhere((event) => event.requestId == 'r7');
++      expect(request.role, TranscriptRole.tool);
++      expect(request.options, containsAll(<String>['allow', 'deny']));
++
++      // Nothing was approved just by reading.
++      expect(
++        remote.calls.where((call) => call.startsWith('respond:')),
++        isEmpty,
++      );
++
++      await handle.reply(const HarnessReply(requestId: 'r7', choice: 'allow'));
++      expect(remote.calls, contains('respond:s1:r7:allow:{}'));
++
++      await subscription.cancel();
++      await handle.detach();
++      expect(remote.calls, contains('unsubscribe:s1'));
++      expect(
++        remote.calls.any((call) => call.startsWith('closeSession:')),
++        isFalse,
++        reason: 'detach releases the view; the desktop session keeps running',
++      );
++      await host.dispose();
++    },
++  );
++
++  test('an unknown approval decision is a refusal, never consent', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 's1'));
++    final host = RemoteHarnessHost(remote: remote);
++    final handle = await host.open('session:s1');
++    remote.pushEvent(
++      's1',
++      protocol.PermissionRequestEvent(
++        1,
++        DateTime.fromMillisecondsSinceEpoch(1),
++        requestId: 'r9',
++        toolName: 'Bash',
++        title: '执行命令',
++        input: null,
++        canAlwaysAllow: false,
++      ),
++    );
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    await handle.reply(const HarnessReply(requestId: 'r9', choice: 'whatever'));
++    expect(remote.calls, contains('respond:s1:r9:deny:{}'));
++    await handle.detach();
++    await host.dispose();
++  });
++
++  test('a terminal session streams bytes and types exact input', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(
++      _session(
++        id: 't1',
++        kind: 'terminal',
++        status: protocol.SessionStatus.running,
++      ),
++    );
++    final host = RemoteHarnessHost(remote: remote);
++    final handle = await host.open('session:t1');
++    expect(handle.terminal, isNotNull);
++    expect(handle.transcript, isNull);
++
++    final chunks = <List<int>>[];
++    final subscription = handle.terminal!.output.listen(
++      (data) => chunks.add(data),
++    );
++    remote.pushEvent(
++      't1',
++      protocol.TerminalOutputEvent(
++        1,
++        DateTime.fromMillisecondsSinceEpoch(1),
++        'PS> ',
++      ),
++    );
++    await Future<void>.delayed(const Duration(milliseconds: 10));
++    expect(chunks.single, 'PS> '.codeUnits);
++
++    handle.terminal!.write(Uint8List.fromList('dir\r'.codeUnits));
++    expect(remote.calls, contains('input:t1:dir<CR>'));
++
++    handle.terminal!.resize(100, 30);
++    expect(remote.calls, contains('resize:t1:100:30'));
++
++    await subscription.cancel();
++    await handle.detach();
++    await host.dispose();
++  });
++
++  test('stop closes the session; detach does not', () async {
++    final remote = FakeRemoteSessionPort();
++    remote.put(_session(id: 's1'));
++    final host = RemoteHarnessHost(remote: remote);
++    final handle = await host.open('session:s1');
++    await handle.stop();
++    expect(remote.calls, contains('closeSession:s1'));
++    expect(handle.status.value, HarnessSessionStatus.exited);
++    await host.dispose();
++  });
++
++  test(
++    'Herdr panes on the paired computer replay snapshots and send keys',
++    () async {
++      final remote = FakeRemoteSessionPort();
++      final herdrPort = FakeRemoteHerdrPort()..agentList.add(_agent());
++      final host = RemoteHarnessHost(remote: remote, herdr: herdrPort);
++      await _waitForCount(host, 1);
++      final handle = await host.open('herdr:w37:p14');
++      expect(handle.terminal, isNotNull);
++      expect(handle.transcript, isNull);
++
++      final chunks = <String>[];
++      final subscription = handle.terminal!.output.listen(
++        (data) => chunks.add(String.fromCharCodes(data)),
++      );
++      // Push after subscribing: the terminal is a view, not a buffer.
++      herdrPort.paneTexts['w37:p14'] = 'π > ready\n';
++      herdrPort.notifyListeners();
++      for (var attempt = 0; attempt < 100; attempt++) {
++        if (chunks.join().contains('π > ready')) break;
++        await Future<void>.delayed(const Duration(milliseconds: 5));
++      }
++      expect(chunks.join(), contains('π > ready'));
++
++      handle.terminal!.write(Uint8List.fromList(<int>[0x1b, 0x5b, 0x41]));
++      await Future<void>.delayed(const Duration(milliseconds: 10));
++      expect(herdrPort.calls, contains('sendKeys:w37:p14:up'));
++
++      await expectLater(
++        handle.reply(const HarnessReply(requestId: 'x', choice: 'allow')),
++        throwsA(isA<UnsupportedError>()),
++      );
++
++      await handle.stop();
++      expect(herdrPort.calls, contains('closePane:w37:p14'));
++      await subscription.cancel();
++      await host.dispose();
++    },
++  );
++
++  test(
++    'Codex threads expose a transcript and answer pending approvals',
++    () async {
++      final remote = FakeRemoteSessionPort();
++      final codex = FakeRemoteCodexPort(
++        threads: <protocol.CodexThread>[_thread()],
++      );
++      final host = RemoteHarnessHost(remote: remote, codex: codex);
++      await _waitForCount(host, 1);
++
++      final handle = await host.open('codex:thread-1');
++      expect(handle.transcript, isNotNull);
++      expect(handle.terminal, isNull);
++
++      final view = codex.views['thread-1']!;
++      view.turnList.add(
++        const protocol.CodexTurn(
++          id: 'turn-1',
++          status: 'complete',
++          items: <protocol.CodexItem>[
++            protocol.CodexItem(id: 'i1', kind: 'user', text: '改一下标题'),
++            protocol.CodexItem(id: 'i2', kind: 'assistant', text: '已经改好'),
++          ],
++        ),
++      );
++      view.pendingList.add(
++        const protocol.CodexPendingRequest(
++          requestId: 'req-1',
++          kind: 'command',
++          title: '运行 flutter analyze?',
++          canAccept: true,
++        ),
++      );
++      view.notifyListeners();
++
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await Future<void>.delayed(const Duration(milliseconds: 10));
++      expect(
++        events.map((event) => event.text),
++        containsAll(<String>['改一下标题', '已经改好']),
++      );
++      final approval = events.firstWhere((event) => event.requestId == 'req-1');
++      expect(approval.options, containsAll(<String>['accept', 'deny']));
++
++      await handle.reply(
++        const HarnessReply(requestId: 'req-1', choice: 'accept'),
++      );
++      expect(
++        codex.calls.any(
++          (call) => call.startsWith('respond:thread-1:req-1:accept'),
++        ),
++        isTrue,
++      );
++      await subscription.cancel();
++      await handle.detach();
++      expect(view.disposed, isTrue);
++      await host.dispose();
++    },
++  );
++
++  test(
++    'launch creates a Claude session or a terminal on the desktop',
++    () async {
++      final remote = FakeRemoteSessionPort();
++      final host = RemoteHarnessHost(remote: remote);
++      final claude = await host.launch(
++        const HarnessLaunchRequest(providerId: 'claude', cwd: r'D:\work'),
++      );
++      expect(claude.info.providerId, 'claude');
++      expect(remote.calls, contains(r'createSession:D:\work'));
++
++      final terminal = await host.launch(
++        const HarnessLaunchRequest(providerId: 'shell', cwd: r'D:\work'),
++      );
++      expect(terminal.info.providerId, 'shell');
++      expect(remote.calls, contains(r'createTerminal:D:\work'));
++      await expectLater(
++        host.launch(
++          const HarnessLaunchRequest(providerId: 'codex', cwd: r'D:\work'),
++        ),
++        throwsA(isA<StateError>()),
++      );
++      await host.dispose();
++    },
++  );
++
++  test(
++    'an offline computer reports offline and offers no remote launch',
++    () async {
++      final remote = FakeRemoteSessionPort(
++        isOnline: false,
++        phase: ConnectionPhase.agentOffline,
++      );
++      final host = RemoteHarnessHost(remote: remote);
++      expect(host.state.value, HarnessHostState.offline);
++      await expectLater(
++        host.launch(
++          const HarnessLaunchRequest(providerId: 'claude', cwd: r'D:\w'),
++        ),
++        throwsA(isA<StateError>()),
++      );
++      await host.dispose();
++    },
++  );
++}

@@ -34,6 +34,14 @@ Questions to answer:
 
 (To be filled by the team)
 
+---
+
+## Testing Requirements
+
+<!-- What level of testing is expected -->
+
+(To be filled by the team)
+
 ### Widget-test route inspection
 
 Use inherited dependency lookups such as `ModalRoute.of(context)` only from an
@@ -47,13 +55,11 @@ For nested route checks, read the page's context and enclosing `Navigator`
 assertions when replacing `pumpAndSettle` for screens with persistent spinners.
 See `test/support/remote_control_app.dart`.
 
----
+### Cloud-only validation
 
-## Testing Requirements
-
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
+Follow [Cloud-Only Verification](../guides/cloud-only-verification.md). Run
+formatting, analysis, tests and build verification through GitHub-hosted Actions;
+do not create local verification output or restore/install dependencies.
 
 ---
 

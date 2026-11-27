@@ -1,0 +1,66 @@
+diff --git a/test/editor_workbench_cleanup_test.dart b/test/editor_workbench_cleanup_test.dart
+index b9b173539a5a593c836fd63fce47bbdc52d16924..ef85a905e63aa6d74c00edfe65d68b9895b52086 100644
+--- a/test/editor_workbench_cleanup_test.dart
++++ b/test/editor_workbench_cleanup_test.dart
+@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:path/path.dart' as p;
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+ import 'package:qfli_studio_core/chat/composer_state.dart';
+ import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
+ import 'package:qfli_studio_core/editor/agent/agent_pane_switcher.dart';
+@@ -28,6 +29,7 @@ import 'package:qfli_studio_core/layout/app_form_factor.dart';
+ import 'package:qfli_studio_core/models/project.dart';
+ import 'package:qfli_studio_core/services/app_paths.dart';
+ import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/services/task_activity_service.dart';
+ import 'package:qfli_studio_core/shell/large_screen_controller.dart';
+ import 'package:qfli_studio_core/shell/shortcut_label.dart';
+ import 'package:qfli_studio_core/store/auth_store.dart';
+@@ -50,6 +52,23 @@ void main() {
+   late HarnessHub hub;
+   late _RecordingRunner runner;
+   late StudioProfile? previousProfile;
++  late Directory support;
++  late PathProviderPlatform previousPaths;
++
++  setUpAll(() async {
++    support = await Directory.systemTemp.createTemp('qfli_workbench_support_');
++    previousPaths = PathProviderPlatform.instance;
++    PathProviderPlatform.instance = _TemporaryPaths(support.path);
++    // Save reporting uses the application-owned service. Resolve its provider
++    // timeout and real filesystem I/O outside the widget test's fake clock.
++    await AppPaths.storageDirectory();
++    await TaskActivityService.instance.initialize();
++  });
++
++  tearDownAll(() async {
++    PathProviderPlatform.instance = previousPaths;
++    await support.delete(recursive: true);
++  });
+ 
+   setUp(() async {
+     root = await Directory.systemTemp.createTemp('qfli_editor_workbench_');
+@@ -1147,6 +1166,21 @@ Future<void> _waitFor(WidgetTester tester, bool Function() condition) async {
+   fail('Timed out waiting for editor I/O');
+ }
+ 
++class _TemporaryPaths extends PathProviderPlatform {
++  _TemporaryPaths(this.root);
++
++  final String root;
++
++  @override
++  Future<String?> getApplicationSupportPath() async => root;
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => root;
++
++  @override
++  Future<String?> getTemporaryPath() async => root;
++}
++
+ class _TrackedVisibility extends ValueNotifier<bool> {
+   _TrackedVisibility(super.value);
+ 

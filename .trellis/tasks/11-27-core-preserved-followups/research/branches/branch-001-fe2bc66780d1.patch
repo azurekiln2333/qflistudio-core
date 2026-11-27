@@ -1,0 +1,3218 @@
+diff --git a/lib/harness/studio/studio_agent_host.dart b/lib/harness/studio/studio_agent_host.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d448fd3f1362448bf8f4c2244a5bbe85a27a542
+--- /dev/null
++++ b/lib/harness/studio/studio_agent_host.dart
+@@ -0,0 +1,382 @@
++/// Studio 内置 Agent 的主机实现：把现有 Vibe 会话映射到 Harness Hub 契约。
++///
++/// 只包装 [AgentRuntime] 与会话存储，不改控制器的行为。会话列表按项目过滤，
++/// 标题、状态与更新时间都来自会话元数据与运行时的活动状态。
++library;
++
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../../session/agent_session.dart';
++import '../../vibe_coding/vibe_agent_facade.dart';
++import '../harness_host.dart';
++
++/// 主机与 provider 的固定标识。
++const String kStudioHostId = 'studio';
++const String kStudioProviderId = 'studio';
++
++/// 内置 Agent 出现在 Hub 列表里的名称。
++const String kStudioHostLabel = '内置 Agent';
++
++/// 一次视图最多保留多少条转录事件。
++const int kStudioTranscriptBacklog = 200;
++
++/// 内置 Agent 主机。
++///
++/// 只有 [watchSessions]、[open] 与 [launch] 会读会话存储；[dispose] 只释放
++/// 本主机的监听与流，不会停止任何会话。
++class StudioAgentHost implements HarnessHost {
++  StudioAgentHost({
++    required AgentRuntime runtime,
++    required this.projectId,
++    required this.projectRoot,
++    this.label = kStudioHostLabel,
++  }) : _runtime = runtime {
++    _sessions.addListener(_onChanged);
++    _runtime.liveChanges.addListener(_onChanged);
++  }
++
++  final AgentRuntime _runtime;
++
++  /// 会话所属项目。
++  final String projectId;
++
++  /// 项目根目录，作为会话的工作目录。
++  final String projectRoot;
++
++  @override
++  final String label;
++
++  final ValueNotifier<HarnessHostState> _state = ValueNotifier(
++    HarnessHostState.online,
++  );
++
++  /// 已打开的视图，用于随主机一起释放监听。
++  final Set<StudioSessionHandle> _handles = {};
++
++  final Set<MultiStreamController<List<HarnessSessionInfo>>> _watchers = {};
++
++  bool _disposed = false;
++
++  AgentSessionStore get _sessions => _runtime.sessions;
++
++  @override
++  String get id => kStudioHostId;
++
++  @override
++  HarnessHostKind get kind => HarnessHostKind.studio;
++
++  @override
++  ValueListenable<HarnessHostState> get state => _state;
++
++  @override
++  Stream<List<HarnessSessionInfo>> watchSessions() {
++    return Stream<List<HarnessSessionInfo>>.multi((controller) {
++      if (_disposed) {
++        controller.close();
++        return;
++      }
++      _watchers.add(controller);
++      controller.onCancel = () {
++        _watchers.remove(controller);
++      };
++      controller.add(snapshot());
++    });
++  }
++
++  /// 当前会话列表；界面刷新时也可直接调用。
++  List<HarnessSessionInfo> snapshot() {
++    if (_disposed) return const [];
++    return [
++      for (final meta in _sessions.sessionsOf(projectId))
++        HarnessSessionInfo(
++          id: meta.id,
++          hostId: id,
++          providerId: kStudioProviderId,
++          title: meta.title,
++          status: _statusOf(meta.id),
++          capabilities: _capabilities,
++          cwd: projectRoot,
++          updatedAt: meta.updatedAt,
++          sourceRef: meta.id,
++        ),
++    ];
++  }
++
++  /// 内置会话没有原始终端，只有对话、输入、确认与停止。
++  static const Set<HarnessCapability> _capabilities = {
++    HarnessCapability.transcript,
++    HarnessCapability.prompt,
++    HarnessCapability.approve,
++    HarnessCapability.stop,
++  };
++
++  @override
++  Future<List<HarnessProviderInfo>> providers() async => const [
++    HarnessProviderInfo(
++      id: kStudioProviderId,
++      label: kStudioHostLabel,
++      available: true,
++    ),
++  ];
++
++  @override
++  Future<HarnessSessionHandle> open(String sessionId) async {
++    if (_disposed) throw StateError('StudioAgentHost has been disposed');
++    final facade = await _runtime.open(projectId, sessionId);
++    final handle = StudioSessionHandle(
++      host: this,
++      runtime: _runtime,
++      projectRoot: projectRoot,
++      facade: facade,
++      info: () => _infoFor(sessionId),
++    );
++    _handles.add(handle);
++    return handle;
++  }
++
++  @override
++  Future<HarnessSessionHandle> launch(HarnessLaunchRequest request) async {
++    if (_disposed) throw StateError('StudioAgentHost has been disposed');
++    if (request.providerId != kStudioProviderId) {
++      throw ArgumentError.value(
++        request.providerId,
++        'providerId',
++        '内置主机只启动内置 Agent',
++      );
++    }
++    final meta = await _sessions.create(projectId, title: request.title);
++    return open(meta.id);
++  }
++
++  @override
++  Future<void> dispose() async {
++    if (_disposed) return;
++    _disposed = true;
++    _sessions.removeListener(_onChanged);
++    _runtime.liveChanges.removeListener(_onChanged);
++    for (final handle in _handles.toList()) {
++      await handle.detach();
++    }
++    _handles.clear();
++    for (final controller in _watchers.toList()) {
++      controller.close();
++    }
++    _watchers.clear();
++    _state.dispose();
++  }
++
++  HarnessSessionInfo _infoFor(String sessionId) {
++    final meta = _sessions.metaOf(sessionId);
++    return HarnessSessionInfo(
++      id: sessionId,
++      hostId: id,
++      providerId: kStudioProviderId,
++      title: meta?.title ?? AgentSessionStore.defaultTitle,
++      status: _statusOf(sessionId),
++      capabilities: _capabilities,
++      cwd: projectRoot,
++      updatedAt: meta?.updatedAt,
++      sourceRef: sessionId,
++    );
++  }
++
++  /// 运行时活动状态到契约状态。
++  HarnessSessionStatus _statusOf(String sessionId) =>
++      switch (_runtime.statusOf(sessionId)) {
++        AgentLiveStatus.running ||
++        AgentLiveStatus.queued => HarnessSessionStatus.working,
++        AgentLiveStatus.awaitingApproval => HarnessSessionStatus.blocked,
++        AgentLiveStatus.finishedUnread => HarnessSessionStatus.done,
++        // 失败未读既不是完成也不是在跑，按未知上报，不粉饰。
++        AgentLiveStatus.failed => HarnessSessionStatus.unknown,
++        AgentLiveStatus.idle => HarnessSessionStatus.idle,
++      };
++
++  void _onChanged() {
++    if (_disposed) return;
++    final list = snapshot();
++    for (final controller in _watchers.toList()) {
++      controller.add(list);
++    }
++  }
++
++  void _release(StudioSessionHandle handle) => _handles.remove(handle);
++}
++
++/// 一个内置 Agent 会话的视图。
++///
++/// [detach] 只释放本视图，会话继续运行；[stop] 结束本轮运行。
++class StudioSessionHandle implements HarnessSessionHandle {
++  StudioSessionHandle({
++    required StudioAgentHost host,
++    required AgentRuntime runtime,
++    required this.projectRoot,
++    required AgentFacade facade,
++    required HarnessSessionInfo Function() info,
++  }) : _host = host,
++       _runtime = runtime,
++       _facade = facade,
++       _infoOf = info,
++       _status = ValueNotifier(_mapStatus(runtime.statusOf(facade.sessionId))) {
++    _facade.addListener(_onFacadeChanged);
++    for (final message in _facade.messages) {
++      _remember(_eventOf(message));
++    }
++    _approvalKey = _pendingApprovalKey();
++  }
++
++  final StudioAgentHost _host;
++  final AgentRuntime _runtime;
++  final AgentFacade _facade;
++  final HarnessSessionInfo Function() _infoOf;
++  final String projectRoot;
++
++  final ValueNotifier<HarnessSessionStatus> _status;
++  final List<TranscriptEvent> _events = [];
++
++  /// 已发布消息的当前文本，用于在同一条消息被改写时重新发布。
++  final Map<String, String> _lastText = {};
++  final Set<MultiStreamController<TranscriptEvent>> _listeners = {};
++
++  /// 已经发布过的确认请求键，避免同一次确认重复出现。
++  String? _approvalKey;
++
++  bool _detached = false;
++
++  /// 当前转录快照；新监听者先收到历史，再收后续消息。
++  List<TranscriptEvent> get _backlog => List.unmodifiable(_events);
++
++  @override
++  HarnessSessionInfo get info => _infoOf();
++
++  @override
++  ValueListenable<HarnessSessionStatus> get status => _status;
++
++  @override
++  Stream<TranscriptEvent>? get transcript {
++    if (_detached) return null;
++    return Stream<TranscriptEvent>.multi((controller) {
++      for (final event in _backlog) {
++        controller.add(event);
++      }
++      _listeners.add(controller);
++      controller.onCancel = () {
++        _listeners.remove(controller);
++      };
++    });
++  }
++
++  @override
++  HarnessTerminalChannel? get terminal => null;
++
++  @override
++  Future<void> sendPrompt(String text) async {
++    final prompt = text.trim();
++    if (prompt.isEmpty) return;
++    await _facade.send(prompt, permission: _facade.permission);
++  }
++
++  @override
++  Future<void> reply(HarnessReply reply) async {
++    if (_facade.pendingApproval == null) return;
++    final choice = reply.choice.trim().toLowerCase();
++    final allow = choice == 'allow' || choice == 'yes' || choice == 'approve';
++    _facade.resolveApproval(allow);
++    _approvalKey = null;
++  }
++
++  @override
++  Future<void> detach() async {
++    if (_detached) return;
++    _detached = true;
++    _facade.removeListener(_onFacadeChanged);
++    for (final controller in _listeners.toList()) {
++      controller.close();
++    }
++    _listeners.clear();
++    _host._release(this);
++  }
++
++  @override
++  Future<void> stop() async {
++    await _facade.cancel();
++  }
++
++  /// 快照的是当前转录，包括打开前已有的消息；之后的消息实时追加。
++  void _onFacadeChanged() {
++    if (_detached) return;
++    _status.value = _mapStatus(_runtime.statusOf(_facade.sessionId));
++    for (final message in _facade.messages) {
++      final event = _eventOf(message);
++      if (_lastText[event.id] == event.text) continue;
++      _publish(event);
++    }
++    final key = _pendingApprovalKey();
++    if (key != null && key != _approvalKey) {
++      _approvalKey = key;
++      final approval = _facade.pendingApproval!;
++      _publish(
++        TranscriptEvent(
++          id: 'approval:$key',
++          role: TranscriptRole.system,
++          text: '需要确认写入 ${approval.path}\n${approval.summary}',
++          requestId: key,
++          options: const ['allow', 'deny'],
++        ),
++      );
++    } else if (key == null) {
++      _approvalKey = null;
++    }
++  }
++
++  String? _pendingApprovalKey() {
++    final approval = _facade.pendingApproval;
++    if (approval == null) return null;
++    return '${approval.path}|${approval.summary}';
++  }
++
++  /// 记下打开前已经存在的消息，供之后接入的监听者补发。
++  void _remember(TranscriptEvent event) {
++    _lastText[event.id] = event.text;
++    _events.add(event);
++  }
++
++  void _publish(TranscriptEvent event) {
++    _lastText[event.id] = event.text;
++    _events.removeWhere((entry) => entry.id == event.id);
++    _events.add(event);
++    if (_events.length > kStudioTranscriptBacklog) {
++      final dropped = _events.take(_events.length - kStudioTranscriptBacklog);
++      for (final event in dropped) {
++        _lastText.remove(event.id);
++      }
++      _events.removeRange(0, _events.length - kStudioTranscriptBacklog);
++    }
++    for (final controller in _listeners.toList()) {
++      controller.add(event);
++    }
++  }
++
++  static TranscriptEvent _eventOf(AgentMessageView message) => TranscriptEvent(
++    id: message.id,
++    role: switch (message.role) {
++      'user' => TranscriptRole.user,
++      'tool' => TranscriptRole.tool,
++      'reasoning' => TranscriptRole.system,
++      _ => TranscriptRole.assistant,
++    },
++    text: message.text,
++  );
++
++  static HarnessSessionStatus _mapStatus(AgentLiveStatus status) =>
++      switch (status) {
++        AgentLiveStatus.running ||
++        AgentLiveStatus.queued => HarnessSessionStatus.working,
++        AgentLiveStatus.awaitingApproval => HarnessSessionStatus.blocked,
++        AgentLiveStatus.finishedUnread => HarnessSessionStatus.done,
++        AgentLiveStatus.failed => HarnessSessionStatus.unknown,
++        AgentLiveStatus.idle => HarnessSessionStatus.idle,
++      };
++}
+diff --git a/lib/trellis/trellis_commands.dart b/lib/trellis/trellis_commands.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..51ff3aac726a48ae6bb7a7e8313e72845b6886a2
+--- /dev/null
++++ b/lib/trellis/trellis_commands.dart
+@@ -0,0 +1,179 @@
++/// Trellis 斜杠命令：把 `/trellis:continue`、`/trellis:finish-work`
++/// 展开成同名技能或项目里的命令文件。
++///
++/// 解析顺序：可见技能 → 项目命令文件 → 内置说明。任何一步取到的内容都按
++/// [kTrellisCommandMaxChars] 截断，命令本身不执行任何脚本。
++library;
++
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++import '../vibe_coding/vibe_skills.dart';
++
++/// 展开后的指令上限（字符）。
++const int kTrellisCommandMaxChars = 8 * 1024;
++
++/// 一条 Trellis 斜杠命令。
++class TrellisSlashCommand {
++  const TrellisSlashCommand({
++    required this.name,
++    required this.skillNames,
++    required this.projectPaths,
++    required this.instructions,
++  });
++
++  /// 用户输入的命令名，例如 `/trellis:continue`。
++  final String name;
++
++  /// 同义技能名；按顺序取第一个可见的。
++  final List<String> skillNames;
++
++  /// 项目内的命令文件，相对项目根；按顺序取第一个存在的。
++  final List<String> projectPaths;
++
++  /// 都找不到时使用的内置说明。
++  final String instructions;
++}
++
++/// 支持的命令。
++const List<TrellisSlashCommand> kTrellisSlashCommands = [
++  TrellisSlashCommand(
++    name: '/trellis:continue',
++    skillNames: ['trellis-continue', 'trellis:continue'],
++    projectPaths: [
++      '.pi/prompts/trellis-continue.md',
++      '.claude/commands/trellis/continue.md',
++    ],
++    instructions: _continueInstructions,
++  ),
++  TrellisSlashCommand(
++    name: '/trellis:finish-work',
++    skillNames: ['trellis-finish-work', 'trellis:finish-work'],
++    projectPaths: [
++      '.pi/prompts/trellis-finish-work.md',
++      '.claude/commands/trellis/finish-work.md',
++    ],
++    instructions: _finishInstructions,
++  ),
++];
++
++const String _continueInstructions = '''
++继续当前 Trellis 任务，按阶段接着做：
++
++1. 读 `.trellis/workflow.md` 的阶段索引。
++2. 读当前任务的 `task.json`，按 `status` 与产物决定步骤：
++   - `planning` 且没有 `prd.md`：回到 1.1 写需求。
++   - `planning` 且复杂任务缺 `design.md` 或 `implement.md`：补齐设计。
++   - `planning` 且产物齐全：请用户确认后再开始实现。
++   - `in_progress` 且未开工：进入 2.1 实现。
++   - `in_progress` 且已实现未检查：进入 2.2 质量检查。
++   - `completed`：进入归档流程。
++3. 只读当前步骤需要的规范与任务文件。
++4. 不要代替用户批准实现，也不要跳过检查。''';
++
++const String _finishInstructions = '''
++收尾当前 Trellis 任务：
++
++1. 先确认本轮代码已经提交；未提交时提示用户回到 3.4。
++2. 归档当前任务：`python ./.trellis/scripts/task.py archive <任务名>`。
++3. 记录会话日志：`python ./.trellis/scripts/add_session.py`。
++4. 不要在这里提交代码，也不要改写别人的工作树。
++5. 命令失败时如实报告，不编造执行结果。''';
++
++/// 找出输入开头的 Trellis 命令；不是命令时返回 null。
++TrellisSlashCommand? matchTrellisSlashCommand(String input) {
++  final trimmed = input.trimLeft();
++  for (final command in kTrellisSlashCommands) {
++    if (!trimmed.startsWith(command.name)) continue;
++    final rest = trimmed.substring(command.name.length);
++    if (rest.isEmpty || rest.startsWith(RegExp(r'\s'))) return command;
++  }
++  return null;
++}
++
++/// 命令之后的附加说明；没有时返回空串。
++String trellisCommandArguments(TrellisSlashCommand command, String input) {
++  final trimmed = input.trimLeft();
++  if (!trimmed.startsWith(command.name)) return '';
++  return trimmed.substring(command.name.length).trim();
++}
++
++/// 展开 Trellis 斜杠命令；不是命令或不是 Trellis 项目时返回 null。
++///
++/// [skills] 是当前会话可见的技能；同名技能优先，正文按需读盘。
++Future<String?> routeTrellisSlashCommand(
++  String input, {
++  required String projectRoot,
++  required List<VibeSkill> skills,
++  int maxChars = kTrellisCommandMaxChars,
++}) async {
++  final command = matchTrellisSlashCommand(input);
++  if (command == null) return null;
++  if (!Directory(p.join(projectRoot, '.trellis')).existsSync()) return null;
++  final extra = trellisCommandArguments(command, input);
++  final body =
++      await _skillBody(command, skills) ??
++      _projectFile(command, projectRoot) ??
++      command.instructions;
++  final buffer = StringBuffer(command.name);
++  if (extra.isNotEmpty) buffer.write('：$extra');
++  buffer
++    ..writeln()
++    ..writeln()
++    ..write(body.trim());
++  return clampTrellisCommand(buffer.toString(), maxChars);
++}
++
++/// 按字符上限截断展开结果。
++String clampTrellisCommand(
++  String text, [
++  int maxChars = kTrellisCommandMaxChars,
++]) {
++  if (text.length <= maxChars) return text;
++  return '${text.substring(0, maxChars)}\n\n（命令内容已截断）';
++}
++
++Future<String?> _skillBody(
++  TrellisSlashCommand command,
++  List<VibeSkill> skills,
++) async {
++  for (final name in command.skillNames) {
++    for (final skill in skills) {
++      if (skill.name != name) continue;
++      final body = await skill.resolveBody();
++      if (body.trim().isNotEmpty) return body;
++    }
++  }
++  return null;
++}
++
++String? _projectFile(TrellisSlashCommand command, String projectRoot) {
++  for (final relative in command.projectPaths) {
++    final file = File(p.joinAll([projectRoot, ...relative.split('/')]));
++    if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
++        FileSystemEntityType.file) {
++      continue;
++    }
++    try {
++      final limit = kTrellisCommandMaxChars * 2;
++      final text = file.lengthSync() <= limit
++          ? file.readAsStringSync()
++          : _readHead(file, limit);
++      if (text.trim().isNotEmpty) return text;
++    } on FileSystemException {
++      continue;
++    }
++  }
++  return null;
++}
++
++String _readHead(File file, int maxBytes) {
++  final handle = file.openSync();
++  try {
++    return utf8.decode(handle.readSync(maxBytes), allowMalformed: true);
++  } finally {
++    handle.closeSync();
++  }
++}
+diff --git a/lib/trellis/trellis_context.dart b/lib/trellis/trellis_context.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..31e5b21c0f0cdaa0fbf7611a604ac4895b6939ce
+--- /dev/null
++++ b/lib/trellis/trellis_context.dart
+@@ -0,0 +1,214 @@
++/// Trellis 会话上下文：把项目状态压成一段精简文本，注入会话开头。
++///
++/// 桌面版可以先调用 `python ./.trellis/scripts/get_context.py` 取官方上下文，
++/// 失败或超时再回退到 [TrellisProject] 的 Dart 解析。两条路径都只读文件。
++library;
++
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import '../services/process_supervisor.dart';
++import 'trellis_project.dart';
++
++/// 注入的系统提示上下文上限（字符）。
++const int kTrellisContextMaxChars = 1600;
++
++/// 上下文里最多列多少个活跃任务。
++const int kTrellisContextMaxTasks = 8;
++
++/// 单条任务标题的字符上限。
++const int kTrellisContextMaxTaskTitleChars = 40;
++
++/// 脚本上下文的字符上限。
++const int kTrellisScriptContextMaxChars = 4000;
++
++/// 能提供 Trellis 上下文的代理上下文来源。
++///
++/// 控制器只在来源实现本接口时注入，测试里的假上下文不受影响。
++abstract interface class VibeTrellisContextSource {
++  /// 会话开头要注入的精简上下文；不是 Trellis 项目时返回空串。
++  Future<String> trellisContext();
++}
++
++/// 生成精简上下文；不是 Trellis 项目时调用方拿到空串。
++String buildTrellisContext(
++  TrellisProject project, {
++  int maxTasks = kTrellisContextMaxTasks,
++  int maxChars = kTrellisContextMaxChars,
++}) {
++  final buffer = StringBuffer()
++    ..writeln('### Trellis 项目上下文')
++    ..writeln(
++      '本项目使用 Trellis。改代码前先用 read_file 读 '
++      '${TrellisProject.workflowPath}。',
++    );
++  if (project.developer.isNotEmpty) {
++    buffer.writeln('开发者：${project.developer}');
++  }
++  final current = project.currentTask;
++  if (current == null) {
++    buffer.writeln('当前任务：未确定');
++  } else {
++    final step = current.phase.step.isEmpty ? '' : '，下一步 ${current.phase.step}';
++    buffer.writeln(
++      '当前任务：${current.dirName}（${current.status}，'
++      '${current.phase.label}$step）',
++    );
++    buffer.writeln(
++      '  标题：${_clip(current.title, kTrellisContextMaxTaskTitleChars * 2)}',
++    );
++    final docs = [
++      for (final doc in current.docs) doc.exists ? doc.name : '${doc.name}（缺）',
++    ];
++    if (docs.isNotEmpty) buffer.writeln('  产物：${docs.join('、')}');
++    buffer.writeln('  任务目录：${current.relativePath}');
++  }
++  final active = project.activeTasks;
++  if (active.isNotEmpty) {
++    final shown = active.take(maxTasks).toList();
++    final more = shown.length < active.length ? '，列出前 ${shown.length} 个' : '';
++    buffer.writeln('活跃任务（共 ${active.length} 个$more）：');
++    for (final task in shown) {
++      buffer.writeln(
++        '- ${task.dirName}：'
++        '${_clip(task.title, kTrellisContextMaxTaskTitleChars)}'
++        '（${task.status}）',
++      );
++    }
++  }
++  if (project.specIndexes.isNotEmpty) {
++    final indexes = [
++      for (final index in project.specIndexes) index.relativePath,
++    ];
++    buffer.writeln('规范索引：${indexes.join('、')}');
++  }
++  buffer.writeln('只按当前改动读取对应的规范与任务文件，不要一次加载全部。');
++  return clampTrellisContext(buffer.toString(), maxChars);
++}
++
++/// 按字符上限截断上下文，尽量停在整行。
++String clampTrellisContext(
++  String text, [
++  int maxChars = kTrellisContextMaxChars,
++]) {
++  if (text.length <= maxChars) return text;
++  const mark = '（Trellis 上下文已截断）';
++  final room = maxChars - mark.length - 1;
++  if (room <= 0) return mark;
++  final cut = text.substring(0, room);
++  final newline = cut.lastIndexOf('\n');
++  final body = newline > room ~/ 2 ? cut.substring(0, newline) : cut;
++  return '$body\n$mark';
++}
++
++/// 载入一次会话上下文。
++///
++/// [preferPython] 只应在桌面版打开；移动端与网页直接走 Dart 解析。
++class TrellisContextLoader {
++  const TrellisContextLoader({
++    this.preferPython = false,
++    this.pythonExecutable = 'python',
++    this.timeout = const Duration(seconds: 8),
++  });
++
++  final bool preferPython;
++  final String pythonExecutable;
++
++  /// 调用脚本的总时限；超时后杀掉进程并回退。
++  final Duration timeout;
++
++  /// 取上下文；项目不是 Trellis 时返回空串。
++  Future<String> load(String projectRoot) async {
++    if (!TrellisProject.hasWorkflow(projectRoot)) return '';
++    if (preferPython) {
++      final text = await _runScript(projectRoot);
++      if (text != null && text.trim().isNotEmpty) {
++        return compactScriptContext(text);
++      }
++    }
++    final project = await TrellisProject.load(projectRoot);
++    if (project == null) return '';
++    return buildTrellisContext(project);
++  }
++
++  /// 运行官方脚本；任何失败都返回 null，不打断会话。
++  Future<String?> _runScript(String projectRoot) async {
++    final script = File(
++      '$projectRoot${Platform.pathSeparator}.trellis'
++      '${Platform.pathSeparator}scripts'
++      '${Platform.pathSeparator}get_context.py',
++    );
++    if (!script.existsSync()) return null;
++    final supervisor = ProcessSupervisor();
++    try {
++      final process = await supervisor.start(pythonExecutable, [
++        script.path,
++      ], workingDirectory: projectRoot);
++      final stdoutText = process.stdout
++          .transform(const Utf8Decoder(allowMalformed: true))
++          .join();
++      final stderrDrained = process.stderr.drain<void>();
++      final exit = process.exitCode;
++      final completed = await Future.any<Object?>([
++        stdoutText,
++        Future<Object?>.delayed(timeout, () => null),
++      ]);
++      if (completed is! String) {
++        await process.cancel();
++        return null;
++      }
++      final code = await exit;
++      await stderrDrained;
++      if (code != 0) return null;
++      return completed;
++    } on Object {
++      return null;
++    } finally {
++      await supervisor.dispose();
++    }
++  }
++}
++
++/// 压缩脚本输出：去掉横幅、截短改动清单、限制总长度。
++String compactScriptContext(
++  String text, {
++  int maxChars = kTrellisScriptContextMaxChars,
++}) {
++  final out = <String>[];
++  var inChanges = false;
++  var changeLines = 0;
++  for (final raw in const LineSplitter().convert(text)) {
++    final line = raw.trimRight();
++    final trimmed = line.trim();
++    if (trimmed.startsWith('=====')) continue;
++    if (trimmed == 'SESSION CONTEXT') continue;
++    if (trimmed == 'Changes:') {
++      inChanges = true;
++      changeLines = 0;
++      out.add(line);
++      continue;
++    }
++    if (inChanges) {
++      if (trimmed.isEmpty) {
++        inChanges = false;
++        out.add(line);
++        continue;
++      }
++      changeLines++;
++      if (changeLines <= 5) {
++        out.add(line);
++      } else if (changeLines == 6) {
++        out.add('…（其余改动未列出）');
++      }
++      continue;
++    }
++    out.add(line);
++  }
++  return clampTrellisContext(out.join('\n').trim(), maxChars);
++}
++
++String _clip(String value, int maxChars) {
++  final flat = value.replaceAll(RegExp(r'\s+'), ' ').trim();
++  return flat.length <= maxChars ? flat : '${flat.substring(0, maxChars)}…';
++}
+diff --git a/lib/trellis/trellis_panel.dart b/lib/trellis/trellis_panel.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5062a860d07058a001da4323f421c845d9f16b2
+--- /dev/null
++++ b/lib/trellis/trellis_panel.dart
+@@ -0,0 +1,91 @@
++/// Trellis 任务面板的数据模型。
++///
++/// 面板只读：显示当前任务、阶段、产物链接与活跃任务。界面直接渲染本模型，
++/// 打开产物走宿主提供的回调，模型自身不碰文件系统。
++library;
++
++import 'trellis_project.dart';
++
++/// 面板里的一行任务。
++class TrellisPanelTask {
++  const TrellisPanelTask({required this.task, this.indent = 0});
++
++  final TrellisTask task;
++
++  /// 子任务的缩进层级。
++  final int indent;
++}
++
++/// 任务面板快照。
++class TrellisTaskPanel {
++  const TrellisTaskPanel({
++    required this.developer,
++    required this.currentTask,
++    required this.activeTasks,
++    required this.myTasks,
++    required this.specIndexes,
++    required this.workflowPath,
++  });
++
++  /// `.trellis/.developer` 里的名字；没有时为空串。
++  final String developer;
++
++  /// 当前任务；未确定时为 null。
++  final TrellisTask? currentTask;
++
++  /// 活跃任务，父任务在前，子任务缩进跟随。
++  final List<TrellisPanelTask> activeTasks;
++
++  /// 分给当前开发者的活跃任务。
++  final List<TrellisTask> myTasks;
++
++  /// 有 `index.md` 的规范层。
++  final List<TrellisSpecIndex> specIndexes;
++
++  /// 工作流文件路径（相对项目根）。
++  final String workflowPath;
++
++  /// 没有任何可显示内容。
++  bool get isEmpty => currentTask == null && activeTasks.isEmpty;
++}
++
++/// 由项目状态生成面板；不是 Trellis 项目时返回 null。
++TrellisTaskPanel? buildTrellisTaskPanel(TrellisProject project) {
++  final active = project.activeTasks;
++  final byName = {for (final task in active) task.dirName: task};
++  final children = <String>{};
++  for (final task in active) {
++    for (final child in task.children) {
++      if (byName.containsKey(child)) children.add(child);
++    }
++  }
++  final rows = <TrellisPanelTask>[];
++  void append(String name, int indent) {
++    final task = byName[name];
++    if (task == null) return;
++    rows.add(TrellisPanelTask(task: task, indent: indent));
++    for (final child in task.children) {
++      append(child, indent + 1);
++    }
++  }
++
++  for (final task in active) {
++    if (children.contains(task.dirName)) continue;
++    append(task.dirName, 0);
++  }
++  // 父任务不在活跃集合里时，孤儿子任务照样显示。
++  for (final task in active) {
++    if (rows.any((row) => row.task.dirName == task.dirName)) continue;
++    rows.add(TrellisPanelTask(task: task));
++  }
++  return TrellisTaskPanel(
++    developer: project.developer,
++    currentTask: project.currentTask,
++    activeTasks: rows,
++    myTasks: project.developer.isEmpty
++        ? const []
++        : project.activeTasksOf(project.developer),
++    specIndexes: project.specIndexes,
++    workflowPath: TrellisProject.workflowPath,
++  );
++}
+diff --git a/lib/trellis/trellis_project.dart b/lib/trellis/trellis_project.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..a69259284a273787e61a85580d4bb2599a6ce540
+--- /dev/null
++++ b/lib/trellis/trellis_project.dart
+@@ -0,0 +1,457 @@
++/// Trellis 项目读取：只读 `.trellis` 下的普通文件，不跟随符号链接。
++///
++/// 识别条件是项目根目录存在普通 `.trellis` 目录，且其中有一份非空的
++/// `workflow.md`。任务、开发者与规范索引都由本文件直接解析，不执行脚本。
++/// 桌面版可另用 `python ./.trellis/scripts/get_context.py` 取上下文，失败时
++/// 回退到这里的结果。
++library;
++
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++/// 任务所处的工作流阶段。
++///
++/// 阶段编号对应 `.trellis/workflow.md` 的 Phase 1/2/3。
++enum TrellisTaskPhase {
++  planning('阶段 1 Plan', '1.1'),
++  executing('阶段 2 Execute', '2.1'),
++  finishing('阶段 3 Finish', '3.3'),
++  archived('已归档', ''),
++  unknown('未知阶段', '');
++
++  const TrellisTaskPhase(this.label, this.step);
++
++  /// 可直接显示的阶段名。
++  final String label;
++
++  /// 该阶段的建议起始步骤；空串表示没有步骤。
++  final String step;
++}
++
++/// 任务目录里的一份产物文档。
++class TrellisTaskDoc {
++  const TrellisTaskDoc({
++    required this.name,
++    required this.relativePath,
++    required this.exists,
++  });
++
++  /// 文件名，例如 `prd.md`。
++  final String name;
++
++  /// 相对项目根的路径。
++  final String relativePath;
++
++  final bool exists;
++}
++
++/// 一个 Trellis 任务的只读视图，来自 `task.json`。
++class TrellisTask {
++  const TrellisTask({
++    required this.dirName,
++    required this.id,
++    required this.title,
++    required this.description,
++    required this.status,
++    required this.docs,
++    this.priority,
++    this.assignee,
++    this.creator,
++    this.parent,
++    this.children = const [],
++    this.createdAt,
++    this.completedAt,
++  });
++
++  /// 任务目录名，例如 `11-22-harness-hub`。
++  final String dirName;
++
++  /// `task.json` 的 `id`。
++  final String id;
++
++  final String title;
++  final String description;
++
++  /// 原始状态：`planning`、`in_progress`、`completed` 等。
++  final String status;
++
++  /// prd、design、implement 三份产物及其存在性。
++  final List<TrellisTaskDoc> docs;
++
++  final String? priority;
++  final String? assignee;
++  final String? creator;
++
++  /// 父任务名；没有父任务时为 null。
++  final String? parent;
++
++  /// 子任务名。
++  final List<String> children;
++
++  final DateTime? createdAt;
++  final DateTime? completedAt;
++
++  /// 任务目录，相对项目根。
++  String get relativePath => '.trellis/tasks/$dirName';
++
++  /// 是否还需要跟进。已归档、已完成、已取消的任务都不算活跃。
++  bool get isActive =>
++      !const {'completed', 'done', 'archived', 'cancelled'}.contains(status);
++
++  /// 当前阶段的显示信息。
++  TrellisTaskPhase get phase => switch (status) {
++    'planning' => TrellisTaskPhase.planning,
++    'in_progress' => TrellisTaskPhase.executing,
++    'completed' || 'done' => TrellisTaskPhase.finishing,
++    'archived' => TrellisTaskPhase.archived,
++    _ => TrellisTaskPhase.unknown,
++  };
++
++  /// 有内容的产物名。
++  List<String> get existingDocs => [
++    for (final doc in docs)
++      if (doc.exists) doc.name,
++  ];
++}
++
++/// `.trellis/spec/<层>/index.md` 的只读视图。
++class TrellisSpecIndex {
++  const TrellisSpecIndex({required this.layer, required this.relativePath});
++
++  /// 层名，例如 `frontend`、`backend`。
++  final String layer;
++
++  /// 相对项目根的路径。
++  final String relativePath;
++}
++
++/// 一个已识别的 Trellis 项目。
++class TrellisProject {
++  const TrellisProject({
++    required this.root,
++    required this.developer,
++    required this.tasks,
++    required this.currentTask,
++    required this.specIndexes,
++  });
++
++  /// 项目根目录的绝对路径。
++  final String root;
++
++  /// `.trellis/.developer` 里的名字；没有时为空串。
++  final String developer;
++
++  /// `.trellis/tasks/*/task.json` 解析出的全部任务，按目录名排序。
++  final List<TrellisTask> tasks;
++
++  /// 当前任务；无法确定时为 null。
++  final TrellisTask? currentTask;
++
++  /// 存在 `index.md` 的规范层。
++  final List<TrellisSpecIndex> specIndexes;
++
++  /// 工作流文件的相对路径。
++  static const String workflowPath = '.trellis/workflow.md';
++
++  /// 任务文件的字节上限；超过上限的任务跳过。
++  static const int maxTaskJsonBytes = 64 * 1024;
++
++  /// 需要跟进的任务。
++  List<TrellisTask> get activeTasks => [
++    for (final task in tasks)
++      if (task.isActive) task,
++  ];
++
++  /// 分配给 [developer] 的活跃任务。
++  List<TrellisTask> activeTasksOf(String developer) => [
++    for (final task in activeTasks)
++      if (task.assignee == developer) task,
++  ];
++
++  /// 按任务目录名查找。
++  TrellisTask? taskNamed(String dirName) {
++    for (final task in tasks) {
++      if (task.dirName == dirName) return task;
++    }
++    return null;
++  }
++
++  /// 判断项目根下是否有可用的 Trellis 工作流。
++  ///
++  /// `.trellis` 或 `workflow.md` 是链接时视为不可用，与规则加载保持一致。
++  static bool hasWorkflow(String projectRoot) {
++    final directory = p.join(projectRoot, '.trellis');
++    final workflow = File(p.join(directory, 'workflow.md'));
++    try {
++      if (FileSystemEntity.typeSync(directory, followLinks: false) !=
++          FileSystemEntityType.directory) {
++        return false;
++      }
++      if (FileSystemEntity.typeSync(workflow.path, followLinks: false) !=
++          FileSystemEntityType.file) {
++        return false;
++      }
++      return readTextHead(workflow, 4 * 1024).trim().isNotEmpty;
++    } on FileSystemException {
++      return false;
++    }
++  }
++
++  /// 解析项目；没有可用工作流时返回 null。
++  ///
++  /// [currentTaskName] 可显式指定当前任务目录名；为 null 时读
++  /// `.trellis/.runtime/sessions/` 里最近一次记录的指针。
++  static Future<TrellisProject?> load(
++    String projectRoot, {
++    String? currentTaskName,
++  }) async {
++    if (!hasWorkflow(projectRoot)) return null;
++    final developer = await _readDeveloper(projectRoot);
++    final tasks = await _readTasks(projectRoot);
++    final specIndexes = await _readSpecIndexes(projectRoot);
++    final resolvedName =
++        currentTaskName ?? await _readRuntimeTaskName(projectRoot);
++    TrellisTask? current;
++    for (final task in tasks) {
++      if (task.dirName == resolvedName) {
++        current = task;
++        break;
++      }
++    }
++    return TrellisProject(
++      root: projectRoot,
++      developer: developer,
++      tasks: tasks,
++      currentTask: current,
++      specIndexes: specIndexes,
++    );
++  }
++
++  static Future<String> _readDeveloper(String projectRoot) async {
++    final file = File(p.join(projectRoot, '.trellis', '.developer'));
++    if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
++        FileSystemEntityType.file) {
++      return '';
++    }
++    final String text;
++    try {
++      text = readTextHead(file, 4 * 1024);
++    } on FileSystemException {
++      return '';
++    }
++    for (final line in const LineSplitter().convert(text)) {
++      final trimmed = line.trim();
++      if (!trimmed.startsWith('name=')) continue;
++      final name = trimmed.substring(5).trim();
++      if (name.isNotEmpty) return name;
++    }
++    return '';
++  }
++
++  /// 读任务目录；单个任务坏了只跳过它。
++  static Future<List<TrellisTask>> _readTasks(String projectRoot) async {
++    final dir = p.join(projectRoot, '.trellis', 'tasks');
++    if (FileSystemEntity.typeSync(dir, followLinks: false) !=
++        FileSystemEntityType.directory) {
++      return const [];
++    }
++    final List<FileSystemEntity> entries;
++    try {
++      entries = await Directory(dir).list(followLinks: false).toList();
++    } on FileSystemException {
++      return const [];
++    }
++    entries.sort((a, b) => a.path.compareTo(b.path));
++    final tasks = <TrellisTask>[];
++    for (final entry in entries) {
++      if (entry is! Directory) continue;
++      final dirName = p.basename(entry.path);
++      final file = File(p.join(entry.path, 'task.json'));
++      if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
++          FileSystemEntityType.file) {
++        continue;
++      }
++      final task = _taskFromFile(projectRoot, dirName, file);
++      if (task != null) tasks.add(task);
++    }
++    return tasks;
++  }
++
++  static TrellisTask? _taskFromFile(
++    String projectRoot,
++    String dirName,
++    File file,
++  ) {
++    final String text;
++    try {
++      text = readTextHead(file, maxTaskJsonBytes);
++    } on FileSystemException {
++      return null;
++    }
++    final Object? decoded;
++    try {
++      decoded = jsonDecode(text);
++    } on FormatException {
++      return null;
++    }
++    if (decoded is! Map) return null;
++    final title = _string(decoded['title']) ?? _string(decoded['name']);
++    if (title == null || title.isEmpty) return null;
++    final base = '.trellis/tasks/$dirName';
++    final docs = [
++      for (final name in kVibeTrellisTaskDocs)
++        TrellisTaskDoc(
++          name: name,
++          relativePath: '$base/$name',
++          exists:
++              FileSystemEntity.typeSync(
++                p.joinAll([projectRoot, ...'$base/$name'.split('/')]),
++                followLinks: false,
++              ) ==
++              FileSystemEntityType.file,
++        ),
++    ];
++    return TrellisTask(
++      dirName: dirName,
++      id: _string(decoded['id']) ?? dirName,
++      title: title,
++      description: _string(decoded['description']) ?? '',
++      status: _string(decoded['status']) ?? 'unknown',
++      docs: docs,
++      priority: _string(decoded['priority']),
++      assignee: _string(decoded['assignee']),
++      creator: _string(decoded['creator']),
++      parent: _string(decoded['parent']),
++      children: _stringList(decoded['children']),
++      createdAt: _date(decoded['createdAt']),
++      completedAt: _date(decoded['completedAt']),
++    );
++  }
++
++  static Future<List<TrellisSpecIndex>> _readSpecIndexes(
++    String projectRoot,
++  ) async {
++    final dir = p.join(projectRoot, '.trellis', 'spec');
++    if (FileSystemEntity.typeSync(dir, followLinks: false) !=
++        FileSystemEntityType.directory) {
++      return const [];
++    }
++    final List<FileSystemEntity> entries;
++    try {
++      entries = await Directory(dir).list(followLinks: false).toList();
++    } on FileSystemException {
++      return const [];
++    }
++    entries.sort((a, b) => a.path.compareTo(b.path));
++    final indexes = <TrellisSpecIndex>[];
++    for (final entry in entries) {
++      if (entry is! Directory) continue;
++      final layer = p.basename(entry.path);
++      final relative = '.trellis/spec/$layer/index.md';
++      final file = File(p.joinAll([projectRoot, ...relative.split('/')]));
++      if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
++          FileSystemEntityType.file) {
++        continue;
++      }
++      indexes.add(TrellisSpecIndex(layer: layer, relativePath: relative));
++    }
++    return indexes;
++  }
++
++  /// 读最近的会话指针，取其中的当前任务目录名。
++  ///
++  /// 指针只含平台名、时间与任务路径，不含任何凭据。读不到时返回 null。
++  static Future<String?> _readRuntimeTaskName(String projectRoot) async {
++    final dir = p.join(projectRoot, '.trellis', '.runtime', 'sessions');
++    if (FileSystemEntity.typeSync(dir, followLinks: false) !=
++        FileSystemEntityType.directory) {
++      return null;
++    }
++    final List<FileSystemEntity> entries;
++    try {
++      entries = await Directory(dir).list(followLinks: false).toList();
++    } on FileSystemException {
++      return null;
++    }
++    String? bestName;
++    DateTime? bestSeen;
++    for (final entry in entries) {
++      if (entry is! File || !entry.path.endsWith('.json')) continue;
++      final String text;
++      try {
++        text = readTextHead(entry, 16 * 1024);
++      } on FileSystemException {
++        continue;
++      }
++      final Object? decoded;
++      try {
++        decoded = jsonDecode(text);
++      } on FormatException {
++        continue;
++      }
++      if (decoded is! Map) continue;
++      final name = taskNameOfRef(_string(decoded['current_task']));
++      if (name == null) continue;
++      final seen = _date(decoded['last_seen_at']);
++      if (bestName == null ||
++          (seen != null && (bestSeen == null || seen.isAfter(bestSeen)))) {
++        bestName = name;
++        bestSeen = seen;
++      }
++    }
++    return bestName;
++  }
++}
++
++/// 任务产物文件名，按阅读顺序。
++const List<String> kVibeTrellisTaskDocs = [
++  'prd.md',
++  'design.md',
++  'implement.md',
++];
++
++/// 把 `.trellis/tasks/<name>` 这样的引用换成任务目录名。
++String? taskNameOfRef(String? ref) {
++  if (ref == null) return null;
++  final normalized = ref.trim().replaceAll('\\', '/');
++  if (normalized.isEmpty) return null;
++  final segments = normalized.split('/').where((s) => s.isNotEmpty).toList();
++  if (segments.isEmpty) return null;
++  final last = segments.last;
++  return last.isEmpty ? null : last;
++}
++
++/// 只读文件开头 [maxBytes] 字节，按 UTF-8 宽松解码。
++///
++/// 读不到时抛 [FileSystemException]，由调用方决定跳过。
++String readTextHead(File file, int maxBytes) {
++  final length = file.lengthSync();
++  if (length <= maxBytes) return file.readAsStringSync();
++  final handle = file.openSync();
++  try {
++    return utf8.decode(handle.readSync(maxBytes), allowMalformed: true);
++  } finally {
++    handle.closeSync();
++  }
++}
++
++String? _string(Object? value) {
++  if (value is! String) return null;
++  final trimmed = value.trim();
++  return trimmed.isEmpty ? null : trimmed;
++}
++
++List<String> _stringList(Object? value) {
++  if (value is! List) return const [];
++  return [
++    for (final entry in value)
++      if (entry is String && entry.trim().isNotEmpty) entry.trim(),
++  ];
++}
++
++DateTime? _date(Object? value) {
++  if (value is! String) return null;
++  return DateTime.tryParse(value.trim());
++}
+diff --git a/lib/trellis/trellis_task_panel_view.dart b/lib/trellis/trellis_task_panel_view.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..de5e09e650a49adf29ab04ff186e6328783811ce
+--- /dev/null
++++ b/lib/trellis/trellis_task_panel_view.dart
+@@ -0,0 +1,283 @@
++import 'package:flutter/material.dart';
++
++import 'trellis_panel.dart';
++import 'trellis_project.dart';
++
++/// Trellis 任务面板：当前任务、阶段、产物链接与活跃任务。
++///
++/// 只渲染 [TrellisTaskPanel]；打开产物交给 [onOpenPath]，面板本身不读文件。
++/// 宿主可以把本组件放进 Agents 侧栏或编辑器侧栏。
++class TrellisTaskPanelView extends StatelessWidget {
++  const TrellisTaskPanelView({
++    super.key,
++    required this.panel,
++    this.onOpenPath,
++    this.compact = false,
++    this.maxTasks = 12,
++  });
++
++  final TrellisTaskPanel panel;
++
++  /// 打开相对项目根的路径，例如 `prd.md` 或 `.trellis/workflow.md`。
++  final ValueChanged<String>? onOpenPath;
++
++  /// 紧凑模式只显示当前任务与前三行活跃任务。
++  final bool compact;
++
++  /// 活跃任务最多显示多少行。
++  final int maxTasks;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    if (panel.isEmpty) {
++      return Padding(
++        padding: const EdgeInsets.all(12),
++        child: Text(
++          '当前项目没有 Trellis 任务',
++          style: theme.textTheme.bodySmall?.copyWith(
++            color: theme.colorScheme.onSurfaceVariant,
++          ),
++        ),
++      );
++    }
++    final current = panel.currentTask;
++    final rows = panel.activeTasks.take(compact ? 3 : maxTasks).toList();
++    return ListView(
++      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++      children: [
++        Row(
++          children: [
++            Icon(
++              Icons.account_tree_outlined,
++              size: 16,
++              color: theme.colorScheme.primary,
++            ),
++            const SizedBox(width: 6),
++            Text('Trellis', style: theme.textTheme.titleSmall),
++            const Spacer(),
++            if (panel.developer.isNotEmpty)
++              Text(
++                panel.developer,
++                style: theme.textTheme.labelSmall?.copyWith(
++                  color: theme.colorScheme.onSurfaceVariant,
++                ),
++              ),
++          ],
++        ),
++        const SizedBox(height: 6),
++        if (current != null)
++          _CurrentTask(panel: panel, task: current, onOpenPath: onOpenPath),
++        if (rows.isNotEmpty) ...[
++          const SizedBox(height: 10),
++          Text('活跃任务', style: theme.textTheme.labelMedium),
++          const SizedBox(height: 4),
++          for (final row in rows)
++            _TaskRow(
++              row: row,
++              selected: current?.dirName == row.task.dirName,
++              onOpenPath: onOpenPath,
++            ),
++        ],
++        if (!compact && panel.specIndexes.isNotEmpty) ...[
++          const SizedBox(height: 10),
++          Text('规范索引', style: theme.textTheme.labelMedium),
++          const SizedBox(height: 4),
++          for (final index in panel.specIndexes)
++            _PathLink(
++              label: index.layer,
++              path: index.relativePath,
++              onOpenPath: onOpenPath,
++            ),
++        ],
++      ],
++    );
++  }
++}
++
++class _CurrentTask extends StatelessWidget {
++  const _CurrentTask({
++    required this.panel,
++    required this.task,
++    this.onOpenPath,
++  });
++
++  final TrellisTaskPanel panel;
++  final TrellisTask task;
++  final ValueChanged<String>? onOpenPath;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Container(
++      padding: const EdgeInsets.all(10),
++      decoration: BoxDecoration(
++        color: theme.colorScheme.surfaceContainerHighest,
++        borderRadius: BorderRadius.circular(8),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(task.title, style: theme.textTheme.bodyMedium),
++          const SizedBox(height: 4),
++          Wrap(
++            spacing: 6,
++            runSpacing: 4,
++            crossAxisAlignment: WrapCrossAlignment.center,
++            children: [
++              _Chip(label: task.phase.label),
++              _Chip(label: task.status),
++              if (task.phase.step.isNotEmpty)
++                _Chip(label: '下一步 ${task.phase.step}'),
++            ],
++          ),
++          const SizedBox(height: 6),
++          for (final doc in task.docs)
++            _PathLink(
++              label: doc.relativePath,
++              path: doc.relativePath,
++              enabled: doc.exists,
++              onOpenPath: onOpenPath,
++              trailing: doc.exists ? doc.name : '未写入',
++            ),
++          const SizedBox(height: 4),
++          _PathLink(
++            label: panel.workflowPath,
++            path: panel.workflowPath,
++            onOpenPath: onOpenPath,
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _TaskRow extends StatelessWidget {
++  const _TaskRow({required this.row, required this.selected, this.onOpenPath});
++
++  final TrellisPanelTask row;
++  final bool selected;
++  final ValueChanged<String>? onOpenPath;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final task = row.task;
++    return InkWell(
++      onTap: onOpenPath == null ? null : () => onOpenPath!(task.relativePath),
++      child: Padding(
++        padding: EdgeInsets.fromLTRB(4.0 + row.indent * 12, 4, 4, 4),
++        child: Row(
++          children: [
++            Icon(
++              selected ? Icons.radio_button_checked : Icons.circle_outlined,
++              size: 12,
++              color: selected
++                  ? theme.colorScheme.primary
++                  : theme.colorScheme.onSurfaceVariant,
++            ),
++            const SizedBox(width: 6),
++            Expanded(
++              child: Text(
++                task.title,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: theme.textTheme.bodySmall,
++              ),
++            ),
++            const SizedBox(width: 6),
++            Text(
++              task.status,
++              style: theme.textTheme.labelSmall?.copyWith(
++                color: theme.colorScheme.onSurfaceVariant,
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _PathLink extends StatelessWidget {
++  const _PathLink({
++    required this.label,
++    required this.path,
++    this.onOpenPath,
++    this.enabled = true,
++    this.trailing,
++  });
++
++  final String label;
++  final String path;
++  final ValueChanged<String>? onOpenPath;
++  final bool enabled;
++  final String? trailing;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final active = enabled && onOpenPath != null;
++    return InkWell(
++      onTap: active ? () => onOpenPath!(path) : null,
++      child: Padding(
++        padding: const EdgeInsets.symmetric(vertical: 3),
++        child: Row(
++          children: [
++            Icon(
++              Icons.description_outlined,
++              size: 13,
++              color: active
++                  ? theme.colorScheme.primary
++                  : theme.colorScheme.onSurfaceVariant,
++            ),
++            const SizedBox(width: 6),
++            Expanded(
++              child: Text(
++                label,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: theme.textTheme.bodySmall?.copyWith(
++                  color: active
++                      ? theme.colorScheme.primary
++                      : theme.colorScheme.onSurfaceVariant,
++                ),
++              ),
++            ),
++            if (trailing != null)
++              Text(
++                trailing!,
++                style: theme.textTheme.labelSmall?.copyWith(
++                  color: theme.colorScheme.onSurfaceVariant,
++                ),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _Chip extends StatelessWidget {
++  const _Chip({required this.label});
++
++  final String label;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Container(
++      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
++      decoration: BoxDecoration(
++        color: theme.colorScheme.secondaryContainer,
++        borderRadius: BorderRadius.circular(4),
++      ),
++      child: Text(
++        label,
++        style: theme.textTheme.labelSmall?.copyWith(
++          color: theme.colorScheme.onSecondaryContainer,
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/vibe_coding/vibe_agent_facade.dart b/lib/vibe_coding/vibe_agent_facade.dart
+index 4f154c7f5d52d65d9f7ab477da3717c2e114e96b..8e5b31c0f92d80c6a703142a14a75b41f9b5a509 100644
+--- a/lib/vibe_coding/vibe_agent_facade.dart
++++ b/lib/vibe_coding/vibe_agent_facade.dart
+@@ -1341,6 +1341,8 @@ class VibeAgentRuntime implements AgentRuntime {
+     final library = VibeSkillLibrary(
+       projectRoot: _projectRootOf(projectId),
+       language: _languageOf?.call(projectId) ?? '',
++      // 列表只要名称与描述，正文留给 use_skill。
++      lazyBodies: true,
+     );
+     final skills = await library.load();
+     return [
+diff --git a/lib/vibe_coding/vibe_coding_controller.dart b/lib/vibe_coding/vibe_coding_controller.dart
+index 8292ad469bf835f7bfe001cc75132e87276d65be..db97fbd8abc9399744a4b4cb2c5ab6b53309fb60 100644
+--- a/lib/vibe_coding/vibe_coding_controller.dart
++++ b/lib/vibe_coding/vibe_coding_controller.dart
+@@ -14,6 +14,8 @@ import 'package:flutter/scheduler.dart';
+ import '../interop/interop_runner.dart';
+ import '../services/ai_file_header.dart';
+ import '../services/api_client.dart';
++import '../trellis/trellis_commands.dart';
++import '../trellis/trellis_context.dart';
+ import 'agent_context_usage.dart';
+ import 'agent_request_scheduler.dart';
+ import 'vibe_loop_guard.dart';
+@@ -53,6 +55,8 @@ export 'vibe_models.dart';
+ export 'agent_context_usage.dart' show AgentContextCategory, AgentContextUsage;
+ export 'vibe_rules.dart'
+     show
++        hasTrellisWorkflow,
++        kVibeTrellisRuleEntry,
+         loadVibeRules,
+         kVibeMaxRuleFileChars,
+         kVibeMaxRulesChars,
+@@ -70,18 +74,29 @@ abstract interface class VibeAgentContext {
+ }
+ 
+ /// 默认实现：读项目目录、内置资产与仓库规则文件。
+-class VibeProjectAgentContext implements VibeAgentContext {
+-  VibeProjectAgentContext({required this.projectRoot, this.language = ''});
++class VibeProjectAgentContext
++    implements VibeAgentContext, VibeTrellisContextSource {
++  VibeProjectAgentContext({
++    required this.projectRoot,
++    this.language = '',
++    this.trellisLoader = const TrellisContextLoader(),
++  });
+ 
+   final String projectRoot;
+   final String language;
+ 
++  /// Trellis 上下文来源；注入会话开头的精简上下文。
++  final TrellisContextLoader trellisLoader;
++
+   @override
+   Future<List<VibeSkill>> skills() =>
+       VibeSkillLibrary(projectRoot: projectRoot, language: language).load();
+ 
+   @override
+   Future<String> rules() async => loadVibeRules(projectRoot);
++
++  @override
++  Future<String> trellisContext() => trellisLoader.load(projectRoot);
+ }
+ 
+ /// 一次写盘审批请求。
+@@ -194,6 +209,11 @@ class VibeCodingController extends ChangeNotifier {
+   List<VibePlanItem> _plan = const [];
+   List<VibeSkill> _skills = const [];
+   String _rules = '';
++
++  /// 本次会话的 Trellis 上下文；只读一次。
++  String _trellis = '';
++  bool _trellisLoaded = false;
++
+   final List<String> _usedSkills = [];
+ 
+   VibePhase _phase = VibePhase.idle;
+@@ -444,7 +464,7 @@ class VibeCodingController extends ChangeNotifier {
+ 
+   // ---- 循环 ----
+ 
+-  /// 一次 send 的主体：准备技能与规则，然后进入模型/工具循环。
++  /// 一次 send 的主体：准备技能、规则与 Trellis 上下文，然后进入模型/工具循环。
+   Future<void> _run(String prompt) async {
+     _abort = Completer<void>();
+     _usedTerminal = false;
+@@ -454,9 +474,11 @@ class VibeCodingController extends ChangeNotifier {
+     final budget = _maxRounds ?? vibeRoundBudget(prompt);
+     _skills = await _agent.skills();
+     _rules = await _agent.rules();
++    await _loadTrellis();
++    final routed = await _routeSlashCommand(prompt);
+     if (_cancelRequested || _disposed) return;
+     guard.markSnapshot(await _projectSnapshot());
+-    _prepareContext(prompt);
++    _prepareContext(routed ?? prompt);
+     try {
+       for (var round = 0; round < budget; round++) {
+         if (_cancelRequested || _disposed) {
+@@ -666,6 +688,54 @@ class VibeCodingController extends ChangeNotifier {
+     }
+   }
+ 
++  /// Trellis 上下文来源；代理上下文没实现时返回 null。
++  VibeTrellisContextSource? get _trellisSource =>
++      _agent is VibeTrellisContextSource
++      ? _agent as VibeTrellisContextSource
++      : null;
++
++  /// 载入本次会话的 Trellis 上下文；一个会话只读一次。
++  Future<void> _loadTrellis() async {
++    if (_trellisLoaded) return;
++    _trellisLoaded = true;
++    final source = _trellisSource;
++    if (source == null) return;
++    try {
++      _trellis = await source.trellisContext();
++    } on Object {
++      // 上下文读不到就不注入，不影响会话。
++      _trellis = '';
++    }
++    if (_trellis.isNotEmpty) _invalidateContextUsage();
++  }
++
++  /// 把 `/trellis:continue` 这类命令换成真正的指令；不是命令时返回 null。
++  ///
++  /// 界面仍显示用户输入的那一行，模型收到的历史换成展开后的指令。
++  Future<String?> _routeSlashCommand(String prompt) async {
++    if (_trellisSource == null) return null;
++    if (matchTrellisSlashCommand(prompt) == null) return null;
++    String? routed;
++    try {
++      routed = await routeTrellisSlashCommand(
++        prompt,
++        projectRoot: _files.projectRoot,
++        skills: _skills,
++      );
++    } on Object {
++      routed = null;
++    }
++    if (routed == null || routed.isEmpty) return null;
++    for (var index = _history.length - 1; index >= 0; index--) {
++      final entry = _history[index];
++      if (entry['role'] != 'user') continue;
++      _history[index] = {...entry, 'content': routed};
++      break;
++    }
++    _invalidateContextUsage();
++    return routed;
++  }
++
+   /// 本轮工具列表。离线专属产品不暴露联网工具。
+   ///
+   /// `web_search` 已下线（整改任务书 §3-W3）：联网搜索的唯一上游是未披露的
+@@ -673,17 +743,22 @@ class VibeCodingController extends ChangeNotifier {
+   List<Map<String, dynamic>> _toolSpecs() =>
+       vibeWebToolsAvailable ? vibeToolSpecsWithWeb() : vibeToolSpecs();
+ 
+-  /// 载入本次 send 的技能与规则，并写入系统提示后可变的上下文块。
++  /// 载入本次 send 的技能、规则与 Trellis 上下文，并写入系统提示后可变的上下文块。
+   void _prepareContext(String prompt) {
+     final skills = _skills;
+     final rules = _rules;
+-    if (skills.isEmpty && rules.isEmpty) return;
++    final trellis = _trellis;
++    if (skills.isEmpty && rules.isEmpty && trellis.isEmpty) return;
+     final sections = <AgentContextCategory, String>{
+       AgentContextCategory.systemPrompt: _systemPrompt(),
+     };
+-    if (rules.isNotEmpty) {
+-      sections[AgentContextCategory.projectRules] =
+-          '\n\n项目规则（来自仓库，必须遵守）：\n$rules';
++    if (rules.isNotEmpty || trellis.isNotEmpty) {
++      final buffer = StringBuffer();
++      if (rules.isNotEmpty) {
++        buffer.write('\n\n项目规则（来自仓库，必须遵守）：\n$rules');
++      }
++      if (trellis.isNotEmpty) buffer.write('\n\n$trellis');
++      sections[AgentContextCategory.projectRules] = buffer.toString();
+     }
+     if (skills.isNotEmpty) {
+       final buffer = StringBuffer(
+@@ -968,7 +1043,7 @@ class VibeCodingController extends ChangeNotifier {
+         case 'todo':
+           return _updatePlan(args);
+         case 'use_skill':
+-          return _useSkill(args);
++          return await _useSkill(args);
+         case 'web_fetch':
+           return await _runWebTool(name, args);
+         default:
+@@ -1252,7 +1327,7 @@ class VibeCodingController extends ChangeNotifier {
+   }
+ 
+   /// `use_skill`：按名称返回技能正文。
+-  _ToolOutcome _useSkill(Map<String, dynamic> args) {
++  Future<_ToolOutcome> _useSkill(Map<String, dynamic> args) async {
+     final name = args['name'];
+     if (name is! String || name.trim().isEmpty) {
+       return _error('error', 'name 必须是非空字符串');
+@@ -1266,12 +1341,16 @@ class VibeCodingController extends ChangeNotifier {
+       return _error('skill', '没有名为 $wanted 的技能。$names');
+     }
+     final match = available.first;
++    final body = await match.resolveBody();
++    if (body.trim().isEmpty) {
++      return _error('skill', '技能 $wanted 的正文读取失败，请检查文件是否存在');
++    }
+     if (!_usedSkills.contains(match.name)) _usedSkills.add(match.name);
+     _notify();
+     return _ToolOutcome(
+       status: VibeToolStatus.ok,
+       summary: '${match.name}（${match.source}）',
+-      modelText: match.body,
++      modelText: body,
+     );
+   }
+ 
+diff --git a/lib/vibe_coding/vibe_rules.dart b/lib/vibe_coding/vibe_rules.dart
+index 90ef22c070c9aea09d8f60ef6cf340fe12ecacf3..bc97497cc2fc924498d6a7f06dec0fa031cacb6b 100644
+--- a/lib/vibe_coding/vibe_rules.dart
++++ b/lib/vibe_coding/vibe_rules.dart
+@@ -2,6 +2,7 @@
+ ///
+ /// 来源按优先级读取：`AGENTS.md`、`CLAUDE.md`、`.qfli/rules.md`。每个文件
+ /// 与整体都有字符上限，超出时按行截断并标注。
++/// Trellis 项目先预留工作流入口，再合并规则文件。
+ library;
+ 
+ import 'dart:convert';
+@@ -22,12 +23,27 @@ const List<String> kVibeRuleFiles = [
+   '.qfli/rules.md',
+ ];
+ 
++/// Trellis 项目的入口提示。
++///
++/// 只告诉模型去读哪些文件，不注入正文：正文按需用 read_file 读。
++const String kVibeTrellisRuleEntry = '''### Trellis workflow
++This project uses Trellis. Before editing, use read_file to read .trellis/workflow.md.
++Read the applicable package and layer index.md under .trellis/spec/. Follow its links only for the current change.
++If a task is active, read its prd.md and any design.md or implement.md before editing.
++Use the available skill index and call use_skill when a project skill applies.
++Read workflow, specs and skill bodies on demand. Do not load every file at once.''';
++
+ /// 读取项目规则；没有规则时返回空串。
+ ///
+ /// 只读项目根目录下的普通文件。符号链接整份跳过，避免读出项目外内容。
++/// Trellis 入口先占预算，已有规则不会把它挤掉。
+ String loadVibeRules(String projectRoot) {
+   final sections = <String>[];
+   var used = 0;
++  if (hasTrellisWorkflow(projectRoot)) {
++    sections.add(kVibeTrellisRuleEntry);
++    used = kVibeTrellisRuleEntry.length + 2;
++  }
+   for (final relative in kVibeRuleFiles) {
+     final file = File(p.joinAll([projectRoot, ...relative.split('/')]));
+     final type = FileSystemEntity.typeSync(file.path, followLinks: false);
+@@ -44,7 +60,9 @@ String loadVibeRules(String projectRoot) {
+     final header = '### $relative';
+     final budget = kVibeMaxRulesChars - used;
+     if (budget <= header.length + 40) {
+-      sections.add('（其余规则文件已达上限，未加载）');
++      // 剩余预算连提示都放不下时，宁可不写，也不挤掉 Trellis 入口。
++      const notice = '（其余规则文件已达上限，未加载）';
++      if (budget >= notice.length + 1) sections.add(notice);
+       break;
+     }
+     const mark = '（规则已截断）';
+@@ -62,6 +80,29 @@ String loadVibeRules(String projectRoot) {
+   return sections.join('\n\n');
+ }
+ 
++/// 项目根下是否有可用的 Trellis 工作流。
++///
++/// `.trellis` 目录与 `workflow.md` 都必须是普通条目；链接与空文件一律不算。
++bool hasTrellisWorkflow(String projectRoot) {
++  final directory = p.join(projectRoot, '.trellis');
++  final workflow = File(p.join(directory, 'workflow.md'));
++  try {
++    if (FileSystemEntity.typeSync(directory, followLinks: false) !=
++        FileSystemEntityType.directory) {
++      return false;
++    }
++    if (FileSystemEntity.typeSync(workflow.path, followLinks: false) !=
++        FileSystemEntityType.file) {
++      return false;
++    }
++    return _readHead(workflow).trim().isNotEmpty;
++  } on FileSystemException {
++    return false;
++  } on FormatException {
++    return false;
++  }
++}
++
+ /// 只读取文件开头，避免加载超大规则文件。
+ String _readHead(File file) {
+   final limit = kVibeMaxRuleFileChars * 2;
+diff --git a/lib/vibe_coding/vibe_skills.dart b/lib/vibe_coding/vibe_skills.dart
+index 3d36a1f03def359de91d22fc281e8c5480b75508..b1666ad9c4742cf33f7fc05b3f275649d5908267 100644
+--- a/lib/vibe_coding/vibe_skills.dart
++++ b/lib/vibe_coding/vibe_skills.dart
+@@ -1,5 +1,6 @@
+-/// 技能目录与现有代理生态兼容：用户目录 `~/.qfli/skills`、项目内 `.qfli/skills`、
+-/// `.claude/skills`、`.agents/skills`，外加随包发布的内置技能。提示词里只放名称与描述。
++/// 技能目录与现有代理生态兼容：用户目录 `~/.qfli/skills`、`~/.claude/skills`、
++/// `~/.agents/skills`、`~/.pi/skills`、`~/.codex/skills`，项目内的同名目录，
++/// 外加随包发布的内置技能。提示词里只放名称与描述。
+ ///
+ /// 来源优先级（低 → 高）：内置 < 用户级 < 项目级。同名技能后者覆盖前者；
+ /// 同一来源内部则先出现者胜出。
+@@ -11,7 +12,8 @@ import 'dart:io';
+ import 'package:flutter/services.dart';
+ import 'package:path/path.dart' as p;
+ 
+-/// 一个已发现的技能。[body] 在加载时读入，[use_skill] 直接返回。
++/// 一个已发现的技能。[body] 可以直接持有正文，也可以留空并在 [resolveBody]
++/// 时按 [bodyPath] 读盘。发现阶段只读 frontmatter，正文按需加载。
+ class VibeSkill {
+   const VibeSkill({
+     required this.name,
+@@ -19,19 +21,47 @@ class VibeSkill {
+     required this.body,
+     required this.source,
+     this.truncated = false,
++    this.bodyPath,
+   });
+ 
+   final String name;
+   final String description;
+ 
+   /// 去掉 frontmatter 的正文；超长时保留开头并标注截断。
++  ///
++  /// 懒加载得到的技能这里为空串，正文由 [resolveBody] 读取。
+   final String body;
+ 
+   /// 来源标签：[VibeSkillSource] 的 `label`。
+   final String source;
+   final bool truncated;
+ 
++  /// `SKILL.md` 的绝对路径；只有懒加载的技能才有值。
++  final String? bodyPath;
++
+   bool get isBuiltIn => source == VibeSkillSource.builtIn.label;
++
++  /// 正文是否已随技能一起读入。
++  bool get hasInlineBody => body.isNotEmpty;
++
++  /// 去掉正文，保留元数据；正文改成按需读取。
++  VibeSkill withoutBody(String path) => VibeSkill(
++    name: name,
++    description: description,
++    body: '',
++    source: source,
++    bodyPath: path,
++  );
++
++  /// 取正文：已读入的直接返回，否则按需读盘。
++  ///
++  /// 读不到时返回空串，调用方据此报告技能不可用，不编造内容。
++  Future<String> resolveBody() async {
++    if (body.isNotEmpty) return body;
++    final path = bodyPath;
++    if (path == null) return '';
++    return readVibeSkillBody(path);
++  }
+ }
+ 
+ /// 技能来源，决定去重顺序与是否受项目语言过滤。
+@@ -40,6 +70,8 @@ enum VibeSkillSource {
+   projectQfli('.qfli/skills'),
+   claude('.claude/skills'),
+   agents('.agents/skills'),
++  pi('.pi/skills'),
++  codex('.codex/skills'),
+   builtIn('内置技能');
+ 
+   const VibeSkillSource(this.label);
+@@ -67,10 +99,12 @@ const Map<String, Set<String>> kVibeBuiltInSkillLanguages = {
+ /// 从 `SKILL.md` 文本解析技能；缺少描述返回 null。
+ ///
+ /// frontmatter 是文件开头的 `---` 块，只读取 `name` 与 `description`。
++/// 传 [bodyPath] 时，技能保留文件位置，后续可用 [VibeSkill.resolveBody] 重读。
+ VibeSkill? parseVibeSkill(
+   String text, {
+   required String fallbackName,
+   required VibeSkillSource source,
++  String? bodyPath,
+ }) {
+   final normalized = text.replaceAll('\r\n', '\n');
+   String? name;
+@@ -120,7 +154,7 @@ VibeSkill? parseVibeSkill(
+       flush();
+       name = block['name'];
+       description = block['description'];
+-      body = lines.sublist(end + 1).join('\n');
++      body = _bodyOf(normalized);
+     }
+   }
+   final resolvedName = (name == null || name.trim().isEmpty)
+@@ -138,9 +172,51 @@ VibeSkill? parseVibeSkill(
+         : trimmedBody,
+     source: source.label,
+     truncated: truncated,
++    bodyPath: bodyPath,
+   );
+ }
+ 
++/// 去掉开头的 frontmatter 块，返回正文；没有 frontmatter 时返回原文。
++String _bodyOf(String normalized) {
++  final lines = normalized.split('\n');
++  if (lines.isEmpty || lines.first.trim() != '---') return normalized;
++  for (var index = 1; index < lines.length; index++) {
++    if (lines[index].trim() == '---') {
++      return lines.sublist(index + 1).join('\n');
++    }
++  }
++  return normalized;
++}
++
++/// 读一份技能的正文；文件不存在或不可读时返回空串。
++///
++/// 只读开头一段，正文超过 [kVibeSkillMaxBodyChars] 时保留开头并标注截断。
++Future<String> readVibeSkillBody(String path) async {
++  if (FileSystemEntity.typeSync(path, followLinks: false) !=
++      FileSystemEntityType.file) {
++    return '';
++  }
++  final String text;
++  try {
++    text = await _readHead(File(path));
++  } on FileSystemException {
++    return '';
++  }
++  final body = _bodyOf(text.replaceAll('\r\n', '\n')).trim();
++  if (body.length <= kVibeSkillMaxBodyChars) return body;
++  return '${body.substring(0, kVibeSkillMaxBodyChars)}\n\n（技能正文已截断）';
++}
++
++/// 只读技能文件的开头；上限足够容纳 12 KiB 正文与 frontmatter。
++Future<String> _readHead(File file) async {
++  const limit = kVibeSkillMaxBodyChars * 2 + 1024;
++  if (await file.length() <= limit) return file.readAsString();
++  final bytes = await file
++      .openRead(0, limit)
++      .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
++  return utf8.decode(bytes, allowMalformed: true);
++}
++
+ String _unquote(String value) {
+   if (value.length >= 2) {
+     final first = value[0];
+@@ -163,9 +239,12 @@ class VibeSkillLibrary {
+     this.maxEntries = kVibeMaxSkillEntries,
+     this.maxIndexChars = kVibeMaxSkillIndexChars,
+     String? userSkillsDir,
++    List<String>? userSkillsDirs,
+     this.includeUserSkills = true,
++    this.lazyBodies = false,
+   }) : _bundle = bundle ?? rootBundle,
+-       _userSkillsDir = userSkillsDir;
++       _userSkillsDir = userSkillsDir,
++       _userSkillsDirs = userSkillsDirs;
+ 
+   final String projectRoot;
+   final String language;
+@@ -173,9 +252,17 @@ class VibeSkillLibrary {
+   final int maxEntries;
+   final int maxIndexChars;
+ 
+-  /// 显式指定的用户级技能目录；为 null 时按 [defaultUserSkillsDir] 推算。
++  /// 只读 frontmatter，正文留给 [VibeSkill.resolveBody]。
++  ///
++  /// 列表、索引这类只要名称与描述的路径传 true，避免为每个技能读全文。
++  final bool lazyBodies;
++
++  /// 显式指定的用户级技能目录；为 null 时按 [defaultUserSkillsDirs] 推算。
+   final String? _userSkillsDir;
+ 
++  /// 显式指定的多个用户级技能目录；优先于 [_userSkillsDir]。
++  final List<String>? _userSkillsDirs;
++
+   /// 是否读用户级目录；嵌入式或测试可关掉。
+   final bool includeUserSkills;
+ 
+@@ -183,10 +270,45 @@ class VibeSkillLibrary {
+   ///
+   /// 没有 HOME（部分移动端）时返回 null，不报错也不猜路径。
+   static String? defaultUserSkillsDir() {
++    final home = _homeDir();
++    if (home == null) return null;
++    return p.join(home, '.qfli', 'skills');
++  }
++
++  /// 用户级技能目录，按优先级排列。
++  ///
++  /// 同一个技能名多份定义时先用 `~/.qfli/skills`，依次到 `~/.codex/skills`。
++  static List<String> defaultUserSkillsDirs() {
++    final home = _homeDir();
++    if (home == null) return const [];
++    return [
++      for (final dir in userSkillDirNames) p.joinAll([home, ...dir.split('/')]),
++    ];
++  }
++
++  /// 用户级技能子目录，顺序即优先级。
++  static const List<String> userSkillDirNames = [
++    '.qfli/skills',
++    '.claude/skills',
++    '.agents/skills',
++    '.pi/skills',
++    '.codex/skills',
++  ];
++
++  /// 项目内技能子目录，顺序即优先级。
++  static const List<String> projectSkillDirNames = [
++    '.qfli/skills',
++    '.claude/skills',
++    '.agents/skills',
++    '.pi/skills',
++    '.codex/skills',
++  ];
++
++  static String? _homeDir() {
+     final home =
+         Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+     if (home == null || home.trim().isEmpty) return null;
+-    return p.join(home.trim(), '.qfli', 'skills');
++    return home.trim();
+   }
+ 
+   static const List<String> builtInAssetDirs = [
+@@ -241,22 +363,30 @@ class VibeSkillLibrary {
+ 
+   List<String> _userDirs() {
+     if (!includeUserSkills) return const [];
+-    final dir = _userSkillsDir ?? defaultUserSkillsDir();
+-    return dir == null ? const [] : [dir];
++    final explicit = _userSkillsDirs;
++    if (explicit != null) return explicit;
++    final single = _userSkillsDir;
++    if (single != null) return [single];
++    return defaultUserSkillsDirs();
+   }
+ 
+   List<String> _projectDirs() => [
+-    p.join(projectRoot, '.qfli', 'skills'),
+-    p.join(projectRoot, '.claude', 'skills'),
+-    p.join(projectRoot, '.agents', 'skills'),
++    for (final dir in projectSkillDirNames)
++      p.joinAll([projectRoot, ...dir.split('/')]),
+   ];
+ 
+   VibeSkillSource? _sourceFor(String dir) {
+-    final normalized = dir.replaceAll('\\', '/');
+-    if (normalized.contains('/.qfli/')) return VibeSkillSource.projectQfli;
+-    if (normalized.contains('/.claude/')) return VibeSkillSource.claude;
+-    if (normalized.contains('/.agents/')) return VibeSkillSource.agents;
+-    return null;
++    // 只认最后两段，避免项目路径里恰好出现同名目录时误判。
++    final parts = p.split(p.normalize(dir));
++    if (parts.length < 2 || parts.last != 'skills') return null;
++    return switch (parts[parts.length - 2]) {
++      '.qfli' => VibeSkillSource.projectQfli,
++      '.claude' => VibeSkillSource.claude,
++      '.agents' => VibeSkillSource.agents,
++      '.pi' => VibeSkillSource.pi,
++      '.codex' => VibeSkillSource.codex,
++      _ => null,
++    };
+   }
+ 
+   bool _languageAccepts(String name) {
+@@ -286,8 +416,10 @@ class VibeSkillLibrary {
+           text,
+           fallbackName: p.basename(entry.path),
+           source: source,
++          bodyPath: file.path,
+         );
+-        if (skill != null) skills.add(skill);
++        if (skill == null) continue;
++        skills.add(lazyBodies ? skill.withoutBody(file.path) : skill);
+       } on FileSystemException {
+         // 不可读的技能目录跳过，不影响其余技能。
+       }
+@@ -297,15 +429,20 @@ class VibeSkillLibrary {
+ 
+   /// 读技能文件；正文上限的两倍足以覆盖 frontmatter。
+   Future<String> _readCapped(File file) async {
+-    final length = await file.length();
+-    final limit = kVibeSkillMaxBodyChars * 2 + 1024;
+-    if (length <= limit) return file.readAsString();
++    const limit = kVibeSkillMaxBodyChars * 2 + 1024;
++    if (!lazyBodies) {
++      final length = await file.length();
++      if (length <= limit) return file.readAsString();
++    }
+     final bytes = await file
+-        .openRead(0, limit)
++        .openRead(0, lazyBodies ? _metadataHeadBytes : limit)
+         .fold<List<int>>(<int>[], (all, chunk) => all..addAll(chunk));
+     return utf8.decode(bytes, allowMalformed: true);
+   }
+ 
++  /// 只读 frontmatter 时读多少字节。
++  static const int _metadataHeadBytes = 8 * 1024;
++
+   Future<List<VibeSkill>> _builtIns() async {
+     final cached = _builtInCache;
+     if (cached != null) return cached;
+diff --git a/test/studio_agent_host_test.dart b/test/studio_agent_host_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..625ea64ef1924d6e4d2848e06e7effb287d897ec
+--- /dev/null
++++ b/test/studio_agent_host_test.dart
+@@ -0,0 +1,229 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/studio/studio_agent_host.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++
++import 'support/fake_agent.dart';
++
++void main() {
++  late FakeAgentRuntime runtime;
++  late MemoryAgentSessionStore store;
++  late StudioAgentHost host;
++
++  setUp(() async {
++    store = MemoryAgentSessionStore();
++    runtime = FakeAgentRuntime(sessions: store);
++    host = StudioAgentHost(
++      runtime: runtime,
++      projectId: 'p1',
++      projectRoot: '/tmp/project',
++    );
++  });
++
++  tearDown(() async {
++    await host.dispose();
++  });
++
++  Future<HarnessSessionInfo> seedSession({String title = '会话一'}) async {
++    final meta = await store.create('p1', title: title);
++    return HarnessSessionInfo(
++      id: meta.id,
++      hostId: host.id,
++      providerId: kStudioProviderId,
++      title: meta.title,
++      status: HarnessSessionStatus.idle,
++      capabilities: const {},
++    );
++  }
++
++  group('host identity', () {
++    test('is the studio host with one built-in provider', () async {
++      expect(host.id, kStudioHostId);
++      expect(host.kind, HarnessHostKind.studio);
++      expect(host.state.value, HarnessHostState.online);
++      final providers = await host.providers();
++      expect(providers.single.id, kStudioProviderId);
++      expect(providers.single.available, isTrue);
++    });
++  });
++
++  group('session list', () {
++    test('lists this project sessions with status and cwd', () async {
++      await seedSession(title: '甲');
++      runtime.liveStatuses['session-0'] = AgentLiveStatus.running;
++      final first = await host.watchSessions().first;
++      expect(first, hasLength(1));
++      expect(first.single.title, '甲');
++      expect(first.single.hostId, kStudioHostId);
++      expect(first.single.cwd, '/tmp/project');
++      expect(first.single.status, HarnessSessionStatus.working);
++      expect(first.single.capabilities, {
++        HarnessCapability.transcript,
++        HarnessCapability.prompt,
++        HarnessCapability.approve,
++        HarnessCapability.stop,
++      });
++    });
++
++    test('never mixes in another project', () async {
++      await store.create('p1', title: '本项目');
++      await store.create('p2', title: '别的项目');
++      final list = await host.watchSessions().first;
++      expect(list.map((session) => session.title), ['本项目']);
++    });
++
++    test('pushes a new list when a session appears', () async {
++      final events = <List<HarnessSessionInfo>>[];
++      final subscription = host.watchSessions().listen(events.add);
++      await pumpEventQueue();
++      await store.create('p1', title: '新会话');
++      await pumpEventQueue();
++      expect(events, isNotEmpty);
++      expect(events.last.map((session) => session.title), contains('新会话'));
++      await subscription.cancel();
++    });
++  });
++
++  group('status mapping', () {
++    test('maps every runtime status without inventing progress', () async {
++      await seedSession();
++      final expected = {
++        AgentLiveStatus.idle: HarnessSessionStatus.idle,
++        AgentLiveStatus.queued: HarnessSessionStatus.working,
++        AgentLiveStatus.running: HarnessSessionStatus.working,
++        AgentLiveStatus.awaitingApproval: HarnessSessionStatus.blocked,
++        AgentLiveStatus.finishedUnread: HarnessSessionStatus.done,
++        AgentLiveStatus.failed: HarnessSessionStatus.unknown,
++      };
++      for (final entry in expected.entries) {
++        runtime.liveStatuses['session-0'] = entry.key;
++        final list = host.snapshot();
++        expect(list.single.status, entry.value, reason: entry.key.name);
++      }
++    });
++  });
++
++  group('open and view', () {
++    test('exposes the transcript, prompt and stop', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      expect(handle.terminal, isNull);
++      expect(handle.transcript, isNotNull);
++      expect(handle.info.title, '会话一');
++      expect(runtime.openedSessions, ['session-0']);
++
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await pumpEventQueue();
++
++      await handle.sendPrompt('写一个页面');
++      await pumpEventQueue();
++      expect(events.map((event) => event.text), contains('写一个页面'));
++
++      await handle.stop();
++      expect(runtime.facades['session-0']!.cancelCount, 1);
++      await subscription.cancel();
++      await handle.detach();
++    });
++
++    test('emits an approval entry and resolves it by reply', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      final events = <TranscriptEvent>[];
++      final subscription = handle.transcript!.listen(events.add);
++      await pumpEventQueue();
++
++      facade.pendingApproval = const AgentWriteApproval(
++        path: 'lib/main.dart',
++        summary: '写入 20 B',
++      );
++      await pumpEventQueue();
++      final approval = events.where((e) => e.requestId != null).last;
++      expect(approval.options, ['allow', 'deny']);
++
++      await handle.reply(
++        HarnessReply(requestId: approval.requestId!, choice: 'allow'),
++      );
++      expect(facade.approvals, [true]);
++
++      await subscription.cancel();
++      await handle.detach();
++    });
++
++    test('deny resolves the approval as a rejection', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      facade.pendingApproval = const AgentWriteApproval(
++        path: 'a.txt',
++        summary: '写入 1 B',
++      );
++      await pumpEventQueue();
++      await handle.reply(const HarnessReply(requestId: 'x', choice: 'deny'));
++      expect(facade.approvals, [false]);
++      await handle.detach();
++    });
++
++    test('detach releases the view without cancelling the session', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final facade = runtime.facades['session-0']!;
++      await handle.detach();
++      expect(facade.cancelCount, 0);
++      expect(handle.transcript, isNull);
++      // 再 detach 一次不报错。
++      await handle.detach();
++    });
++
++    test('status follows the runtime while the view is open', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      runtime.liveStatuses['session-0'] = AgentLiveStatus.awaitingApproval;
++      runtime.notifyLive();
++      final facade = runtime.facades['session-0']!;
++      facade.notifyListeners();
++      expect(handle.status.value, HarnessSessionStatus.blocked);
++      await handle.detach();
++    });
++  });
++
++  group('launch', () {
++    test('creates a new session and opens it', () async {
++      final handle = await host.launch(
++        const HarnessLaunchRequest(
++          providerId: kStudioProviderId,
++          cwd: '/tmp/project',
++          title: '新任务',
++        ),
++      );
++      expect(handle.info.title, '新任务');
++      expect(runtime.openedSessions, hasLength(1));
++      expect(host.snapshot().single.title, '新任务');
++      await handle.detach();
++    });
++
++    test('refuses a provider that is not the built-in agent', () async {
++      await expectLater(
++        host.launch(
++          const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp/x'),
++        ),
++        throwsArgumentError,
++      );
++    });
++  });
++
++  group('dispose', () {
++    test('closes watchers and detaches open views', () async {
++      await seedSession();
++      final handle = await host.open('session-0');
++      final events = <List<HarnessSessionInfo>>[];
++      final subscription = host.watchSessions().listen(events.add);
++      await pumpEventQueue();
++      await host.dispose();
++      await subscription.cancel();
++      expect(handle.transcript, isNull);
++      expect(host.snapshot(), isEmpty);
++    });
++  });
++}
+diff --git a/test/support/trellis_fixture.dart b/test/support/trellis_fixture.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..465091432496282c236b524a896ee9acbe957bea
+--- /dev/null
++++ b/test/support/trellis_fixture.dart
+@@ -0,0 +1,87 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++
++/// 一个最小 Trellis 夹具项目：工作流、开发者、两个活跃任务、一层规范。
++///
++/// 只能在测试体内调用：它用 `addTearDown` 删除临时目录。
++Directory makeTrellisProject() {
++  final root = Directory.systemTemp.createTempSync('trellis-project-');
++  addTearDown(() {
++    if (root.existsSync()) root.deleteSync(recursive: true);
++  });
++  writeFixture(
++    root,
++    '.trellis/workflow.md',
++    '## Phase Index\n\nPhase 1: Plan\n',
++  );
++  writeFixture(
++    root,
++    '.trellis/.developer',
++    'name=lichengyu\ninitialized_at=now\n',
++  );
++  writeFixture(root, '.trellis/spec/frontend/index.md', '# Frontend\n');
++  writeFixture(root, '.trellis/spec/backend/index.md', '# Backend\n');
++  writeFixtureTask(root, '11-22-harness-hub', {
++    'id': 'harness-hub',
++    'title': 'Studio 内置完整 harness 体验',
++    'description': '统一本机与远程会话',
++    'status': 'in_progress',
++    'priority': 'P2',
++    'assignee': 'lichengyu',
++    'creator': 'lichengyu',
++    'createdAt': '2026-11-22',
++    'children': ['11-22-child'],
++  });
++  writeFixtureTask(root, '11-22-child', {
++    'id': 'child',
++    'title': '子任务',
++    'status': 'planning',
++    'assignee': 'lichengyu',
++    'parent': '11-22-harness-hub',
++  });
++  writeFixtureTask(root, '11-30-archived', {
++    'id': 'done-one',
++    'title': '已归档任务',
++    'status': 'completed',
++    'assignee': 'other',
++  });
++  writeFixture(root, '.trellis/tasks/11-22-harness-hub/prd.md', '# PRD\n');
++  writeFixture(
++    root,
++    '.trellis/tasks/11-22-harness-hub/design.md',
++    '# Design\n',
++  );
++  writeFixture(
++    root,
++    '.trellis/.runtime/sessions/pi_1.json',
++    jsonEncode({
++      'platform': 'pi',
++      'last_seen_at': '2026-11-22T10:00:00Z',
++      'current_task': '.trellis/tasks/11-22-harness-hub',
++    }),
++  );
++  writeFixture(
++    root,
++    '.trellis/.runtime/sessions/claude_1.json',
++    jsonEncode({
++      'platform': 'claude',
++      'last_seen_at': '2026-11-21T10:00:00Z',
++      'current_task': '.trellis/tasks/11-22-child',
++    }),
++  );
++  return root;
++}
++
++/// 在夹具项目里写一个文件，自动建父目录。
++void writeFixture(Directory root, String relative, String text) {
++  final file = File(p.joinAll([root.path, ...relative.split('/')]));
++  file.parent.createSync(recursive: true);
++  file.writeAsStringSync(text);
++}
++
++/// 在夹具项目里写一份 `task.json`。
++void writeFixtureTask(Directory root, String name, Map<String, Object?> json) =>
++    writeFixture(root, '.trellis/tasks/$name/task.json', jsonEncode(json));
+diff --git a/test/trellis_context_test.dart b/test/trellis_context_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f82259c8a160bebbc2b1ca08b0ed701f97a14ec
+--- /dev/null
++++ b/test/trellis_context_test.dart
+@@ -0,0 +1,241 @@
++import 'dart:io';
++
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/trellis/trellis_commands.dart';
++import 'package:qfli_studio_core/trellis/trellis_context.dart';
++import 'package:qfli_studio_core/trellis/trellis_project.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_rules.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_skills.dart';
++
++import 'support/trellis_fixture.dart';
++
++/// 不提供任何内置技能资产。
++class _NoAssets extends CachingAssetBundle {
++  _NoAssets();
++
++  @override
++  Future<ByteData> load(String key) async =>
++      throw StateError('missing asset $key');
++
++  @override
++  Future<String> loadString(String key, {bool cache = true}) async =>
++      throw StateError('missing asset $key');
++}
++
++void main() {
++  group('context text', () {
++    test('lists the current task, phase, docs and spec indexes', () async {
++      final project = await TrellisProject.load(makeTrellisProject().path);
++      final text = buildTrellisContext(project!);
++      expect(text, startsWith('### Trellis 项目上下文'));
++      expect(text, contains('开发者：lichengyu'));
++      expect(text, contains('当前任务：11-22-harness-hub'));
++      expect(text, contains('阶段 2 Execute'));
++      expect(text, contains('下一步 2.1'));
++      expect(text, contains('prd.md'));
++      expect(text, contains('implement.md（缺）'));
++      expect(text, contains('活跃任务（共 2 个）'));
++      expect(text, contains('.trellis/spec/frontend/index.md'));
++      expect(text.length, lessThanOrEqualTo(kTrellisContextMaxChars));
++    });
++
++    test('stays within the character budget with many tasks', () async {
++      final root = makeTrellisProject();
++      for (var i = 0; i < 40; i++) {
++        writeFixture(
++          root,
++          '.trellis/tasks/12-00-many-$i/task.json',
++          '{"id":"many-$i","title":"${'任务标题' * 20}$i",'
++              '"status":"in_progress","assignee":"lichengyu"}',
++        );
++      }
++      final project = await TrellisProject.load(root.path);
++      final text = buildTrellisContext(project!);
++      expect(text.length, lessThanOrEqualTo(kTrellisContextMaxChars));
++      expect(text, contains('上下文已截断'));
++    });
++
++    test('reports an undetermined current task honestly', () async {
++      final root = makeTrellisProject();
++      Directory(
++        '${root.path}${Platform.pathSeparator}.trellis'
++        '${Platform.pathSeparator}.runtime'
++        '${Platform.pathSeparator}sessions',
++      ).deleteSync(recursive: true);
++      final project = await TrellisProject.load(root.path);
++      expect(project!.currentTask, isNull);
++      expect(buildTrellisContext(project), contains('当前任务：未确定'));
++    });
++  });
++
++  group('script compaction', () {
++    test('drops the banner and bounds the change list', () {
++      final text = [
++        '========================================',
++        'SESSION CONTEXT',
++        '========================================',
++        '',
++        '## DEVELOPER',
++        'Name: lichengyu',
++        '',
++        '## GIT STATUS',
++        'Branch: main',
++        'Changes:',
++        for (var i = 0; i < 9; i++) ' M lib/file_$i.dart',
++        '',
++        '## CURRENT TASK',
++        'Path: .trellis/tasks/x',
++      ].join('\n');
++      final compact = compactScriptContext(text);
++      expect(compact, isNot(contains('=====')));
++      expect(compact, isNot(contains('SESSION CONTEXT')));
++      expect(compact, contains('Name: lichengyu'));
++      expect(compact, contains('M lib/file_4.dart'));
++      expect(compact, isNot(contains('M lib/file_5.dart')));
++      expect(compact, contains('其余改动未列出'));
++      expect(compact, contains('## CURRENT TASK'));
++    });
++  });
++
++  group('context loader', () {
++    test('returns an empty string outside a Trellis project', () async {
++      final root = Directory.systemTemp.createTempSync('trellis-none-');
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      expect(await const TrellisContextLoader().load(root.path), isEmpty);
++    });
++
++    test('parses with Dart when the Python script is absent', () async {
++      final project = await TrellisProject.load(makeTrellisProject().path);
++      final text = await const TrellisContextLoader(
++        preferPython: true,
++      ).load(project!.root);
++      expect(text, contains('### Trellis 项目上下文'));
++      expect(text, contains('11-22-harness-hub'));
++    });
++  });
++
++  group('project rules', () {
++    test('reserves the Trellis entry before rule files', () {
++      final root = makeTrellisProject();
++      writeFixture(root, 'AGENTS.md', 'agent rule\n');
++      final rules = loadVibeRules(root.path);
++      expect(rules, startsWith('### Trellis workflow'));
++      expect(rules, contains('.trellis/workflow.md'));
++      expect(
++        rules.indexOf('### Trellis workflow'),
++        lessThan(rules.indexOf('### AGENTS.md')),
++      );
++      expect(rules.length, lessThan(kVibeMaxRulesChars + 16));
++    });
++
++    test('keeps the entry when AGENTS.md exceeds the budget', () {
++      final root = makeTrellisProject();
++      writeFixture(root, 'AGENTS.md', '${'a' * 40}\n' * 400);
++      final rules = loadVibeRules(root.path);
++      expect(rules, startsWith('### Trellis workflow'));
++      expect(rules.length, lessThan(kVibeMaxRulesChars + 16));
++    });
++
++    test('skips the entry without a real workflow', () {
++      final root = Directory.systemTemp.createTempSync('trellis-none-');
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      writeFixture(root, 'AGENTS.md', 'agent rule\n');
++      final rules = loadVibeRules(root.path);
++      expect(rules, isNot(contains('Trellis')));
++    });
++  });
++
++  group('slash commands', () {
++    late Directory root;
++
++    setUp(() {
++      root = makeTrellisProject();
++    });
++
++    test('matches the two supported commands only', () {
++      expect(
++        matchTrellisSlashCommand('/trellis:continue')?.name,
++        '/trellis:continue',
++      );
++      expect(
++        matchTrellisSlashCommand('  /trellis:finish-work now')?.name,
++        '/trellis:finish-work',
++      );
++      expect(matchTrellisSlashCommand('/trellis:continuex'), isNull);
++      expect(matchTrellisSlashCommand('继续'), isNull);
++      expect(
++        trellisCommandArguments(
++          matchTrellisSlashCommand('/trellis:continue 继续实现')!,
++          '/trellis:continue 继续实现',
++        ),
++        '继续实现',
++      );
++    });
++
++    test('prefers a visible skill body', () async {
++      writeFixture(
++        root,
++        '.qfli/skills/trellis-continue/SKILL.md',
++        '---\nname: trellis-continue\ndescription: 继续任务\n---\n'
++            '技能正文：先读工作流。\n',
++      );
++      final skills = await VibeSkillLibrary(
++        projectRoot: root.path,
++        bundle: _NoAssets(),
++        includeUserSkills: false,
++        lazyBodies: true,
++      ).load();
++      final routed = await routeTrellisSlashCommand(
++        '/trellis:continue 接着做',
++        projectRoot: root.path,
++        skills: skills,
++      );
++      expect(routed, startsWith('/trellis:continue：接着做'));
++      expect(routed, contains('技能正文：先读工作流。'));
++    });
++
++    test('falls back to the project command file', () async {
++      writeFixture(
++        root,
++        '.pi/prompts/trellis-continue.md',
++        '# Continue\n\n项目命令文件内容\n',
++      );
++      final routed = await routeTrellisSlashCommand(
++        '/trellis:continue',
++        projectRoot: root.path,
++        skills: const [],
++      );
++      expect(routed, contains('项目命令文件内容'));
++    });
++
++    test('falls back to the built-in instructions', () async {
++      final routed = await routeTrellisSlashCommand(
++        '/trellis:finish-work',
++        projectRoot: root.path,
++        skills: const [],
++      );
++      expect(routed, contains('task.py archive'));
++      expect(routed, contains('add_session.py'));
++    });
++
++    test('ignores commands outside a Trellis project', () async {
++      final plain = Directory.systemTemp.createTempSync('trellis-none-');
++      addTearDown(() {
++        if (plain.existsSync()) plain.deleteSync(recursive: true);
++      });
++      expect(
++        await routeTrellisSlashCommand(
++          '/trellis:continue',
++          projectRoot: plain.path,
++          skills: const [],
++        ),
++        isNull,
++      );
++    });
++  });
++}
+diff --git a/test/trellis_project_test.dart b/test/trellis_project_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..3df8cb6c4b09599c4a9fcaf403d0cb5059d3dac8
+--- /dev/null
++++ b/test/trellis_project_test.dart
+@@ -0,0 +1,152 @@
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/trellis/trellis_panel.dart';
++import 'package:qfli_studio_core/trellis/trellis_project.dart';
++
++import 'support/trellis_fixture.dart';
++
++void main() {
++  group('detection', () {
++    test('requires a normal, nonempty workflow file', () {
++      final root = Directory.systemTemp.createTempSync('trellis-detect-');
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      expect(TrellisProject.hasWorkflow(root.path), isFalse);
++      Directory(p.join(root.path, '.trellis')).createSync();
++      expect(TrellisProject.hasWorkflow(root.path), isFalse);
++      File(
++        p.join(root.path, '.trellis', 'workflow.md'),
++      ).writeAsStringSync('  \n');
++      expect(TrellisProject.hasWorkflow(root.path), isFalse);
++      File(
++        p.join(root.path, '.trellis', 'workflow.md'),
++      ).writeAsStringSync('# w');
++      expect(TrellisProject.hasWorkflow(root.path), isTrue);
++    });
++
++    test('a linked .trellis directory is not a project', () {
++      final root = Directory.systemTemp.createTempSync('trellis-detect-');
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      final real = Directory(p.join(root.path, 'real'))..createSync();
++      File(p.join(real.path, 'workflow.md')).writeAsStringSync('# w');
++      final link = Link(p.join(root.path, '.trellis'));
++      try {
++        link.createSync(real.path);
++      } on FileSystemException {
++        // 没有建链接权限的宿主跳过这条断言。
++        return;
++      }
++      expect(TrellisProject.hasWorkflow(root.path), isFalse);
++    });
++
++    test('load returns null without a workflow', () async {
++      final root = Directory.systemTemp.createTempSync('trellis-detect-');
++      addTearDown(() {
++        if (root.existsSync()) root.deleteSync(recursive: true);
++      });
++      expect(await TrellisProject.load(root.path), isNull);
++    });
++  });
++
++  group('task reading', () {
++    test('reads tasks, developer, docs and spec indexes', () async {
++      final root = makeTrellisProject();
++      final project = await TrellisProject.load(root.path);
++      expect(project, isNotNull);
++      expect(project!.developer, 'lichengyu');
++      expect(project.tasks.map((task) => task.dirName), [
++        '11-22-child',
++        '11-22-harness-hub',
++        '11-30-archived',
++      ]);
++      expect(project.specIndexes.map((index) => index.layer), [
++        'backend',
++        'frontend',
++      ]);
++      final hub = project.taskNamed('11-22-harness-hub')!;
++      expect(hub.title, 'Studio 内置完整 harness 体验');
++      expect(hub.status, 'in_progress');
++      expect(hub.phase, TrellisTaskPhase.executing);
++      expect(hub.phase.step, '2.1');
++      expect(hub.existingDocs, ['prd.md', 'design.md']);
++      expect(hub.relativePath, '.trellis/tasks/11-22-harness-hub');
++      expect(hub.docs.map((doc) => doc.exists), [true, true, false]);
++      expect(hub.children, ['11-22-child']);
++    });
++
++    test('skips broken task files without failing the project', () async {
++      final root = makeTrellisProject();
++      writeFixture(root, '.trellis/tasks/99-broken/task.json', '{not json');
++      writeFixture(root, '.trellis/tasks/98-empty/task.json', '{"id":"x"}');
++      final project = await TrellisProject.load(root.path);
++      expect(project!.tasks.map((task) => task.dirName), [
++        '11-22-child',
++        '11-22-harness-hub',
++        '11-30-archived',
++      ]);
++    });
++
++    test('keeps completed tasks out of the active list', () async {
++      final project = await TrellisProject.load(makeTrellisProject().path);
++      expect(project!.activeTasks.map((task) => task.dirName), [
++        '11-22-child',
++        '11-22-harness-hub',
++      ]);
++      expect(project.activeTasksOf('lichengyu').map((task) => task.dirName), [
++        '11-22-child',
++        '11-22-harness-hub',
++      ]);
++      expect(
++        project.taskNamed('11-30-archived')!.phase,
++        TrellisTaskPhase.finishing,
++      );
++    });
++  });
++
++  group('current task', () {
++    test('takes the newest runtime pointer', () async {
++      final project = await TrellisProject.load(makeTrellisProject().path);
++      expect(project!.currentTask?.dirName, '11-22-harness-hub');
++    });
++
++    test('honors an explicit override', () async {
++      final project = await TrellisProject.load(
++        makeTrellisProject().path,
++        currentTaskName: '11-22-child',
++      );
++      expect(project!.currentTask?.dirName, '11-22-child');
++    });
++
++    test('normalizes a task reference to its directory name', () {
++      expect(
++        taskNameOfRef('.trellis/tasks/11-22-harness-hub'),
++        '11-22-harness-hub',
++      );
++      expect(taskNameOfRef('11-22-harness-hub/'), '11-22-harness-hub');
++      expect(taskNameOfRef(''), isNull);
++      expect(taskNameOfRef(null), isNull);
++    });
++  });
++
++  group('panel', () {
++    test('puts parents before children and keeps my tasks', () async {
++      final project = await TrellisProject.load(makeTrellisProject().path);
++      final panel = buildTrellisTaskPanel(project!)!;
++      expect(panel.developer, 'lichengyu');
++      expect(panel.currentTask?.dirName, '11-22-harness-hub');
++      expect(panel.activeTasks.map((row) => row.task.dirName), [
++        '11-22-harness-hub',
++        '11-22-child',
++      ]);
++      expect(panel.activeTasks.last.indent, 1);
++      expect(panel.myTasks.length, 2);
++      expect(panel.workflowPath, '.trellis/workflow.md');
++      expect(panel.isEmpty, isFalse);
++    });
++  });
++}
+diff --git a/test/vibe_coding_skills_test.dart b/test/vibe_coding_skills_test.dart
+index f18ba5a8807eee5653114dd0cc3b1bb2735fd8d2..0a5c4f9110cb1cbfb0c98c07d5442fcaf1434ebb 100644
+--- a/test/vibe_coding_skills_test.dart
++++ b/test/vibe_coding_skills_test.dart
+@@ -142,6 +142,7 @@ void main() {
+         projectRoot: root.path,
+         language: 'python',
+         bundle: assets,
++        includeUserSkills: false,
+       );
+ 
+       final skills = await library.load();
+@@ -175,6 +176,7 @@ void main() {
+       final library = VibeSkillLibrary(
+         projectRoot: root.path,
+         bundle: _FakeAssets({}),
++        includeUserSkills: false,
+       );
+       final skills = await library.load();
+       expect(skills.map((s) => s.name), ['real']);
+@@ -188,6 +190,7 @@ void main() {
+       final library = VibeSkillLibrary(
+         projectRoot: root.path,
+         bundle: _FakeAssets({}),
++        includeUserSkills: false,
+       );
+       final skills = await library.load();
+       expect(skills.map((s) => s.name), ['local']);
+diff --git a/test/vibe_skill_discovery_test.dart b/test/vibe_skill_discovery_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..9885f0778d301300d99ba09780a7fd21e8f76076
+--- /dev/null
++++ b/test/vibe_skill_discovery_test.dart
+@@ -0,0 +1,196 @@
++import 'dart:io';
++
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/vibe_coding/vibe_skills.dart';
++
++/// 只提供内置技能资产的 bundle；不给资产时返回空列表。
++class _Assets extends CachingAssetBundle {
++  _Assets(this.files);
++
++  final Map<String, String> files;
++
++  @override
++  Future<ByteData> load(String key) async {
++    final text = files[key];
++    if (text == null) throw StateError('missing asset $key');
++    return ByteData.view(Uint8List.fromList(text.codeUnits).buffer);
++  }
++
++  @override
++  Future<String> loadString(String key, {bool cache = true}) async {
++    await load(key);
++    return files[key]!;
++  }
++}
++
++void main() {
++  late Directory project;
++  late Directory home;
++
++  setUp(() {
++    VibeSkillLibrary.resetBuiltInCache();
++    project = Directory.systemTemp.createTempSync('skill-project-');
++    home = Directory.systemTemp.createTempSync('skill-home-');
++  });
++
++  tearDown(() {
++    if (project.existsSync()) project.deleteSync(recursive: true);
++    if (home.existsSync()) home.deleteSync(recursive: true);
++  });
++
++  void writeSkill(Directory root, String dir, String name, String body) {
++    final file = File(
++      p.joinAll([root.path, ...dir.split('/'), name, 'SKILL.md']),
++    );
++    file.parent.createSync(recursive: true);
++    file.writeAsStringSync(
++      '---\nname: $name\ndescription: $dir 的 $name\n---\n$body\n',
++    );
++  }
++
++  VibeSkillLibrary library({bool lazy = false}) => VibeSkillLibrary(
++    projectRoot: project.path,
++    bundle: _Assets(const {}),
++    userSkillsDirs: [
++      for (final dir in VibeSkillLibrary.userSkillDirNames)
++        p.joinAll([home.path, ...dir.split('/')]),
++    ],
++    lazyBodies: lazy,
++  );
++
++  group('directory coverage', () {
++    test('discovers .agents, .claude, .pi and .codex project skills', () async {
++      writeSkill(project, '.agents/skills', 'agents-one', 'a');
++      writeSkill(project, '.claude/skills', 'claude-one', 'c');
++      writeSkill(project, '.pi/skills', 'pi-one', 'p');
++      writeSkill(project, '.codex/skills', 'codex-one', 'x');
++      final skills = await library().load();
++      expect(skills.map((skill) => skill.name).toSet(), {
++        'agents-one',
++        'claude-one',
++        'pi-one',
++        'codex-one',
++      });
++      expect(
++        skills.firstWhere((s) => s.name == 'pi-one').source,
++        VibeSkillSource.pi.label,
++      );
++      expect(
++        skills.firstWhere((s) => s.name == 'codex-one').source,
++        VibeSkillSource.codex.label,
++      );
++    });
++
++    test('reads the same directories under the user home', () async {
++      final names = <String>{};
++      for (final dir in VibeSkillLibrary.userSkillDirNames) {
++        final name = 'home-${dir.split('/').first.replaceAll('.', '')}';
++        writeSkill(home, dir, name, 'body');
++        names.add(name);
++      }
++      final skills = await library().load();
++      expect(skills.map((skill) => skill.name).toSet(), names);
++      for (final skill in skills) {
++        expect(skill.source, VibeSkillSource.user.label);
++      }
++    });
++
++    test('user directories keep the declared priority order', () {
++      expect(VibeSkillLibrary.userSkillDirNames, [
++        '.qfli/skills',
++        '.claude/skills',
++        '.agents/skills',
++        '.pi/skills',
++        '.codex/skills',
++      ]);
++      expect(
++        VibeSkillLibrary.projectSkillDirNames,
++        VibeSkillLibrary.userSkillDirNames,
++      );
++    });
++
++    test('a project skill wins over a user skill of the same name', () async {
++      writeSkill(project, '.pi/skills', 'shared', 'project body');
++      writeSkill(home, '.pi/skills', 'shared', 'user body');
++      writeSkill(home, '.codex/skills', 'user-only', 'user body');
++      final skills = await library().load();
++      expect(
++        skills.firstWhere((skill) => skill.name == 'shared').description,
++        '.pi/skills 的 shared',
++      );
++      expect(
++        skills.firstWhere((skill) => skill.name == 'shared').source,
++        VibeSkillSource.pi.label,
++      );
++      expect(
++        skills.where((skill) => skill.name == 'user-only').single.source,
++        VibeSkillSource.user.label,
++      );
++    });
++  });
++
++  group('metadata only', () {
++    test('lazy loading skips the body until asked', () async {
++      writeSkill(project, '.agents/skills', 'slow', '正文第一部分');
++      final skills = await library(lazy: true).load();
++      final skill = skills.single;
++      expect(skill.name, 'slow');
++      expect(skill.description, '.agents/skills 的 slow');
++      expect(skill.hasInlineBody, isFalse);
++      expect(skill.bodyPath, isNotNull);
++      expect(skill.body, isEmpty);
++
++      final body = await skill.resolveBody();
++      expect(body, '正文第一部分');
++      // 第二次读仍从盘上取，读到的内容与第一次一致。
++      expect(await skill.resolveBody(), body);
++    });
++
++    test('a missing file resolves to an empty body', () async {
++      writeSkill(project, '.agents/skills', 'gone', 'body');
++      final skills = await library(lazy: true).load();
++      File(skills.single.bodyPath!).deleteSync();
++      expect(await skills.single.resolveBody(), isEmpty);
++    });
++
++    test('an eager library still carries the body', () async {
++      writeSkill(project, '.agents/skills', 'eager', '完整正文');
++      final skills = await library().load();
++      expect(skills.single.body, '完整正文');
++      expect(await skills.single.resolveBody(), '完整正文');
++    });
++
++    test('an oversized body is truncated with a marker', () async {
++      final big = 'x' * (kVibeSkillMaxBodyChars + 100);
++      writeSkill(project, '.agents/skills', 'big', big);
++      final skills = await library(lazy: true).load();
++      final body = await skills.single.resolveBody();
++      expect(body.length, lessThan(kVibeSkillMaxBodyChars + 100));
++      expect(body, contains('技能正文已截断'));
++    });
++  });
++
++  group('frontmatter', () {
++    test('keeps the directory name when name is absent', () async {
++      final file = File(
++        p.join(project.path, '.codex', 'skills', 'dir-name', 'SKILL.md'),
++      );
++      file.parent.createSync(recursive: true);
++      file.writeAsStringSync('---\ndescription: 只有描述\n---\n正文\n');
++      final skills = await library().load();
++      expect(skills.single.name, 'dir-name');
++      expect(skills.single.description, '只有描述');
++    });
++
++    test('skips a skill with an empty description', () async {
++      final file = File(
++        p.join(project.path, '.pi', 'skills', 'no-desc', 'SKILL.md'),
++      );
++      file.parent.createSync(recursive: true);
++      file.writeAsStringSync('---\nname: no-desc\ndescription:\n---\n正文\n');
++      expect(await library().load(), isEmpty);
++    });
++  });
++}

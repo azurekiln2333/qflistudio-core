@@ -1,0 +1,1424 @@
+diff --git a/lib/chat/agent_context_indicator.dart b/lib/chat/agent_context_indicator.dart
+index 8be01330066625f4efd0ed8ee4a70beda53de5e0..9b5a5a8ec1c6a258e9003ef0f93f963b4cfb7384 100644
+--- a/lib/chat/agent_context_indicator.dart
++++ b/lib/chat/agent_context_indicator.dart
+@@ -4,6 +4,7 @@ import 'dart:math' as math;
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
++import '../shell/large_screen_controller.dart';
+ import '../vibe_coding/agent_context_usage.dart';
+ 
+ /// Context estimates for loaded history, with explicit capacity provenance.
+@@ -155,6 +156,7 @@ class _AgentContextIndicatorState extends State<AgentContextIndicator> {
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
++    final workbench = LargeScreenScope.maybeOf(context) != null;
+     final size = MediaQuery.sizeOf(context);
+     final width = math.max(1.0, math.min(360.0, size.width - 32));
+     final height = math.max(1.0, math.min(560.0, size.height - 48));
+@@ -173,7 +175,11 @@ class _AgentContextIndicatorState extends State<AgentContextIndicator> {
+       childFocusNode: _focus,
+       alignmentOffset: const Offset(0, 6),
+       style: MenuStyle(
+-        padding: const WidgetStatePropertyAll(EdgeInsets.zero),
++        // Preserve WorkbenchTheme's transparent gutter around the painted
++        // menu surface while keeping this custom popover's own content padding.
++        padding: const WidgetStatePropertyAll(
++          EdgeInsets.symmetric(horizontal: 8, vertical: 16),
++        ),
+         backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainerHigh),
+       ),
+       onClose: () {
+@@ -190,6 +196,10 @@ class _AgentContextIndicatorState extends State<AgentContextIndicator> {
+             child: ConstrainedBox(
+               constraints: BoxConstraints(maxHeight: height),
+               child: SingleChildScrollView(
++                key: const ValueKey('agent-context-capacity-menu-content'),
++                // Keep this popover off the menu primary in the workbench.
++                // Retain the existing phone scroll inheritance.
++                primary: workbench ? false : null,
+                 padding: const EdgeInsets.all(16),
+                 child: _details(context),
+               ),
+diff --git a/lib/shell/large_screen_workbench.dart b/lib/shell/large_screen_workbench.dart
+index 888725e2bfc0c261c32cad8c62f42170896c475d..80c0a6ba56e30eda3685fbc34fc446f062587366 100644
+--- a/lib/shell/large_screen_workbench.dart
++++ b/lib/shell/large_screen_workbench.dart
+@@ -12,7 +12,6 @@ import '../harness/hub/harness_hosts.dart';
+ import '../harness/ui/agent_session_details_page.dart';
+ import '../harness/ui/agents_entry.dart';
+ import '../harness/ui/home_agents_tab.dart';
+-import '../i18n/studio_localizations.dart';
+ import '../layout/app_form_factor.dart';
+ import '../layout/breakpoints.dart';
+ import '../pages/home_page.dart';
+@@ -81,16 +80,8 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+         builder: (context, _) {
+           if (_layout.activity == WorkbenchActivity.explorer &&
+               _layout.sidebarVisible) {
+-            final l = StudioLocalizations.of(context);
+-            return Center(
+-              child: Text(
+-                l.isEnglish
+-                    ? 'Choose a project from Explorer'
+-                    : l.isTraditionalChinese
+-                    ? '從資源管理器選擇專案'
+-                    : '从资源管理器选择项目',
+-                style: Theme.of(context).textTheme.bodyMedium,
+-              ),
++            return WorkbenchShortcutHints(
++              includeClone: StudioProfile.current?.offlineOnly != true,
+             );
+           }
+           return WorkbenchWelcome(
+diff --git a/lib/shell/workbench_chrome.dart b/lib/shell/workbench_chrome.dart
+index 0538ac2139d974b9c04164514fc1a7137475b2f5..d9a72e1a5ca9041afa94e2b735b9f7f1014e92ef 100644
+--- a/lib/shell/workbench_chrome.dart
++++ b/lib/shell/workbench_chrome.dart
+@@ -4,7 +4,6 @@ import '../i18n/studio_localizations.dart';
+ import '../models/project.dart';
+ import 'large_screen_controller.dart';
+ import 'shortcut_label.dart';
+-import 'workbench_theme.dart';
+ 
+ /// 大屏工作台左侧图标导航的六个去处。
+ ///
+@@ -74,8 +73,9 @@ class WorkbenchActivityRail extends StatelessWidget {
+     final index = _railActivities.indexOf(selected);
+     return Container(
+       width: width,
+-      decoration: BoxDecoration(
+-        color: scheme.surfaceContainerLow,
++      color: scheme.surfaceContainerLow,
++      // A foreground line does not consume 1dp of the 80dp rail's hit targets.
++      foregroundDecoration: BoxDecoration(
+         border: Border(right: BorderSide(color: scheme.outlineVariant)),
+       ),
+       child: SafeArea(
+@@ -221,43 +221,101 @@ class _RailButton extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+-    return WorkbenchFocusOutline(
++    return _RailCapsuleButton(
++      selected: selected,
++      label: label,
++      onPressed: () => onPressed(activity),
++      child: Icon(
++        icon,
++        size: 24,
++        color: selected ? scheme.onSecondaryContainer : scheme.onSurfaceVariant,
++      ),
++    );
++  }
++}
++
++/// Keeps pointer/keyboard state layers inside the same capsule as the native
++/// destinations while retaining the full 80x48dp button hit target.
++class _RailCapsuleButton extends StatelessWidget {
++  const _RailCapsuleButton({
++    required this.selected,
++    required this.label,
++    required this.onPressed,
++    required this.child,
++  });
++
++  final bool selected;
++  final String label;
++  final VoidCallback onPressed;
++  final Widget child;
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    return MergeSemantics(
+       child: Semantics(
+         button: true,
+         selected: selected,
+         label: label,
+-        child: MouseRegion(
+-          cursor: SystemMouseCursors.click,
+-          child: Tooltip(
+-            message: label,
+-            child: SizedBox(
+-              width: WorkbenchActivityRail.width,
+-              height: WorkbenchActivityRail.touchTarget,
+-              child: Material(
+-                color: Colors.transparent,
+-                child: InkWell(
+-                  onTap: () => onPressed(activity),
+-                  child: Center(
++        child: Tooltip(
++          message: label,
++          excludeFromSemantics: true,
++          child: SizedBox(
++            width: WorkbenchActivityRail.width,
++            height: WorkbenchActivityRail.touchTarget,
++            child: TextButton(
++              clipBehavior: Clip.none,
++              onPressed: onPressed,
++              style: ButtonStyle(
++                visualDensity: VisualDensity.standard,
++                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++                padding: const WidgetStatePropertyAll(EdgeInsets.zero),
++                shape: const WidgetStatePropertyAll(RoundedRectangleBorder()),
++                side: const WidgetStatePropertyAll(BorderSide.none),
++                backgroundColor: const WidgetStatePropertyAll(
++                  Colors.transparent,
++                ),
++                elevation: const WidgetStatePropertyAll(0),
++                mouseCursor: const WidgetStatePropertyAll(
++                  SystemMouseCursors.click,
++                ),
++                // The button owns the 48dp hit target. Paint all feedback on the
++                // 56x32dp capsule instead of its full-width Material/InkWell.
++                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
++                backgroundBuilder: (context, states, child) {
++                  final focused = states.contains(WidgetState.focused);
++                  final alpha = states.contains(WidgetState.pressed) || focused
++                      ? 0.10
++                      : states.contains(WidgetState.hovered)
++                      ? 0.08
++                      : 0.0;
++                  return Center(
+                     child: AnimatedContainer(
++                      key: const ValueKey('workbench-rail-capsule'),
+                       duration: const Duration(milliseconds: 150),
+                       width: 56,
+                       height: 32,
+-                      alignment: Alignment.center,
+-                      decoration: BoxDecoration(
++                      decoration: ShapeDecoration(
+                         color: selected ? scheme.secondaryContainer : null,
+-                        borderRadius: BorderRadius.circular(20),
++                        shape: const StadiumBorder(),
+                       ),
+-                      child: Icon(
+-                        icon,
+-                        size: 24,
+-                        color: selected
+-                            ? scheme.onSecondaryContainer
+-                            : scheme.onSurfaceVariant,
++                      child: DecoratedBox(
++                        key: const ValueKey('workbench-rail-state-layer'),
++                        decoration: ShapeDecoration(
++                          color: scheme.onSurface.withValues(alpha: alpha),
++                          shape: StadiumBorder(
++                            side: focused
++                                ? BorderSide(color: scheme.primary)
++                                : BorderSide.none,
++                          ),
++                        ),
++                        child: Center(child: child),
+                       ),
+                     ),
+-                  ),
+-                ),
++                  );
++                },
+               ),
++              child: child,
+             ),
+           ),
+         ),
+@@ -329,42 +387,20 @@ class _AvatarButton extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+     final initial = _initialOf(accountLabel);
+-    return WorkbenchFocusOutline(
+-      child: Semantics(
+-        button: true,
+-        selected: selected,
+-        label: label,
+-        child: Tooltip(
+-          message: label,
+-          child: SizedBox(
+-            width: WorkbenchActivityRail.width,
+-            height: WorkbenchActivityRail.touchTarget,
+-            child: Material(
+-              color: Colors.transparent,
+-              child: InkWell(
+-                mouseCursor: SystemMouseCursors.click,
+-                onTap: onPressed,
+-                child: Center(
+-                  child: Container(
+-                    width: 28,
+-                    height: 28,
+-                    decoration: BoxDecoration(
+-                      shape: BoxShape.circle,
+-                      border: Border.all(
+-                        color: selected
+-                            ? scheme.primary
+-                            : scheme.outlineVariant,
+-                      ),
+-                      color: scheme.surfaceContainerHigh,
+-                    ),
+-                    clipBehavior: Clip.antiAlias,
+-                    child: _avatarChild(scheme, initial),
+-                  ),
+-                ),
+-              ),
+-            ),
+-          ),
++    return _RailCapsuleButton(
++      selected: selected,
++      label: label,
++      onPressed: onPressed,
++      child: Container(
++        width: 28,
++        height: 28,
++        decoration: BoxDecoration(
++          shape: BoxShape.circle,
++          border: Border.all(color: scheme.outlineVariant),
++          color: scheme.surfaceContainerHigh,
+         ),
++        clipBehavior: Clip.antiAlias,
++        child: _avatarChild(scheme, initial),
+       ),
+     );
+   }
+@@ -405,6 +441,64 @@ class _AvatarButton extends StatelessWidget {
+   }
+ }
+ 
++/// Read-only command reminders beside the Explorer-owned project actions.
++/// These are text, not another Start surface (R5).
++class WorkbenchShortcutHints extends StatelessWidget {
++  const WorkbenchShortcutHints({super.key, this.includeClone = true});
++
++  final bool includeClone;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final l = StudioLocalizations.of(context);
++    String label(String en, String zh, String traditional) => l.isEnglish
++        ? en
++        : l.isTraditionalChinese
++        ? traditional
++        : zh;
++    final hints = <(String, String)>[
++      (l.createProject, 'Ctrl+Shift+N'),
++      (label('Open folder', '打开文件夹', '開啟資料夾'), 'Ctrl+O'),
++      if (includeClone)
++        (label('Clone repository', '克隆仓库', '複製儲存庫'), 'Ctrl+Shift+G'),
++      (label('Explorer', '资源管理器', '資源管理器'), 'Ctrl+Shift+E'),
++      (l.agentsTab, 'Ctrl+Shift+A'),
++      (label('Settings', '设置', '設定'), 'Ctrl+,'),
++      (label('Interface zoom', '界面缩放', '介面縮放'), 'Ctrl+= / Ctrl+-'),
++    ];
++    return Center(
++      child: SingleChildScrollView(
++        padding: const EdgeInsets.all(24),
++        child: ConstrainedBox(
++          constraints: const BoxConstraints(maxWidth: 460),
++          child: DefaultTextStyle(
++            style: theme.textTheme.bodyMedium!.copyWith(
++              color: theme.colorScheme.onSurfaceVariant,
++            ),
++            child: Table(
++              key: const ValueKey('workbench-shortcut-hints'),
++              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
++              children: [
++                for (final (label, keys) in hints)
++                  TableRow(
++                    children: [
++                      Padding(
++                        padding: const EdgeInsets.fromLTRB(0, 6, 24, 6),
++                        child: Text(label, textAlign: TextAlign.end),
++                      ),
++                      Text(shortcutLabel(keys)),
++                    ],
++                  ),
++              ],
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
++
+ /// The empty workbench offers existing project commands and recent projects.
+ class WorkbenchWelcome extends StatelessWidget {
+   const WorkbenchWelcome({
+diff --git a/lib/shell/workbench_theme.dart b/lib/shell/workbench_theme.dart
+index 5cb23eb827a232a0de66370da9c029486bcf4b43..fda4729a1cc81316b5d46a71462b9a502c01ab95 100644
+--- a/lib/shell/workbench_theme.dart
++++ b/lib/shell/workbench_theme.dart
+@@ -65,20 +65,25 @@ abstract final class WorkbenchTheme {
+       menuTheme: MenuThemeData(
+         style: MenuStyle(
+           backgroundColor: WidgetStatePropertyAll(scheme.surfaceContainer),
++          shadowColor: WidgetStatePropertyAll(scheme.shadow),
+           surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
++          elevation: const WidgetStatePropertyAll(2),
++          side: const WidgetStatePropertyAll(BorderSide.none),
++          // The outer 8dp is a transparent menu-only gutter. The visible
++          // surface then has the MD3 8dp vertical content padding.
+           padding: const WidgetStatePropertyAll(
+-            EdgeInsets.symmetric(vertical: 4),
+-          ),
+-          shape: WidgetStatePropertyAll(
+-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
++            EdgeInsets.symmetric(horizontal: 8, vertical: 16),
+           ),
++          shape: const WidgetStatePropertyAll(_WorkbenchMenuBorder()),
+         ),
+       ),
+       popupMenuTheme: base.popupMenuTheme.copyWith(
+         color: scheme.surfaceContainer,
+         surfaceTintColor: Colors.transparent,
+-        menuPadding: const EdgeInsets.symmetric(vertical: 4),
+-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
++        elevation: 2,
++        shadowColor: scheme.shadow,
++        menuPadding: const EdgeInsets.symmetric(vertical: 8),
++        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+       ),
+       tooltipTheme: base.tooltipTheme.copyWith(
+         waitDuration: const Duration(milliseconds: 500),
+@@ -104,6 +109,95 @@ abstract final class WorkbenchTheme {
+   }
+ }
+ 
++/// Keeps menu surfaces inside every overlay edge without moving shell content.
++///
++/// Flutter's MenuAnchor reservedPadding constrains size, but its edge fallback
++/// can still place the panel at coordinate zero or the overlay's far edge.
++/// Inset only the surface/shadow path, not the anchor or its hit-test geometry.
++/// MenuStyle adds the same gutter to its content padding. This also applies to
++/// nested editor overlays and submenus through the scoped MenuTheme.
++class _WorkbenchMenuBorder extends RoundedRectangleBorder {
++  const _WorkbenchMenuBorder({
++    super.side,
++    super.borderRadius = const BorderRadius.all(Radius.circular(4)),
++    this.gutter = 8,
++  });
++
++  final double gutter;
++
++  @override
++  Path getOuterPath(Rect rect, {TextDirection? textDirection}) =>
++      super.getOuterPath(rect.deflate(gutter), textDirection: textDirection);
++
++  @override
++  Path getInnerPath(Rect rect, {TextDirection? textDirection}) =>
++      super.getInnerPath(rect.deflate(gutter), textDirection: textDirection);
++
++  @override
++  void paintInterior(
++    Canvas canvas,
++    Rect rect,
++    Paint paint, {
++    TextDirection? textDirection,
++  }) => super.paintInterior(
++    canvas,
++    rect.deflate(gutter),
++    paint,
++    textDirection: textDirection,
++  );
++
++  @override
++  void paint(Canvas canvas, Rect rect, {TextDirection? textDirection}) =>
++      super.paint(canvas, rect.deflate(gutter), textDirection: textDirection);
++
++  @override
++  _WorkbenchMenuBorder copyWith({
++    BorderSide? side,
++    BorderRadiusGeometry? borderRadius,
++  }) => _WorkbenchMenuBorder(
++    side: side ?? this.side,
++    borderRadius: borderRadius ?? this.borderRadius,
++    gutter: gutter,
++  );
++
++  @override
++  ShapeBorder scale(double t) => _WorkbenchMenuBorder(
++    side: side.scale(t),
++    borderRadius: borderRadius * t,
++    gutter: gutter * t,
++  );
++
++  @override
++  ShapeBorder? lerpFrom(ShapeBorder? a, double t) {
++    if (a is _WorkbenchMenuBorder) {
++      return _WorkbenchMenuBorder(
++        side: BorderSide.lerp(a.side, side, t),
++        borderRadius: BorderRadiusGeometry.lerp(
++          a.borderRadius,
++          borderRadius,
++          t,
++        )!,
++        gutter: a.gutter + (gutter - a.gutter) * t,
++      );
++    }
++    return super.lerpFrom(a, t);
++  }
++
++  @override
++  ShapeBorder? lerpTo(ShapeBorder? b, double t) {
++    if (b is _WorkbenchMenuBorder) return b.lerpFrom(this, t);
++    return super.lerpTo(b, t);
++  }
++
++  @override
++  bool operator ==(Object other) =>
++      identical(this, other) ||
++      other is _WorkbenchMenuBorder && super == other && gutter == other.gutter;
++
++  @override
++  int get hashCode => Object.hash(super.hashCode, gutter);
++}
++
+ /// Outlines custom workbench controls without adding a second tab stop.
+ /// Native MD3 controls keep their own focus handling and state layers.
+ class WorkbenchFocusOutline extends StatefulWidget {
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index 7cccc5b4af192cbdc33e29b1ba7cb4970c46a39c..99afd2127eb07e9b5466507146493bf052169701 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -47,7 +47,18 @@ class _FilePanel extends StatefulWidget {
+ 
+ class _FilePanelState extends State<_FilePanel> {
+   @override
+-  Widget build(BuildContext context) => const Text('Retained file panel');
++  Widget build(BuildContext context) => Column(
++    children: [
++      // R5/R14: registered files panels now own their single header.
++      IconButton(
++        key: WorkbenchExplorer.backKey,
++        tooltip: '项目列表',
++        onPressed: LargeScreenScope.maybeOf(context)!.showProjects,
++        icon: const Icon(Icons.arrow_back),
++      ),
++      const Text('Retained file panel'),
++    ],
++  );
+ }
+ 
+ class _Paths extends PathProviderPlatform {
+@@ -306,7 +317,17 @@ void main() {
+     expect(layout.centerOverlay, isNull);
+     expect(layout.explorerPage, ExplorerPage.files);
+     expect(editors.sessionInfos, hasLength(1));
+-    await tester.tap(find.byKey(WorkbenchExplorer.backKey));
++    // This fake controller starts no editor. Supply its registered files
++    // header instead of relying on the duplicate shell header removed by R5.
++    layout.registerFiles(editors, (_) => const _FilePanel());
++    layout.activateFiles(editors);
++    // Registration notifies after a frame. Build the registered panel on the
++    // next frame and finish the slide before using its single Back control.
++    await _finishExplorerTransition(tester);
++    final back = find.byKey(WorkbenchExplorer.backKey);
++    expect(back, findsOneWidget);
++    expect(back.hitTestable(), findsOneWidget);
++    await tester.tap(back);
+     await tester.pump();
+     await _finishExplorerTransition(tester);
+     expect(editors.activeSessionKey, alpha);
+@@ -372,6 +393,13 @@ void main() {
+     await mount(tester);
+     final welcome = find.byType(WorkbenchWelcome);
+     expect(welcome, findsNothing);
++    // R5/V9, round 4: the center gives passive shortcuts, not duplicate actions.
++    final hints = find.byType(WorkbenchShortcutHints);
++    expect(hints, findsOneWidget);
++    expect(
++      find.descendant(of: hints, matching: find.byType(TextButton)),
++      findsNothing,
++    );
+     expect(find.text('Alpha'), findsOneWidget);
+     expect(find.text('Beta'), findsOneWidget);
+     expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
+@@ -381,6 +409,7 @@ void main() {
+     );
+     await tester.pump();
+     expect(welcome, findsOneWidget);
++    expect(hints, findsNothing);
+     expect(find.text('Alpha'), findsOneWidget);
+     expect(find.text('Beta'), findsOneWidget);
+     expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
+diff --git a/test/retained_editor_test.dart b/test/retained_editor_test.dart
+index 2f2fe3377282baa56993e0cebf6594fbb0cffd90..3f09797882192fdac90216a9ab7ca94d459d8a42 100644
+--- a/test/retained_editor_test.dart
++++ b/test/retained_editor_test.dart
+@@ -63,8 +63,8 @@ void main() {
+     testWidgets('$family uses one workbench and preserves live project state', (
+       tester,
+     ) async {
+-      // R5/V9: the prompt assertions below use Simplified Chinese. QfliApp
+-      // otherwise resolves the host locale (English on the Linux CI runner).
++      // R5/V9: these desktop/tablet hint assertions use Simplified Chinese.
++      // QfliApp otherwise resolves the host locale (English on Linux CI).
+       tester.platformDispatcher.localeTestValue = const Locale('zh', 'CN');
+       addTearDown(tester.platformDispatcher.clearLocaleTestValue);
+       final fixture = _Fixture(root);
+@@ -73,7 +73,9 @@ void main() {
+       expect(find.byType(HomePage), findsNothing);
+       // R5/V9, design §11.2: visible Explorer owns the project commands.
+       expect(find.byType(WorkbenchWelcome), findsNothing);
+-      expect(find.text('从资源管理器选择项目'), findsOneWidget);
++      // R5/V9, round 4: the passive hint list replaces the old prompt, not
++      // another Start surface. Explorer remains the only project-action owner.
++      expect(find.byType(WorkbenchShortcutHints), findsOneWidget);
+       expect(find.byType(FileExplorer, skipOffstage: false), findsNothing);
+       final shell = tester.widget<LargeScreenWorkbench>(
+         find.byType(LargeScreenWorkbench),
+@@ -206,7 +208,7 @@ void main() {
+       expect(find.byType(FileExplorer), findsNothing);
+       // R5/V9: closing the editor must not duplicate visible project actions.
+       expect(find.byType(WorkbenchWelcome), findsNothing);
+-      expect(find.text('从资源管理器选择项目'), findsOneWidget);
++      expect(find.byType(WorkbenchShortcutHints), findsOneWidget);
+       expect(shell.editors.sessionInfos, hasLength(1));
+       expect(tester.takeException(), isNull);
+     });
+diff --git a/test/workbench_chrome_test.dart b/test/workbench_chrome_test.dart
+index 5082dfcaf99f35d3237a58aa7869964f6d3522f8..520121e84ea99fa7fbe5f56d3f4cfa247625792a 100644
+--- a/test/workbench_chrome_test.dart
++++ b/test/workbench_chrome_test.dart
+@@ -1,4 +1,7 @@
++import 'package:flutter/gestures.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter/semantics.dart';
+ import 'package:flutter_localizations/flutter_localizations.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:qfli_studio_core/i18n/studio_localizations.dart';
+@@ -13,6 +16,8 @@ Widget _host(
+   Locale locale = const Locale('en'),
+   Size size = const Size(800, 600),
+   double textScale = 1,
++  Brightness brightness = Brightness.light,
++  AppFormFactor formFactor = AppFormFactor.desktop,
+ }) => MaterialApp(
+   locale: locale,
+   localizationsDelegates: const [
+@@ -23,8 +28,8 @@ Widget _host(
+   ],
+   supportedLocales: StudioLocalizations.supportedLocales,
+   theme: WorkbenchTheme.from(
+-    ThemeData(useMaterial3: true),
+-    formFactor: AppFormFactor.desktop,
++    ThemeData(useMaterial3: true, brightness: brightness),
++    formFactor: formFactor,
+   ),
+   home: Scaffold(
+     body: MediaQuery(
+@@ -260,6 +265,172 @@ void main() {
+       },
+     );
+ 
++    for (final brightness in Brightness.values) {
++      for (final factor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
++        testWidgets('$brightness $factor bottom feedback stays in capsules', (
++          tester,
++        ) async {
++          final calls = <WorkbenchActivity>[];
++          await _pump(
++            tester,
++            _host(
++              WorkbenchActivityRail(
++                selected: WorkbenchActivity.settings,
++                onSelected: calls.add,
++              ),
++              brightness: brightness,
++              formFactor: factor,
++            ),
++          );
++          final scheme = Theme.of(
++            tester.element(find.byType(WorkbenchActivityRail)),
++          ).colorScheme;
++          final settings = find.byKey(
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.settings),
++          );
++          final avatar = find.byKey(WorkbenchActivityRail.avatarKey);
++          Finder capsule(Finder control) => find.descendant(
++            of: control,
++            matching: find.byKey(const ValueKey('workbench-rail-capsule')),
++          );
++          Finder layer(Finder control) => find.descendant(
++            of: control,
++            matching: find.byKey(const ValueKey('workbench-rail-state-layer')),
++          );
++          ShapeDecoration state(Finder control) =>
++              tester.widget<DecoratedBox>(layer(control)).decoration
++                  as ShapeDecoration;
++          for (final control in [settings, avatar]) {
++            expect(tester.getSize(control), const Size(80, 48));
++            expect(tester.getSize(capsule(control)), const Size(56, 32));
++            expect(tester.getSize(layer(control)), const Size(56, 32));
++            expect(state(control).color, scheme.onSurface.withValues(alpha: 0));
++            final button = tester.widget<TextButton>(
++              find.descendant(of: control, matching: find.byType(TextButton)),
++            );
++            for (final states in [
++              <WidgetState>{},
++              {WidgetState.hovered},
++              {WidgetState.focused},
++              {WidgetState.pressed},
++            ]) {
++              expect(
++                button.style!.overlayColor!.resolve(states),
++                Colors.transparent,
++              );
++              expect(
++                button.style!.backgroundColor!.resolve(states),
++                Colors.transparent,
++              );
++              expect(button.style!.side!.resolve(states), BorderSide.none);
++            }
++          }
++          final selected = tester.widget<AnimatedContainer>(capsule(settings));
++          final decoration = selected.decoration! as ShapeDecoration;
++          expect(decoration.color, scheme.secondaryContainer);
++          expect(decoration.shape, isA<StadiumBorder>());
++          final mouse = await tester.createGesture(
++            kind: PointerDeviceKind.mouse,
++          );
++          await mouse.addPointer(location: Offset.zero);
++          try {
++            await mouse.moveTo(tester.getCenter(settings));
++            await tester.pumpAndSettle();
++            expect(
++              state(settings).color,
++              scheme.onSurface.withValues(alpha: 0.08),
++            );
++            expect(tester.getSize(layer(settings)), const Size(56, 32));
++            await mouse.moveTo(Offset.zero);
++            await tester.pumpAndSettle();
++            expect(
++              state(settings).color,
++              scheme.onSurface.withValues(alpha: 0),
++            );
++            for (final control in [settings, avatar]) {
++              final press = await tester.startGesture(
++                tester.getCenter(control),
++              );
++              try {
++                // InkWell waits for the tap arena or this native deadline
++                // before exposing WidgetState.pressed. A zero-time pump is
++                // still before onTapDown when Tooltip competes in the arena.
++                await tester.pump(kPressTimeout);
++                expect(
++                  state(control).color,
++                  scheme.onSurface.withValues(alpha: 0.10),
++                );
++                expect(tester.getSize(layer(control)), const Size(56, 32));
++              } finally {
++                await press.cancel();
++                await tester.pumpAndSettle();
++              }
++              expect(
++                state(control).color,
++                scheme.onSurface.withValues(alpha: 0),
++              );
++              expect(calls, isEmpty);
++            }
++            final ink = find.descendant(
++              of: settings,
++              matching: find.byType(InkWell),
++            );
++            Focus.of(
++              tester.element(
++                find
++                    .descendant(of: ink, matching: find.byType(MouseRegion))
++                    .first,
++              ),
++            ).requestFocus();
++            tester.binding.focusManager.applyFocusChangesIfNeeded();
++            await tester.pumpAndSettle();
++            expect(
++              state(settings).color,
++              scheme.onSurface.withValues(alpha: 0.10),
++            );
++            expect(
++              (state(settings).shape as StadiumBorder).side.color,
++              scheme.primary,
++            );
++            expect(
++              find.byKey(const ValueKey('workbench-focus-outline')),
++              findsNothing,
++              reason: 'Bottom rail focus must not outline the whole 80dp row.',
++            );
++            // The visual capsule is small, but tablet-sized outer padding is
++            // still actionable and keyboard activation keeps working.
++            await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++            await tester.tapAt(tester.getTopLeft(avatar) + const Offset(2, 2));
++            await tester.pumpAndSettle();
++            expect(calls, [
++              WorkbenchActivity.settings,
++              WorkbenchActivity.profile,
++            ]);
++          } finally {
++            await mouse.removePointer();
++          }
++          await _pump(
++            tester,
++            _host(
++              WorkbenchActivityRail(
++                selected: WorkbenchActivity.profile,
++                onSelected: calls.add,
++              ),
++              brightness: brightness,
++              formFactor: factor,
++            ),
++          );
++          final profileDecoration =
++              tester.widget<AnimatedContainer>(capsule(avatar)).decoration!
++                  as ShapeDecoration;
++          expect(profileDecoration.color, scheme.secondaryContainer);
++          expect(profileDecoration.shape, isA<StadiumBorder>());
++          expect(tester.getSize(capsule(avatar)), const Size(56, 32));
++          expect(tester.takeException(), isNull);
++        });
++      }
++    }
++
+     for (final scale in [1.0, 2.0]) {
+       testWidgets(
+         'short rail scrolls and keeps bottom avatar reachable at $scale text',
+@@ -335,6 +506,207 @@ void main() {
+     );
+   });
+ 
++  // R5/V9, round 4: Explorer owns all project actions. The center is a
++  // read-only reminder, not a duplicate set of buttons or focus targets.
++  group('WorkbenchShortcutHints', () {
++    for (final brightness in Brightness.values) {
++      for (final factor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
++        testWidgets(
++          '$brightness $factor hints are muted, aligned and passive',
++          (tester) async {
++            await _pump(
++              tester,
++              _host(
++                // Observe only this subtree. The hints themselves need no
++                // Focus ancestor and must not create command focus targets.
++                Focus(
++                  canRequestFocus: false,
++                  skipTraversal: true,
++                  child: const WorkbenchShortcutHints(),
++                ),
++                brightness: brightness,
++                formFactor: factor,
++              ),
++            );
++            final hints = find.byType(WorkbenchShortcutHints);
++            final context = tester.element(hints);
++            final theme = Theme.of(context);
++            final table = find.byKey(
++              const ValueKey('workbench-shortcut-hints'),
++            );
++            final labels = [
++              'New project',
++              'Open folder',
++              'Clone repository',
++              'Explorer',
++              'Agents',
++              'Settings',
++              'Interface zoom',
++            ];
++            final keys = [
++              'Ctrl+Shift+N',
++              'Ctrl+O',
++              'Ctrl+Shift+G',
++              'Ctrl+Shift+E',
++              'Ctrl+Shift+A',
++              'Ctrl+,',
++              'Ctrl+= / Ctrl+-',
++            ];
++            expect(tester.widget<Table>(table).children, hasLength(7));
++            for (var index = 0; index < labels.length; index++) {
++              expect(find.text(labels[index]), findsOneWidget);
++              final key = find.text(shortcutLabel(keys[index]));
++              expect(key, findsOneWidget);
++              expect(
++                tester.getTopLeft(key).dx,
++                closeTo(
++                  tester.getTopLeft(find.text(shortcutLabel(keys.first))).dx,
++                  0.01,
++                ),
++              );
++              expect(
++                DefaultTextStyle.of(tester.element(key)).style.color,
++                theme.colorScheme.onSurfaceVariant,
++              );
++            }
++            expect(
++              find.descendant(of: hints, matching: find.byType(TextButton)),
++              findsNothing,
++            );
++            expect(
++              find.descendant(of: hints, matching: find.byType(IconButton)),
++              findsNothing,
++            );
++            expect(
++              find.descendant(of: hints, matching: find.byType(InkWell)),
++              findsNothing,
++            );
++            // A scroll view may expose scrolling gestures, but none of its
++            // hint text may acquire a command/tap semantics action.
++            final semantics = tester.ensureSemantics();
++            try {
++              await tester.pump();
++              for (final label in labels) {
++                expect(
++                  tester
++                      .getSemantics(find.text(label))
++                      .getSemanticsData()
++                      .hasAction(SemanticsAction.tap),
++                  isFalse,
++                );
++              }
++            } finally {
++              semantics.dispose();
++            }
++            final focus = Focus.of(context, createDependency: false);
++            expect(focus.traversalDescendants, isEmpty);
++            expect(
++              focus.descendants.where((node) => node.canRequestFocus),
++              isEmpty,
++            );
++            expect(tester.takeException(), isNull);
++          },
++        );
++      }
++    }
++
++    testWidgets('hints do not intercept Tab traversal or Enter activation', (
++      tester,
++    ) async {
++      final before = FocusNode();
++      final after = FocusNode();
++      addTearDown(before.dispose);
++      addTearDown(after.dispose);
++      final activated = <String>[];
++      await _pump(
++        tester,
++        _host(
++          Column(
++            children: [
++              TextButton(
++                focusNode: before,
++                onPressed: () => activated.add('before'),
++                child: const Text('Before hints'),
++              ),
++              const Expanded(child: WorkbenchShortcutHints()),
++              TextButton(
++                focusNode: after,
++                onPressed: () => activated.add('after'),
++                child: const Text('After hints'),
++              ),
++            ],
++          ),
++        ),
++      );
++      before.requestFocus();
++      tester.binding.focusManager.applyFocusChangesIfNeeded();
++      await tester.pumpAndSettle();
++      expect(before.hasPrimaryFocus, isTrue);
++      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
++      await tester.pumpAndSettle();
++      expect(after.hasPrimaryFocus, isTrue);
++      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++      await tester.pumpAndSettle();
++      expect(activated, ['after']);
++      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
++      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
++      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
++      await tester.pumpAndSettle();
++      expect(before.hasPrimaryFocus, isTrue);
++      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++      await tester.pumpAndSettle();
++      expect(activated, ['after', 'before']);
++      expect(tester.takeException(), isNull);
++    });
++
++    testWidgets(
++      'Chinese hints localize and offline mode hides unavailable clone',
++      (tester) async {
++        await _pump(
++          tester,
++          _host(
++            const WorkbenchShortcutHints(includeClone: false),
++            locale: const Locale('zh', 'CN'),
++          ),
++        );
++        for (final label in ['新建项目', '打开文件夹', '资源管理器', '设置', '界面缩放']) {
++          expect(find.text(label), findsOneWidget);
++        }
++        expect(find.text('克隆仓库'), findsNothing);
++        expect(find.text(shortcutLabel('Ctrl+Shift+G')), findsNothing);
++      },
++    );
++
++    testWidgets('narrow hint list wraps and scrolls without overflow', (
++      tester,
++    ) async {
++      await _pump(
++        tester,
++        _host(
++          const WorkbenchShortcutHints(),
++          size: const Size(260, 180),
++          textScale: 2,
++        ),
++      );
++      expect(find.byType(SingleChildScrollView), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    });
++
++    test('platform label helper supplies command symbols for every hint', () {
++      for (final keys in [
++        'Ctrl+Shift+N',
++        'Ctrl+O',
++        'Ctrl+Shift+G',
++        'Ctrl+Shift+E',
++        'Ctrl+Shift+A',
++        'Ctrl+,',
++        'Ctrl+= / Ctrl+-',
++      ]) {
++        expect(shortcutLabel(keys, macOS: true), keys.replaceAll('Ctrl', '⌘'));
++      }
++    });
++  });
++
+   // R21/V9: replace one empty-state button with Start and Recent projects.
+   group('WorkbenchWelcome', () {
+     testWidgets('start actions dispatch and show platform shortcuts', (
+diff --git a/test/workbench_explorer_test.dart b/test/workbench_explorer_test.dart
+index 5ae46b6668d344eabac1d212a040e30c1c8d895d..82f7a8809002a6272dfadde000c7b3d4e38ad19b 100644
+--- a/test/workbench_explorer_test.dart
++++ b/test/workbench_explorer_test.dart
+@@ -5,8 +5,9 @@ import 'package:qfli_studio_core/shell/workbench_chrome.dart';
+ import 'package:qfli_studio_core/shell/workbench_explorer.dart';
+ 
+ class _Probe extends StatefulWidget {
+-  const _Probe(this.label);
++  const _Probe(this.label, {this.onBack});
+   final String label;
++  final VoidCallback? onBack;
+ 
+   @override
+   State<_Probe> createState() => _ProbeState();
+@@ -16,9 +17,20 @@ class _ProbeState extends State<_Probe> {
+   int count = 0;
+ 
+   @override
+-  Widget build(BuildContext context) => TextButton(
+-    onPressed: () => setState(() => count++),
+-    child: Text('${widget.label}: $count'),
++  Widget build(BuildContext context) => Column(
++    children: [
++      // R5/R14: registered files content owns its header, including Back.
++      if (widget.onBack != null)
++        IconButton(
++          key: WorkbenchExplorer.backKey,
++          onPressed: widget.onBack,
++          icon: const Icon(Icons.arrow_back),
++        ),
++      TextButton(
++        onPressed: () => setState(() => count++),
++        child: Text('${widget.label}: $count'),
++      ),
++    ],
+   );
+ }
+ 
+@@ -45,7 +57,7 @@ void main() {
+                 controller: controller,
+                 projectName: 'Alpha',
+                 projects: const _Probe('Projects'),
+-                files: const _Probe('Files'),
++                files: _Probe('Files', onBack: controller.showProjects),
+               ),
+             ),
+           ),
+@@ -75,7 +87,9 @@ void main() {
+         ),
+         same(projects),
+       );
+-      expect(find.text('Alpha'), findsOneWidget);
++      // R5: the Explorer transition no longer repeats a project title above
++      // the FileExplorer header.
++      expect(find.text('Alpha'), findsNothing);
+       await tester.tap(find.text('Files: 0'));
+       final files = tester.state(find.byType(_Probe));
+       final owner = Object();
+diff --git a/test/workbench_menu_surface_test.dart b/test/workbench_menu_surface_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..99526b8eb74c290bc03d8296064d3202271b6ef8
+--- /dev/null
++++ b/test/workbench_menu_surface_test.dart
+@@ -0,0 +1,368 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/chat/agent_context_indicator.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/workbench_theme.dart';
++import 'package:qfli_studio_core/vibe_coding/agent_context_usage.dart';
++
++Finder _surfaceFor(Finder item, ColorScheme scheme) => find
++    .ancestor(
++      of: item,
++      matching: find.byWidgetPredicate(
++        (widget) =>
++            widget is Material && widget.color == scheme.surfaceContainer,
++      ),
++    )
++    .first;
++
++void _expectSurface(
++  WidgetTester tester,
++  Finder item,
++  ColorScheme scheme,
++  Rect viewport,
++) {
++  final surface = _surfaceFor(item, scheme);
++  expect(surface, findsOneWidget);
++  final material = tester.widget<Material>(surface);
++  expect(material.elevation, 2);
++  expect(material.shadowColor, scheme.shadow);
++  expect(material.surfaceTintColor, Colors.transparent);
++  final shape = material.shape! as RoundedRectangleBorder;
++  expect(shape.side, BorderSide.none);
++  expect(shape.borderRadius, BorderRadius.circular(4));
++  // Verify the painted surface, not its transparent menu-only layout gutter.
++  // The pinned SDK's reservedPadding limits size but not fallback placement.
++  final surfaceRect = tester.getRect(surface);
++  final painted = shape
++      .getOuterPath(Offset.zero & surfaceRect.size)
++      .getBounds()
++      .shift(surfaceRect.topLeft);
++  expect(painted.left, greaterThanOrEqualTo(viewport.left + 8));
++  expect(painted.top, greaterThanOrEqualTo(viewport.top + 8));
++  expect(painted.right, lessThanOrEqualTo(viewport.right - 8));
++  expect(painted.bottom, lessThanOrEqualTo(viewport.bottom - 8));
++  final itemRect = tester.getRect(item);
++  expect(itemRect.left, closeTo(painted.left, 0.01));
++  expect(itemRect.right, closeTo(painted.right, 0.01));
++  expect(itemRect.top - painted.top, closeTo(8, 0.01));
++  expect(painted.bottom - itemRect.bottom, closeTo(8, 0.01));
++}
++
++void main() {
++  // R21/V6: native MenuAnchor panels inherit a borderless MD3 surface even
++  // through editor overlays. Keep true shadows in this visual regression suite.
++  for (final brightness in Brightness.values) {
++    for (final factor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
++      testWidgets('$brightness $factor menu surfaces stay inside every edge', (
++        tester,
++      ) async {
++        const size = Size(640, 480);
++        tester.view.physicalSize = size;
++        tester.view.devicePixelRatio = 1;
++        final shadows = debugDisableShadows;
++        debugDisableShadows = false;
++        final focus = FocusNode();
++        final controller = MenuController();
++        final theme = WorkbenchTheme.from(
++          ThemeData(useMaterial3: true, brightness: brightness),
++          formFactor: factor,
++        );
++        final scheme = theme.colorScheme;
++        const itemKey = ValueKey('menu-surface-item');
++        const anchorKey = ValueKey('menu-surface-anchor');
++        try {
++          for (final corner in [
++            Alignment.topLeft,
++            Alignment.topRight,
++            Alignment.bottomLeft,
++            Alignment.bottomRight,
++          ]) {
++            // Include an editor-like nested overlay, not only the root route.
++            await tester.pumpWidget(
++              MaterialApp(
++                theme: theme,
++                home: Scaffold(
++                  body: Overlay.wrap(
++                    child: Align(
++                      alignment: corner,
++                      child: MenuAnchor(
++                        controller: controller,
++                        menuChildren: [
++                          MenuItemButton(
++                            key: itemKey,
++                            focusNode: focus,
++                            onPressed: () {},
++                            child: const Text('Command'),
++                          ),
++                        ],
++                        builder: (context, controller, _) => IconButton(
++                          key: anchorKey,
++                          onPressed: controller.open,
++                          icon: const Icon(Icons.more_vert),
++                        ),
++                      ),
++                    ),
++                  ),
++                ),
++              ),
++            );
++            await tester.tap(find.byKey(anchorKey));
++            await tester.pumpAndSettle();
++            final item = find.byKey(itemKey);
++            expect(controller.isOpen, isTrue);
++            _expectSurface(tester, item, scheme, Offset.zero & size);
++            expect(
++              tester.getSize(item).height,
++              factor == AppFormFactor.desktop ? 32 : 48,
++            );
++            focus.requestFocus();
++            tester.binding.focusManager.applyFocusChangesIfNeeded();
++            await tester.pumpAndSettle();
++            expect(focus.hasPrimaryFocus, isTrue);
++            _expectSurface(tester, item, scheme, Offset.zero & size);
++            expect(
++              find.byKey(const ValueKey('workbench-focus-outline')),
++              findsNothing,
++              reason: 'Keyboard focus belongs to a menu item, not the panel.',
++            );
++            await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++            await tester.pumpAndSettle();
++            expect(controller.isOpen, isFalse);
++            expect(find.byKey(itemKey), findsNothing);
++            expect(tester.takeException(), isNull);
++          }
++        } finally {
++          await tester.pumpWidget(const SizedBox.shrink());
++          focus.dispose();
++          debugDisableShadows = shadows;
++          tester.view.resetPhysicalSize();
++          tester.view.resetDevicePixelRatio();
++        }
++      });
++    }
++  }
++
++  testWidgets('custom context popover keeps the inherited surface gutter', (
++    tester,
++  ) async {
++    const size = Size(640, 480);
++    tester.view.physicalSize = size;
++    tester.view.devicePixelRatio = 1;
++    final shell = LargeScreenController();
++    final theme = WorkbenchTheme.from(
++      ThemeData(useMaterial3: true),
++      formFactor: AppFormFactor.desktop,
++    );
++    try {
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: theme,
++          home: LargeScreenScope(
++            controller: shell,
++            formFactor: AppFormFactor.desktop,
++            child: const Scaffold(
++              body: Align(
++                alignment: Alignment.topLeft,
++                child: AgentContextIndicator(
++                  usage: AgentContextUsage(estimatedInputTokens: 900),
++                  reportedCapacity: 1000,
++                ),
++              ),
++            ),
++          ),
++        ),
++      );
++      await tester.tap(find.byKey(const ValueKey('agent-context-capacity')));
++      await tester.pumpAndSettle();
++
++      final content = find.byKey(
++        const ValueKey('agent-context-capacity-menu-content'),
++      );
++      expect(content, findsOneWidget);
++      final menu = find
++          .ancestor(
++            of: content,
++            matching: find.byWidgetPredicate(
++              (widget) =>
++                  widget is Material &&
++                  widget.color == theme.colorScheme.surfaceContainerHigh &&
++                  widget.elevation == 2,
++            ),
++          )
++          .first;
++      expect(menu, findsOneWidget);
++      final material = tester.widget<Material>(menu);
++      final shape = material.shape! as RoundedRectangleBorder;
++      final rect = tester.getRect(menu);
++      final visible = shape
++          .getOuterPath(Offset.zero & rect.size)
++          .getBounds()
++          .shift(rect.topLeft);
++      expect(visible.left, greaterThanOrEqualTo(8));
++      expect(visible.top, greaterThanOrEqualTo(8));
++      expect(visible.right, lessThanOrEqualTo(size.width - 8));
++      expect(visible.bottom, lessThanOrEqualTo(size.height - 8));
++      // The MenuAnchor scrollbar owns only the outer menu position. Custom
++      // popover content must scroll independently, including on native mobile
++      // platforms that automatically inherit PrimaryScrollController.
++      final menuScroll = PrimaryScrollController.of(tester.element(content));
++      final contentScroll = tester.state<ScrollableState>(
++        find.descendant(of: content, matching: find.byType(Scrollable)),
++      );
++      expect(menuScroll.positions, hasLength(1));
++      expect(contentScroll.position, isNot(same(menuScroll.position)));
++      final contentRect = tester.getRect(content);
++      expect(contentRect.left - visible.left, closeTo(0, 0.01));
++      expect(visible.right - contentRect.right, closeTo(0, 0.01));
++      expect(contentRect.top - visible.top, closeTo(8, 0.01));
++      expect(visible.bottom - contentRect.bottom, closeTo(8, 0.01));
++      // Force overflow independently of font metrics, without changing the
++      // original viewport's surface and gutter assertions above. Close and
++      // reopen through the anchor since native menus dismiss during resize.
++      await tester.tap(find.byKey(const ValueKey('agent-context-capacity')));
++      await tester.pumpAndSettle();
++      expect(content, findsNothing);
++      tester.view.physicalSize = const Size(640, 320);
++      await tester.pumpAndSettle();
++      await tester.tap(find.byKey(const ValueKey('agent-context-capacity')));
++      await tester.pumpAndSettle();
++      expect(content, findsOneWidget);
++      final compactMenuScroll = PrimaryScrollController.of(
++        tester.element(content),
++      );
++      final compactContentScroll = tester.state<ScrollableState>(
++        find.descendant(of: content, matching: find.byType(Scrollable)),
++      );
++      expect(compactMenuScroll.positions, hasLength(1));
++      expect(
++        compactContentScroll.position,
++        isNot(same(compactMenuScroll.position)),
++      );
++      expect(compactContentScroll.position.maxScrollExtent, greaterThan(0));
++      final menuOffset = compactMenuScroll.position.pixels;
++      await tester.drag(content, const Offset(0, -80));
++      await tester.pumpAndSettle();
++      expect(compactContentScroll.position.pixels, greaterThan(0));
++      expect(compactMenuScroll.position.pixels, menuOffset);
++      expect(compactMenuScroll.positions, hasLength(1));
++      expect(content, findsOneWidget);
++      expect(tester.takeException(), isNull);
++    } finally {
++      await tester.pumpWidget(const SizedBox.shrink());
++      shell.dispose();
++      tester.view.resetPhysicalSize();
++      tester.view.resetDevicePixelRatio();
++    }
++  });
++
++  testWidgets('context menu placement and submenus share the surface gutter', (
++    tester,
++  ) async {
++    const size = Size(640, 480);
++    tester.view.physicalSize = size;
++    tester.view.devicePixelRatio = 1;
++    final controller = MenuController();
++    final base = ThemeData(useMaterial3: true);
++    final theme = WorkbenchTheme.from(base, formFactor: AppFormFactor.desktop);
++    final style = theme.menuTheme.style!;
++    final shape = style.shape!.resolve({})!;
++    const bounds = Rect.fromLTWH(0, 0, 240, 160);
++    expect(shape.getOuterPath(bounds).getBounds(), bounds.deflate(8));
++    expect(
++      shape.copyWith(side: BorderSide.none).getOuterPath(bounds).getBounds(),
++      bounds.deflate(8),
++    );
++    expect(shape.scale(1).getOuterPath(bounds).getBounds(), bounds.deflate(8));
++    expect(
++      ShapeBorder.lerp(
++        shape,
++        shape.copyWith(side: BorderSide.none),
++        0.5,
++      )!.getOuterPath(bounds).getBounds(),
++      bounds.deflate(8),
++    );
++    expect(base.menuTheme.style, isNull);
++    const itemKey = ValueKey('context-menu-item');
++    const nestedKey = ValueKey('submenu-item');
++    try {
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: theme,
++          home: Scaffold(
++            body: MenuAnchor(
++              controller: controller,
++              menuChildren: [
++                MenuItemButton(
++                  key: itemKey,
++                  onPressed: () {},
++                  child: const Text('Context command'),
++                ),
++              ],
++              child: const SizedBox.expand(),
++            ),
++          ),
++        ),
++      );
++      for (final position in [
++        Offset.zero,
++        const Offset(639, 0),
++        const Offset(0, 479),
++        const Offset(639, 479),
++      ]) {
++        controller.open(position: position);
++        await tester.pumpAndSettle();
++        _expectSurface(
++          tester,
++          find.byKey(itemKey),
++          theme.colorScheme,
++          Offset.zero & size,
++        );
++        controller.close();
++        await tester.pumpAndSettle();
++      }
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: theme,
++          home: Scaffold(
++            body: Align(
++              alignment: Alignment.topRight,
++              child: MenuAnchor(
++                controller: controller,
++                menuChildren: [
++                  SubmenuButton(
++                    menuChildren: [
++                      MenuItemButton(
++                        key: nestedKey,
++                        onPressed: () {},
++                        child: const Text('Nested command'),
++                      ),
++                    ],
++                    child: const Text('Submenu'),
++                  ),
++                ],
++                child: const SizedBox(width: 48, height: 48),
++              ),
++            ),
++          ),
++        ),
++      );
++      controller.open();
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Submenu'));
++      await tester.pumpAndSettle();
++      _expectSurface(
++        tester,
++        find.byKey(nestedKey),
++        theme.colorScheme,
++        Offset.zero & size,
++      );
++      expect(tester.takeException(), isNull);
++    } finally {
++      await tester.pumpWidget(const SizedBox.shrink());
++      tester.view.resetPhysicalSize();
++      tester.view.resetDevicePixelRatio();
++    }
++  });
++}

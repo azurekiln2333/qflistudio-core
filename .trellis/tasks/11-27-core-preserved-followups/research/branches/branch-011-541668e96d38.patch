@@ -1,0 +1,193 @@
+diff --git a/lib/pages/settings_page.dart b/lib/pages/settings_page.dart
+index 7ab7b51a55a27eddd1ad290e4d5c491cb2cfee89..63e1a08bdc9e337eb6694fa0c9437f83a3f9b73d 100644
+--- a/lib/pages/settings_page.dart
++++ b/lib/pages/settings_page.dart
+@@ -82,7 +82,8 @@ class _SettingsPageState extends State<SettingsPage> {
+   /// 所以三个入口都在这一屏直接可见，不再嵌二级页面。
+   Widget _accountSection(BuildContext context, {Key? key}) {
+     final auth = _auth!;
+-    return SettingsSection(
++    return _categorySection(
++      context,
+       key: key,
+       title: '账户与隐私',
+       children: [
+@@ -129,7 +130,8 @@ class _SettingsPageState extends State<SettingsPage> {
+   /// 「设备与远程」：配对、已绑定电脑和撤销。
+   ///
+   /// 配对不再占用独立首页，会话已并入编辑器页的 Agents 面板。
+-  Widget _devicesSection(BuildContext context, {Key? key}) => SettingsSection(
++  Widget _devicesSection(BuildContext context, {Key? key}) => _categorySection(
++    context,
+     key: key,
+     title: '设备与远程',
+     children: [
+@@ -278,16 +280,21 @@ class _SettingsPageState extends State<SettingsPage> {
+             if (largeScreen) _settingsCategoryRail(context),
+             Expanded(
+               child: Align(
+-                alignment: Alignment.topCenter,
++                alignment: largeScreen
++                    ? Alignment.topLeft
++                    : Alignment.topCenter,
+                 child: ConstrainedBox(
++                  key: largeScreen
++                      ? const ValueKey('settings-detail-container')
++                      : null,
+                   constraints: BoxConstraints(
+                     maxWidth: largeScreen ? 720 : 840,
+                   ),
+                   child: ListView(
+                     padding: EdgeInsets.fromLTRB(
+-                      largeScreen ? 24 : 16,
+-                      largeScreen ? 20 : 12,
+-                      largeScreen ? 24 : 16,
++                      largeScreen ? 32 : 16,
++                      largeScreen ? 32 : 12,
++                      largeScreen ? 32 : 16,
+                       32,
+                     ),
+                     children: [
+@@ -295,12 +302,14 @@ class _SettingsPageState extends State<SettingsPage> {
+                         Padding(
+                           padding: const EdgeInsets.only(bottom: 24),
+                           child: Text(
+-                            '设置',
++                            _categoryTitle(_selectedCategory),
++                            key: const ValueKey('settings-category-heading'),
+                             style: Theme.of(context).textTheme.headlineSmall,
+                           ),
+                         ),
+                       if (showCategory(0))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[0],
+                           title: '外观与体验',
+                           children: [
+@@ -331,7 +340,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                           ],
+                         ),
+                       if (showCategory(1))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[1],
+                           title: '编辑器',
+                           children: [
+@@ -396,7 +406,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                       if (showCategory(3) &&
+                           widget.showAi &&
+                           _customAiEndpointAllowed)
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[3],
+                           title: 'AI 助手',
+                           children: [
+@@ -430,7 +441,8 @@ class _SettingsPageState extends State<SettingsPage> {
+                       if (showCategory(5) && RemoteComputerPage.isSupported)
+                         _devicesSection(context, key: _sectionKeys[5]),
+                       if (showCategory(6))
+-                        SettingsSection(
++                        _categorySection(
++                          context,
+                           key: _sectionKeys[6],
+                           title: '数据与存储',
+                           children: [
+@@ -500,6 +512,36 @@ class _SettingsPageState extends State<SettingsPage> {
+     );
+   }
+ 
++  Widget _categorySection(
++    BuildContext context, {
++    Key? key,
++    required String title,
++    required List<Widget> children,
++  }) {
++    if (LargeScreenScope.maybeOf(context) != null) {
++      return Padding(
++        key: key,
++        padding: const EdgeInsets.only(bottom: 24),
++        child: Card.filled(
++          margin: EdgeInsets.zero,
++          child: Column(children: children),
++        ),
++      );
++    }
++    return SettingsSection(key: key, title: title, children: children);
++  }
++
++  String _categoryTitle(int index) => switch (index) {
++    0 => '外观与体验',
++    1 => '编辑器',
++    2 => '快捷键',
++    3 => 'AI 助手',
++    4 => '账户与隐私',
++    5 => '设备与远程',
++    6 => '数据与存储',
++    _ => '设置',
++  };
++
+   Widget _settingsCategoryRail(BuildContext context) {
+     final theme = Theme.of(context);
+     final entries = <(String, IconData, int)>[
+@@ -602,7 +644,8 @@ class _SettingsPageState extends State<SettingsPage> {
+     ),
+   );
+ 
+-  Widget _shortcutSection({Key? key}) => SettingsSection(
++  Widget _shortcutSection({Key? key}) => _categorySection(
++    context,
+     key: key,
+     title: '快捷键',
+     children: [
+diff --git a/test/pi_d_ui_workbench_test.dart b/test/pi_d_ui_workbench_test.dart
+index b28bd31016acd448061166d43723739b8ce15f96..53002b626543b5c1e775015c42f51daa2804146b 100644
+--- a/test/pi_d_ui_workbench_test.dart
++++ b/test/pi_d_ui_workbench_test.dart
+@@ -76,15 +76,27 @@ void main() {
+     );
+     expect(rail, findsWidgets);
+     expect(find.byType(AppBar), findsNothing);
+-    // 设置 repeats on a large screen: rail heading, page heading, and one
+-    // shortcut row title. Assert the rail heading specifically, since a bare
+-    // text count would pin unrelated shortcut content.
++    final categoryHeading = find.byKey(
++      const ValueKey('settings-category-heading'),
++    );
++    expect(categoryHeading, findsOneWidget);
++    final heading = tester.widget<Text>(categoryHeading);
++    expect(heading.data, '外观与体验');
++    // The detail headline replaces the removed page title and section label.
++    // Only the rail label and this heading identify the selected category.
++    expect(find.text('外观与体验'), findsNWidgets(2));
++    expect(find.text('设置'), findsOneWidget);
+     expect(
+-      find.descendant(
+-        of: find.byType(ListTile).first,
+-        matching: find.text('外观与体验'),
+-      ),
+-      findsOneWidget,
++      heading.style,
++      Theme.of(tester.element(categoryHeading)).textTheme.headlineSmall,
++    );
++    expect(tester.getTopLeft(categoryHeading).dx, closeTo(272, 1));
++    expect(tester.getTopLeft(categoryHeading).dy, closeTo(32, 1));
++    expect(
++      tester
++          .getSize(find.byKey(const ValueKey('settings-detail-container')))
++          .width,
++      lessThanOrEqualTo(720),
+     );
+     expect(
+       tester.getSize(find.byKey(const ValueKey('settings-ui-zoom'))).width,
+@@ -101,6 +113,8 @@ void main() {
+     await tester.pumpAndSettle();
+     expect(find.text('外观'), findsNothing);
+     expect(find.text('编辑器字体'), findsOneWidget);
++    expect(tester.widget<Text>(categoryHeading).data, '编辑器');
++    expect(find.text('编辑器'), findsNWidgets(2));
+ 
+     final dataCategory = find.ancestor(
+       of: find.text('数据与存储').first,

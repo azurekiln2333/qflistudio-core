@@ -1,0 +1,189 @@
+diff --git a/lib/harness/ui/agents_entry.dart b/lib/harness/ui/agents_entry.dart
+index bd23c9b8511808bae196259d8d6248419e3b0cf4..f39085d665f5d4f15e056980342ec6d17fed3489 100644
+--- a/lib/harness/ui/agents_entry.dart
++++ b/lib/harness/ui/agents_entry.dart
+@@ -243,30 +243,47 @@ class _SessionOverlay extends StatefulWidget {
+ }
+ 
+ class _SessionOverlayState extends State<_SessionOverlay> {
+-  late final HarnessHub _hub;
+-  late final bool _ownsHub;
++  late HarnessHub _hub;
++  late bool _ownsHub;
+ 
+   @override
+   void initState() {
+     super.initState();
+-    _ownsHub = widget.hub == null;
+-    _hub =
+-        widget.hub ??
+-        HarnessHub(
+-          hosts: HarnessHosts.build(
+-            HubHostContext(
+-              auth: widget.auth,
+-              projectStore: widget.store,
+-              settings: widget.settings,
+-              projectRoot: '',
+-              desktop: AppPaths.isDesktop,
+-            ),
+-          ),
+-          desktop: AppPaths.isDesktop,
+-          hostBuildError: HarnessHosts.lastBuildError,
+-        );
++    _replaceHub(widget.hub);
++  }
++
++  @override
++  void didUpdateWidget(_SessionOverlay oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (!identical(oldWidget.hub, widget.hub)) _replaceHub(widget.hub);
++  }
++
++  void _replaceHub(HarnessHub? supplied) {
++    final oldHub = _hubOrNull;
++    final oldOwned = _hubInitialized && _ownsHub;
++    _hub = supplied ?? _createFallbackHub();
++    _ownsHub = supplied == null;
++    if (oldOwned && oldHub != null) oldHub.dispose();
++    _hubInitialized = true;
+   }
+ 
++  bool _hubInitialized = false;
++  HarnessHub? get _hubOrNull => _hubInitialized ? _hub : null;
++
++  HarnessHub _createFallbackHub() => HarnessHub(
++    hosts: HarnessHosts.build(
++      HubHostContext(
++        auth: widget.auth,
++        projectStore: widget.store,
++        settings: widget.settings,
++        projectRoot: '',
++        desktop: AppPaths.isDesktop,
++      ),
++    ),
++    desktop: AppPaths.isDesktop,
++    hostBuildError: HarnessHosts.lastBuildError,
++  );
++
+   @override
+   void dispose() {
+     if (_ownsHub) _hub.dispose();
+diff --git a/test/workbench_session_view_test.dart b/test/workbench_session_view_test.dart
+index 6a675de97abdf51ccca9991be29591788ad91584..65a7ae7806f4ee1e58ff18dde5dee373c7336aa9 100644
+--- a/test/workbench_session_view_test.dart
++++ b/test/workbench_session_view_test.dart
+@@ -5,8 +5,13 @@ import 'package:flutter_test/flutter_test.dart';
+ import 'package:qfli_studio_core/harness/harness_host.dart';
+ import 'package:qfli_studio_core/harness/hub/agents_index.dart';
+ import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/harness/ui/agents_entry.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
+ import 'package:qfli_studio_core/shell/workbench_session_view.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
+ 
+ import 'support/fake_harness_host.dart';
+ 
+@@ -129,6 +134,100 @@ void main() {
+     },
+   );
+ 
++  testWidgets('center overlay follows a replacement shared hub', (
++    tester,
++  ) async {
++    final firstHandle = FakeSessionHandle(info: session);
++    final secondHandle = FakeSessionHandle(info: session);
++    FakeHarnessHost hostFor(FakeSessionHandle handle) => FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) async => handle,
++    );
++    final firstHub = HarnessHub(hosts: [hostFor(firstHandle)], desktop: true);
++    final secondHub = HarnessHub(hosts: [hostFor(secondHandle)], desktop: true);
++    final layout = LargeScreenController();
++    final auth = AuthStore();
++    final store = ProjectStore();
++    final settings = SettingsStore();
++    var selectedHub = firstHub;
++    Future<void>? pending;
++    await tester.pumpWidget(
++      MaterialApp(
++        home: LargeScreenScope(
++          controller: layout,
++          child: Scaffold(
++            body: Builder(
++              builder: (context) => Column(
++                children: [
++                  TextButton(
++                    onPressed: () {
++                      pending = openAgentSession(
++                        context,
++                        row: AgentsIndexRow(
++                          session: session,
++                          hostLabel: 'Local',
++                          hostKind: HarnessHostKind.local,
++                        ),
++                        auth: auth,
++                        store: store,
++                        settings: settings,
++                        harnessHub: selectedHub,
++                      );
++                    },
++                    child: const Text('Open session'),
++                  ),
++                  Expanded(
++                    child: ListenableBuilder(
++                      listenable: layout,
++                      builder: (context, _) {
++                        final overlay = layout.centerOverlay;
++                        return overlay == null
++                            ? const SizedBox.shrink()
++                            : Builder(builder: overlay);
++                      },
++                    ),
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++
++    Future<void> openSelectedHub() async {
++      await tester.runAsync(() async {
++        await tester.tap(find.text('Open session'));
++        await pending;
++      });
++      await tester.pump();
++      await tester.pump();
++    }
++
++    await openSelectedHub();
++    expect(firstHub.activeHandle, same(firstHandle));
++    selectedHub = secondHub;
++    await openSelectedHub();
++
++    expect(firstHandle.detachCount, 1);
++    expect(firstHub.activeHandle, isNull);
++    expect(secondHub.activeHandle, same(secondHandle));
++    expect(find.byType(HubChatView), findsOneWidget);
++    expect(tester.takeException(), isNull);
++
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    layout.dispose();
++    store.dispose();
++    auth.dispose();
++    settings.dispose();
++    await firstHub.shutdown();
++    await secondHub.shutdown();
++  });
++
+   testWidgets('removing overlay does not close a newer shared-hub session', (
+     tester,
+   ) async {

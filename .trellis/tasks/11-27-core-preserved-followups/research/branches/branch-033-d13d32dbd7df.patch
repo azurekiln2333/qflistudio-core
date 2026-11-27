@@ -1,0 +1,21 @@
+diff --git a/lib/trellis/trellis_commands.dart b/lib/trellis/trellis_commands.dart
+index 51ff3aac726a48ae6bb7a7e8313e72845b6886a2..fe57f57c1ababe155a4c18dcf03b0e9dab61a3fc 100644
+--- a/lib/trellis/trellis_commands.dart
++++ b/lib/trellis/trellis_commands.dart
+@@ -11,6 +11,7 @@ import 'dart:io';
+ import 'package:path/path.dart' as p;
+ 
+ import '../vibe_coding/vibe_skills.dart';
++import 'trellis_project.dart';
+ 
+ /// 展开后的指令上限（字符）。
+ const int kTrellisCommandMaxChars = 8 * 1024;
+@@ -111,7 +112,7 @@ Future<String?> routeTrellisSlashCommand(
+ }) async {
+   final command = matchTrellisSlashCommand(input);
+   if (command == null) return null;
+-  if (!Directory(p.join(projectRoot, '.trellis')).existsSync()) return null;
++  if (!TrellisProject.hasWorkflow(projectRoot)) return null;
+   final extra = trellisCommandArguments(command, input);
+   final body =
+       await _skillBody(command, skills) ??

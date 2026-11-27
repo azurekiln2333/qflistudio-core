@@ -1,0 +1,227 @@
+diff --git a/test/screenshots/workbench_screenshots_test.dart b/test/screenshots/workbench_screenshots_test.dart
+index 6792dce67af5c52036e7bcc1e74ece9fb5ef3dff..0c05d82c88b1dd2e0a8edbc3af80ebdc57e11f4f 100644
+--- a/test/screenshots/workbench_screenshots_test.dart
++++ b/test/screenshots/workbench_screenshots_test.dart
+@@ -125,15 +125,19 @@ Future<void> _configuration(
+       configuration.factor == AppFormFactor.desktop,
+     );
+     final stem = '${configuration.name}-$theme';
+-    final explorer = WorkbenchActivityRail.activityKey(
+-      WorkbenchActivity.explorer,
++    final explorer = find.byKey(
++      WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
+     );
++    expect(find.text('资源管理器'), findsOneWidget);
+ 
+     // R5/V9: Start/Recent is visible only while the Explorer panel is hidden.
+-    await _tap(tester, find.byKey(explorer));
++    await _tap(tester, explorer);
++    expect(layout.sidebarVisible, isFalse);
+     expect(find.byType(WorkbenchWelcome), findsOneWidget);
+     await _capture(tester, '$stem-welcome.png');
+-    await _tap(tester, find.byKey(explorer));
++    await _tap(tester, explorer);
++    expect(layout.explorerPage, ExplorerPage.projects);
++    expect(layout.sidebarVisible, isTrue);
+     final added = await tester.runAsync(
+       () => fixture.store.addExisting(fixture.sample.path),
+     );
+@@ -148,21 +152,29 @@ Future<void> _configuration(
+     );
+     await _capture(tester, '$stem-explorer-projects.png');
+ 
+-    await _tap(
+-      tester,
+-      find.descendant(
+-        of: find.byType(HomeTab),
+-        matching: find.text('Screenshot Sample'),
+-      ),
++    await _tap(tester, find.byKey(ValueKey('workbench-project-${project.id}')));
++    final sourceFile = find.descendant(
++      of: find.byType(FileExplorer),
++      matching: find.text('main.dart'),
+     );
++    // A new project has no saved editor tabs. Open its real file-tree entry.
+     await _wait(
+       tester,
+       () =>
+           find.byType(EditorPage).evaluate().length == 1 &&
+-          _editor(tester).files.isNotEmpty,
++          sourceFile.evaluate().length == 1,
++      '$stem file tree',
+     );
+-    layout.showFiles();
+-    await _settle(tester);
++    expect(layout.explorerPage, ExplorerPage.files);
++    await _tap(tester, sourceFile);
++    await _wait(
++      tester,
++      () =>
++          _editor(tester).current?.name == 'main.dart' &&
++          find.byType(CodeEditor).evaluate().length == 1,
++      '$stem open source file',
++    );
++    final retainedEditor = tester.state(find.byType(EditorPage));
+     expect(find.byType(FileExplorer), findsOneWidget);
+     expect(find.byType(CodeEditor), findsOneWidget);
+     await _capture(tester, '$stem-explorer-files-editor.png');
+@@ -185,8 +197,10 @@ Future<void> _configuration(
+       tester,
+       () =>
+           identical(fixture.hub.activeHandle, fixture.handle) &&
++          find.byType(HubChatView).evaluate().length == 1 &&
+           (configuration.size.width < 1100 ||
+               find.byType(AgentDock).evaluate().isNotEmpty),
++      '$stem Agent conversation',
+     );
+     fixture.handle.addEvent(
+       TranscriptEvent(
+@@ -207,27 +221,35 @@ Future<void> _configuration(
+       tester,
+       find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.settings)),
+     );
++    expect(layout.activity, WorkbenchActivity.settings);
+     expect(find.byType(SettingsPage), findsOneWidget);
++    final appearanceCategory = find.widgetWithText(ListTile, '外观与体验');
++    expect(appearanceCategory, findsOneWidget);
++    expect(tester.widget<ListTile>(appearanceCategory).selected, isTrue);
+     expect(find.byKey(const ValueKey('settings-ui-zoom')), findsOneWidget);
+     await _capture(tester, '$stem-settings.png');
+ 
+-    await _tap(tester, find.byKey(explorer));
++    await _tap(tester, explorer);
+     if (layout.sidebarVisible) layout.toggleSidebar();
+     await _settle(tester);
+     if (find.byType(CodeEditor).evaluate().isEmpty) {
+       await _tap(tester, find.byKey(const ValueKey('editor-agent-toggle')));
+     }
++    expect(tester.state(find.byType(EditorPage)), same(retainedEditor));
++    expect(find.byType(CodeEditor), findsOneWidget);
+     await _tap(tester, find.byKey(const ValueKey('workbench-editor-more')));
+     expect(find.byKey(const ValueKey('workbench-menu-save')), findsOneWidget);
+     expect(find.byType(MenuItemButton), findsWidgets);
+     await _capture(tester, '$stem-more-menu.png');
++    await _tap(tester, find.byKey(const ValueKey('workbench-editor-more')));
++    expect(find.byKey(const ValueKey('workbench-menu-save')), findsNothing);
+     expect(tester.takeException(), isNull);
+   } finally {
+     FocusManager.instance.primaryFocus?.unfocus();
+     await tester.pump();
+     await tester.pumpWidget(const SizedBox.shrink());
+     await tester.pump();
+-    await fixture.hub.shutdown();
++    await tester.runAsync(() => fixture.hub.shutdown());
+     fixture.github.dispose();
+     fixture.settings.dispose();
+     fixture.auth.dispose();
+@@ -257,7 +279,11 @@ Future<void> _settle(WidgetTester tester) async {
+   await tester.pump();
+ }
+ 
+-Future<void> _wait(WidgetTester tester, bool Function() ready) async {
++Future<void> _wait(
++  WidgetTester tester,
++  bool Function() ready,
++  String scene,
++) async {
+   for (var i = 0; i < 200; i++) {
+     await tester.pump(const Duration(milliseconds: 25));
+     if (ready()) return;
+@@ -265,7 +291,7 @@ Future<void> _wait(WidgetTester tester, bool Function() ready) async {
+       () => Future<void>.delayed(const Duration(milliseconds: 10)),
+     );
+   }
+-  throw StateError('QFLI_SCREENSHOTS: required scene did not become ready');
++  throw StateError('QFLI_SCREENSHOTS: $scene did not become ready');
+ }
+ 
+ Future<void> _tap(WidgetTester tester, Finder target) async {
+@@ -276,22 +302,24 @@ Future<void> _tap(WidgetTester tester, Finder target) async {
+ }
+ 
+ Future<void> _capture(WidgetTester tester, String name) async {
++  expect(tester.takeException(), isNull, reason: 'Before capture: $name');
+   final boundary = tester.renderObject<RenderRepaintBoundary>(
+     find.byKey(_screenshotRoot),
+   );
+-  final image = await tester.runAsync(() => boundary.toImage(pixelRatio: 1));
+-  if (image == null) throw StateError('Screenshot image missing: $name');
+-  final bytes = await tester.runAsync(
+-    () => image.toByteData(format: ui.ImageByteFormat.png),
+-  );
+-  image.dispose();
+-  if (bytes == null) throw StateError('Screenshot encoding failed: $name');
+   await tester.runAsync(() async {
+-    final file = File(p.join('build', 'screenshots', name));
+-    await file.parent.create(recursive: true);
+-    await file.writeAsBytes(
+-      bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+-    );
++    final image = await boundary.toImage(pixelRatio: 1);
++    try {
++      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++      if (bytes == null) throw StateError('Screenshot encoding failed: $name');
++      final file = File(p.join('build', 'screenshots', name));
++      await file.parent.create(recursive: true);
++      await file.writeAsBytes(
++        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
++        flush: true,
++      );
++    } finally {
++      image.dispose();
++    }
+   });
+ }
+ 
+@@ -403,8 +431,12 @@ Future<void> _loadRealFonts() async {
+     );
+   }
+   await mono.load();
+-  await _font('MaterialIcons', await _materialIcons());
+-  final candidates = await Directory('/usr/share/fonts')
++  // Flutter resolves the SDK cache font to this canonical asset key. Use the
++  // bundle instead of guessing the SDK root or case-sensitive cache filename.
++  final icons = FontLoader('MaterialIcons')
++    ..addFont(_asset('fonts/MaterialIcons-Regular.otf'));
++  await icons.load();
++  final candidates = await Directory('/usr/share/fonts/opentype/noto')
+       .list(recursive: true, followLinks: false)
+       .where(
+         (file) =>
+@@ -427,35 +459,11 @@ Future<void> _loadRealFonts() async {
+ Future<ByteData> _asset(String path) async {
+   try {
+     return await rootBundle.load(path);
+-  } on Object {
++  } on FlutterError {
+     return rootBundle.load('packages/qfli_studio_core/$path');
+   }
+ }
+ 
+-Future<File> _materialIcons() async {
+-  var directory = Directory(
+-    Platform.environment['FLUTTER_ROOT'] ??
+-        p.dirname(Platform.resolvedExecutable),
+-  );
+-  while (true) {
+-    final font = File(
+-      p.join(
+-        directory.path,
+-        'bin',
+-        'cache',
+-        'artifacts',
+-        'material_fonts',
+-        'materialicons-regular.otf',
+-      ),
+-    );
+-    if (await font.exists()) return font;
+-    if (directory.parent.path == directory.path) {
+-      throw StateError('Flutter SDK MaterialIcons font is missing');
+-    }
+-    directory = directory.parent;
+-  }
+-}
+-
+ Future<void> _font(String family, File file) async {
+   final loader = FontLoader(family)
+     ..addFont(file.readAsBytes().then((bytes) => ByteData.sublistView(bytes)));

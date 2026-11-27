@@ -1,0 +1,36 @@
+diff --git a/lib/harness/local/local_harness_host.dart b/lib/harness/local/local_harness_host.dart
+index 87b13ca7592775d4b9b0c083b2d2833c01a48b94..b1f0cb30036056e6f06431e228cb19a81500efef 100644
+--- a/lib/harness/local/local_harness_host.dart
++++ b/lib/harness/local/local_harness_host.dart
+@@ -68,7 +68,6 @@ class _LiveSessionHandle implements HarnessSessionHandle {
+             HarnessCapability.terminal,
+             HarnessCapability.transcript,
+             HarnessCapability.prompt,
+-            HarnessCapability.approve,
+             HarnessCapability.stop,
+           },
+     updatedAt: _session.startedAt,
+diff --git a/test/harness/local/local_harness_host_test.dart b/test/harness/local/local_harness_host_test.dart
+index 1ec2395bbcf61b26360425cd1a0965175901b07a..98a25c38d8316bf9f2eaab6e0ebf5ce9757d892c 100644
+--- a/test/harness/local/local_harness_host_test.dart
++++ b/test/harness/local/local_harness_host_test.dart
+@@ -21,7 +21,9 @@ ProviderRegistry registryFor({String home = ''}) {
+       isWindows: false,
+       isMacOS: true,
+       fileExists: (String path) =>
+-          path == '/usr/local/bin/claude' || path == '/usr/local/bin/pi',
++          path == '/usr/local/bin/claude' ||
++          path == '/usr/local/bin/pi' ||
++          path == '/usr/local/bin/opencode',
+     ),
+     configPathResolver: () async => null,
+   );
+@@ -145,7 +147,7 @@ void main() {
+       addTearDown(() => cwd.deleteSync(recursive: true));
+ 
+       final handle = await host.launch(
+-        HarnessLaunchRequest(providerId: 'shell', cwd: cwd.path),
++        HarnessLaunchRequest(providerId: 'opencode', cwd: cwd.path),
+       );
+ 
+       expect(handle.terminal, isNotNull);

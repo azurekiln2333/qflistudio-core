@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/audit-baseline.md","reason":"Observed preservation gaps, active-owner gates, target directory and CI compatibility contract"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Coordinate path/CI/runtime contracts across core and product repositories"}
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/ci-baseline.md","reason":"Existing cloud evidence, six-platform signing gaps and app-owned SDK/path contract"}
+{"file":".trellis/tasks/11-26-github-cloud-workspace-migration/research/java-core-work-review.md","reason":"Twenty-one Java-held authored core snapshots and helper dispositions; preserve five unresolved variants without replaying obsolete source"}
+{"file":".trellis/tasks/11-26-core-target-handoff/cleanup-plan.md","reason":"Exact old-directory/worktree and WSL holds; inventory only with no deletion acceptance"}

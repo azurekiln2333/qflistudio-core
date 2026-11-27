@@ -1,0 +1,121 @@
+diff --git a/test/editor_workbench_cleanup_test.dart b/test/editor_workbench_cleanup_test.dart
+index ef85a905e63aa6d74c00edfe65d68b9895b52086..e9d33694cc2c6d4f8e3a33dcf2e2c9873376f905 100644
+--- a/test/editor_workbench_cleanup_test.dart
++++ b/test/editor_workbench_cleanup_test.dart
+@@ -3,6 +3,7 @@ library;
+ 
+ import 'dart:io';
+ 
++import 'package:flutter/foundation.dart';
+ import 'package:flutter/gestures.dart';
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+@@ -178,16 +179,37 @@ void main() {
+         ),
+       );
+     }
+-    await tester.pumpWidget(
+-      MaterialApp(
+-        theme: workbench
+-            ? ThemeData(colorSchemeSeed: Colors.indigo, brightness: brightness)
+-            : null,
+-        home: editor,
+-      ),
+-    );
+-    await _waitFor(tester, () => find.byType(CodeEditor).evaluate().isNotEmpty);
+-    await _frames(tester);
++    // Flutter widget tests default to Android even on desktop CI. re_editor
++    // caches platform constants, so exercise its real desktop shortcut tree
++    // from the first workbench mount rather than its mobile input fallback.
++    final previousPlatform = debugDefaultTargetPlatformOverride;
++    if (workbench) {
++      debugDefaultTargetPlatformOverride = Platform.isMacOS
++          ? TargetPlatform.macOS
++          : Platform.isWindows
++          ? TargetPlatform.windows
++          : TargetPlatform.linux;
++    }
++    try {
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: workbench
++              ? ThemeData(
++                  colorSchemeSeed: Colors.indigo,
++                  brightness: brightness,
++                )
++              : null,
++          home: editor,
++        ),
++      );
++      await _waitFor(
++        tester,
++        () => find.byType(CodeEditor).evaluate().isNotEmpty,
++      );
++      await _frames(tester);
++    } finally {
++      debugDefaultTargetPlatformOverride = previousPlatform;
++    }
+   }
+ 
+   EditorController editor(WidgetTester tester) {
+@@ -726,8 +748,14 @@ void main() {
+       SystemMouseCursors.resizeColumn,
+     );
+     Future<void> dragBy(double dx) async {
+-      final gesture = await tester.startGesture(tester.getCenter(handle));
+-      await tester.pump(const Duration(milliseconds: 350));
++      final gesture = await tester.startGesture(
++        tester.getCenter(handle),
++        kind: PointerDeviceKind.mouse,
++      );
++      // The first move wins the drag arena against double-tap. With the
++      // default DragStartBehavior.start it is not an onUpdate displacement.
++      await gesture.moveBy(Offset(dx.sign * 24, 0));
++      await tester.pump();
+       await gesture.moveBy(Offset(dx, 0));
+       await tester.pump();
+       await gesture.up();
+@@ -798,8 +826,18 @@ void main() {
+     expect(find.byType(EditorPage), findsOneWidget);
+     await tester.tap(find.byKey(const ValueKey('workbench-empty-new')));
+     await tester.pumpAndSettle();
+-    expect(find.text('新建文件'), findsOneWidget);
+-    await tester.tap(find.text('取消'));
++    final dialog = find.byType(AlertDialog);
++    expect(dialog, findsOneWidget);
++    expect(
++      find.descendant(of: dialog, matching: find.text('新建文件')),
++      findsOneWidget,
++    );
++    expect(
++      find.byKey(const ValueKey('workbench-empty-new')),
++      findsOneWidget,
++      reason: 'The empty-state action remains mounted behind the dialog.',
++    );
++    await tester.tap(find.descendant(of: dialog, matching: find.text('取消')));
+     await tester.pumpAndSettle();
+     expect(tester.takeException(), isNull);
+   });
+@@ -931,6 +969,22 @@ void main() {
+       offset: 5,
+     );
+     await focusEditor(tester);
++    expect(editor(tester).current!.focusNode.hasFocus, isTrue);
++    final sourceShortcuts = tester.widgetList<Shortcuts>(
++      find.descendant(
++        of: find.byType(CodeEditor),
++        matching: find.byType(Shortcuts),
++      ),
++    );
++    expect(
++      sourceShortcuts.any(
++        (shortcuts) => shortcuts.shortcuts.values.any(
++          (intent) => intent is CodeShortcutLineSelectIntent,
++        ),
++      ),
++      isTrue,
++      reason: 'Exercise the desktop shortcut tree, not the mobile fallback.',
++    );
+     await _shortcut(tester, LogicalKeyboardKey.keyL, meta: Platform.isMacOS);
+     await _frames(tester);
+     expect(controller.selection.isCollapsed, isFalse);

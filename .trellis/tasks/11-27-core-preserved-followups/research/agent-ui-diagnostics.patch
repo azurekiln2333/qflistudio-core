@@ -1,0 +1,1633 @@
+diff --git a/tool/agent_editor_scenes_test.dart b/tool/agent_editor_scenes_test.dart
+new file mode 100644
+--- /dev/null
++++ b/tool/agent_editor_scenes_test.dart
+@@ -0,0 +1,768 @@
++// 集成后编辑器页截图（pi-D，未跟踪，不提交）。
++//
++// 用法：
++//   flutter test --no-pub tool/agent_editor_scenes_test.dart
++// 可选 --dart-define：
++//   PREVIEW_OUT=<目录>   默认 TASK/check/screens/integration
++//   PREVIEW_SCENES=empty,running
++//   PREVIEW_SIZES=390x844,900x700,1280x800
++//   PREVIEW_THEMES=light,dark
++//   PREVIEW_SCALE=2
++//
++// 复用 tool/agent_preview_test.dart 的场景与请求类型、字体加载和
++// RepaintBoundary 出图思路。多一步 prepare：编辑器页要先点开 Agent 面板，
++// runAgentPreview 没有挂载后的钩子，这里补一个。
++import 'dart:io';
++import 'dart:ui' as ui;
++
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_localizations/flutter_localizations.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/chat/composer_state.dart';
++import 'package:qfli_studio_core/community/models.dart';
++import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
++import 'package:qfli_studio_core/editor/agent/editor_agent_host.dart';
++import 'package:qfli_studio_core/editor/editor_page.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/shell/workbench_state.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/theme/app_theme.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++
++import '../test/support/fake_agent.dart';
++import 'agent_preview_test.dart' show AgentPreviewRequest;
++
++/// 一个场景：先建 widget，挂载后可以再操作一次界面。
++class EditorScene {
++  const EditorScene({required this.name, required this.build, this.prepare});
++
++  final String name;
++  final Future<Widget> Function() build;
++
++  /// 挂载后、出图前的交互，例如展开 Agent 面板或切到会话分段。
++  final Future<void> Function(WidgetTester tester, Size size)? prepare;
++}
++
++/// 场景共用的环境：临时项目目录、登录态、假运行时。
++class _SceneEnv {
++  _SceneEnv({
++    required this.directory,
++    required this.project,
++    required this.store,
++    required this.auth,
++    required this.settings,
++    required this.runtime,
++    required this.facade,
++    this.sessionId,
++  });
++
++  final Directory directory;
++  final Project project;
++  final ProjectStore store;
++  final AuthStore auth;
++  final SettingsStore settings;
++  final FakeAgentRuntime runtime;
++  final FakeAgentFacade facade;
++  final String? sessionId;
++}
++
++Future<_SceneEnv> _env({
++  bool loggedIn = true,
++  bool makeSession = true,
++  String projectName = '计算器练习',
++  List<AgentModelOption> models = _defaultModels,
++}) async {
++  final directory = await Directory.systemTemp.createTemp('qfli_editor_scene_');
++  Directory(p.join(directory.path, 'lib')).createSync(recursive: true);
++  Directory(p.join(directory.path, 'src')).createSync(recursive: true);
++  File(p.join(directory.path, 'lib', 'main.dart')).writeAsStringSync(
++    "import 'src/app.dart';\n\nvoid main() {\n  runApp(const App());\n}\n",
++  );
++  File(p.join(directory.path, 'src', 'app.dart')).writeAsStringSync(
++    'class App {\n  const App();\n}\n',
++  );
++  File(p.join(directory.path, 'README.md')).writeAsStringSync(
++    '# 计算器练习\n\n跟着教程做一个小计算器。\n',
++  );
++
++  final auth = AuthStore();
++  if (loggedIn) {
++    await auth.signIn(
++      'preview-only',
++      const CommunityUser(
++        id: '1',
++        username: 'preview-user',
++        nickname: 'Example',
++        bio: 'Synthetic preview user.',
++        avatarColor: '#4D6994',
++        points: 1280,
++        checkinStreak: 7,
++        provider: 'local',
++      ),
++    );
++  }
++
++  final store = ProjectStore();
++  final project = Project.create(name: projectName, path: directory.path);
++  final settings = SettingsStore();
++  final sessions = MemoryAgentSessionStore();
++  final sessionId = makeSession
++      ? (await sessions.create(project.id, title: '改标题并补一个求和函数')).id
++      : null;
++
++  final runtime = FakeAgentRuntime(
++    sessions: sessions,
++    modelOptions: models,
++    skillRefs: const <AgentSkillRef>[
++      AgentSkillRef(name: 'dart-format', description: '按项目规则格式化 Dart'),
++      AgentSkillRef(name: 'run-tests', description: '跑一遍测试并汇总失败'),
++    ],
++  );
++  final facade = FakeAgentFacade(sessionId: sessionId ?? 'preview-new');
++  facade.permission = AgentPermissionMode.askEveryWrite;
++  if (sessionId != null) runtime.facades[sessionId] = facade;
++  runtime.facade = facade;
++  EditorAgentHost.resetRuntimeResolutions();
++  return _SceneEnv(
++    directory: directory,
++    project: project,
++    store: store,
++    auth: auth,
++    settings: settings,
++    runtime: runtime,
++    facade: facade,
++    sessionId: sessionId,
++  );
++}
++
++const List<AgentModelOption> _defaultModels = <AgentModelOption>[
++  AgentModelOption(
++    id: 'deepseek-v4.1-flash',
++    label: 'DeepSeek V4.1 Flash',
++    reasoningEfforts: <String>['low', 'medium', 'high'],
++  ),
++  AgentModelOption(id: 'deepseek-v4.1-pro', label: 'DeepSeek V4.1 Pro'),
++];
++
++/// 切换会话场景用的模型列表：两个模型都支持推理强度。
++const List<AgentModelOption> _switchModels = <AgentModelOption>[
++  AgentModelOption(
++    id: 'deepseek-v4.1-flash',
++    label: 'DeepSeek V4.1 Flash',
++    reasoningEfforts: <String>['low', 'medium', 'high'],
++  ),
++  AgentModelOption(
++    id: 'deepseek-v4.1-pro',
++    label: 'DeepSeek V4.1 Pro',
++    reasoningEfforts: <String>['low', 'medium', 'high'],
++  ),
++];
++
++Widget _page(_SceneEnv env, {bool openFile = true}) => EditorPage(
++  project: env.project,
++  auth: env.auth,
++  store: env.store,
++  settings: env.settings,
++  initialOpenPath: openFile
++      ? p.join(env.directory.path, 'lib', 'main.dart')
++      : null,
++  agentRuntime: env.runtime,
++  composerDefaults: _MemoryComposerDefaults(),
++  agentEnabled: true,
++);
++
++/// 展开 Agent 面板：宽屏点右侧轨道的展开按钮，窄屏点分段条的「Agent」。
++Future<void> _openAgent(WidgetTester tester, Size size) async {
++  if (size.width >= 1100) {
++    await tester.tap(find.byKey(const ValueKey('editor-agent-expand')));
++  } else {
++    await tester.tap(find.text('Agent').last);
++  }
++  await _frames(tester);
++}
++
++/// 打开侧边栏的「会话」分段。
++Future<void> _openSessions(WidgetTester tester, Size size) async {
++  await _openSidebar(tester, size);
++  final section = find.byKey(
++    const ValueKey('editor-sidebar-section-sessions'),
++  );
++  if (section.evaluate().isNotEmpty) {
++    await tester.tap(section, warnIfMissed: false);
++    await _frames(tester);
++  }
++}
++
++Future<void> _openSidebar(WidgetTester tester, Size size) async {
++  final section = find.byKey(
++    const ValueKey('editor-sidebar-section-sessions'),
++  );
++  if (_onScreen(tester, section, size)) return;
++  final open = find.byTooltip('打开文件树');
++  if (open.evaluate().isNotEmpty) {
++    await tester.tap(open.first, warnIfMissed: false);
++    await _frames(tester);
++    if (_onScreen(tester, section, size)) return;
++  }
++  final menu = find.byIcon(Icons.menu);
++  if (menu.evaluate().isNotEmpty) {
++    await tester.tap(menu.first, warnIfMissed: false);
++    await _frames(tester);
++  }
++}
++
++/// 分段开关是否真的在屏幕内（抽屉关着时它在屏幕外）。
++bool _onScreen(WidgetTester tester, Finder finder, Size size) {
++  if (finder.evaluate().isEmpty) return false;
++  try {
++    final rect = tester.getRect(finder);
++    return rect.width > 0 &&
++        rect.height > 0 &&
++        rect.left >= 0 &&
++        rect.right <= size.width &&
++        rect.top >= 0 &&
++        rect.bottom <= size.height;
++  } catch (_) {
++    return false;
++  }
++}
++
++/// 窄屏抽屉打开，停在「文件 | 会话」分段。
++Future<void> _openDrawer(WidgetTester tester, Size size) async {
++  await _openSidebar(tester, size);
++}
++
++/// 选中一个会话：直接驱动 [WorkbenchState]，不依赖点击会话行。
++///
++/// 会话行在侧边栏抽屉里，中屏与窄屏下点不到。宽屏从 [AgentEntryButton]、
++/// 中窄屏从分段条上的 [AgentSegmentIcon] 拿到宿主，直接设置会话与布局状态。
++Future<void> _selectSession(
++  WidgetTester tester,
++  Size size,
++  String? sessionId,
++) async {
++  if (sessionId == null) return;
++  final entry = find.byType(AgentEntryButton);
++  final EditorAgentHost host;
++  if (entry.evaluate().isNotEmpty) {
++    host = tester.widget<AgentEntryButton>(entry.first).host;
++  } else {
++    final seg = find.byType(AgentSegmentIcon);
++    if (seg.evaluate().isEmpty) {
++      throw StateError('找不到 AgentEntryButton 或 AgentSegmentIcon，无法选中会话 $sessionId');
++    }
++    host = tester.widget<AgentSegmentIcon>(seg.first).host;
++  }
++  host.activate();
++  host.state.selectSession(sessionId);
++  // 宽屏展开右栏；中屏与窄屏切到 Agent 分段。两个都设，与宽度无关。
++  host.state.setAgentPaneCollapsed(false);
++  host.state.showMainPane(MainPane.agent);
++  await _frames(tester);
++}
++
++Future<void> _frames(WidgetTester tester, [int frames = 24]) async {
++  for (var i = 0; i < frames; i++) {
++    await tester.pump(const Duration(milliseconds: 20));
++    await tester.runAsync(
++      () => Future<void>.delayed(const Duration(milliseconds: 2)),
++    );
++  }
++}
++
++/// 点开输入卡片上的一个下拉，选中指定文字。
++///
++/// [chipKey] 是筹码按钮的 key（`composer-model` / `composer-reasoning`）。
++Future<void> _pickMenuItem(
++  WidgetTester tester,
++  String chipKey,
++  String label,
++) async {
++  final chip = find.byKey(ValueKey(chipKey));
++  if (chip.evaluate().isEmpty) {
++    throw StateError('找不到 $chipKey，无法选择「$label」');
++  }
++  await tester.tap(chip.first, warnIfMissed: false);
++  await _frames(tester);
++  final item = find.text(label).last;
++  if (item.evaluate().isEmpty) {
++    throw StateError('下拉里没有「$label」');
++  }
++  await tester.tap(item, warnIfMissed: false);
++  await _frames(tester);
++}
++
++// ---- 场景 ----
++
++List<EditorScene> editorScenes() {
++  final runningId = <String?>[null];
++  final failedId = <String?>[null];
++  final offlineId = <String?>[null];
++  final longId = <String?>[null];
++  final tlsId = <String?>[null];
++  final switchSessionIds = <String?>[null, null];
++  return <EditorScene>[
++  EditorScene(
++    name: 'empty',
++    build: () async {
++      final env = await _env(makeSession: false);
++      return _page(env);
++    },
++    prepare: (tester, size) => _openAgent(tester, size),
++  ),
++  EditorScene(
++    name: 'running',
++    build: () async {
++      final env = await _env();
++      runningId[0] = env.sessionId;
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 'r0',
++            role: 'user',
++            text: '把 main.dart 的标题改成「计算器」，再补一个求和函数。',
++          ),
++          AgentMessageView(
++            id: 'r1',
++            role: 'assistant',
++            text: '先看一下项目结构，再改 main.dart。',
++            aiGenerated: true,
++          ),
++          AgentMessageView(
++            id: 'r2',
++            role: 'tool',
++            text: '读取 3 个文件',
++            toolName: 'read_file',
++          ),
++          AgentMessageView(
++            id: 'r3',
++            role: 'tool',
++            text: '正在写入 lib/main.dart',
++            toolName: 'write_file',
++            pending: true,
++          ),
++        ])
++        ..activity = '正在写入 lib/main.dart'
++        ..state = AgentRunState.running;
++      return _page(env);
++    },
++    prepare: (tester, size) => _selectSession(tester, size, runningId[0]),
++  ),
++  EditorScene(
++    name: 'failed-503',
++    build: () async {
++      final env = await _env();
++      failedId[0] = env.sessionId;
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 'f0',
++            role: 'user',
++            text: '帮我把 README 补一节运行说明。',
++          ),
++        ])
++        ..lastError = '服务端没有配置 AI 凭据'
++        ..lastErrorInfo = const AgentErrorInfo(
++          kind: AgentErrorKind.notConfigured,
++          statusCode: 503,
++          detail: 'AI 服务未配置：缺少 QFLI_AI_API_KEY',
++        )
++        ..state = AgentRunState.failed;
++      return _page(env);
++    },
++    prepare: (tester, size) => _selectSession(tester, size, failedId[0]),
++  ),
++  EditorScene(
++    name: 'failed-offline',
++    build: () async {
++      final env = await _env();
++      offlineId[0] = env.sessionId;
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(id: 'n0', role: 'user', text: '把这个文件跑一遍。'),
++        ])
++        ..lastError = 'SocketException: 网络不可达'
++        ..lastErrorInfo = const AgentErrorInfo(
++          kind: AgentErrorKind.offline,
++          detail: 'SocketException: Network is unreachable',
++        )
++        ..state = AgentRunState.failed;
++      return _page(env);
++    },
++    prepare: (tester, size) => _selectSession(tester, size, offlineId[0]),
++  ),
++  EditorScene(
++    name: 'long',
++    build: () async {
++      final env = await _env();
++      longId[0] = env.sessionId;
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 'l0',
++            role: 'user',
++            text: '把计算器的按钮布局改成两列，并补单元测试。',
++          ),
++          AgentMessageView(
++            id: 'l1',
++            role: 'assistant',
++            text: '先读一下现在的布局和测试。',
++            aiGenerated: true,
++          ),
++          AgentMessageView(
++            id: 'l2',
++            role: 'tool',
++            text: '读取 lib/main.dart、test/main_test.dart',
++            toolName: 'read_file',
++          ),
++          AgentMessageView(
++            id: 'l3',
++            role: 'tool',
++            text: '搜索 GridView、Wrap 的用法',
++            toolName: 'search_text',
++          ),
++          AgentMessageView(
++            id: 'l4',
++            role: 'tool',
++            text: '运行 flutter test 失败：Expected 2, actual 3',
++            toolName: 'run_command',
++            isError: true,
++          ),
++          AgentMessageView(
++            id: 'l5',
++            role: 'assistant',
++            text: '按钮改成两列后测试里的期望值要跟着改，我先改 test/main_test.dart。',
++            changedPaths: <String>['lib/main.dart', 'test/main_test.dart'],
++            aiGenerated: true,
++          ),
++        ])
++        ..pendingApproval = const AgentWriteApproval(
++          path: 'test/main_test.dart',
++          summary: '把两列布局的期望值从 3 改成 2，并加一个边界用例。',
++        )
++        ..state = AgentRunState.awaitingApproval;
++      return _page(env);
++    },
++    prepare: (tester, size) => _selectSession(tester, size, longId[0]),
++  ),
++  EditorScene(
++    name: 'sessions',
++    build: () async {
++      final env = await _env();
++      final store = env.runtime.sessions;
++      // 五种状态各建一个会话。
++      final running = await store.create(env.project.id, title: '改成两列布局');
++      final queued = await store.create(env.project.id, title: '补单元测试');
++      final waiting = await store.create(env.project.id, title: '等确认的写入');
++      final failed = await store.create(env.project.id, title: '读取失败的那次');
++      final unread = await store.create(env.project.id, title: '已完成未读');
++      env.runtime.liveStatuses[running.id] = AgentLiveStatus.running;
++      env.runtime.liveStatuses[queued.id] = AgentLiveStatus.queued;
++      env.runtime.liveStatuses[waiting.id] = AgentLiveStatus.awaitingApproval;
++      env.runtime.liveStatuses[failed.id] = AgentLiveStatus.failed;
++      env.runtime.liveStatuses[unread.id] = AgentLiveStatus.finishedUnread;
++      return _page(env);
++    },
++    prepare: (tester, size) async {
++      await _openAgent(tester, size);
++      await _openSessions(tester, size);
++      await _frames(tester);
++    },
++  ),
++  EditorScene(
++    name: 'switch-session',
++    build: () async {
++      // 模型列表里第一个是默认项，场景里选第二个（Pro）与 high，切换后
++      // 看得到的两项都不是默认值。
++      final env = await _env(models: _switchModels);
++      final other = await env.runtime.sessions.create(
++        env.project.id,
++        title: '补一个求和函数',
++      );
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 's0',
++            role: 'user',
++            text: '把计算器的按钮改成两列。',
++          ),
++          AgentMessageView(
++            id: 's1',
++            role: 'assistant',
++            text: '已经改成两列，测试也过了。',
++            aiGenerated: true,
++            changedPaths: <String>['lib/main.dart'],
++          ),
++        ])
++        ..state = AgentRunState.idle;
++      // 每个会话一份门面：切换后对话流真的换成了另一个会话的内容。
++      env.runtime.facade = null;
++      env.runtime.facades[other.id] = FakeAgentFacade(sessionId: other.id)
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 't0',
++            role: 'user',
++            text: '再补一个求和函数和一个单元测试。',
++          ),
++          AgentMessageView(
++            id: 't1',
++            role: 'assistant',
++            text: '看一下 main.dart，再加 sum 和它的测试。',
++            aiGenerated: true,
++          ),
++        ])
++        ..state = AgentRunState.idle;
++      switchSessionIds[0] = env.sessionId;
++      switchSessionIds[1] = other.id;
++      return _page(env);
++    },
++    prepare: (tester, size) async {
++      // 会话 A 选好模型和推理强度。
++      await _selectSession(tester, size, switchSessionIds[0]);
++      await _pickMenuItem(tester, 'composer-model', 'DeepSeek V4.1 Pro');
++      await _pickMenuItem(tester, 'composer-reasoning', 'high');
++      // 切到会话 B：两项选择应该还看得见。
++      await _selectSession(tester, size, switchSessionIds[1]);
++      await _frames(tester);
++      if (find.text('DeepSeek V4.1 Pro').evaluate().isEmpty) {
++        throw StateError('切到会话 B 后模型名不见了');
++      }
++      // 400 宽右栏里推理强度的文字会被收成图标（见 composer_card 的
++      // _toolRowFit），所以文字和 tooltip 有一个就行。
++      final effortText = find.text('high');
++      final effortTip = find.byTooltip('推理强度：high');
++      if (effortText.evaluate().isEmpty && effortTip.evaluate().isEmpty) {
++        throw StateError('切到会话 B 后推理强度不见了');
++      }
++    },
++  ),
++  EditorScene(
++    name: 'tls-failed',
++    build: () async {
++      final env = await _env(projectName: 'BackgroundSmoke');
++      tlsId[0] = env.sessionId;
++      env.facade
++        ..seed(const <AgentMessageView>[
++          AgentMessageView(
++            id: 't0',
++            role: 'user',
++            text: '第二个会话，补一个素数判断',
++          ),
++        ])
++        ..seedError(
++          message: '连不上服务器 qfli.suanxiwanjie.cn：TLS 握手失败',
++          kind: AgentErrorKind.offline,
++          host: 'qfli.suanxiwanjie.cn',
++          phase: AgentErrorPhase.tls,
++          detail: '请求：POST /api/ai/chat\n'
++              '服务器：qfli.suanxiwanjie.cn\n'
++              '失败步骤：TLS 握手\n'
++              '异常：HandshakeException\n'
++              '系统信息：Connection terminated during handshake\n'
++              '用时：8.2 秒',
++        );
++      return _page(env);
++    },
++    prepare: (tester, size) async {
++      await _selectSession(tester, size, tlsId[0]);
++      final detailsToggle = find.textContaining('详情');
++      if (detailsToggle.evaluate().isNotEmpty) {
++        await tester.tap(detailsToggle.first, warnIfMissed: false);
++        await _frames(tester);
++      }
++    },
++  ),
++  EditorScene(
++    name: 'drawer',
++    build: () async {
++      final env = await _env();
++      return _page(env);
++    },
++    prepare: (tester, size) async {
++      await _openDrawer(tester, size);
++    },
++  ),
++  ];
++}
++
++// ---- 出图 ----
++
++Future<List<File>> runEditorScenes(
++  WidgetTester tester, {
++  required List<EditorScene> scenes,
++  required AgentPreviewRequest request,
++}) async {
++  await tester.runAsync(_loadFonts);
++  await tester.runAsync(() => request.outputDir.create(recursive: true));
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.resetDevicePixelRatio);
++  addTearDown(tester.view.resetPhysicalSize);
++
++  final written = <File>[];
++  for (final scene in scenes) {
++    for (final size in request.sizes) {
++      for (final themeName in request.themes) {
++        final theme = themeName == 'dark' ? AppTheme.dark : AppTheme.light;
++        final boundaryKey = GlobalKey();
++        tester.view.physicalSize = size;
++        final body = await tester.runAsync(scene.build);
++        await tester.pumpWidget(
++          MaterialApp(
++            debugShowCheckedModeBanner: false,
++            theme: theme,
++            locale: const Locale('zh', 'CN'),
++            supportedLocales: const <Locale>[Locale('zh', 'CN')],
++            localizationsDelegates: GlobalMaterialLocalizations.delegates,
++            home: RepaintBoundary(
++              key: boundaryKey,
++              child: Scaffold(body: body ?? const SizedBox.shrink()),
++            ),
++          ),
++        );
++        await _frames(tester);
++        final prepare = scene.prepare;
++        if (prepare != null) await prepare(tester, size);
++        await _frames(tester);
++        final failure = tester.takeException();
++        if (failure != null) {
++          throw StateError(
++            '场景 ${scene.name} 在 $size / $themeName 渲染失败：$failure',
++          );
++        }
++        final file = File(
++          '${request.outputDir.path}/${scene.name}-'
++          '${size.width.toInt()}x${size.height.toInt()}-$themeName.png',
++        );
++        await _capture(tester, boundaryKey, file, request.pixelRatio);
++        written.add(file);
++      }
++    }
++  }
++  await tester.pumpWidget(const SizedBox.shrink());
++  return written;
++}
++
++Future<void> _capture(
++  WidgetTester tester,
++  GlobalKey boundaryKey,
++  File file,
++  double pixelRatio,
++) async {
++  final boundary =
++      boundaryKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
++  await tester.runAsync(() async {
++    final image = await boundary.toImage(pixelRatio: pixelRatio);
++    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++    await file.parent.create(recursive: true);
++    await file.writeAsBytes(bytes!.buffer.asUint8List());
++    image.dispose();
++  });
++}
++
++Future<void> _loadFonts() async {
++  const fontPath = String.fromEnvironment(
++    'UI_FONT_PATH',
++    defaultValue: '',
++  );
++  await AppPaths.storageDirectory();
++  await (FontLoader(
++    'MaterialIcons',
++  )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
++  final file = File(fontPath);
++  if (await file.exists()) {
++    final bytes = await file.readAsBytes();
++    for (final family in const <String>['Roboto', 'monospace']) {
++      await (FontLoader(
++        family,
++      )..addFont(Future.value(ByteData.sublistView(bytes)))).load();
++    }
++  } else {
++    stderr.writeln('警告：没找到中文字体 $fontPath，图里的中文会显示成方块。');
++  }
++}
++
++class _MemoryComposerDefaults implements ComposerDefaultsStore {
++  final Map<String, ComposerDefaults> _byProject = {};
++  @override
++  Future<ComposerDefaults?> read(String projectId) async =>
++      _byProject[projectId];
++  @override
++  Future<void> write(String projectId, ComposerDefaults defaults) async {
++    _byProject[projectId] = defaults;
++  }
++}
++
++const String _defaultOutput =
++    'build/archived-agent-scenes';
++
++List<String> _split(String raw, List<String> fallback) {
++  if (raw.trim().isEmpty) return fallback;
++  return raw
++      .split(',')
++      .map((part) => part.trim())
++      .where((part) => part.isNotEmpty)
++      .toList();
++}
++
++List<Size> _parseSizes(String raw) {
++  final parts = _split(raw, const <String>[]);
++  if (parts.isEmpty) {
++    return AgentPreviewRequest.defaultSizes;
++  }
++  return parts.map((part) {
++    final bits = part.toLowerCase().split('x');
++    if (bits.length != 2) throw FormatException('尺寸要写成 390x844：$part');
++    return Size(double.parse(bits[0]), double.parse(bits[1]));
++  }).toList();
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  const outDir = String.fromEnvironment(
++    'PREVIEW_OUT',
++    defaultValue: _defaultOutput,
++  );
++  const scenesArg = String.fromEnvironment('PREVIEW_SCENES');
++  const sizesArg = String.fromEnvironment('PREVIEW_SIZES');
++  const themesArg = String.fromEnvironment('PREVIEW_THEMES');
++  const scaleArg = String.fromEnvironment('PREVIEW_SCALE', defaultValue: '2');
++
++  testWidgets('导出集成后编辑器页场景截图', (tester) async {
++    StudioProfile.current = const StudioProfile(
++      id: 'editor-scenes',
++      appTitle: 'QFLIStudio+',
++      templates: [],
++      productKey: StudioProductCatalog.qfliStudioKey,
++      isOffline: false,
++    );
++    final wanted = _split(scenesArg, const <String>[]);
++    final scenes = editorScenes()
++        .where((scene) => wanted.isEmpty || wanted.contains(scene.name))
++        .toList();
++    expect(scenes, isNotEmpty, reason: 'PREVIEW_SCENES 没有匹配到场景');
++    final written = await runEditorScenes(
++      tester,
++      scenes: scenes,
++      request: AgentPreviewRequest(
++        outputDir: Directory(outDir),
++        sizes: _parseSizes(sizesArg),
++        themes: _split(themesArg, AgentPreviewRequest.defaultThemes),
++        pixelRatio: double.parse(scaleArg),
++      ),
++    );
++    // ignore: avoid_print
++    print('导出 ${written.length} 张截图到 $outDir');
++    for (final file in written) {
++      // ignore: avoid_print
++      print('  ${file.path} (${file.lengthSync()} 字节)');
++    }
++  });
++}
+diff --git a/tool/pi_d_check_test.dart b/tool/pi_d_check_test.dart
+new file mode 100644
+--- /dev/null
++++ b/tool/pi_d_check_test.dart
+@@ -0,0 +1,799 @@
++// pi-D 独立交叉检查（未跟踪，不提交）。用自建场景验证 CHECKLIST 的 C、D、G、H。
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/chat/chat_transcript.dart';
++import 'package:qfli_studio_core/chat/composer_card.dart';
++import 'package:qfli_studio_core/chat/composer_state.dart';
++import 'package:qfli_studio_core/community/models.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/session/agent_session.dart';
++import 'package:qfli_studio_core/shell/login_gate.dart';
++import 'package:qfli_studio_core/shell/workbench_agent_pane.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++
++import '../test/support/fake_agent.dart';
++
++Project _project() => Project(
++  id: 'p1',
++  name: 'Demo',
++  path: 'demo',
++  createdAt: DateTime(2026, 1, 1),
++  lastOpenedAt: DateTime(2026, 1, 1),
++);
++
++Future<AuthStore> _loggedIn() async {
++  final auth = AuthStore();
++  await auth.signIn(
++    'token',
++    const CommunityUser(
++      id: 'u1',
++      username: 'demo',
++      nickname: 'Demo',
++      bio: '',
++      avatarColor: '#000000',
++      points: 0,
++      checkinStreak: 0,
++      provider: 'local',
++    ),
++  );
++  return auth;
++}
++
++Widget _host({
++  required AuthStore auth,
++  required FakeAgentRuntime runtime,
++  String? sessionId,
++  Size size = const Size(420, 800),
++  double bottomInset = 0,
++  double textScale = 1,
++}) => MaterialApp(
++  home: LoginGateScope(
++    auth: auth,
++    child: Scaffold(
++      body: MediaQuery(
++        data: MediaQueryData(
++          size: size,
++          viewInsets: EdgeInsets.only(bottom: bottomInset),
++          textScaler: TextScaler.linear(textScale),
++        ),
++        child: WorkbenchAgentPane(
++          project: _project(),
++          runtime: runtime,
++          auth: auth,
++          settings: SettingsStore(),
++          sessionId: sessionId,
++        ),
++      ),
++    ),
++  ),
++);
++
++Future<void> _settle(WidgetTester tester) async {
++  await tester.pump();
++  await tester.pump();
++}
++
++Future<void> _unmount(WidgetTester tester) async {
++  await tester.pumpWidget(const SizedBox.shrink());
++  await tester.pump();
++}
++
++String _inputText(WidgetTester tester) {
++  final field = tester.widget<TextField>(
++    find.byKey(const ValueKey('composer-input')),
++  );
++  return field.controller?.text ?? '';
++}
++
++void main() {
++  group('pi-D 独立 C', () {
++    testWidgets('C1 一帧内清空输入、出现用户消息、发送键变停止键', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id)
++        ..sendGate = Completer<void>();
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        '独立检查 C1',
++      );
++      await tester.pump();
++      await tester.tap(find.byKey(const ValueKey('composer-send')));
++      await tester.pump();
++
++      expect(_inputText(tester), isEmpty);
++      expect(
++        find.descendant(
++          of: find.byType(ChatTranscript),
++          matching: find.text('独立检查 C1'),
++        ),
++        findsOneWidget,
++      );
++      expect(find.byKey(const ValueKey('composer-stop')), findsOneWidget);
++      expect(find.byKey(const ValueKey('composer-send')), findsNothing);
++
++      facade.sendGate!.complete();
++      await _unmount(tester);
++    });
++
++    testWidgets('C2 进度条是不确定进度（value 为 null）', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      expect(find.byKey(const ValueKey('chat-progress')), findsNothing);
++
++      facade.state = AgentRunState.running;
++      await tester.pump();
++      final bar = tester.widget<LinearProgressIndicator>(
++        find.byKey(const ValueKey('chat-progress')),
++      );
++      expect(bar.value, isNull);
++      // 进度条在对话流上方。
++      final barRect = tester.getRect(
++        find.byKey(const ValueKey('chat-progress')),
++      );
++      final listRect = tester.getRect(find.byType(ListView));
++      expect(barRect.bottom, lessThanOrEqualTo(listRect.top + 1));
++
++      await _unmount(tester);
++    });
++
++    testWidgets('C3 状态行随 activity 与排队变化', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++
++      facade
++        ..state = AgentRunState.running
++        ..activity = '正在写入 lib/a.dart';
++      await tester.pump();
++      expect(find.text('正在写入 lib/a.dart'), findsOneWidget);
++
++      facade.activity = null;
++      await tester.pump();
++      expect(find.text('思考中…'), findsOneWidget);
++
++      facade.state = AgentRunState.idle;
++      runtime.liveStatuses[meta.id] = AgentLiveStatus.queued;
++      runtime.notifyLive();
++      await tester.pump();
++      expect(find.text('排队中'), findsOneWidget);
++
++      runtime.liveStatuses[meta.id] = AgentLiveStatus.idle;
++      runtime.notifyLive();
++      await _unmount(tester);
++    });
++
++    testWidgets('C4 3 秒前不显示，3 秒后显示已等待秒数', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      facade.state = AgentRunState.running;
++      await tester.pump();
++      await tester.pump(const Duration(seconds: 2));
++      expect(find.byKey(const ValueKey('chat-waiting')), findsNothing);
++      await tester.pump(const Duration(seconds: 1));
++      expect(find.text('已等待 3 秒'), findsOneWidget);
++      await tester.pump(const Duration(seconds: 2));
++      expect(find.text('已等待 5 秒'), findsOneWidget);
++
++      facade.state = AgentRunState.idle;
++      await tester.pump();
++      expect(find.byKey(const ValueKey('chat-waiting')), findsNothing);
++      await _unmount(tester);
++    });
++
++    testWidgets('C5 工具条目运行中转圈，完成对勾，失败叉', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      facade
++        ..state = AgentRunState.running
++        ..seed(const [
++          AgentMessageView(
++            id: 'x1',
++            role: 'tool',
++            text: '',
++            toolName: 'read_file',
++            pending: true,
++          ),
++          AgentMessageView(
++            id: 'x2',
++            role: 'tool',
++            text: 'ok',
++            toolName: 'read_file',
++          ),
++          AgentMessageView(
++            id: 'x3',
++            role: 'tool',
++            text: 'bad',
++            toolName: 'write_file',
++            isError: true,
++          ),
++        ]);
++      await tester.pump();
++
++      expect(find.byKey(const ValueKey('tool-spinner-x1')), findsOneWidget);
++      expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
++      expect(find.byIcon(Icons.cancel_outlined), findsOneWidget);
++      expect(find.text('执行中'), findsOneWidget);
++      expect(find.text('完成'), findsOneWidget);
++      expect(find.text('失败'), findsOneWidget);
++
++      await _unmount(tester);
++    });
++
++    testWidgets('C6 取消后恢复可输入', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      facade.state = AgentRunState.running;
++      await tester.pump();
++      await tester.tap(find.byKey(const ValueKey('composer-stop')));
++      await tester.pump();
++
++      expect(facade.cancelCount, 1);
++      expect(find.byKey(const ValueKey('composer-send')), findsOneWidget);
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        '再试',
++      );
++      await tester.pump();
++      final send = tester.widget<IconButton>(
++        find.byKey(const ValueKey('composer-send')),
++      );
++      expect(send.onPressed, isNotNull);
++      await _unmount(tester);
++    });
++  });
++
++  group('pi-D 独立 D', () {
++    testWidgets('D1 工具行五件套齐全', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(
++        sessions: store,
++        modelOptions: const [
++          AgentModelOption(
++            id: 'm1',
++            label: 'Model One',
++            reasoningEfforts: ['low', 'high'],
++          ),
++        ],
++      );
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      for (final key in const [
++        'composer-plus',
++        'composer-permission',
++        'composer-model',
++        'composer-reasoning',
++        'composer-send',
++      ]) {
++        expect(find.byKey(ValueKey(key)), findsOneWidget, reason: key);
++      }
++      await _unmount(tester);
++    });
++
++    testWidgets('D2 空模型列表仍显示「默认模型」', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      expect(find.byKey(const ValueKey('composer-model')), findsOneWidget);
++      expect(find.text('默认模型'), findsOneWidget);
++      await _unmount(tester);
++    });
++
++    testWidgets('D3 模型加载中显示「模型…」和转圈', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store)
++        ..modelsGate = Completer<void>();
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      expect(find.text('模型…'), findsOneWidget);
++      expect(
++        find.descendant(
++          of: find.byKey(const ValueKey('composer-model')),
++          matching: find.byType(CircularProgressIndicator),
++        ),
++        findsOneWidget,
++      );
++      await _unmount(tester);
++    });
++
++    testWidgets('D4 草稿与附件按会话保留', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final a = await store.create('p1', title: 'A');
++      final b = await store.create('p1', title: 'B');
++      final runtime = FakeAgentRuntime(sessions: store);
++      runtime.facades[a.id] = FakeAgentFacade(sessionId: a.id);
++      runtime.facades[b.id] = FakeAgentFacade(sessionId: b.id);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: a.id),
++      );
++      await _settle(tester);
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        'A 的草稿',
++      );
++      await tester.pump();
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: b.id),
++      );
++      await _settle(tester);
++      expect(_inputText(tester), isEmpty);
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        'B 的草稿',
++      );
++      await tester.pump();
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: a.id),
++      );
++      await _settle(tester);
++      expect(_inputText(tester), 'A 的草稿');
++      await _unmount(tester);
++    });
++
++    testWidgets('D5 桌面 Enter 发送，Shift+Enter 换行', (tester) async {
++      final state = ComposerState();
++      final sent = <String>[];
++      await tester.pumpWidget(
++        MaterialApp(
++          home: Scaffold(
++            body: ComposerCard(
++              state: state,
++              desktopKeyboard: true,
++              onSend: (text, _) async {
++                sent.add(text);
++                return true;
++              },
++            ),
++          ),
++        ),
++      );
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        '第一行',
++      );
++      await tester.pump();
++      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
++      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
++      await tester.pump();
++      // 注：widget 测试的按键事件不会真的往 TextField 插字符，换行由平台输入
++      // 插件完成。这里只能证明 Shift+Enter 没有被发送快捷键吃掉。
++      expect(sent, isEmpty);
++
++      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++      await tester.pump();
++      expect(sent, hasLength(1));
++      expect(sent.single.trim(), '第一行');
++    });
++
++    testWidgets('D5 移动端回车换行不发送', (tester) async {
++      final state = ComposerState();
++      final sent = <String>[];
++      await tester.pumpWidget(
++        MaterialApp(
++          home: Scaffold(
++            body: ComposerCard(
++              state: state,
++              desktopKeyboard: false,
++              onSend: (text, _) async {
++                sent.add(text);
++                return true;
++              },
++            ),
++          ),
++        ),
++      );
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        '第一行',
++      );
++      await tester.pump();
++      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
++      await tester.pump();
++      expect(sent, isEmpty);
++    });
++
++    testWidgets('D6 软键盘弹出时输入卡片上移', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      final before = tester.getRect(find.byType(ComposerCard));
++      await tester.pumpWidget(
++        _host(
++          auth: auth,
++          runtime: runtime,
++          sessionId: meta.id,
++          bottomInset: 280,
++        ),
++      );
++      await _settle(tester);
++      final after = tester.getRect(find.byType(ComposerCard));
++      expect(before.bottom - after.bottom, closeTo(280, 1));
++      await _unmount(tester);
++    });
++  });
++
++  group('pi-D 独立 G', () {
++    testWidgets('G2 文字缩放 1.3 在 390 宽不溢出', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(
++        sessions: store,
++        modelOptions: const [
++          AgentModelOption(
++            id: 'deepseek-v4.1-flash',
++            label: 'deepseek-v4.1-flash',
++            reasoningEfforts: ['low', 'high'],
++          ),
++        ],
++      );
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(
++          auth: auth,
++          runtime: runtime,
++          sessionId: meta.id,
++          size: const Size(390, 844),
++          textScale: 1.3,
++        ),
++      );
++      await _settle(tester);
++      expect(tester.takeException(), isNull);
++      await _unmount(tester);
++    });
++
++    testWidgets('G3 工具行点击目标不小于 44×44', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(
++        sessions: store,
++        modelOptions: const [
++          AgentModelOption(
++            id: 'm1',
++            label: 'Model One',
++            reasoningEfforts: ['low'],
++          ),
++        ],
++      );
++      runtime.facades[meta.id] = FakeAgentFacade(sessionId: meta.id);
++
++      await tester.pumpWidget(
++        _host(
++          auth: auth,
++          runtime: runtime,
++          sessionId: meta.id,
++          size: const Size(390, 844),
++        ),
++      );
++      await _settle(tester);
++      for (final key in const [
++        'composer-plus',
++        'composer-permission',
++        'composer-model',
++        'composer-reasoning',
++        'composer-send',
++      ]) {
++        final size = tester.getSize(find.byKey(ValueKey(key)));
++        expect(size.height, greaterThanOrEqualTo(44), reason: key);
++        expect(size.width, greaterThanOrEqualTo(44), reason: key);
++      }
++      await _unmount(tester);
++    });
++  });
++
++  group('pi-D 独立 H', () {
++    Future<FakeAgentFacade> failed(
++      WidgetTester tester, {
++      required AgentErrorKind kind,
++      int? statusCode,
++      String detail = '',
++      String? lastError,
++    }) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: meta.id),
++      );
++      await _settle(tester);
++      facade.seed(const [
++        AgentMessageView(id: 'u0', role: 'user', text: '跑一下'),
++      ]);
++      facade.lastError = lastError;
++      facade
++        ..lastErrorInfo = AgentErrorInfo(
++          kind: kind,
++          statusCode: statusCode,
++          detail: detail,
++        )
++        ..state = AgentRunState.failed;
++      await tester.pump();
++      return facade;
++    }
++
++    testWidgets('H1 未登录显示登录引导，无错误无输入卡片', (tester) async {
++      final store = MemoryAgentSessionStore();
++      final runtime = FakeAgentRuntime(sessions: store, loginRequired: true);
++      await tester.pumpWidget(_host(auth: AuthStore(), runtime: runtime));
++      await _settle(tester);
++      expect(find.byType(LoginGuideCard), findsOneWidget);
++      expect(find.byKey(const ValueKey('chat-error')), findsNothing);
++      expect(find.byType(ComposerCard), findsNothing);
++      expect(runtime.openedSessions, isEmpty);
++    });
++
++    testWidgets('H2 503 文案', (tester) async {
++      await failed(
++        tester,
++        kind: AgentErrorKind.notConfigured,
++        statusCode: 503,
++      );
++      expect(find.text('AI 服务暂未开通（服务端未配置），请联系管理员'), findsOneWidget);
++      await _unmount(tester);
++    });
++
++    testWidgets('H3 429 文案', (tester) async {
++      await failed(tester, kind: AgentErrorKind.rateLimited, statusCode: 429);
++      expect(find.text('请求太频繁，已自动重试仍失败，请稍后再试'), findsOneWidget);
++      await _unmount(tester);
++    });
++
++    testWidgets('H4 断网文案', (tester) async {
++      await failed(tester, kind: AgentErrorKind.offline);
++      expect(find.text('网络不可用，检查网络后重试'), findsOneWidget);
++      await _unmount(tester);
++    });
++
++    testWidgets('H5 每种错误都有重试，详情含状态码与原文', (tester) async {
++      for (final entry in const {
++        AgentErrorKind.loginExpired: '登录已过期，请重新登录',
++        AgentErrorKind.rateLimited: '请求太频繁，已自动重试仍失败，请稍后再试',
++        AgentErrorKind.notConfigured: 'AI 服务暂未开通（服务端未配置），请联系管理员',
++        AgentErrorKind.offline: '网络不可用，检查网络后重试',
++        AgentErrorKind.timeout: '上游响应超时，重试一次',
++      }.entries) {
++        final facade = await failed(
++          tester,
++          kind: entry.key,
++          statusCode: 503,
++          detail: '上游原文',
++        );
++        expect(find.text(entry.value), findsOneWidget, reason: entry.key.name);
++        expect(find.byKey(const ValueKey('chat-retry')), findsOneWidget);
++        await tester.tap(find.text('详情'));
++        await tester.pumpAndSettle();
++        expect(find.text('状态码：503'), findsOneWidget);
++        expect(find.text('上游原文'), findsOneWidget);
++        await tester.tap(find.byKey(const ValueKey('chat-retry')));
++        await tester.pump();
++        expect(facade.retryCount, 1);
++        await _unmount(tester);
++      }
++    });
++  });
++
++  group('pi-D 破坏性场景', () {
++    testWidgets('破坏 1：models 永不返回且 open 抛错，界面仍可输入', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store)
++        ..modelsGate = Completer<void>();
++      // 没有 facades 条目，open 会新建一个；这里让 open 抛错。
++      final runtime2 = _ThrowingRuntime(store);
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime2, sessionId: meta.id),
++      );
++      await _settle(tester);
++      expect(find.byType(ComposerCard), findsOneWidget);
++      expect(find.text('打不开这个会话，请重试。'), findsOneWidget);
++      expect(find.byKey(const ValueKey('agent-open-retry')), findsOneWidget);
++      await tester.enterText(
++        find.byKey(const ValueKey('composer-input')),
++        '还能输入',
++      );
++      await tester.pump();
++      expect(_inputText(tester), '还能输入');
++      await _unmount(tester);
++    });
++
++    testWidgets('破坏 2：超长错误详情在 390 宽不溢出', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final meta = await store.create('p1');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final facade = FakeAgentFacade(sessionId: meta.id);
++      runtime.facades[meta.id] = facade;
++      await tester.pumpWidget(
++        _host(
++          auth: auth,
++          runtime: runtime,
++          sessionId: meta.id,
++          size: const Size(390, 844),
++        ),
++      );
++      await _settle(tester);
++      facade.seed(const [
++        AgentMessageView(id: 'u0', role: 'user', text: '跑一下'),
++      ]);
++      facade
++        ..lastErrorInfo = AgentErrorInfo(
++          kind: AgentErrorKind.unknown,
++          statusCode: 500,
++          detail: 'x' * 4000,
++        )
++        ..state = AgentRunState.failed;
++      await tester.pump();
++      expect(tester.takeException(), isNull);
++      await _unmount(tester);
++    });
++
++    testWidgets('破坏 3：只有附件没有文字也能发送', (tester) async {
++      final state = ComposerState()..attach('lib/a.dart');
++      final sent = <String>[];
++      final attachments = <List<String>>[];
++      await tester.pumpWidget(
++        MaterialApp(
++          home: Scaffold(
++            body: ComposerCard(
++              state: state,
++              onSend: (text, paths) async {
++                sent.add(text);
++                attachments.add(paths);
++                return true;
++              },
++            ),
++          ),
++        ),
++      );
++      await tester.pump();
++      final send = tester.widget<IconButton>(
++        find.byKey(const ValueKey('composer-send')),
++      );
++      expect(send.onPressed, isNotNull);
++      await tester.tap(find.byKey(const ValueKey('composer-send')));
++      await tester.pump();
++      expect(sent, ['']);
++      expect(attachments.single, ['lib/a.dart']);
++    });
++
++    testWidgets('破坏 4：运行中切走再切回，停止键与进度条仍在', (tester) async {
++      final auth = await _loggedIn();
++      final store = MemoryAgentSessionStore();
++      final a = await store.create('p1', title: 'A');
++      final b = await store.create('p1', title: 'B');
++      final runtime = FakeAgentRuntime(sessions: store);
++      final fa = FakeAgentFacade(sessionId: a.id);
++      final fb = FakeAgentFacade(sessionId: b.id);
++      runtime.facades[a.id] = fa;
++      runtime.facades[b.id] = fb;
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: a.id),
++      );
++      await _settle(tester);
++      fa.state = AgentRunState.running;
++      await tester.pump();
++      expect(find.byKey(const ValueKey('composer-stop')), findsOneWidget);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: b.id),
++      );
++      await _settle(tester);
++      expect(find.byKey(const ValueKey('composer-stop')), findsNothing);
++
++      await tester.pumpWidget(
++        _host(auth: auth, runtime: runtime, sessionId: a.id),
++      );
++      await _settle(tester);
++      expect(find.byKey(const ValueKey('composer-stop')), findsOneWidget);
++      expect(find.byKey(const ValueKey('chat-progress')), findsOneWidget);
++      expect(fa.disposeCount, 0);
++
++      fa.state = AgentRunState.idle;
++      await _unmount(tester);
++    });
++  });
++}
++
++/// open 总是抛错的运行时，用来验证打不开会话时的界面。
++class _ThrowingRuntime extends FakeAgentRuntime {
++  _ThrowingRuntime(AgentSessionStore store) : super(sessions: store);
++
++  @override
++  Future<AgentFacade> open(String projectId, String sessionId) async {
++    throw StateError('boom');
++  }
++}
+diff --git a/tool/pi_d_switch_test.dart b/tool/pi_d_switch_test.dart
+new file mode 100644
+--- /dev/null
++++ b/tool/pi_d_switch_test.dart
+@@ -0,0 +1,51 @@
++
++// 追加：切换会话后模型名与推理强度是否还在。
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/chat/composer_card.dart';
++import 'package:qfli_studio_core/community/models.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/shell/login_gate.dart';
++import 'package:qfli_studio_core/shell/workbench_agent_pane.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:qfli_studio_core/vibe_coding/vibe_agent_facade.dart';
++
++import '../test/support/fake_agent.dart';
++
++Project _p() => Project(id: 'p1', name: 'D', path: 'd', createdAt: DateTime(2026,1,1), lastOpenedAt: DateTime(2026,1,1));
++
++void main() {
++  testWidgets('切到第二个会话后，模型名与推理强度还在（D1/D2）', (tester) async {
++    final auth = AuthStore();
++    await auth.signIn('t', const CommunityUser(id: 'u', username: 'u', nickname: 'N', bio: '', avatarColor: '#000', points: 0, checkinStreak: 0, provider: 'local'));
++    final store = MemoryAgentSessionStore();
++    final a = await store.create('p1', title: 'A');
++    final b = await store.create('p1', title: 'B');
++    final runtime = FakeAgentRuntime(
++      sessions: store,
++      modelOptions: const <AgentModelOption>[
++        AgentModelOption(id: 'm1', label: 'Model One', reasoningEfforts: <String>['low','high']),
++      ],
++    );
++    runtime.facades[a.id] = FakeAgentFacade(sessionId: a.id);
++    runtime.facades[b.id] = FakeAgentFacade(sessionId: b.id);
++
++    Widget host(String? sid) => MaterialApp(home: LoginGateScope(auth: auth, child: Scaffold(body: MediaQuery(
++      data: const MediaQueryData(size: Size(900, 800)),
++      child: WorkbenchAgentPane(project: _p(), runtime: runtime, auth: auth, settings: SettingsStore(), sessionId: sid)))));
++
++    await tester.pumpWidget(host(a.id));
++    await tester.pump(); await tester.pump();
++    expect(find.text('Model One'), findsOneWidget, reason: 'A 会话应有模型名');
++    expect(find.byKey(const ValueKey('composer-reasoning')), findsOneWidget);
++
++    await tester.pumpWidget(host(b.id));
++    await tester.pump(); await tester.pump();
++    expect(find.text('Model One'), findsOneWidget, reason: '切到 B 后模型名应还在');
++    expect(find.byKey(const ValueKey('composer-reasoning')), findsOneWidget, reason: '切到 B 后推理强度应还在');
++
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++  });
++}

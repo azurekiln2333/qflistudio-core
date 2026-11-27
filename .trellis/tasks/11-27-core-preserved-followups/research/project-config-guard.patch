@@ -1,0 +1,330 @@
+diff --git a/lib/editor/file_explorer.dart b/lib/editor/file_explorer.dart
+--- a/lib/editor/file_explorer.dart
++++ b/lib/editor/file_explorer.dart
+@@ -8,6 +8,7 @@
+ import '../models/project.dart';
+ import '../store/project_store.dart';
+ import '../services/file_service.dart';
++import '../services/project_config_guard.dart';
+ import '../editor/new_file_dialog.dart';
+ import '../store/settings_store.dart';
+ import '../editor/project_history.dart';
+@@ -1049,6 +1050,17 @@
+ 
+   Future<void> _delete(FileNode node) async {
+     final owner = _ownerOf(node.path);
++    final protectionError = await ProjectConfigGuard.deletionError(
++      projectRoot: owner.path,
++      absolutePath: node.path,
++    );
++    if (!mounted) return;
++    if (protectionError != null) {
++      ScaffoldMessenger.of(
++        context,
++      ).showSnackBar(SnackBar(content: Text(protectionError)));
++      return;
++    }
+     final confirmed = await showDeleteEntryConfirm(
+       context,
+       name: node.name,
+@@ -1066,6 +1078,18 @@
+           context,
+         ).showSnackBar(SnackBar(content: Text('已取消删除：$backupError')));
+       }
++      return;
++    }
++    // Confirmation and backup both await work. Recheck before removing bytes.
++    final finalProtectionError = await ProjectConfigGuard.deletionError(
++      projectRoot: owner.path,
++      absolutePath: node.path,
++    );
++    if (!mounted) return;
++    if (finalProtectionError != null) {
++      ScaffoldMessenger.of(
++        context,
++      ).showSnackBar(SnackBar(content: Text(finalProtectionError)));
+       return;
+     }
+     try {
+@@ -1093,9 +1117,17 @@
+     );
+   }
+ 
+-  void _showMenu(FileNode node, Offset position) {
++  Future<void> _showMenu(FileNode node, Offset position) async {
++    final generation = _treeGeneration;
+     final isRoot = _roots.any((root) => p.equals(node.path, root.path));
+     final owner = _ownerOf(node.path);
++    final protectionError = isRoot
++        ? null
++        : await ProjectConfigGuard.deletionError(
++            projectRoot: owner.path,
++            absolutePath: node.path,
++          );
++    if (!mounted || generation != _treeGeneration) return;
+     final l = StudioLocalizations.of(context);
+     final items = <PopupMenuEntry<String>>[
+       if (!node.isDir)
+@@ -1184,13 +1216,19 @@
+           ),
+         ),
+       if (!isRoot)
+-        const PopupMenuItem(
++        PopupMenuItem(
+           value: 'delete',
++          enabled: protectionError == null,
+           child: Row(
+             children: [
+-              Icon(Icons.delete_outline, size: 18),
+-              SizedBox(width: 10),
+-              Text('删除'),
++              Icon(
++                protectionError == null
++                    ? Icons.delete_outline
++                    : Icons.lock_outline,
++                size: 18,
++              ),
++              const SizedBox(width: 10),
++              Text(protectionError == null ? '删除' : '项目配置受保护'),
+             ],
+           ),
+         ),
+@@ -1785,7 +1823,8 @@
+     final dirty = !node.isDir && widget.editor.isDirty(node.path);
+     final row = GestureDetector(
+       key: ValueKey('file-row-${node.path}'),
+-      onLongPressStart: (details) => _showMenu(node, details.globalPosition),
++      onLongPressStart: (details) =>
++          unawaited(_showMenu(node, details.globalPosition)),
+       child: Ink(
+         decoration: BoxDecoration(
+           color: selected
+@@ -1802,7 +1841,7 @@
+             }
+           },
+           onSecondaryTapUp: (details) =>
+-              _showMenu(node, details.globalPosition),
++              unawaited(_showMenu(node, details.globalPosition)),
+           child: ConstrainedBox(
+             // Tree rows grow with the text scale; a fixed 34px row overflowed
+             // by a couple of pixels at 2.0x on short panels.
+diff --git a/lib/services/cloud_sync_service.dart b/lib/services/cloud_sync_service.dart
+--- a/lib/services/cloud_sync_service.dart
++++ b/lib/services/cloud_sync_service.dart
+@@ -10,6 +10,7 @@
+ import 'api_client.dart';
+ import 'cloud_cache_paths.dart';
+ import 'cloud_cache_service.dart';
++import 'project_config_guard.dart';
+ import 'project_templates.dart';
+ 
+ /// 云端项目条目（服务器返回）。
+@@ -300,14 +301,47 @@
+   }
+ 
+   Future<String?> pushDelete(String token, String absolutePath) async {
++    late final CloudSession session;
++    late final String relative;
++    try {
++      session = _capture(token);
++      relative = _relative(absolutePath);
++      final protectionError = await ProjectConfigGuard.deletionError(
++        projectRoot: localPath,
++        absolutePath: absolutePath,
++      );
++      if (protectionError != null) return protectionError;
++      // The editor may already have removed its mirror. Check the remote tree
++      // before dirty markers, cache updates or a destructive remote request.
++      final tree = await cache.api.scopedCloud(session).fileTree(cloudId);
++      final entries = tree['files'];
++      if (entries is! List) {
++        throw const CloudOperationException('response', '云端文件列表无效');
++      }
++      final remotePaths = <String>[];
++      for (final entry in entries) {
++        if (entry is! Map || entry['path'] is! String) {
++          throw const CloudOperationException('response', '云端文件列表无效');
++        }
++        remotePaths.add(CloudCachePaths.relative(entry['path'] as String));
++      }
++      final remoteProtectionError = ProjectConfigGuard.relativeDeletionError(
++        relative,
++        descendants: remotePaths,
++      );
++      if (remoteProtectionError != null) return remoteProtectionError;
++      session.ensureCurrent();
++      _relative(absolutePath);
++    } catch (error) {
++      return _message(error);
++    }
+     if (scope != null) {
+       CloudWorkspaceActivity.markDirty(_activityKey, absolutePath);
+       CloudWorkspaceActivity.beginPush(_activityKey);
+     }
+     _setState(SyncState.syncing);
+     try {
+-      final session = _capture(token);
+-      final relative = _relative(absolutePath);
++      session.ensureCurrent();
+       if (cache.isBusy(scope!, cloudId)) {
+         throw const CloudOperationException('busy', '缓存正在处理，已保留本地修改');
+       }
+diff --git a/lib/services/project_config_guard.dart b/lib/services/project_config_guard.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/services/project_config_guard.dart
+@@ -0,0 +1,154 @@
++import 'dart:io';
++
++import 'package:path/path.dart' as p;
++
++/// Protects project configuration from managed deletion or relocation.
++/// Reading and editing configuration are outside this policy.
++abstract final class ProjectConfigGuard {
++  static const Set<String> protectedNames = {
++    '.git',
++    '.gitignore',
++    '.gitattributes',
++    '.gitmodules',
++    '.editorconfig',
++    '.trellis',
++    '.agents',
++    '.codex',
++    '.claude',
++    '.qfli',
++    '.vscode',
++    '.idea',
++    'agents.md',
++    'claude.md',
++  };
++
++  static const String protectedMessage = '项目配置受保护，不能删除或移动';
++  static const String invalidPathMessage = '删除路径不在项目目录内';
++  static const String inspectionMessage = '无法确认项目配置，已取消删除';
++
++  static bool _isProtectedName(String name) {
++    var folded = name.toLowerCase();
++    if (Platform.isWindows) {
++      // Win32 aliases and alternate data streams must not bypass the name.
++      folded = folded.split(':').first.replaceFirst(RegExp(r'[. ]+$'), '');
++    }
++    return protectedNames.contains(folded);
++  }
++
++  static bool _containsConfiguration(String relativePath) =>
++      relativePath.replaceAll(r'\', '/').split('/').any(_isProtectedName);
++
++  /// Checks a portable project-relative target and known remote descendants.
++  static String? relativeDeletionError(
++    String relativePath, {
++    Iterable<String> descendants = const [],
++  }) {
++    final path = relativePath.replaceAll(r'\', '/');
++    if (path.isEmpty || path == '.') return protectedMessage;
++    final segments = path.split('/');
++    if (path.startsWith('/') ||
++        RegExp(r'^[A-Za-z]:').hasMatch(path) ||
++        path.contains('\u0000') ||
++        segments.any((part) => part.isEmpty || part == '.' || part == '..')) {
++      return invalidPathMessage;
++    }
++    if (_containsConfiguration(path)) return protectedMessage;
++    final prefix = '${path.toLowerCase()}/';
++    for (final descendant in descendants) {
++      final child = descendant.replaceAll(r'\', '/');
++      if (child.toLowerCase().startsWith(prefix) &&
++          _containsConfiguration(child)) {
++        return protectedMessage;
++      }
++    }
++    return null;
++  }
++
++  /// Checks both the displayed path and its resolved filesystem alias.
++  static String? pathError({
++    required String projectRoot,
++    required String absolutePath,
++  }) {
++    try {
++      if (projectRoot.contains('\u0000') || absolutePath.contains('\u0000')) {
++        return invalidPathMessage;
++      }
++      // Normalizing first could hide a link/.. traversal from the check while
++      // the filesystem mutation still receives the original spelling.
++      if (absolutePath
++          .replaceAll(r'\', '/')
++          .split('/')
++          .any((part) => part == '.' || part == '..')) {
++        return invalidPathMessage;
++      }
++      final root = p.normalize(p.absolute(projectRoot));
++      final target = p.normalize(p.absolute(absolutePath));
++      if (p.equals(root, target)) return protectedMessage;
++      if (!p.isWithin(root, target)) return invalidPathMessage;
++      final lexicalError = relativeDeletionError(
++        p.relative(target, from: root),
++      );
++      if (lexicalError != null) return lexicalError;
++      final realRoot = Directory(root).resolveSymbolicLinksSync();
++      final realTarget = _resolvedPath(target);
++      if (p.equals(realRoot, realTarget)) return protectedMessage;
++      if (!p.isWithin(realRoot, realTarget)) return invalidPathMessage;
++      return relativeDeletionError(p.relative(realTarget, from: realRoot));
++    } on FileSystemException {
++      return inspectionMessage;
++    } on ArgumentError {
++      return invalidPathMessage;
++    }
++  }
++
++  /// Also refuses a directory that contains protected configuration.
++  /// Scan without following child links, then recheck the selected alias.
++  static Future<String?> deletionError({
++    required String projectRoot,
++    required String absolutePath,
++  }) async {
++    final initialError = pathError(
++      projectRoot: projectRoot,
++      absolutePath: absolutePath,
++    );
++    if (initialError != null) return initialError;
++    try {
++      final directory = Directory(absolutePath);
++      if (directory.existsSync()) {
++        await for (final entry in directory.list(
++          recursive: true,
++          followLinks: false,
++        )) {
++          if (_isProtectedName(p.basename(entry.path))) return protectedMessage;
++          if (entry is Link) {
++            final aliasError = pathError(
++              projectRoot: projectRoot,
++              absolutePath: entry.path,
++            );
++            if (aliasError != null) return aliasError;
++          }
++        }
++      }
++    } on FileSystemException {
++      return inspectionMessage;
++    }
++    return pathError(projectRoot: projectRoot, absolutePath: absolutePath);
++  }
++
++  /// Missing leaves still inherit the canonical path of an existing ancestor.
++  static String _resolvedPath(String path) {
++    var ancestor = path;
++    final missing = <String>[];
++    while (FileSystemEntity.typeSync(ancestor, followLinks: false) ==
++        FileSystemEntityType.notFound) {
++      final parent = p.dirname(ancestor);
++      if (p.equals(parent, ancestor)) {
++        throw FileSystemException(inspectionMessage, path);
++      }
++      missing.insert(0, p.basename(ancestor));
++      ancestor = parent;
++    }
++    final resolved = File(ancestor).resolveSymbolicLinksSync();
++    return p.normalize(p.joinAll([resolved, ...missing]));
++  }
++}

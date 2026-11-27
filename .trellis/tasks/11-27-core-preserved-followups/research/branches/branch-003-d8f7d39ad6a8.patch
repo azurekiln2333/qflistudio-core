@@ -1,0 +1,789 @@
+diff --git a/lib/harness/hub/harness_hosts.dart b/lib/harness/hub/harness_hosts.dart
+index e0eb9951ec84ebeb8a2f9d7f3e278c7a93a5813b..445151661f8a24969c185228b63409d9e34e1654 100644
+--- a/lib/harness/hub/harness_hosts.dart
++++ b/lib/harness/hub/harness_hosts.dart
+@@ -9,6 +9,8 @@
+ // 这样 Pi-C 分支可以先合并而不带上别人的实现。集成时用
+ // [HarnessHosts.registerDefault] 注册一个工厂即可，编辑器页无需再改。
+ 
++import 'package:flutter/foundation.dart';
++
+ import '../harness_host.dart';
+ import '../../services/app_paths.dart';
+ import 'harness_hub.dart';
+@@ -48,14 +50,22 @@ abstract final class HarnessHosts {
+   static HarnessHostsFactory? _default;
+   static HarnessHostsFactory? _override;
+ 
++  /// 最近一次 [build] 的异常；成功后清空。
++  ///
++  /// 主机装不上时界面上不能只留一个空白面板：编辑器页把它交给
++  /// [HarnessHub.hostBuildError]，Agents 面板据此显示原因。
++  static Object? lastBuildError;
++
+   /// 集成方注册真实主机。后注册的覆盖先注册的。
+   static void registerDefault(HarnessHostsFactory factory) {
+     _default = factory;
++    lastBuildError = null;
+   }
+ 
+   /// 测试和预览注入假主机，优先于 [registerDefault]。
+   static void overrideForTesting(HarnessHostsFactory? factory) {
+     _override = factory;
++    lastBuildError = null;
+   }
+ 
+   /// 是否有任何工厂可用；界面据此决定要不要显示主机选择器。
+@@ -63,11 +73,22 @@ abstract final class HarnessHosts {
+ 
+   static List<HarnessHost> build(HubHostContext context) {
+     final factory = _override ?? _default;
+-    if (factory == null) return const <HarnessHost>[];
++    if (factory == null) {
++      lastBuildError = null;
++      return const <HarnessHost>[];
++    }
+     try {
+-      return factory(context);
+-    } on Object {
+-      // 某台主机的构造失败不应该连带让整个 Agents 面板打不开。
++      final hosts = factory(context);
++      lastBuildError = null;
++      return hosts;
++    } on Object catch (error, stack) {
++      // 某台主机的构造失败不应该连带让整个 Agents 面板打不开，
++      // 但原因要留下来，否则界面只能显示“什么都没有”。
++      lastBuildError = error;
++      assert(() {
++        debugPrint('HarnessHosts.build failed: $error\n$stack');
++        return true;
++      }());
+       return const <HarnessHost>[];
+     }
+   }
+@@ -92,5 +113,9 @@ HarnessHub harnessHubFor({
+       projectRoot: projectRoot,
+     ),
+   );
+-  return HarnessHub(hosts: hosts, desktop: desktop ?? AppPaths.isDesktop);
++  return HarnessHub(
++    hosts: hosts,
++    desktop: desktop ?? AppPaths.isDesktop,
++    hostBuildError: HarnessHosts.lastBuildError,
++  );
+ }
+diff --git a/lib/harness/hub/harness_hub.dart b/lib/harness/hub/harness_hub.dart
+index ca111c2261fd3cd4d3db7086b84d5433d903f21f..e7e4618ca8186aa74b80f939a012362988291f63 100644
+--- a/lib/harness/hub/harness_hub.dart
++++ b/lib/harness/hub/harness_hub.dart
+@@ -12,9 +12,43 @@ import '../harness_host.dart';
+ /// 主机可选能力：装不上或平台不支持时给界面的一句说明。
+ ///
+ /// 契约里没有安装提示字段，所以用这个可选接口传，避免改动共享契约。
++/// 返回值是 `Object?`：各家主机可以给自己定义的结构化对象（例如
++/// `{title, message, url}`），文字由 [harnessHintText] 统一取。
+ abstract class HarnessHostHint {
+-  /// 例如「未检测到 Herdr，请先安装」。
+-  String? get installHint;
++  /// 例如「未检测到 Herdr，请先安装」，或一个带 `message` 字段的对象。
++  Object? get installHint;
++}
++
++/// 把 [HarnessHostHint.installHint] 变成一行可显示的文本。
++///
++/// 认三种形态，都是按结构取文字，不做字符串搜索：
++/// * `String`：直接用（空串视为没有说明）；
++/// * `Map`：依次取 `message`、`detail`、`title`；
++/// * 其它对象：取 `message` 字段，取不到就退到 `toString`。
++///
++/// 默认的 `Instance of ...` 不算说明，返回 null 让界面走通用文案。
++String? harnessHintText(Object? hint) {
++  if (hint == null) return null;
++  if (hint is String) {
++    final text = hint.trim();
++    return text.isEmpty ? null : text;
++  }
++  if (hint is Map) {
++    for (final key in const ['message', 'detail', 'title']) {
++      final value = hint[key];
++      if (value is String && value.trim().isNotEmpty) return value.trim();
++    }
++    return null;
++  }
++  try {
++    final message = (hint as dynamic).message;
++    if (message is String && message.trim().isNotEmpty) return message.trim();
++  } on Object {
++    // 没有 message 字段：继续往下退。
++  }
++  final text = hint.toString().trim();
++  if (text.isEmpty || text.startsWith('Instance of ')) return null;
++  return text;
+ }
+ 
+ /// 一个主机里同一 provider 的会话。
+@@ -96,7 +130,10 @@ class HarnessHub extends ChangeNotifier {
+     required List<HarnessHost> hosts,
+     required bool desktop,
+     String? initialHostId,
++    bool ownsHosts = true,
++    this.hostBuildError,
+   }) : _desktop = desktop,
++       _ownsHosts = ownsHosts,
+        _hosts = List<HarnessHost>.unmodifiable(
+          hosts.where(
+            (host) => hostVisibleOnPlatform(host.kind, desktop: desktop),
+@@ -125,6 +162,16 @@ class HarnessHub extends ChangeNotifier {
+   }
+ 
+   final bool _desktop;
++
++  /// 销毁时是否连带 `dispose()` 主机。
++  ///
++  /// 主机是应用级共享单例时由调用方传 false：关掉一个编辑页不能把全局主机
++  /// 释放掉。默认 true，对应「工厂每次给新实例」的约定。
++  final bool _ownsHosts;
++
++  /// 装配主机时的异常；没有异常或没有注册工厂时为 null。
++  final Object? hostBuildError;
++
+   final List<HarnessHost> _hosts;
+   final Map<String, HarnessHostState> _states = <String, HarnessHostState>{};
+   final Map<String, VoidCallback> _stateListeners = <String, VoidCallback>{};
+@@ -187,7 +234,10 @@ class HarnessHub extends ChangeNotifier {
+   /// 主机自带的安装/修复说明；没有时为 null。
+   String? hintOf(String hostId) {
+     final host = hostById(hostId);
+-    if (host is HarnessHostHint) return (host as HarnessHostHint).installHint;
++    // 两个类型互不相关，Dart 不会做类型提升；用模式匹配绑定出非空副本。
++    if (host case final HarnessHostHint hinted) {
++      return harnessHintText(hinted.installHint);
++    }
+     return null;
+   }
+ 
+@@ -334,6 +384,8 @@ class HarnessHub extends ChangeNotifier {
+       }
+       _activeSession = handle.info;
+       _activeHandle = handle;
++      // 与 openSession 一致：新会话属于哪台主机，当前主机就跟到哪。
++      if (_currentHostId != host.id) _currentHostId = host.id;
+       notifyListeners();
+       return handle;
+     } finally {
+@@ -436,7 +488,7 @@ class HarnessHub extends ChangeNotifier {
+     for (final host in _hosts) {
+       final listener = _stateListeners.remove(host.id);
+       if (listener != null) host.state.removeListener(listener);
+-      unawaited(host.dispose());
++      if (_ownsHosts) unawaited(host.dispose());
+     }
+     final handle = _activeHandle;
+     _activeHandle = null;
+diff --git a/lib/harness/ui/hub_agents_surface.dart b/lib/harness/ui/hub_agents_surface.dart
+index 6043714e53df8479876fea60907af27900c63c48..7a3e0586ff11dfa5a54b384233aeecb760531cd7 100644
+--- a/lib/harness/ui/hub_agents_surface.dart
++++ b/lib/harness/ui/hub_agents_surface.dart
+@@ -59,6 +59,8 @@ class HubAgentsSurface extends StatelessWidget {
+                 compact: compact,
+                 projectRoot: projectRoot,
+               ),
++            if (host == null && hub.hostBuildError != null)
++              _HostBuildFailure(error: hub.hostBuildError!),
+             Expanded(
+               child: showsHubSession
+                   ? HubSessionView(
+@@ -82,6 +84,34 @@ class HubAgentsSurface extends StatelessWidget {
+   }
+ }
+ 
++/// 主机装配失败时的说明条。
++///
++/// 装配异常不能让面板只剩下内置 Agent 而没有任何线索；这里给出原因，
++/// 用户能直接把它转给支持人员。
++class _HostBuildFailure extends StatelessWidget {
++  const _HostBuildFailure({required this.error});
++
++  final Object error;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    return Container(
++      key: const ValueKey('hub-host-build-error'),
++      width: double.infinity,
++      padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
++      color: scheme.errorContainer,
++      child: Text(
++        '外部主机没有装配成功：$error',
++        style: theme.textTheme.labelSmall?.copyWith(
++          color: scheme.onErrorContainer,
++        ),
++      ),
++    );
++  }
++}
++
+ /// 主机条：选择器、连接状态说明、新建会话和刷新。
+ class _HostHeader extends StatelessWidget {
+   const _HostHeader({
+diff --git a/lib/harness/ui/hub_chat_view.dart b/lib/harness/ui/hub_chat_view.dart
+index dd6522c49d313f5194f7638ef7b496ece3444104..73ee7b85e47726733fd1679b8b99667e2f66bf5a 100644
+--- a/lib/harness/ui/hub_chat_view.dart
++++ b/lib/harness/ui/hub_chat_view.dart
+@@ -3,6 +3,9 @@
+ // 消息气泡复用 Studio 的 ChatMessageTile，输入卡片复用 ComposerState 的
+ // 草稿状态；权限和模型选择器属于内置 Agent 的模型范围，hub 会话没有对应
+ // 契约字段，所以这里只保留发送与停止。
++//
++// 停止 = `stop()` = 结束会话，必须由外层确认后再调用：本组件只负责把点击
++// 冒泡成 [HubChatView.onStop]，不直接碰 handle。
+ 
+ import 'dart:async';
+ 
+@@ -30,11 +33,18 @@ class HubChatView extends StatefulWidget {
+   const HubChatView({
+     super.key,
+     required this.handle,
++    this.onStop,
+     this.emptyTitle = '还没有对话记录',
+     this.emptyHint = '在下面的输入框里描述要它做什么。',
+   });
+ 
+   final HarnessSessionHandle handle;
++
++  /// 用户点了输入卡片的停止按钮。为空时不显示该按钮。
++  ///
++  /// 结束会话需要用户确认（AC5），确认对话框与 `stop()` 都由外层完成。
++  final VoidCallback? onStop;
++
+   final String emptyTitle;
+   final String emptyHint;
+ 
+@@ -57,8 +67,23 @@ class _HubChatViewState extends State<HubChatView> {
+     _bind();
+   }
+ 
++  @override
++  void didUpdateWidget(HubChatView oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    // 同一个 State 换会话时必须重绑，否则界面留着上一个会话的事件，
++    // 而 _send 已经发往新会话。
++    if (!identical(oldWidget.handle, widget.handle)) {
++      _events.clear();
++      _answered.clear();
++      _error = null;
++      _bind();
++    }
++  }
++
+   void _bind() {
+     unawaited(_sub?.cancel());
++    _sub = null;
++    _events.clear();
+     final stream = widget.handle.transcript;
+     if (stream == null) return;
+     _sub = stream.listen(
+@@ -178,7 +203,8 @@ class _HubChatViewState extends State<HubChatView> {
+           state: _composer,
+           onSend: _send,
+           sending: _sending,
+-          onStop: () => widget.handle.stop(),
++          // 只是把点击转给外层：结束会话要先弹确认。
++          onStop: widget.onStop,
+           enabled: true,
+         ),
+       ],
+@@ -388,10 +414,10 @@ class _HubComposerState extends State<HubComposer> {
+                   SizedBox(
+                     width: 36,
+                     height: 36,
+-                    child: widget.sending
++                    child: widget.sending && widget.onStop != null
+                         ? IconButton.filled(
+                             key: const ValueKey('hub-composer-stop'),
+-                            tooltip: '停止',
++                            tooltip: '结束会话',
+                             onPressed: widget.onStop,
+                             icon: const Icon(Icons.stop, size: 20),
+                           )
+diff --git a/lib/harness/ui/hub_session_list.dart b/lib/harness/ui/hub_session_list.dart
+index 7d05d7fef5c8120d1c8b822540841535ae881148..c6f55e5ec18b7b4b7a04dc8ecf3c416f8cfce9d1 100644
+--- a/lib/harness/ui/hub_session_list.dart
++++ b/lib/harness/ui/hub_session_list.dart
+@@ -368,6 +368,10 @@ class HubSessionListSection extends StatelessWidget {
+       builder: (context, _) {
+         final host = hub.currentHost;
+         if (host == null) return const SizedBox.shrink();
++        // 内置 Agent 的会话由上面的原生列表画过了，这里只补其它主机。
++        if (host.kind == HarnessHostKind.studio) {
++          return const SizedBox.shrink();
++        }
+         final groups = hub.groupsOf(host.id);
+         final theme = Theme.of(context);
+         final scheme = theme.colorScheme;
+diff --git a/lib/harness/ui/hub_session_view.dart b/lib/harness/ui/hub_session_view.dart
+index e23f15cc2db27badb810e887597c4c06fcbf7ec9..2d4b7e2ca9a71da35f84549678fa3c3abdf1d811 100644
+--- a/lib/harness/ui/hub_session_view.dart
++++ b/lib/harness/ui/hub_session_view.dart
+@@ -177,7 +177,15 @@ class _HubSessionViewState extends State<HubSessionView> {
+     final hasTerminal = handle.terminal != null;
+     // 标签和内容是同一份列表，索引不会错位。
+     final pages = <({String label, Widget body})>[
+-      if (hasTranscript) (label: '对话', body: HubChatView(handle: handle)),
++      if (hasTranscript)
++        (
++          label: '对话',
++          // 结束会话的确认在 _confirmStop 里做，输入卡片只把点击转过来。
++          body: HubChatView(
++            handle: handle,
++            onStop: _busy ? null : () => unawaited(_confirmStop()),
++          ),
++        ),
+       if (hasTerminal)
+         (
+           label: '终端',
+diff --git a/lib/harness/ui/hub_terminal_view.dart b/lib/harness/ui/hub_terminal_view.dart
+index 0eeb74c3c730a46f3111d5e6a4e1b7ce31b1e3f0..0cf43a3bda225f24f87b662e90f331fce0460089 100644
+--- a/lib/harness/ui/hub_terminal_view.dart
++++ b/lib/harness/ui/hub_terminal_view.dart
+@@ -57,8 +57,11 @@ class _HubTerminalViewState extends State<HubTerminalView> {
+   static const int _maxLines = 5000;
+ 
+   late final Terminal _terminal = Terminal(maxLines: _maxLines);
+-  StreamSubscription<String>? _output;
+   StreamSubscription<Uint8List>? _raw;
++
++  /// 当前流的解码器；流结束时由它自己的 sink 关闭，销毁时也要关。
++  ByteConversionSink? _decoder;
++
+   String? _error;
+ 
+   @override
+@@ -70,8 +73,9 @@ class _HubTerminalViewState extends State<HubTerminalView> {
+   }
+ 
+   void _bind(HarnessTerminalChannel channel) {
+-    unawaited(_output?.cancel());
+     unawaited(_raw?.cancel());
++    _raw = null;
++    _closeDecoder();
+     // 自己拼 UTF-8：被拆在两个数据块里的多字节字符也要能完整解出来，
+     // 所以用带状态的 chunked 解码器而不是每块单独 convert。
+     final decoder = const Utf8Decoder(allowMalformed: true)
+@@ -83,6 +87,7 @@ class _HubTerminalViewState extends State<HubTerminalView> {
+             onDone: () => widget.onClosed?.call(),
+           ),
+         );
++    _decoder = decoder;
+     _raw = channel.output.listen(
+       (bytes) {
+         try {
+@@ -98,12 +103,26 @@ class _HubTerminalViewState extends State<HubTerminalView> {
+         widget.onClosed?.call();
+       },
+       onDone: () {
+-        decoder.close();
++        _closeDecoder();
+       },
+       cancelOnError: false,
+     );
+   }
+ 
++  /// 关闭当前的解码器；重复调用无副作用。
++  ///
++  /// 流正常结束时 sink 会收到 close，销毁时则要主动关一次，两边行为一致。
++  void _closeDecoder() {
++    final decoder = _decoder;
++    _decoder = null;
++    if (decoder == null) return;
++    try {
++      decoder.close();
++    } on Object {
++      // 已经关过了：忽略。
++    }
++  }
++
+   void _write(String data) {
+     try {
+       widget.channel.write(utf8.encode(data));
+@@ -124,9 +143,8 @@ class _HubTerminalViewState extends State<HubTerminalView> {
+   @override
+   void dispose() {
+     unawaited(_raw?.cancel());
+-    unawaited(_output?.cancel());
+     _raw = null;
+-    _output = null;
++    _closeDecoder();
+     if (_terminal.onOutput == _write) _terminal.onOutput = null;
+     if (_terminal.onResize == _resize) _terminal.onResize = null;
+     super.dispose();
+diff --git a/lib/pages/devices_remote_page.dart b/lib/pages/devices_remote_page.dart
+index 2f595a11cef83e34208b69cf17f10135a23bdad2..e5f00b60fe694f4bc0794412b454be198aa86e05 100644
+--- a/lib/pages/devices_remote_page.dart
++++ b/lib/pages/devices_remote_page.dart
+@@ -69,13 +69,22 @@ class _DevicesRemotePageState extends State<DevicesRemotePage> {
+     try {
+       final provided = widget.controller;
+       if (provided != null) {
+-        _controller = provided;
++        if (!mounted) return;
+         _store = widget.store;
++        _controller = provided;
+         _ownsController = false;
+       } else {
+         final store = widget.store ?? await RemoteStore.open();
++        // 页面在 await 期间被弹出：不再创建控制器，否则那个 WebSocket
++        // 与订阅没有任何人释放。
++        if (!mounted) return;
++        final controller = RemoteController(store: store)..connect();
++        if (!mounted) {
++          controller.dispose();
++          return;
++        }
+         _store = store;
+-        _controller = RemoteController(store: store)..connect();
++        _controller = controller;
+         _ownsController = true;
+       }
+     } on Object catch (error) {
+@@ -304,6 +313,11 @@ class _PairRouteState extends State<_PairRoute> {
+     // 配对完成立刻退回设备列表：配对页本身没有“完成”按钮。
+     WidgetsBinding.instance.addPostFrameCallback((_) {
+       if (!mounted) return;
++      // 只在配对页仍是最上层时退一层：重复回调或用户已手动返回时，
++      // pop 会把设置页一起弹掉。
++      final route = ModalRoute.of(context);
++      if (route != null && !route.isCurrent) return;
++      if (!Navigator.of(context).canPop()) return;
+       Navigator.of(context).pop();
+     });
+   }
+diff --git a/test/harness/harness_hub_test.dart b/test/harness/harness_hub_test.dart
+index c21543395dab84ce3a5a87dd9fba6ca1c0d8d31d..45aed9a044097474f704d3634d8e6bd32337f1ec 100644
+--- a/test/harness/harness_hub_test.dart
++++ b/test/harness/harness_hub_test.dart
+@@ -188,6 +188,28 @@ void main() {
+     hub.dispose();
+   });
+ 
++  test('install hints accept strings, maps and structured objects', () {
++    // 主机可以给纯文本，也可以给自己定义的对象；两种都要能变成一句话。
++    expect(harnessHintText('未检测到 Herdr'), '未检测到 Herdr');
++    expect(harnessHintText('   '), isNull);
++    expect(harnessHintText(null), isNull);
++    expect(
++      harnessHintText({'title': 'Herdr', 'message': '服务未运行'}),
++      '服务未运行',
++    );
++    expect(harnessHintText(const _StructuredHint('需要安装 Herdr')), '需要安装 Herdr');
++    // 拿不到文字的默认 toString 不算说明。
++    expect(harnessHintText(const _OpaqueHint()), isNull);
++  });
++
++  test('the hub reads a structured hint from a host', () async {
++    final host = _StructuredHintHost();
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    await pumpEventQueue();
++    expect(hub.hintOf('herdr'), '服务未运行，请重启 Herdr');
++    hub.dispose();
++  });
++
+   test(
+     'selecting a host switches its session list and releases the view',
+     () async {
+@@ -267,6 +289,27 @@ void main() {
+     hub.dispose();
+   });
+ 
++  test('launching on another host switches to that host', () async {
++    final hub = buildHub();
++    await pumpEventQueue();
++    expect(hub.currentHostId, 'local');
++
++    final handle = await hub.launch(
++      const HarnessLaunchRequest(providerId: 'claude', cwd: '/tmp/project'),
++      hostId: 'remote-pc',
++    );
++    await pumpEventQueue();
++
++    // 新会话在远程主机上：顶栏、侧边栏都会按新主机画，不能还停在本机。
++    expect(hub.currentHostId, 'remote-pc');
++    expect(hub.activeSession?.hostId, 'remote-pc');
++    expect(
++      hub.currentSessions.map((session) => session.id),
++      contains(handle.info.id),
++    );
++    hub.dispose();
++  });
++
+   test('launching without a host reports a readable error', () async {
+     final hub = HarnessHub(hosts: const [], desktop: true);
+     await pumpEventQueue();
+@@ -308,6 +351,27 @@ void main() {
+     expect(remote.disposeCount, 1);
+   });
+ 
++  test('a hub that does not own its hosts leaves them running', () async {
++    // 共享主机（应用级单例）的形态：关闭编辑页只摘监听，不释放主机。
++    final hub = HarnessHub(
++      hosts: [local, remote],
++      desktop: true,
++      ownsHosts: false,
++    );
++    await pumpEventQueue();
++    hub.dispose();
++    await pumpEventQueue();
++
++    expect(local.disposeCount, 0);
++    expect(remote.disposeCount, 0);
++
++    // 主机仍然可用：再建一个 hub 仍能读到会话。
++    final again = HarnessHub(hosts: [local, remote], desktop: true);
++    await pumpEventQueue();
++    expect(again.currentSessions, isNotEmpty);
++    again.dispose();
++  });
++
+   test('groupSessionsByProvider keeps unknown providers under their id', () {
+     final groups = groupSessionsByProvider(
+       [
+@@ -320,3 +384,31 @@ void main() {
+     expect(groups.map((group) => group.label), ['Claude Code', 'mystery']);
+   });
+ }
++
++/// 主机自定义的结构化安装说明（对应 Pi-B 的 `HerdrInstallHint`）。
++class _StructuredHint {
++  const _StructuredHint(this.message);
++
++  final String message;
++  final String title = 'Herdr';
++  final String? url = null;
++}
++
++/// 只带默认 `toString` 的对象：拿不到文字。
++class _OpaqueHint {
++  const _OpaqueHint();
++}
++
++/// 给结构化提示的主机：不需要实现全部行为，只要能被 hub 读提示。
++class _StructuredHintHost extends FakeHarnessHost {
++  _StructuredHintHost()
++    : super(
++        id: 'herdr',
++        label: 'Herdr',
++        kind: HarnessHostKind.local,
++        initialState: HarnessHostState.unsupported,
++      );
++
++  @override
++  Object? get installHint => const _StructuredHint('服务未运行，请重启 Herdr');
++}
+diff --git a/test/harness/hub_ui_test.dart b/test/harness/hub_ui_test.dart
+index 454bb2a0ac4d18f1659de534866a246fd6333c3d..7e0011701c68280b9c47052e4b15124ea1ea6c51 100644
+--- a/test/harness/hub_ui_test.dart
++++ b/test/harness/hub_ui_test.dart
+@@ -3,16 +3,20 @@
+ //
+ // 本地不执行测试（brief 规定），这些用例交给云端 CI。
+ 
++import 'dart:async';
++
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:qfli_studio_core/harness/harness_host.dart';
+ import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_agents_surface.dart';
++import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_host_switcher.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_session_list.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_session_view.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_terminal_key_bar.dart';
++import 'package:qfli_studio_core/harness/ui/hub_terminal_view.dart';
+ import 'package:xterm/xterm.dart';
+ 
+ import '../support/fake_harness_host.dart';
+@@ -310,6 +314,132 @@ void main() {
+     },
+   );
+ 
++  testWidgets('the composer stop button asks for confirmation too', (
++    tester,
++  ) async {
++    final hub = buildHub();
++    final handle =
++        await hub.openSession(hub.sessionsOf('local').first)
++            as FakeSessionHandle;
++    // 卡住这次发送，让输入卡片进入“发送中”，才会出现停止按钮。
++    handle.sendGate = Completer<void>();
++    await tester.pumpWidget(
++      _wrap(HubSessionView(hub: hub, session: handle.info)),
++    );
++    await tester.pumpAndSettle();
++
++    await tester.enterText(
++      find.byKey(const ValueKey('hub-composer-input')),
++      '跑一下测试',
++    );
++    await tester.pump();
++    await tester.tap(find.byKey(const ValueKey('hub-composer-send')));
++    await tester.pump();
++
++    // 点停止：先弹确认，会话还没结束。
++    await tester.tap(find.byKey(const ValueKey('hub-composer-stop')));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('hub-stop-dialog')), findsOneWidget);
++    expect(handle.stopCount, 0);
++
++    await tester.tap(find.byKey(const ValueKey('hub-stop-cancel')));
++    await tester.pumpAndSettle();
++    expect(handle.stopCount, 0);
++
++    handle.sendGate!.complete();
++    await tester.pumpAndSettle();
++    hub.dispose();
++  });
++
++  testWidgets('chat view rebinds when the handle changes', (tester) async {
++    final hub = buildHub();
++    final first =
++        await hub.openSession(hub.sessionsOf('local').first)
++            as FakeSessionHandle;
++    await tester.pumpWidget(_wrap(HubChatView(handle: first)));
++    await tester.pumpAndSettle();
++
++    first.addEvent(
++      const TranscriptEvent(
++        id: 'a1',
++        role: TranscriptRole.assistant,
++        text: '第一个会话的话',
++      ),
++    );
++    await tester.pumpAndSettle();
++    expect(find.text('第一个会话的话'), findsOneWidget);
++
++    // 同一个 State 换句柄：旧会话的事件不能留着。
++    final second = FakeSessionHandle(
++      info: fakeSession(hostId: 'local', id: 'l9', title: '第二个会话'),
++    );
++    await tester.pumpWidget(_wrap(HubChatView(handle: second)));
++    await tester.pumpAndSettle();
++    expect(find.text('第一个会话的话'), findsNothing);
++
++    second.addEvent(
++      const TranscriptEvent(
++        id: 'b1',
++        role: TranscriptRole.assistant,
++        text: '第二个会话的话',
++      ),
++    );
++    await tester.pumpAndSettle();
++    expect(find.text('第二个会话的话'), findsOneWidget);
++    hub.dispose();
++  });
++
++  testWidgets('the session list section stays out of the studio host', (
++    tester,
++  ) async {
++    final studio = FakeHarnessHost(
++      id: 'studio',
++      label: '内置 Agent',
++      kind: HarnessHostKind.studio,
++      initialSessions: [fakeSession(hostId: 'studio', id: 's1', title: '内置')],
++    );
++    final hub = HarnessHub(
++      hosts: [studio],
++      desktop: true,
++      initialHostId: 'studio',
++    );
++    await tester.pumpWidget(
++      _wrap(HubSessionListSection(hub: hub, cwd: 'D:/proj/alpha')),
++    );
++    await tester.pump();
++
++    // 内置会话由编辑器原有的列表画，这里不能再列一遍。
++    expect(find.byKey(const ValueKey('hub-session-section-title')), findsNothing);
++    expect(find.byKey(const ValueKey('hub-session-studio-s1')), findsNothing);
++
++    hub.dispose();
++    await studio.dispose();
++  });
++
++  testWidgets('terminal view joins a multi-byte character split in two chunks', (
++    tester,
++  ) async {
++    final channel = FakeTerminalChannel();
++    await tester.pumpWidget(_wrap(HubTerminalView(channel: channel)));
++    await tester.pump();
++
++    // 「你」的 UTF-8 是 E4 BD A0，故意拆成两块送进来。
++    channel.emitBytes(const [0xE4, 0xBD]);
++    await tester.pump();
++    channel.emitBytes(const [0xA0]);
++    await tester.pump();
++
++    final terminal = tester
++        .widget<TerminalView>(find.byType(TerminalView))
++        .terminal;
++    expect(terminal.buffer.getText(), contains('你'));
++    // 拆包不能变成替换字符。
++    expect(terminal.buffer.getText(), isNot(contains('\uFFFD')));
++
++    await channel.close();
++    await tester.pumpAndSettle();
++  });
++
+   testWidgets('terminal key bar sends control keys with modifiers', (
+     tester,
+   ) async {
+diff --git a/test/support/fake_harness_host.dart b/test/support/fake_harness_host.dart
+index 6423a1329b107e4ad2cb7f5529907c89aa5fb271..7a92be422355d7be638a887e0defc481d25f6f3c 100644
+--- a/test/support/fake_harness_host.dart
++++ b/test/support/fake_harness_host.dart
+@@ -30,6 +30,9 @@ class FakeTerminalChannel implements HarnessTerminalChannel {
+ 
+   void emit(String text) => _out.add(Uint8List.fromList(text.codeUnits));
+ 
++  /// 原样发送字节：用来验证被拆开的多字节字符能重新拼回去。
++  void emitBytes(List<int> bytes) => _out.add(Uint8List.fromList(bytes));
++
+   Future<void> close() => _out.close();
+ }
+ 
+@@ -57,6 +60,9 @@ class FakeSessionHandle implements HarnessSessionHandle {
+   int detachCount = 0;
+   int stopCount = 0;
+ 
++  /// 非空时 sendPrompt 一直等它：用来观察“发送中”那一刻的界面。
++  Completer<void>? sendGate;
++
+   /// 结束后从终端拿到的状态。
+   HarnessSessionStatus? lastStatus;
+ 
+@@ -66,7 +72,11 @@ class FakeSessionHandle implements HarnessSessionHandle {
+   void addEvent(TranscriptEvent event) => _transcript?.add(event);
+ 
+   @override
+-  Future<void> sendPrompt(String text) async => prompts.add(text);
++  Future<void> sendPrompt(String text) async {
++    prompts.add(text);
++    final gate = sendGate;
++    if (gate != null) await gate.future;
++  }
+ 
+   @override
+   Future<void> reply(HarnessReply reply) async => replies.add(reply);
+@@ -111,8 +121,9 @@ class FakeHarnessHost implements HarnessHost, HarnessHostHint {
+ 
+   final String? hint;
+ 
++  /// 可选：给结构化提示的主机换成子类覆写它。
+   @override
+-  String? get installHint => hint;
++  Object? get installHint => hint;
+ 
+   @override
+   late final ValueNotifier<HarnessHostState> state;

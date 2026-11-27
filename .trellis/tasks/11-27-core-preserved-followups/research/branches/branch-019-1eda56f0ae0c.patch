@@ -1,0 +1,334 @@
+diff --git a/lib/shell/large_screen_workbench.dart b/lib/shell/large_screen_workbench.dart
+index 343a19c1fb1e4855a1b64e61f94047aa591328c4..8dd069e0e8dcb49a439d048071020bc8f5596a3a 100644
+--- a/lib/shell/large_screen_workbench.dart
++++ b/lib/shell/large_screen_workbench.dart
+@@ -12,6 +12,7 @@ import '../harness/hub/harness_hosts.dart';
+ import '../harness/ui/agent_session_details_page.dart';
+ import '../harness/ui/agents_entry.dart';
+ import '../harness/ui/home_agents_tab.dart';
++import '../i18n/studio_localizations.dart';
+ import '../layout/app_form_factor.dart';
+ import '../layout/breakpoints.dart';
+ import '../pages/home_page.dart';
+@@ -74,18 +75,34 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+       controller: widget.editors,
+       showRestoreControl: false,
+       child: ListenableBuilder(
+-        listenable: widget.store,
+-        builder: (context, _) => WorkbenchWelcome(
+-          onOpenProject: _layout.openFolder,
+-          onCreateProject: _layout.createProject,
+-          onCloneRepository: StudioProfile.current?.offlineOnly == true
+-              ? null
+-              : _layout.cloneRepository,
+-          projects: widget.store.projects
+-              .where((project) => !project.isCloud)
+-              .toList(),
+-          onOpenRecent: _layout.openRecent,
+-        ),
++        listenable: Listenable.merge([widget.store, _layout]),
++        builder: (context, _) {
++          if (_layout.activity == WorkbenchActivity.explorer &&
++              _layout.sidebarVisible) {
++            final l = StudioLocalizations.of(context);
++            return Center(
++              child: Text(
++                l.isEnglish
++                    ? 'Choose a project from Explorer'
++                    : l.isTraditionalChinese
++                    ? '從資源管理器選擇專案'
++                    : '从资源管理器选择项目',
++                style: Theme.of(context).textTheme.bodyMedium,
++              ),
++            );
++          }
++          return WorkbenchWelcome(
++            onOpenProject: _layout.openFolder,
++            onCreateProject: _layout.createProject,
++            onCloneRepository: StudioProfile.current?.offlineOnly == true
++                ? null
++                : _layout.cloneRepository,
++            projects: widget.store.projects
++                .where((project) => !project.isCloud)
++                .toList(),
++            onOpenRecent: _layout.openRecent,
++          );
++        },
+       ),
+     );
+     _page(WorkbenchActivity.explorer);
+@@ -359,6 +376,9 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+                                   (constraints.maxWidth -
+                                           WorkbenchActivityRail.width)
+                                       .clamp(0.0, double.infinity);
++                              final dividerWidth = AppPaths.isDesktop
++                                  ? WorkbenchSidebarDivider.desktopHitWidth
++                                  : WorkbenchSidebarDivider.touchHitWidth;
+                               final sideWidth = _layout.sidebarWidth
+                                   .clamp(
+                                     0.0,
+@@ -435,12 +455,13 @@ class _LargeScreenWorkbenchState extends State<LargeScreenWorkbench> {
+                                             key: const ValueKey(
+                                               'workbench-sidebar-divider-slot',
+                                             ),
+-                                            left: sideWidth - 3,
++                                            left: sideWidth - dividerWidth / 2,
+                                             top: 0,
+                                             bottom: 0,
+-                                            width: 6,
++                                            width: dividerWidth,
+                                             child: WorkbenchSidebarDivider(
+                                               controller: _layout,
++                                              touchLayout: !AppPaths.isDesktop,
+                                             ),
+                                           ),
+                                       ],
+diff --git a/lib/shell/workbench_chrome.dart b/lib/shell/workbench_chrome.dart
+index b67a96f0374b38a2510e9173d9d05d11fc2a245a..0538ac2139d974b9c04164514fc1a7137475b2f5 100644
+--- a/lib/shell/workbench_chrome.dart
++++ b/lib/shell/workbench_chrome.dart
+@@ -268,9 +268,16 @@ class _RailButton extends StatelessWidget {
+ 
+ /// Resizable IDE-style sidebar edge. Double-click restores the default width.
+ class WorkbenchSidebarDivider extends StatelessWidget {
+-  const WorkbenchSidebarDivider({super.key, required this.controller});
++  const WorkbenchSidebarDivider({
++    super.key,
++    required this.controller,
++    this.touchLayout = false,
++  });
+ 
+   final LargeScreenController controller;
++  final bool touchLayout;
++  static const double desktopHitWidth = 6;
++  static const double touchHitWidth = 48;
+ 
+   static const ValueKey<String> dividerKey = ValueKey<String>(
+     'workbench-sidebar-divider',
+@@ -286,10 +293,13 @@ class WorkbenchSidebarDivider extends StatelessWidget {
+         controller.sidebarWidth + details.delta.dx,
+       ),
+       onDoubleTap: controller.resetSidebarWidth,
+-      child: Center(
+-        child: Container(
+-          width: 1,
+-          color: Theme.of(context).colorScheme.outlineVariant,
++      child: SizedBox(
++        width: touchLayout ? touchHitWidth : desktopHitWidth,
++        child: Center(
++          child: Container(
++            width: 1,
++            color: Theme.of(context).colorScheme.outlineVariant,
++          ),
+         ),
+       ),
+     ),
+diff --git a/lib/shell/workbench_explorer.dart b/lib/shell/workbench_explorer.dart
+index 67e210c38cb705fa219e52bd2f8b0ba89ea04c7d..c8d3a73225966d70e2f8c02ac02b44e4bb072ba9 100644
+--- a/lib/shell/workbench_explorer.dart
++++ b/lib/shell/workbench_explorer.dart
+@@ -1,7 +1,4 @@
+-import 'dart:io' show Platform;
+-
+ import 'package:flutter/material.dart';
+-import 'package:flutter/services.dart';
+ 
+ import '../i18n/studio_localizations.dart';
+ import '../models/project.dart';
+@@ -217,15 +214,6 @@ class WorkbenchProjectsPanel extends StatelessWidget {
+       onPressed: action,
+       icon: Icon(icon),
+     );
+-    MenuSerializableShortcut shortcut(
+-      LogicalKeyboardKey key, {
+-      bool shift = false,
+-    }) => SingleActivator(
+-      key,
+-      control: !Platform.isMacOS,
+-      meta: Platform.isMacOS,
+-      shift: shift,
+-    );
+     Widget menu(IconData icon, String label, List<Widget> items) => MenuAnchor(
+       menuChildren: items,
+       builder: (context, controller, _) => IconButton(
+@@ -281,27 +269,7 @@ class WorkbenchProjectsPanel extends StatelessWidget {
+                     'Ctrl+Shift+G',
+                     onClone,
+                   ),
+-                menu(Icons.more_vert, l.more, [
+-                  MenuItemButton(
+-                    shortcut: shortcut(LogicalKeyboardKey.keyN, shift: true),
+-                    onPressed: onCreate,
+-                    child: Text(l.createProject),
+-                  ),
+-                  if (onOpenFolder != null)
+-                    MenuItemButton(
+-                      shortcut: shortcut(LogicalKeyboardKey.keyO),
+-                      onPressed: onOpenFolder,
+-                      child: Text(l.addExistingProject),
+-                    ),
+-                  if (onClone != null)
+-                    MenuItemButton(
+-                      shortcut: shortcut(LogicalKeyboardKey.keyG, shift: true),
+-                      onPressed: onClone,
+-                      child: Text(l.isEnglish ? 'Clone repository' : '克隆仓库'),
+-                    ),
+-                  const Divider(),
+-                  ...moreItems,
+-                ]),
++                menu(Icons.more_vert, l.more, moreItems),
+               ],
+             ),
+           ),
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index 9cde6f131bec3117db82def529af6467946305a0..c7899bf0c889366c74544129612cd3640a341a00 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -277,6 +277,27 @@ void main() {
+     expect(tester.takeException(), isNull);
+   });
+ 
++  testWidgets('visible Explorer does not duplicate the welcome project list', (
++    tester,
++  ) async {
++    await mount(tester);
++    final welcome = find.byType(WorkbenchWelcome);
++    expect(welcome, findsNothing);
++    expect(find.text('Alpha'), findsOneWidget);
++    expect(find.text('Beta'), findsOneWidget);
++    expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
++
++    await tester.tap(
++      find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer)),
++    );
++    await tester.pump();
++    expect(welcome, findsOneWidget);
++    expect(find.text('Alpha'), findsOneWidget);
++    expect(find.text('Beta'), findsOneWidget);
++    expect(find.byIcon(Icons.create_new_folder_outlined), findsOneWidget);
++    expect(tester.takeException(), isNull);
++  });
++
+   testWidgets(
+     'file panel survives Explorer pages, activities and compact resize',
+     (tester) async {
+diff --git a/test/workbench_chrome_test.dart b/test/workbench_chrome_test.dart
+index bda4230bf9a9e9029c3346eb9d8cba25295fd1be..8c5b0975663cbe3be876d3e5d4520d57515ffeab 100644
+--- a/test/workbench_chrome_test.dart
++++ b/test/workbench_chrome_test.dart
+@@ -150,6 +150,39 @@ void main() {
+       },
+     );
+ 
++    testWidgets('new destinations expose selection semantics and labels', (
++      tester,
++    ) async {
++      final semantics = tester.ensureSemantics();
++      await _pump(
++        tester,
++        _host(
++          WorkbenchActivityRail(
++            selected: WorkbenchActivity.explorer,
++            onSelected: (_) {},
++          ),
++        ),
++      );
++      expect(
++        tester.getSemantics(
++          find.byKey(
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.explorer),
++          ),
++        ),
++        isSemantics(isButton: true, hasSelectedState: true, isSelected: true),
++      );
++      expect(
++        tester.getSemantics(
++          find.byKey(
++            WorkbenchActivityRail.activityKey(WorkbenchActivity.agents),
++          ),
++        ),
++        isSemantics(isButton: true, hasSelectedState: true, isSelected: false),
++      );
++      expect(find.bySemanticsLabel('Files'), findsNothing);
++      semantics.dispose();
++    });
++
+     testWidgets(
+       '80dp rail uses MD3 indicator, 24dp icons and shortcut tooltips',
+       (tester) async {
+diff --git a/test/workbench_density_test.dart b/test/workbench_density_test.dart
+index b531947f5cc072027deff42132c577828cb2b13d..871ca2582cc1a98e406cb5590c83b0447633a926 100644
+--- a/test/workbench_density_test.dart
++++ b/test/workbench_density_test.dart
+@@ -129,6 +129,7 @@ void main() {
+     final owner = Object();
+     controller.activateFiles(owner);
+     controller.showFiles();
++    final dividerWidth = WorkbenchSidebarDivider.desktopHitWidth;
+     await tester.pumpWidget(
+       MaterialApp(
+         home: Scaffold(
+@@ -142,10 +143,10 @@ void main() {
+                 builder: (context, _) => Stack(
+                   children: [
+                     Positioned(
+-                      left: controller.sidebarWidth - 3,
++                      left: controller.sidebarWidth - dividerWidth / 2,
+                       top: 0,
+                       bottom: 0,
+-                      width: 6,
++                      width: dividerWidth,
+                       child: WorkbenchSidebarDivider(controller: controller),
+                     ),
+                   ],
+@@ -157,6 +158,7 @@ void main() {
+       ),
+     );
+     final divider = find.byKey(WorkbenchSidebarDivider.dividerKey);
++    expect(tester.getSize(divider).width, 6);
+     final region = find
+         .ancestor(of: divider, matching: find.byType(MouseRegion))
+         .first;
+@@ -182,6 +184,42 @@ void main() {
+     expect(controller.sidebarWidth, 300);
+   });
+ 
++  testWidgets('touch workbench divider exposes a 48dp target', (tester) async {
++    final controller = LargeScreenController();
++    addTearDown(controller.dispose);
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: SizedBox(
++            width: 800,
++            height: 400,
++            child: Stack(
++              children: [
++                Positioned(
++                  left:
++                      controller.sidebarWidth -
++                      WorkbenchSidebarDivider.touchHitWidth / 2,
++                  top: 0,
++                  bottom: 0,
++                  width: WorkbenchSidebarDivider.touchHitWidth,
++                  child: WorkbenchSidebarDivider(
++                    controller: controller,
++                    touchLayout: true,
++                  ),
++                ),
++              ],
++            ),
++          ),
++        ),
++      ),
++    );
++    expect(
++      tester.getSize(find.byKey(WorkbenchSidebarDivider.dividerKey)).width,
++      48,
++    );
++    expect(tester.takeException(), isNull);
++  });
++
+   testWidgets('project panel has permanent compact search and menu shortcuts', (
+     tester,
+   ) async {

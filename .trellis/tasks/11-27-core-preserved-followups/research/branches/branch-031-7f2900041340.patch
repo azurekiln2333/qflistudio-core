@@ -1,0 +1,94 @@
+diff --git a/test/large_screen_workbench_cleanup_test.dart b/test/large_screen_workbench_cleanup_test.dart
+index d8331b3e90808b4b54c57f1a8f26ad4e4a8f91c5..e00b94f3a91ce17aaa08a3a1b8927fde69a2ae7e 100644
+--- a/test/large_screen_workbench_cleanup_test.dart
++++ b/test/large_screen_workbench_cleanup_test.dart
+@@ -55,6 +55,14 @@ class _Paths extends PathProviderPlatform {
+   Future<String?> getTemporaryPath() async => root;
+ }
+ 
++Future<void> _finishExplorerTransition(WidgetTester tester) async {
++  await tester.pump();
++  // The interpolation simulation finishes strictly after its duration.
++  await tester.pump(
++    WorkbenchExplorer.duration + const Duration(milliseconds: 16),
++  );
++}
++
+ /// Avoids starting real runtimes: these tests exercise the shell and Home's
+ /// project-open boundary, while the existing host suite covers editor state.
+ class _Editors extends RetainedEditorController {
+@@ -219,8 +227,7 @@ void main() {
+       find.byKey(const ValueKey('workbench-editor-host')),
+     );
+     fixture.layout.showProjects();
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     final home = tester.widget<HomeTab>(find.byType(HomeTab));
+     final info = HarnessSessionInfo(
+       id: 'missing',
+@@ -297,8 +304,7 @@ void main() {
+     expect(layout.explorerPage, ExplorerPage.files);
+     expect(editors.sessionInfos, hasLength(1));
+     await tester.tap(find.byKey(WorkbenchExplorer.backKey));
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     expect(editors.activeSessionKey, alpha);
+     expect(find.byIcon(Icons.radio_button_checked), findsOneWidget);
+     await project(tester, 'Alpha');
+@@ -311,21 +317,18 @@ void main() {
+     await tester.pump();
+     expect(find.text('Another conversation'), findsOneWidget);
+     layout.showProjects();
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     await project(tester, 'Alpha');
+     expect(layout.centerOverlay, isNull);
+     expect(editors.activeSessionKey, alpha);
+     layout.showProjects();
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     await project(tester, 'Beta');
+     expect(editors.activeProject!.name, 'Beta');
+     expect(editors.sessionInfos, hasLength(2));
+     expect(layout.explorerPage, ExplorerPage.files);
+     layout.showProjects();
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     expect(find.byIcon(Icons.circle_outlined), findsOneWidget);
+     await project(tester, 'Alpha');
+     expect(editors.activeSessionKey, alpha);
+@@ -347,8 +350,7 @@ void main() {
+     editors.active = 'workspace:kept';
+     editors.statusChanged();
+     layout.showProjects();
+-    await tester.pump();
+-    await tester.pump(WorkbenchExplorer.duration);
++    await _finishExplorerTransition(tester);
+     await project(tester, 'Alpha');
+     expect(editors.activeSessionKey, 'workspace:kept');
+     expect(editors.resumed.last, 'workspace:kept');
+@@ -392,13 +394,15 @@ void main() {
+       await tester.pump();
+       final panel = tester.state(find.byType(_FilePanel));
+       fixture.layout.showProjects();
+-      await tester.pump();
+-      await tester.pump(WorkbenchExplorer.duration);
++      await _finishExplorerTransition(tester);
+       expect(find.byType(_FilePanel), findsNothing);
+       expect(panel.mounted, isTrue);
++      expect(
++        tester.state(find.byType(_FilePanel, skipOffstage: false)),
++        same(panel),
++      );
+       fixture.layout.showFiles();
+-      await tester.pump();
+-      await tester.pump(WorkbenchExplorer.duration);
++      await _finishExplorerTransition(tester);
+       expect(tester.state(find.byType(_FilePanel)), same(panel));
+       await tester.tap(
+         find.byKey(WorkbenchActivityRail.activityKey(WorkbenchActivity.agents)),

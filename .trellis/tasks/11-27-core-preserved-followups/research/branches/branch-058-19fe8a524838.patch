@@ -1,0 +1,1714 @@
+diff --git a/lib/chat/attachment_picker.dart b/lib/chat/attachment_picker.dart
+index 280d77d15415a61839e9fce52686aab83ff4c583..f77dbf9c89db690c6f68b20196cd8db28af96816 100644
+--- a/lib/chat/attachment_picker.dart
++++ b/lib/chat/attachment_picker.dart
+@@ -1,9 +1,12 @@
+ import 'dart:io';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
+ import 'package:path/path.dart' as p;
+ 
++import '../services/app_paths.dart';
+ import '../services/file_service.dart';
++import '../shell/large_screen_controller.dart';
+ import '../workspace/saved_workspace.dart';
+ import '../workspace/workspace_store.dart';
+ 
+@@ -153,6 +156,44 @@ Future<List<String>?> showAttachmentPicker(
+   required String projectRoot,
+   required WorkspaceStore workspaces,
+ }) {
++  if (LargeScreenScope.maybeOf(context) != null) {
++    final target = context.findRenderObject();
++    final overlay =
++        Navigator.of(
++              context,
++              rootNavigator: true,
++            ).overlay!.context.findRenderObject()!
++            as RenderBox;
++    final anchor = target is RenderBox && target.hasSize
++        ? target.localToGlobal(
++            Offset(8, target.size.height - 8),
++            ancestor: overlay,
++          )
++        : const Offset(24, 24);
++    final desktop = AppPaths.isDesktop;
++    return showGeneralDialog<List<String>>(
++      context: context,
++      barrierDismissible: true,
++      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
++      barrierColor: Colors.transparent,
++      transitionDuration: Duration.zero,
++      pageBuilder: (_, _, _) => InheritedTheme.captureAll(
++        context,
++        _AttachmentMenu(
++          source: source,
++          anchor: anchor,
++          desktop: desktop,
++          load: () => switch (source) {
++            AttachmentSource.project => listProjectAttachments(projectRoot),
++            AttachmentSource.workspace => listWorkspaceAttachments(
++              projectRoot: projectRoot,
++              workspaces: workspaces.workspaces,
++            ),
++          },
++        ),
++      ),
++    );
++  }
+   return showModalBottomSheet<List<String>>(
+     context: context,
+     isScrollControlled: true,
+@@ -170,6 +211,194 @@ Future<List<String>?> showAttachmentPicker(
+   );
+ }
+ 
++/// Workbench-only menu. The route owns dismissal; file access and results are
++/// identical to the phone sheet. Checkbox items keep the menu open for multi-pick.
++class _AttachmentMenu extends StatefulWidget {
++  const _AttachmentMenu({
++    required this.source,
++    required this.anchor,
++    required this.desktop,
++    required this.load,
++  });
++
++  final AttachmentSource source;
++  final Offset anchor;
++  final bool desktop;
++  final Future<List<AttachmentFile>> Function() load;
++
++  @override
++  State<_AttachmentMenu> createState() => _AttachmentMenuState();
++}
++
++class _AttachmentMenuState extends State<_AttachmentMenu> {
++  final MenuController _controller = MenuController();
++  final Set<String> _selected = {};
++  late Future<List<AttachmentFile>> _future;
++  bool _finished = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _future = widget.load();
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (mounted) _controller.open();
++    });
++  }
++
++  void _finish([List<String>? result]) {
++    if (!mounted || _finished) return;
++    _finished = true;
++    Navigator.of(context).pop(result);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final available = MediaQuery.sizeOf(context);
++    final width = (available.width - 32).clamp(0.0, 400.0);
++    final itemStyle = MenuItemButton.styleFrom(
++      minimumSize: Size(width, widget.desktop ? 32 : 48),
++      maximumSize: Size(width, double.infinity),
++      tapTargetSize: widget.desktop
++          ? MaterialTapTargetSize.shrinkWrap
++          : MaterialTapTargetSize.padded,
++      visualDensity: widget.desktop
++          ? VisualDensity.compact
++          : VisualDensity.standard,
++    );
++    return Stack(
++      children: [
++        Positioned(
++          left: widget.anchor.dx.clamp(16.0, available.width - 16),
++          top: widget.anchor.dy.clamp(16.0, available.height - 16),
++          child: FutureBuilder<List<AttachmentFile>>(
++            future: _future,
++            builder: (context, snapshot) {
++              final files = snapshot.data ?? const <AttachmentFile>[];
++              return MenuAnchor(
++                key: const ValueKey('attachment-workbench-menu'),
++                controller: _controller,
++                crossAxisUnconstrained: false,
++                consumeOutsideTap: true,
++                onClose: () {
++                  // Menu callbacks can run while the overlay is rebuilding.
++                  WidgetsBinding.instance.addPostFrameCallback(
++                    (_) => _finish(),
++                  );
++                },
++                style: MenuStyle(
++                  backgroundColor: WidgetStatePropertyAll(
++                    theme.colorScheme.surfaceContainer,
++                  ),
++                  maximumSize: WidgetStatePropertyAll(
++                    Size(width, available.height * 0.72),
++                  ),
++                ),
++                menuChildren: [
++                  Padding(
++                    padding: const EdgeInsets.symmetric(
++                      horizontal: 12,
++                      vertical: 8,
++                    ),
++                    child: SizedBox(
++                      width: width - 24,
++                      child: Text(
++                        widget.source == AttachmentSource.project
++                            ? '项目文件'
++                            : '工作区文件（只读）',
++                        style: theme.textTheme.titleSmall,
++                      ),
++                    ),
++                  ),
++                  const Divider(height: 1),
++                  if (snapshot.connectionState != ConnectionState.done)
++                    MenuItemButton(
++                      style: itemStyle,
++                      child: const Text('正在读取文件…'),
++                    )
++                  else if (snapshot.hasError) ...[
++                    MenuItemButton(
++                      style: itemStyle,
++                      child: const Text('读取文件失败'),
++                    ),
++                    MenuItemButton(
++                      key: const ValueKey('attachment-menu-retry'),
++                      style: itemStyle,
++                      closeOnActivate: false,
++                      onPressed: () => setState(() => _future = widget.load()),
++                      leadingIcon: const Icon(Icons.refresh, size: 18),
++                      child: const Text('重试'),
++                    ),
++                  ] else if (files.isEmpty)
++                    MenuItemButton(
++                      style: itemStyle,
++                      child: Text(
++                        widget.source == AttachmentSource.project
++                            ? '这个项目还没有文件'
++                            : '没有找到工作区文件',
++                      ),
++                    )
++                  else
++                    for (final file in files)
++                      CheckboxMenuButton(
++                        key: ValueKey('attachment-${file.path}'),
++                        style: itemStyle,
++                        value: _selected.contains(file.path),
++                        closeOnActivate: false,
++                        onChanged: (checked) => setState(() {
++                          if (checked == true) {
++                            _selected.add(file.path);
++                          } else {
++                            _selected.remove(file.path);
++                          }
++                        }),
++                        child: SizedBox(
++                          width: (width - 80).clamp(0.0, width),
++                          child: Tooltip(
++                            message: '${file.group} / ${file.label}',
++                            child: Text(
++                              widget.source == AttachmentSource.workspace
++                                  ? '${file.group} / ${file.label}'
++                                  : file.label,
++                              maxLines: 1,
++                              overflow: TextOverflow.ellipsis,
++                            ),
++                          ),
++                        ),
++                      ),
++                  const Divider(height: 1),
++                  MenuItemButton(
++                    key: const ValueKey('attachment-confirm'),
++                    style: itemStyle,
++                    closeOnActivate: false,
++                    leadingIcon: const Icon(Icons.attach_file, size: 18),
++                    onPressed: _selected.isEmpty
++                        ? null
++                        : () => _finish(_selected.toList()),
++                    child: Text(
++                      _selected.isEmpty ? '选择文件' : '附加 ${_selected.length} 个文件',
++                    ),
++                  ),
++                  MenuItemButton(
++                    key: const ValueKey('attachment-menu-cancel'),
++                    autofocus: true,
++                    style: itemStyle,
++                    closeOnActivate: false,
++                    shortcut: const SingleActivator(LogicalKeyboardKey.escape),
++                    onPressed: _finish,
++                    child: const Text('取消'),
++                  ),
++                ],
++                child: const SizedBox(width: 1, height: 1),
++              );
++            },
++          ),
++        ),
++      ],
++    );
++  }
++}
++
+ /// 附件选择面板。多选，确认后一次性返回。
+ class AttachmentPickerSheet extends StatefulWidget {
+   const AttachmentPickerSheet({
+diff --git a/lib/harness/ui/home_agents_tab.dart b/lib/harness/ui/home_agents_tab.dart
+index aeb98cfa6e9bf136f97bf34c04f80949738c0931..c13671d0a6350bb01799ba79149ed021059ead29 100644
+--- a/lib/harness/ui/home_agents_tab.dart
++++ b/lib/harness/ui/home_agents_tab.dart
+@@ -14,6 +14,7 @@ import 'package:path/path.dart' as p;
+ import '../../i18n/studio_localizations.dart';
+ import '../../services/app_paths.dart';
+ import '../../shell/agent_runtime_factory.dart';
++import '../../shell/large_screen_controller.dart';
+ import '../../store/auth_store.dart';
+ import '../../store/project_store.dart';
+ import '../../store/settings_store.dart';
+@@ -110,6 +111,7 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
+ 
+   /// 正在补接已绑定的电脑，避免打开与下拉刷新同时开两条连接。
+   bool _attachingRemote = false;
++  final TextEditingController _search = TextEditingController();
+ 
+   /// 当前渲染的行，测试用来断言排序与合并。
+   @visibleForTesting
+@@ -341,6 +343,7 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
+     _sub?.cancel();
+     _unwatchRuntime();
+     _writer.dispose();
++    _search.dispose();
+     if (_ownsHub) _hub.dispose();
+     super.dispose();
+   }
+@@ -348,6 +351,9 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
+   @override
+   Widget build(BuildContext context) {
+     final l10n = StudioLocalizations.of(context);
++    if (LargeScreenScope.maybeOf(context) != null) {
++      return _buildWorkbench(context);
++    }
+     if (_loading && _rows.isEmpty) {
+       return Center(
+         key: const ValueKey('agents-loading'),
+@@ -408,6 +414,164 @@ class HomeAgentsTabState extends State<HomeAgentsTab> {
+     );
+   }
+ 
++  Widget _buildWorkbench(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final l10n = StudioLocalizations.of(context);
++    final desktop = AppPaths.isDesktop;
++    final query = _search.text.trim().toLowerCase();
++    final groups = <String, List<AgentsIndexRow>>{};
++    for (final row in _rows) {
++      if (query.isNotEmpty &&
++          ![
++            row.session.title,
++            row.session.cwd ?? '',
++            row.hostLabel,
++          ].any((value) => value.toLowerCase().contains(query))) {
++        continue;
++      }
++      groups.putIfAbsent(row.session.hostId, () => []).add(row);
++    }
++    return Material(
++      key: const ValueKey('agents-workbench-panel'),
++      color: scheme.surfaceContainerLow,
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          SizedBox(
++            key: const ValueKey('agents-workbench-header'),
++            height: desktop ? 40 : 48,
++            child: Padding(
++              padding: const EdgeInsets.only(left: 12, right: 4),
++              child: Row(
++                children: [
++                  Expanded(
++                    child: Text('Agents', style: theme.textTheme.titleSmall),
++                  ),
++                  IconButton(
++                    key: const ValueKey('agents-workbench-refresh'),
++                    tooltip: MaterialLocalizations.of(
++                      context,
++                    ).refreshIndicatorSemanticLabel,
++                    constraints: BoxConstraints.tightFor(
++                      width: desktop ? 32 : 48,
++                      height: desktop ? 32 : 48,
++                    ),
++                    padding: EdgeInsets.zero,
++                    icon: const Icon(Icons.refresh, size: 20),
++                    onPressed: refresh,
++                  ),
++                ],
++              ),
++            ),
++          ),
++          Padding(
++            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
++            child: SizedBox(
++              height: desktop ? 36 : 48,
++              child: TextField(
++                key: const ValueKey('agents-workbench-search'),
++                controller: _search,
++                onChanged: (_) => setState(() {}),
++                style: theme.textTheme.bodySmall,
++                decoration: InputDecoration(
++                  hintText: '搜索会话',
++                  isDense: true,
++                  filled: true,
++                  fillColor: scheme.surfaceContainerHigh,
++                  contentPadding: const EdgeInsets.symmetric(
++                    horizontal: 12,
++                    vertical: 8,
++                  ),
++                  prefixIcon: const Icon(Icons.search, size: 20),
++                  prefixIconConstraints: BoxConstraints.tightFor(
++                    width: desktop ? 36 : 48,
++                  ),
++                  border: OutlineInputBorder(
++                    borderRadius: BorderRadius.circular(8),
++                    borderSide: BorderSide.none,
++                  ),
++                  focusedBorder: OutlineInputBorder(
++                    borderRadius: BorderRadius.circular(8),
++                    borderSide: BorderSide(color: scheme.primary, width: 2),
++                  ),
++                  suffixIcon: query.isEmpty
++                      ? null
++                      : IconButton(
++                          tooltip: MaterialLocalizations.of(
++                            context,
++                          ).deleteButtonTooltip,
++                          padding: EdgeInsets.zero,
++                          icon: const Icon(Icons.close, size: 18),
++                          onPressed: () => setState(_search.clear),
++                        ),
++                ),
++              ),
++            ),
++          ),
++          if (_error != null)
++            Padding(
++              padding: const EdgeInsets.all(12),
++              child: Text(
++                l10n.agentsRefreshFailed,
++                key: const ValueKey('agents-refresh-failed'),
++                style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
++              ),
++            ),
++          Expanded(
++            child: _loading && _rows.isEmpty
++                ? const Center(
++                    key: ValueKey('agents-loading'),
++                    child: CircularProgressIndicator(),
++                  )
++                : groups.isEmpty
++                ? Center(
++                    key: const ValueKey('agents-empty'),
++                    child: Padding(
++                      padding: const EdgeInsets.all(24),
++                      child: Text(
++                        query.isEmpty ? l10n.agentsEmpty : '没有匹配的会话',
++                        textAlign: TextAlign.center,
++                        style: theme.textTheme.bodySmall,
++                      ),
++                    ),
++                  )
++                : ListView(
++                    key: const ValueKey('agents-list'),
++                    padding: EdgeInsets.zero,
++                    children: [
++                      for (final entry in groups.entries) ...[
++                        Padding(
++                          key: ValueKey('agents-host-${entry.key}'),
++                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
++                          child: Text(
++                            entry.value.first.hostLabel,
++                            maxLines: 1,
++                            overflow: TextOverflow.ellipsis,
++                            style: theme.textTheme.labelMedium?.copyWith(
++                              color: scheme.onSurfaceVariant,
++                            ),
++                          ),
++                        ),
++                        for (final row in entry.value)
++                          AgentsRowTile(
++                            row: row,
++                            onTap: widget.onOpenSession == null
++                                ? null
++                                : () => widget.onOpenSession!(row),
++                            onDetails: widget.onOpenDetails == null
++                                ? null
++                                : () => widget.onOpenDetails!(row),
++                          ),
++                      ],
++                    ],
++                  ),
++          ),
++        ],
++      ),
++    );
++  }
++
+   /// 内置 Agent 的主机 id，与 `kStudioHostId` 同一写法。
+   static const String _studioHostId = 'studio';
+ }
+@@ -427,6 +591,9 @@ class AgentsRowTile extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
++    if (LargeScreenScope.maybeOf(context) != null) {
++      return _WorkbenchAgentsRow(row: row, onTap: onTap, onDetails: onDetails);
++    }
+     final theme = Theme.of(context);
+     final status = row.session.status;
+     final path = row.session.cwd;
+@@ -487,17 +654,119 @@ class AgentsRowTile extends StatelessWidget {
+   }
+ }
+ 
++class _WorkbenchAgentsRow extends StatefulWidget {
++  const _WorkbenchAgentsRow({required this.row, this.onTap, this.onDetails});
++
++  final AgentsIndexRow row;
++  final VoidCallback? onTap;
++  final VoidCallback? onDetails;
++
++  @override
++  State<_WorkbenchAgentsRow> createState() => _WorkbenchAgentsRowState();
++}
++
++class _WorkbenchAgentsRowState extends State<_WorkbenchAgentsRow> {
++  bool _focused = false;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final scheme = theme.colorScheme;
++    final row = widget.row;
++    final height = AppPaths.isDesktop ? 32.0 : 48.0;
++    return Tooltip(
++      message: [
++        row.session.title,
++        row.hostLabel,
++        row.session.cwd ?? '',
++      ].join('\n'),
++      child: InkWell(
++        key: ValueKey('agents-row-${row.rowKey}'),
++        onTap: widget.onTap,
++        mouseCursor: widget.onTap == null
++            ? SystemMouseCursors.basic
++            : SystemMouseCursors.click,
++        onFocusChange: (value) => setState(() => _focused = value),
++        overlayColor: WidgetStateProperty.resolveWith((states) {
++          if (states.contains(WidgetState.pressed) ||
++              states.contains(WidgetState.focused)) {
++            return scheme.onSurface.withValues(alpha: 0.10);
++          }
++          if (states.contains(WidgetState.hovered)) {
++            return scheme.onSurface.withValues(alpha: 0.08);
++          }
++          return null;
++        }),
++        child: Container(
++          height: height,
++          padding: const EdgeInsets.only(left: 12, right: 4),
++          foregroundDecoration: BoxDecoration(
++            border: Border.all(
++              color: _focused ? scheme.primary : Colors.transparent,
++            ),
++          ),
++          child: Row(
++            children: [
++              _StatusDot(
++                status: row.session.status,
++                label: harnessStatusLabel(row.session.status),
++                rowKey: row.rowKey,
++                themed: true,
++              ),
++              const SizedBox(width: 8),
++              Expanded(
++                child: Text(
++                  row.session.title,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: theme.textTheme.bodySmall,
++                ),
++              ),
++              if (row.session.updatedAt case final updated?) ...[
++                const SizedBox(width: 6),
++                Text(
++                  harnessRelativeTime(updated),
++                  style: theme.textTheme.labelSmall?.copyWith(
++                    color: scheme.onSurfaceVariant,
++                  ),
++                ),
++              ],
++              if (widget.onDetails != null)
++                IconButton(
++                  key: ValueKey('agents-details-${row.rowKey}'),
++                  tooltip: StudioLocalizations.of(context).agentsDetails,
++                  constraints: BoxConstraints.tightFor(
++                    width: height,
++                    height: height,
++                  ),
++                  padding: EdgeInsets.zero,
++                  icon: Icon(
++                    Icons.info_outline,
++                    size: AppPaths.isDesktop ? 16 : 20,
++                  ),
++                  onPressed: widget.onDetails,
++                ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
+ /// 状态圆点。
+ ///
+-/// 颜色固定，不取主题色（裁定 R3）。未知画空心圈。文字语义标签同时给
+-/// 读屏与长按提示，不只靠颜色区分。
++/// Phone colors retain their original status mapping. Workbench colors use
++/// ColorScheme roles. Both expose status text; unknown remains an outline.
+ class _StatusDot extends StatelessWidget {
+   const _StatusDot({
+     required this.status,
+     required this.label,
+     required this.rowKey,
++    this.themed = false,
+   });
+ 
++  final bool themed;
+   final HarnessSessionStatus status;
+ 
+   /// 状态的文字说法，读屏与长按都能读到。
+@@ -509,6 +778,14 @@ class _StatusDot extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
++    final role = switch (status) {
++      HarnessSessionStatus.blocked => scheme.tertiary,
++      HarnessSessionStatus.working => scheme.primary,
++      HarnessSessionStatus.idle => scheme.onSurfaceVariant,
++      HarnessSessionStatus.done => scheme.secondary,
++      HarnessSessionStatus.exited => scheme.error,
++      HarnessSessionStatus.unknown => scheme.outline,
++    };
+     return Semantics(
+       container: true,
+       label: label,
+@@ -521,9 +798,13 @@ class _StatusDot extends StatelessWidget {
+           height: 10,
+           decoration: BoxDecoration(
+             shape: BoxShape.circle,
+-            color: harnessStatusDotColor(status),
++            color: themed
++                ? (status == HarnessSessionStatus.unknown ? null : role)
++                : harnessStatusDotColor(status),
+             border: Border.all(
+-              color: harnessStatusDotBorderColor(scheme, status),
++              color: themed
++                  ? role
++                  : harnessStatusDotBorderColor(scheme, status),
+               width: 1.5,
+             ),
+           ),
+diff --git a/lib/share/share_intake_sheet.dart b/lib/share/share_intake_sheet.dart
+index dfde842148c5341e95cbb2aa6bb70f42492c2e00..3023d40b8c4b4c63870ab2a7df234050639e481f 100644
+--- a/lib/share/share_intake_sheet.dart
++++ b/lib/share/share_intake_sheet.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../models/project.dart';
++import '../shell/large_screen_controller.dart';
+ import '../session/agent_session.dart';
+ import 'share_inbox.dart';
+ import 'share_intake.dart';
+@@ -37,6 +38,23 @@ Future<ShareIntakeChoice?> showShareIntakeSheet(
+   required List<Project> projects,
+   required List<AgentSessionMeta> Function(String projectId) sessionsOf,
+ }) {
++  if (_hasWorkbench(context)) {
++    return showDialog<ShareIntakeChoice>(
++      context: context,
++      builder: (_) => Dialog(
++        key: const ValueKey('share-intake-dialog'),
++        constraints: const BoxConstraints(maxWidth: 560),
++        insetPadding: const EdgeInsets.all(24),
++        clipBehavior: Clip.antiAlias,
++        child: ShareIntakeSheet(
++          batch: batch,
++          projects: projects,
++          sessionsOf: sessionsOf,
++          workbench: true,
++        ),
++      ),
++    );
++  }
+   return showModalBottomSheet<ShareIntakeChoice>(
+     context: context,
+     isScrollControlled: true,
+@@ -49,6 +67,25 @@ Future<ShareIntakeChoice?> showShareIntakeSheet(
+   );
+ }
+ 
++bool _hasWorkbench(BuildContext context) {
++  if (LargeScreenScope.maybeOf(context) != null) return true;
++  // ShareIntakeHost launches from navigatorKey.currentContext, above the
++  // workbench's inherited scope. Inspect that navigator's mounted shell rather
++  // than guessing the device family from its window size or operating system.
++  var found = false;
++  void visit(Element element) {
++    if (found) return;
++    if (element.widget is LargeScreenScope) {
++      found = true;
++    } else if (element.widget is! Navigator) {
++      element.visitChildElements(visit);
++    }
++  }
++
++  Navigator.of(context).context.visitChildElements(visit);
++  return found;
++}
++
+ /// 选择面板：先选去处，再选项目，放进项目时选子目录，附到会话时选会话。
+ class ShareIntakeSheet extends StatefulWidget {
+   const ShareIntakeSheet({
+@@ -56,8 +93,10 @@ class ShareIntakeSheet extends StatefulWidget {
+     required this.batch,
+     required this.projects,
+     required this.sessionsOf,
++    this.workbench = false,
+   });
+ 
++  final bool workbench;
+   final ShareInboxBatch batch;
+   final List<Project> projects;
+   final List<AgentSessionMeta> Function(String projectId) sessionsOf;
+@@ -76,6 +115,7 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
+   @override
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
++    if (widget.workbench) return _buildWorkbench(context, theme);
+     return SafeArea(
+       child: ConstrainedBox(
+         constraints: BoxConstraints(
+@@ -103,6 +143,70 @@ class _ShareIntakeSheetState extends State<ShareIntakeSheet> {
+     );
+   }
+ 
++  Widget _buildWorkbench(BuildContext context, ThemeData theme) {
++    return ConstrainedBox(
++      constraints: BoxConstraints(
++        maxHeight: MediaQuery.sizeOf(context).height * 0.72,
++      ),
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(24, 8, 16, 16),
++        child: Column(
++          key: const ValueKey('share-intake-sheet'),
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Row(
++              children: [
++                if (_step != _Step.destination)
++                  IconButton(
++                    key: const ValueKey('share-intake-back'),
++                    tooltip: MaterialLocalizations.of(
++                      context,
++                    ).backButtonTooltip,
++                    constraints: const BoxConstraints.tightFor(
++                      width: 48,
++                      height: 48,
++                    ),
++                    onPressed: () => setState(() {
++                      _step = _step == _Step.project
++                          ? _Step.destination
++                          : _Step.project;
++                    }),
++                    icon: const Icon(Icons.arrow_back, size: 20),
++                  ),
++                Expanded(
++                  child: Text(
++                    '收到 ${widget.batch.files.length} 个文件',
++                    style: theme.textTheme.titleLarge,
++                  ),
++                ),
++                IconButton(
++                  key: const ValueKey('share-intake-dialog-close'),
++                  tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
++                  constraints: const BoxConstraints.tightFor(
++                    width: 48,
++                    height: 48,
++                  ),
++                  onPressed: () => Navigator.of(context).pop(),
++                  icon: const Icon(Icons.close, size: 20),
++                ),
++              ],
++            ),
++            const SizedBox(height: 8),
++            Flexible(
++              child: SingleChildScrollView(child: _fileList(context, theme)),
++            ),
++            const Padding(
++              padding: EdgeInsets.symmetric(vertical: 12),
++              child: Divider(height: 1),
++            ),
++            Flexible(child: _body(context)),
++          ],
++        ),
++      ),
++    );
++  }
++
+   /// 逐项列出文件名与大小，最多 6 行，其余折成一行计数。
+   Widget _fileList(BuildContext context, ThemeData theme) {
+     final files = widget.batch.files;
+diff --git a/lib/shell/workbench_session_view.dart b/lib/shell/workbench_session_view.dart
+index 45cc6a0d839660573d3636c233f8a4b63d9fe3b5..a8ca1fe5ac41270766337a7c1318d40ad873149e 100644
+--- a/lib/shell/workbench_session_view.dart
++++ b/lib/shell/workbench_session_view.dart
+@@ -6,6 +6,7 @@ import '../harness/harness_host.dart';
+ import '../harness/hub/agents_index.dart';
+ import '../harness/hub/harness_hub.dart';
+ import '../harness/ui/hub_chat_view.dart';
++import '../services/app_paths.dart';
+ 
+ /// Center-area chat for an Agent session that has no usable editor project.
+ ///
+@@ -134,41 +135,45 @@ class _WorkbenchSessionViewState extends State<WorkbenchSessionView> {
+       key: const ValueKey('workbench-session-view'),
+       children: [
+         Material(
+-          color: theme.colorScheme.surface,
++          color: theme.colorScheme.surfaceContainerLow,
+           child: SizedBox(
+-            height: 56,
++            key: const ValueKey('workbench-session-header'),
++            height: AppPaths.isDesktop ? 40 : 48,
+             child: Row(
+               children: [
+-                const SizedBox(width: 16),
+-                const Icon(Icons.forum_outlined),
+                 const SizedBox(width: 12),
++                const Icon(Icons.forum_outlined, size: 18),
++                const SizedBox(width: 8),
+                 Expanded(
+-                  child: Column(
+-                    mainAxisAlignment: MainAxisAlignment.center,
+-                    crossAxisAlignment: CrossAxisAlignment.start,
+-                    children: [
+-                      Text(
+-                        widget.row.session.title,
+-                        maxLines: 1,
+-                        overflow: TextOverflow.ellipsis,
+-                        style: theme.textTheme.titleSmall,
+-                      ),
+-                      Text(
+-                        widget.row.hostLabel,
+-                        maxLines: 1,
+-                        overflow: TextOverflow.ellipsis,
+-                        style: theme.textTheme.bodySmall,
+-                      ),
+-                    ],
++                  child: Text(
++                    widget.row.session.title,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: theme.textTheme.titleSmall,
++                  ),
++                ),
++                const SizedBox(width: 12),
++                Flexible(
++                  child: Text(
++                    widget.row.hostLabel,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: theme.textTheme.labelMedium?.copyWith(
++                      color: theme.colorScheme.onSurfaceVariant,
++                    ),
+                   ),
+                 ),
+                 IconButton(
+                   key: const ValueKey('workbench-session-close'),
+                   tooltip: '关闭会话',
++                  constraints: BoxConstraints.tightFor(
++                    width: AppPaths.isDesktop ? 40 : 48,
++                    height: AppPaths.isDesktop ? 40 : 48,
++                  ),
++                  padding: EdgeInsets.zero,
+                   onPressed: _close,
+-                  icon: const Icon(Icons.close),
++                  icon: const Icon(Icons.close, size: 20),
+                 ),
+-                const SizedBox(width: 8),
+               ],
+             ),
+           ),
+diff --git a/test/chat_attachment_picker_workbench_test.dart b/test/chat_attachment_picker_workbench_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..9204710a0586b2e79ba3aa8a3cc75a094f716d28
+--- /dev/null
++++ b/test/chat_attachment_picker_workbench_test.dart
+@@ -0,0 +1,247 @@
++@TestOn('vm')
++library;
++
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/chat/attachment_picker.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/workspace/workspace_store.dart';
++
++void main() {
++  late Directory root;
++  late WorkspaceStore workspaces;
++  late LargeScreenController layout;
++
++  setUp(() {
++    root = Directory.systemTemp.createTempSync('attachment-menu-');
++    File('${root.path}/main.dart').writeAsStringSync('void main() {}');
++    File('${root.path}/other.dart').writeAsStringSync('// another file');
++    workspaces = WorkspaceStore(root: Directory('${root.path}/.workspaces'));
++    layout = LargeScreenController();
++  });
++
++  tearDown(() {
++    layout.dispose();
++    workspaces.dispose();
++    if (root.existsSync()) root.deleteSync(recursive: true);
++  });
++
++  Future<void> mount(
++    WidgetTester tester, {
++    required ValueChanged<List<String>?> onResult,
++    bool workbench = true,
++    AttachmentSource source = AttachmentSource.project,
++    Brightness brightness = Brightness.light,
++  }) async {
++    final button = Builder(
++      builder: (context) => TextButton(
++        onPressed: () async {
++          onResult(
++            await showAttachmentPicker(
++              context,
++              source: source,
++              projectRoot: root.path,
++              workspaces: workspaces,
++            ),
++          );
++        },
++        child: const Text('attach'),
++      ),
++    );
++    await tester.pumpWidget(
++      MaterialApp(
++        theme: ThemeData(
++          colorScheme: ColorScheme.fromSeed(
++            seedColor: Colors.indigo,
++            brightness: brightness,
++          ),
++        ),
++        home: Scaffold(
++          body: Align(
++            alignment: Alignment.bottomRight,
++            child: SizedBox(
++              width: 400,
++              height: 200,
++              child: workbench
++                  ? LargeScreenScope(controller: layout, child: button)
++                  : button,
++            ),
++          ),
++        ),
++      ),
++    );
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++    });
++    await tester.runAsync(() async {
++      await tester.tap(find.text('attach'));
++      await tester.pump();
++      final watch = Stopwatch()..start();
++      while (find
++              .byKey(const ValueKey('attachment-main.dart'))
++              .evaluate()
++              .isEmpty &&
++          find.text('没有找到工作区文件').evaluate().isEmpty &&
++          watch.elapsed < const Duration(seconds: 5)) {
++        await Future<void>.delayed(const Duration(milliseconds: 5));
++        await tester.pump();
++      }
++    });
++    await tester.pumpAndSettle();
++  }
++
++  for (final brightness in Brightness.values) {
++    testWidgets(
++      'workbench uses MenuAnchor and returns multiple paths: $brightness',
++      (tester) async {
++        tester.view.devicePixelRatio = 1;
++        tester.view.physicalSize = const Size(1024, 768);
++        addTearDown(tester.view.resetPhysicalSize);
++        addTearDown(tester.view.resetDevicePixelRatio);
++        List<String>? result;
++        await mount(
++          tester,
++          brightness: brightness,
++          onResult: (value) => result = value,
++        );
++        final anchor = find.byKey(const ValueKey('attachment-workbench-menu'));
++        expect(anchor, findsOneWidget);
++        expect(find.byType(BottomSheet), findsNothing);
++        expect(find.byType(CheckboxMenuButton), findsNWidgets(2));
++        final scheme = Theme.of(tester.element(anchor)).colorScheme;
++        expect(
++          tester.widget<MenuAnchor>(anchor).style!.backgroundColor!.resolve({}),
++          scheme.surfaceContainer,
++        );
++        final cancel = tester.widget<MenuItemButton>(
++          find.byKey(const ValueKey('attachment-menu-cancel')),
++        );
++        expect(
++          cancel.shortcut,
++          const SingleActivator(LogicalKeyboardKey.escape),
++        );
++        expect(
++          find.text(
++            MaterialLocalizations.of(tester.element(anchor)).keyboardKeyEscape,
++          ),
++          findsOneWidget,
++          reason: 'The native menu displays its localized Escape shortcut.',
++        );
++        final confirm = find.byKey(const ValueKey('attachment-confirm'));
++        expect(tester.widget<MenuItemButton>(confirm).onPressed, isNull);
++        await tester.tap(find.byKey(const ValueKey('attachment-main.dart')));
++        await tester.pump();
++        await tester.tap(find.byKey(const ValueKey('attachment-other.dart')));
++        await tester.pump();
++        expect(
++          find.byType(CheckboxMenuButton),
++          findsNWidgets(2),
++          reason: 'Selection must not close the menu.',
++        );
++        expect(
++          tester
++              .widget<CheckboxMenuButton>(
++                find.byKey(const ValueKey('attachment-main.dart')),
++              )
++              .value,
++          isTrue,
++        );
++        expect(
++          tester
++              .widget<CheckboxMenuButton>(
++                find.byKey(const ValueKey('attachment-main.dart')),
++              )
++              .style!
++              .minimumSize!
++              .resolve({})!
++              .height,
++          AppPaths.isDesktop ? 32 : 48,
++        );
++        final rect = tester.getRect(
++          find.byKey(const ValueKey('attachment-main.dart')),
++        );
++        expect(rect.left, greaterThanOrEqualTo(0));
++        expect(rect.right, lessThanOrEqualTo(1024));
++        await tester.tap(confirm);
++        await tester.pumpAndSettle();
++        expect(result, ['main.dart', 'other.dart']);
++        expect(anchor, findsNothing);
++        expect(tester.takeException(), isNull);
++      },
++    );
++  }
++
++  testWidgets('Escape cancels the menu without attaching a checked file', (
++    tester,
++  ) async {
++    var completed = false;
++    List<String>? result;
++    await mount(
++      tester,
++      onResult: (value) {
++        completed = true;
++        result = value;
++      },
++    );
++    await tester.tap(find.byKey(const ValueKey('attachment-main.dart')));
++    await tester.pump();
++    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++    await tester.pumpAndSettle();
++    expect(completed, isTrue);
++    expect(result, isNull);
++    expect(find.byType(MenuAnchor), findsNothing);
++  });
++
++  testWidgets('outside click cancels the menu', (tester) async {
++    var completed = false;
++    await mount(
++      tester,
++      onResult: (value) {
++        completed = true;
++        expect(value, isNull);
++      },
++    );
++    await tester.tapAt(const Offset(8, 8));
++    await tester.pumpAndSettle();
++    expect(completed, isTrue);
++    expect(find.byType(MenuAnchor), findsNothing);
++  });
++
++  testWidgets(
++    'empty workspace menu remains cancellable and explains read-only scope',
++    (tester) async {
++      await mount(tester, source: AttachmentSource.workspace, onResult: (_) {});
++      expect(find.text('工作区文件（只读）'), findsOneWidget);
++      expect(find.text('没有找到工作区文件'), findsOneWidget);
++      expect(
++        tester
++            .widget<MenuItemButton>(
++              find.byKey(const ValueKey('attachment-confirm')),
++            )
++            .onPressed,
++        isNull,
++      );
++      await tester.tap(find.byKey(const ValueKey('attachment-menu-cancel')));
++      await tester.pumpAndSettle();
++      expect(find.byType(MenuAnchor), findsNothing);
++    },
++  );
++
++  testWidgets('phone context still opens the existing bottom sheet', (
++    tester,
++  ) async {
++    await mount(tester, workbench: false, onResult: (_) {});
++    expect(find.byType(BottomSheet), findsOneWidget);
++    expect(find.byType(AttachmentPickerSheet), findsOneWidget);
++    expect(find.byType(MenuAnchor), findsNothing);
++    await tester.tap(find.byKey(const ValueKey('attachment-main.dart')));
++    await tester.pump();
++    await tester.tap(find.byKey(const ValueKey('attachment-confirm')));
++    await tester.pumpAndSettle();
++  });
++}
+diff --git a/test/harness/home_agents_tab_workbench_visual_test.dart b/test/harness/home_agents_tab_workbench_visual_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..5cffef9e5b8c53e61f20288f5b13162e84496e45
+--- /dev/null
++++ b/test/harness/home_agents_tab_workbench_visual_test.dart
+@@ -0,0 +1,239 @@
++@TestOn('vm')
++library;
++
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/agents_index.dart';
++import 'package:qfli_studio_core/harness/hub/agents_snapshot.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/harness/ui/home_agents_tab.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/services/local_store_backend.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++import '../support/fake_harness_host.dart';
++
++void main() {
++  Future<void> mount(
++    WidgetTester tester, {
++    required Brightness brightness,
++    bool workbench = true,
++    void Function(AgentsIndexRow)? onOpen,
++    void Function(AgentsIndexRow)? onDetails,
++  }) async {
++    final root = Directory.systemTemp.createTempSync('agents-visual-');
++    final auth = AuthStore();
++    final projects = ProjectStore();
++    final settings = SettingsStore();
++    final layout = LargeScreenController();
++    final hosts = [
++      FakeHarnessHost(
++        id: 'local',
++        label: 'Local computer',
++        kind: HarnessHostKind.local,
++        initialSessions: [
++          fakeSession(
++            hostId: 'local',
++            id: 'a',
++            title: 'Local task',
++            cwd: '/alpha',
++          ),
++        ],
++      ),
++      FakeHarnessHost(
++        id: 'remote',
++        label: 'Remote computer',
++        kind: HarnessHostKind.remote,
++        initialSessions: [
++          fakeSession(
++            hostId: 'remote',
++            id: 'b',
++            title: 'Remote task',
++            cwd: '/beta',
++          ),
++        ],
++      ),
++    ];
++    final hub = HarnessHub(hosts: hosts, desktop: AppPaths.isDesktop);
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++      await hub.shutdown();
++      layout.dispose();
++      settings.dispose();
++      projects.dispose();
++      auth.dispose();
++      if (root.existsSync()) root.deleteSync(recursive: true);
++    });
++    final key = GlobalKey<HomeAgentsTabState>();
++    final tab = HomeAgentsTab(
++      key: key,
++      auth: auth,
++      store: projects,
++      settings: settings,
++      harnessHub: hub,
++      remoteHostOpener: () async => null,
++      sessionRoot: root,
++      snapshotStore: AgentsSnapshotStore(backend: LocalMemoryBackend()),
++      onOpenSession: onOpen ?? (_) {},
++      onOpenDetails: onDetails ?? (_) {},
++    );
++    await tester.runAsync(() async {
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: ThemeData(
++            colorScheme: ColorScheme.fromSeed(
++              seedColor: Colors.indigo,
++              brightness: brightness,
++            ),
++            visualDensity: AppPaths.isDesktop
++                ? VisualDensity.compact
++                : VisualDensity.standard,
++            materialTapTargetSize: AppPaths.isDesktop
++                ? MaterialTapTargetSize.shrinkWrap
++                : MaterialTapTargetSize.padded,
++          ),
++          home: Scaffold(
++            body: Align(
++              alignment: Alignment.topLeft,
++              child: SizedBox(
++                width: 300,
++                child: workbench
++                    ? LargeScreenScope(controller: layout, child: tab)
++                    : tab,
++              ),
++            ),
++          ),
++        ),
++      );
++      final watch = Stopwatch()..start();
++      while ((key.currentState?.rows.length ?? 0) != 2 &&
++          watch.elapsed < const Duration(seconds: 5)) {
++        await Future<void>.delayed(const Duration(milliseconds: 5));
++        await tester.pump();
++      }
++      // Complete real directory IO too, not only the hub's initial event.
++      await key.currentState!.refresh();
++      await tester.pump();
++    });
++    await tester.pump(const Duration(seconds: 3));
++  }
++
++  for (final size in [const Size(1440, 900), const Size(1024, 768)]) {
++    for (final brightness in Brightness.values) {
++      testWidgets(
++        'workbench Agents geometry, search and roles: $size $brightness',
++        (tester) async {
++          tester.view.devicePixelRatio = 1;
++          tester.view.physicalSize = size;
++          addTearDown(tester.view.resetPhysicalSize);
++          addTearDown(tester.view.resetDevicePixelRatio);
++          AgentsIndexRow? opened;
++          AgentsIndexRow? detailed;
++          await mount(
++            tester,
++            brightness: brightness,
++            onOpen: (row) => opened = row,
++            onDetails: (row) => detailed = row,
++          );
++
++          final header = find.byKey(const ValueKey('agents-workbench-header'));
++          final row = find.byKey(const ValueKey('agents-row-local:a'));
++          expect(tester.getSize(header).height, AppPaths.isDesktop ? 40 : 48);
++          expect(tester.getSize(row).height, AppPaths.isDesktop ? 32 : 48);
++          expect(
++            find.byKey(const ValueKey('agents-host-local')),
++            findsOneWidget,
++          );
++          expect(
++            find.byKey(const ValueKey('agents-host-remote')),
++            findsOneWidget,
++          );
++          final context = tester.element(header);
++          final scheme = Theme.of(context).colorScheme;
++          expect(
++            tester
++                .widget<Material>(
++                  find.byKey(const ValueKey('agents-workbench-panel')),
++                )
++                .color,
++            scheme.surfaceContainerLow,
++          );
++          final search = tester.widget<TextField>(
++            find.byKey(const ValueKey('agents-workbench-search')),
++          );
++          expect(search.decoration!.fillColor, scheme.surfaceContainerHigh);
++          final ink = tester.widget<InkWell>(row);
++          expect(ink.mouseCursor, SystemMouseCursors.click);
++          expect(
++            ink.overlayColor!.resolve({WidgetState.hovered}),
++            scheme.onSurface.withValues(alpha: 0.08),
++          );
++          expect(
++            ink.overlayColor!.resolve({WidgetState.pressed}),
++            scheme.onSurface.withValues(alpha: 0.10),
++          );
++          expect(
++            ink.overlayColor!.resolve({WidgetState.focused}),
++            scheme.onSurface.withValues(alpha: 0.10),
++          );
++
++          await tester.tap(find.text('Local task'));
++          expect(opened?.session.id, 'a');
++          await tester.tap(
++            find.byKey(const ValueKey('agents-details-local:a')),
++          );
++          expect(detailed?.session.id, 'a');
++          await tester.enterText(find.byType(TextField), 'Remote');
++          await tester.pump();
++          expect(find.text('Local task'), findsNothing);
++          expect(find.text('Remote task'), findsOneWidget);
++          expect(find.byKey(const ValueKey('agents-host-local')), findsNothing);
++          await tester.enterText(find.byType(TextField), 'beta');
++          await tester.pump();
++          expect(
++            find.text('Remote task'),
++            findsOneWidget,
++            reason: 'Paths are searchable too.',
++          );
++          await tester.enterText(find.byType(TextField), 'no-such-session');
++          await tester.pump();
++          expect(find.text('没有匹配的会话'), findsOneWidget);
++          expect(
++            find.byKey(const ValueKey('agents-workbench-search')),
++            findsOneWidget,
++          );
++          expect(
++            find.byKey(const ValueKey('agents-workbench-refresh')),
++            findsOneWidget,
++          );
++          expect(tester.takeException(), isNull);
++        },
++      );
++    }
++  }
++
++  testWidgets(
++    'without workbench scope the phone list keeps its original presentation',
++    (tester) async {
++      await mount(tester, brightness: Brightness.light, workbench: false);
++      expect(find.byType(RefreshIndicator), findsOneWidget);
++      expect(find.byType(TextField), findsNothing);
++      expect(
++        find.byKey(const ValueKey('agents-workbench-header')),
++        findsNothing,
++      );
++      expect(
++        tester.getSize(find.byKey(const ValueKey('agents-row-local:a'))).height,
++        greaterThan(48),
++      );
++      expect(find.textContaining('alpha'), findsOneWidget);
++    },
++  );
++}
+diff --git a/test/share/share_intake_workbench_visual_test.dart b/test/share/share_intake_workbench_visual_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfea234197293df9c8f203ceb1a8a299d1660991
+--- /dev/null
++++ b/test/share/share_intake_workbench_visual_test.dart
+@@ -0,0 +1,255 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/session/agent_session.dart';
++import 'package:qfli_studio_core/share/share_inbox.dart';
++import 'package:qfli_studio_core/share/share_intake_sheet.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++
++void main() {
++  final project = Project(
++    id: 'p1',
++    name: 'Example project',
++    path: '/example',
++    createdAt: DateTime(2026),
++    lastOpenedAt: DateTime(2026),
++  );
++  final batch = ShareInboxBatch(
++    id: 'visual-batch',
++    files: const [
++      SharedIncomingFile(
++        path: '/inbox/main.dart',
++        name: 'main.dart',
++        bytes: 42,
++      ),
++    ],
++    coldStart: false,
++    source: 'share',
++  );
++  final session = AgentSessionMeta(
++    id: 's1',
++    projectId: 'p1',
++    title: 'Existing session',
++    createdAt: DateTime(2026),
++    updatedAt: DateTime(2026),
++    messageCount: 1,
++    preview: 'Continue',
++  );
++
++  Future<void> mount(
++    WidgetTester tester, {
++    required ValueChanged<ShareIntakeChoice?> onResult,
++    bool workbench = true,
++    Brightness brightness = Brightness.light,
++    List<Project>? projects,
++    ShareInboxBatch? incoming,
++  }) async {
++    final layout = LargeScreenController();
++    addTearDown(layout.dispose);
++    final launcher = Builder(
++      builder: (context) => TextButton(
++        onPressed: () async => onResult(
++          await showShareIntakeSheet(
++            context,
++            batch: incoming ?? batch,
++            projects: projects ?? [project],
++            sessionsOf: (_) => [session],
++          ),
++        ),
++        child: const Text('receive'),
++      ),
++    );
++    await tester.pumpWidget(
++      MaterialApp(
++        theme: ThemeData(
++          colorScheme: ColorScheme.fromSeed(
++            seedColor: Colors.indigo,
++            brightness: brightness,
++          ),
++        ),
++        home: Scaffold(
++          body: workbench
++              ? LargeScreenScope(controller: layout, child: launcher)
++              : launcher,
++        ),
++      ),
++    );
++    addTearDown(() async {
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++    });
++    await tester.tap(find.text('receive'));
++    await tester.pumpAndSettle();
++  }
++
++  for (final size in [
++    const Size(1440, 900),
++    const Size(1024, 768),
++    const Size(1180, 820),
++  ]) {
++    for (final brightness in Brightness.values) {
++      testWidgets(
++        'share intake centered, bounded and usable: $size / $brightness',
++        (tester) async {
++          tester.view.devicePixelRatio = 1;
++          tester.view.physicalSize = size;
++          addTearDown(tester.view.resetPhysicalSize);
++          addTearDown(tester.view.resetDevicePixelRatio);
++          ShareIntakeChoice? result;
++          await mount(
++            tester,
++            brightness: brightness,
++            onResult: (value) => result = value,
++          );
++          final dialog = find.byKey(const ValueKey('share-intake-dialog'));
++          expect(dialog, findsOneWidget);
++          expect(find.byType(BottomSheet), findsNothing);
++          final surface = find
++              .descendant(of: dialog, matching: find.byType(Material))
++              .first;
++          final rect = tester.getRect(surface);
++          expect(rect.width, lessThanOrEqualTo(560));
++          expect(rect.center.dx, closeTo(size.width / 2, 1));
++          expect(rect.center.dy, closeTo(size.height / 2, 1));
++          expect(
++            tester
++                .getSize(
++                  find.byKey(const ValueKey('share-intake-dialog-close')),
++                )
++                .height,
++            greaterThanOrEqualTo(48),
++          );
++          await tester.tap(
++            find.byKey(const ValueKey('share-intake-into-project')),
++          );
++          await tester.pumpAndSettle();
++          await tester.tap(
++            find.byKey(const ValueKey('share-intake-project-p1')),
++          );
++          await tester.pumpAndSettle();
++          await tester.tap(find.byKey(const ValueKey('share-intake-back')));
++          await tester.pumpAndSettle();
++          expect(
++            find.byKey(const ValueKey('share-intake-project-p1')),
++            findsOneWidget,
++          );
++          await tester.tap(
++            find.byKey(const ValueKey('share-intake-project-p1')),
++          );
++          await tester.pumpAndSettle();
++          await tester.tap(
++            find.byKey(const ValueKey('share-intake-subdir-root')),
++          );
++          await tester.pumpAndSettle();
++          expect(result, isA<ShareIntakeIntoProject>());
++          final choice = result as ShareIntakeIntoProject;
++          expect(choice.project, same(project));
++          expect(choice.subdirectory, isEmpty);
++          expect(dialog, findsNothing);
++          expect(tester.takeException(), isNull);
++        },
++      );
++    }
++  }
++
++  testWidgets('workbench can attach to an existing session', (tester) async {
++    ShareIntakeChoice? result;
++    await mount(tester, onResult: (value) => result = value);
++    await tester.tap(find.byKey(const ValueKey('share-intake-into-session')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('share-intake-project-p1')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('share-intake-session-s1')));
++    await tester.pumpAndSettle();
++    expect((result as ShareIntakeIntoSession).sessionId, 's1');
++  });
++
++  testWidgets('workbench close cancels without choosing a destination', (
++    tester,
++  ) async {
++    var completed = false;
++    await mount(
++      tester,
++      onResult: (value) {
++        completed = true;
++        expect(value, isNull);
++      },
++    );
++    await tester.tap(find.byKey(const ValueKey('share-intake-dialog-close')));
++    await tester.pumpAndSettle();
++    expect(completed, isTrue);
++    expect(find.byType(Dialog), findsNothing);
++  });
++
++  testWidgets(
++    'many shared files remain bounded and an empty registry is explained',
++    (tester) async {
++      final many = ShareInboxBatch(
++        id: 'many',
++        coldStart: false,
++        source: 'share',
++        files: [
++          for (var i = 0; i < 20; i++)
++            SharedIncomingFile(path: '/inbox/$i.txt', name: '$i.txt', bytes: 1),
++        ],
++      );
++      await mount(tester, incoming: many, projects: [], onResult: (_) {});
++      expect(find.text('另有 14 个文件'), findsOneWidget);
++      await tester.tap(find.byKey(const ValueKey('share-intake-into-project')));
++      await tester.pumpAndSettle();
++      expect(find.text('还没有项目。先建一个项目，再分享文件。'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets(
++    'share host navigator context finds the mounted workbench scope',
++    (tester) async {
++      final navigatorKey = GlobalKey<NavigatorState>();
++      final layout = LargeScreenController();
++      addTearDown(layout.dispose);
++      await tester.pumpWidget(
++        MaterialApp(
++          navigatorKey: navigatorKey,
++          home: LargeScreenScope(
++            controller: layout,
++            child: const Scaffold(body: Text('workbench')),
++          ),
++        ),
++      );
++      final pending = showShareIntakeSheet(
++        navigatorKey.currentContext!,
++        batch: batch,
++        projects: [project],
++        sessionsOf: (_) => [],
++      );
++      await tester.pumpAndSettle();
++      expect(find.byKey(const ValueKey('share-intake-dialog')), findsOneWidget);
++      expect(find.byType(BottomSheet), findsNothing);
++      await tester.tap(find.byKey(const ValueKey('share-intake-dialog-close')));
++      await tester.pumpAndSettle();
++      expect(await pending, isNull);
++      await tester.pumpWidget(const SizedBox.shrink());
++    },
++  );
++
++  testWidgets('phone context retains bottom-sheet presentation and choices', (
++    tester,
++  ) async {
++    ShareIntakeChoice? result;
++    await mount(tester, workbench: false, onResult: (value) => result = value);
++    expect(find.byType(BottomSheet), findsOneWidget);
++    expect(find.byType(Dialog), findsNothing);
++    expect(
++      find.byKey(const ValueKey('share-intake-dialog-close')),
++      findsNothing,
++    );
++    await tester.tap(find.byKey(const ValueKey('share-intake-into-project')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('share-intake-project-p1')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('share-intake-subdir-inbox')));
++    await tester.pumpAndSettle();
++    expect((result as ShareIntakeIntoProject).subdirectory, 'inbox');
++  });
++}
+diff --git a/test/workbench_session_view_visual_test.dart b/test/workbench_session_view_visual_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa264ccdec869e508d158777dbe641a1f3fccd97
+--- /dev/null
++++ b/test/workbench_session_view_visual_test.dart
+@@ -0,0 +1,93 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/agents_index.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/shell/workbench_session_view.dart';
++
++import 'support/fake_harness_host.dart';
++
++void main() {
++  for (final brightness in Brightness.values) {
++    for (final width in [320.0, 1024.0, 1440.0]) {
++      testWidgets(
++        'session header uses workbench geometry at $width / $brightness',
++        (tester) async {
++          tester.view.devicePixelRatio = 1;
++          tester.view.physicalSize = Size(width, 900);
++          addTearDown(tester.view.resetPhysicalSize);
++          addTearDown(tester.view.resetDevicePixelRatio);
++          final session = fakeSession(
++            hostId: 'local',
++            id: 'header',
++            title:
++                'A long session title that must truncate instead of wrapping',
++          );
++          final handle = FakeSessionHandle(info: session);
++          final hub = HarnessHub(
++            hosts: [
++              FakeHarnessHost(
++                id: 'local',
++                label: 'Local',
++                kind: HarnessHostKind.local,
++                openHandler: (_) async => handle,
++              ),
++            ],
++            desktop: AppPaths.isDesktop,
++          );
++          addTearDown(() async {
++            await tester.pumpWidget(const SizedBox.shrink());
++            await tester.pump();
++            await hub.shutdown();
++          });
++          final theme = ThemeData(
++            colorScheme: ColorScheme.fromSeed(
++              seedColor: Colors.indigo,
++              brightness: brightness,
++            ),
++          );
++          var closes = 0;
++          await tester.pumpWidget(
++            MaterialApp(
++              theme: theme,
++              home: Scaffold(
++                body: WorkbenchSessionView(
++                  row: AgentsIndexRow(
++                    session: session,
++                    hostLabel: 'A very long host name',
++                    hostKind: HarnessHostKind.local,
++                  ),
++                  hub: hub,
++                  onClose: () => closes++,
++                ),
++              ),
++            ),
++          );
++          await tester.pump();
++          await tester.pump();
++          final header = find.byKey(const ValueKey('workbench-session-header'));
++          expect(tester.getSize(header).height, AppPaths.isDesktop ? 40 : 48);
++          final material = find
++              .ancestor(of: header, matching: find.byType(Material))
++              .first;
++          expect(
++            tester.widget<Material>(material).color,
++            theme.colorScheme.surfaceContainerLow,
++          );
++          final close = find.byKey(const ValueKey('workbench-session-close'));
++          expect(tester.getSize(close).height, AppPaths.isDesktop ? 40 : 48);
++          final title = tester.widget<Text>(find.text(session.title));
++          expect(title.maxLines, 1);
++          expect(title.overflow, TextOverflow.ellipsis);
++          expect(tester.takeException(), isNull);
++          await tester.tap(close);
++          await tester.pump();
++          expect(closes, 1);
++          expect(handle.detachCount, 1);
++          expect(handle.stopCount, 0);
++        },
++      );
++    }
++  }
++}

@@ -1,0 +1,1327 @@
+diff --git a/lib/harness/harness_host.dart b/lib/harness/harness_host.dart
+index 2d683a1dcfb36ac3496e4d2db280ab6008af98f8..57e02ae890c92b25c2664a0f860df6d670a0e3a4 100644
+--- a/lib/harness/harness_host.dart
++++ b/lib/harness/harness_host.dart
+@@ -3,7 +3,6 @@
+ // only on this file. Changes go through the harness-hub task root.
+ 
+ import 'dart:async';
+-import 'dart:typed_data';
+ 
+ import 'package:flutter/foundation.dart';
+ 
+diff --git a/lib/harness/ui/agents_entry.dart b/lib/harness/ui/agents_entry.dart
+index a7614f1d8b581ef90124ac0f5c4d0c21266a403a..f39085d665f5d4f15e056980342ec6d17fed3489 100644
+--- a/lib/harness/ui/agents_entry.dart
++++ b/lib/harness/ui/agents_entry.dart
+@@ -4,6 +4,8 @@
+ // 工具页的旧卡片改为调用这里：挑一个本地项目，打开编辑器，并让页面首帧就
+ // 落在 Agents 面板上。没有项目时给出说明，而不是推一个空页面。
+ 
++import 'dart:io';
++
+ import 'package:flutter/material.dart';
+ import 'package:path/path.dart' as p;
+ 
+@@ -12,11 +14,16 @@ import '../../store/auth_store.dart';
+ import '../../store/project_store.dart';
+ import '../../store/settings_store.dart';
+ import '../../models/project.dart';
++import '../../services/app_paths.dart';
++import '../../shell/large_screen_controller.dart';
++import '../../shell/workbench_chrome.dart';
++import '../../shell/workbench_session_view.dart';
+ import '../../sync/placeholder_project.dart';
+ import '../harness_host.dart';
+ import '../harness_session_target.dart';
+ import '../hub/agents_index.dart';
+ import '../hub/harness_hub.dart';
++import '../hub/harness_hosts.dart';
+ import '../studio/studio_agent_host.dart';
+ 
+ /// 打开 Agents 面板。
+@@ -32,6 +39,11 @@ Future<void> openAgentsSurface(
+   final target = project ?? _pickLocalProject(store);
+   if (target == null) {
+     if (!context.mounted) return;
++    final workbench = LargeScreenScope.maybeOf(context);
++    if (workbench != null) {
++      workbench.select(WorkbenchActivity.agents, toggle: false);
++      return;
++    }
+     await showDialog<void>(
+       context: context,
+       builder: (dialogContext) => AlertDialog(
+@@ -70,10 +82,8 @@ Project? _pickLocalProject(ProjectStore store) {
+ 
+ /// 打开首页列表里的一行：跳到编辑器并首帧选中该会话。
+ ///
+-/// 找项目的顺序：会话目录对应的本地项目 → 该会话已建的占位项目 →
+-/// 新建一个占位项目。只有全都不成时才用最近的本地项目（需求 9.7）。
+-/// 配对电脑上的会话不拿别的项目当工作目录：那样编辑器显示的目录、
+-/// 文件树与保存位置都不是用户以为的那个项目。
++/// Workbench sessions use their own directory or a session-only center view.
++/// Phone navigation keeps its existing project and placeholder behavior.
+ Future<void> openAgentSession(
+   BuildContext context, {
+   required AgentsIndexRow row,
+@@ -82,9 +92,37 @@ Future<void> openAgentSession(
+   required SettingsStore settings,
+   HarnessHub? harnessHub,
+ }) async {
+-  final target = await resolveSessionProject(store, row);
++  final workbench = LargeScreenScope.maybeOf(context);
++  Project? target;
++  if (workbench == null) {
++    target = await resolveSessionProject(store, row);
++  } else {
++    try {
++      target = await resolveSessionProject(store, row, workbench: true);
++    } on Object {
++      // Registration or placeholder storage can fail. The conversation must
++      // still open independently of a writable editor project.
++      target = null;
++    }
++  }
+   if (target == null) {
+     if (!context.mounted) return;
++    if (workbench != null) {
++      workbench.showWorkspace();
++      workbench.showCenterOverlay(
++        (_) => _SessionOverlay(
++          key: ValueKey(row.rowKey),
++          row: row,
++          auth: auth,
++          store: store,
++          settings: settings,
++          hub: harnessHub,
++          onClose: workbench.closeCenterOverlay,
++        ),
++      );
++      workbench.closeCompactSidebar();
++      return;
++    }
+     await showDialog<void>(
+       context: context,
+       builder: (dialogContext) => AlertDialog(
+@@ -104,6 +142,7 @@ Future<void> openAgentSession(
+     return;
+   }
+   if (!context.mounted) return;
++  workbench?.closeCenterOverlay();
+   await openEditorPage(
+     context,
+     project: target,
+@@ -121,22 +160,44 @@ Future<void> openAgentSession(
+ 
+ /// 一行的会话应该落在哪个项目上。
+ ///
+-/// 配对本机之外的会话（已绑定电脑、内置 Agent）没有本地目录可比，于是走
+-/// 占位项目（需求 12）：已经有就复用，没有就建一个，并登记到项目列表。
+-/// 占位项目只承载会话，项目文件要用户确认后才拉，见
+-/// [PlaceholderProjects.pullFiles]。这样的会话不发到别的项目上：编辑器显示
+-/// 的目录、文件树与保存位置都会变成另一个项目（需求 9.7 只允许本机会话
+-/// 退回最近的项目）。
++/// [workbench] enables strict directory ownership without changing the phone
++/// default. Desktop local sessions register their existing directory in place.
++/// Unusable local directories return null, never an unrelated project. Remote
++/// and built-in sessions keep their session-specific placeholder workflow.
+ Future<Project?> resolveSessionProject(
+   ProjectStore store,
+-  AgentsIndexRow row,
+-) async {
+-  final local = _projectForSession(store, row.session.cwd);
+-  if (local != null) return local;
+-
+-  if (row.session.hostId != kStudioHostId &&
+-      row.hostKind != HarnessHostKind.remote) {
+-    return _pickLocalProject(store);
++  AgentsIndexRow row, {
++  bool workbench = false,
++}) async {
++  final localSession =
++      row.session.hostId != kStudioHostId &&
++      row.hostKind == HarnessHostKind.local;
++  if (!workbench || localSession) {
++    final local = _projectForSession(
++      store,
++      row.session.cwd,
++      onlyLocal: workbench,
++    );
++    if (local != null) {
++      if (!workbench || await Directory(local.path).exists()) return local;
++      return null;
++    }
++  }
++
++  if (localSession) {
++    if (!workbench) return _pickLocalProject(store);
++    final cwd = row.session.cwd;
++    if (!AppPaths.isDesktop ||
++        cwd == null ||
++        cwd.trim().isEmpty ||
++        !p.isAbsolute(cwd) ||
++        !await Directory(cwd).exists()) {
++      return null;
++    }
++    final registered = await store.addExisting(cwd);
++    if (registered.error == null) return registered.project;
++    // Another registration may have completed while this open was awaiting IO.
++    return _projectForSession(store, cwd, onlyLocal: true);
+   }
+ 
+   final existing = store.deviceProjectFor(
+@@ -158,12 +219,92 @@ Future<Project?> resolveSessionProject(
+   return result.project ?? created;
+ }
+ 
++/// Owns a fallback hub only when the caller has no shared Home/workbench hub.
++class _SessionOverlay extends StatefulWidget {
++  const _SessionOverlay({
++    super.key,
++    required this.row,
++    required this.auth,
++    required this.store,
++    required this.settings,
++    required this.hub,
++    required this.onClose,
++  });
++
++  final AgentsIndexRow row;
++  final AuthStore auth;
++  final ProjectStore store;
++  final SettingsStore settings;
++  final HarnessHub? hub;
++  final VoidCallback onClose;
++
++  @override
++  State<_SessionOverlay> createState() => _SessionOverlayState();
++}
++
++class _SessionOverlayState extends State<_SessionOverlay> {
++  late HarnessHub _hub;
++  late bool _ownsHub;
++
++  @override
++  void initState() {
++    super.initState();
++    _replaceHub(widget.hub);
++  }
++
++  @override
++  void didUpdateWidget(_SessionOverlay oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (!identical(oldWidget.hub, widget.hub)) _replaceHub(widget.hub);
++  }
++
++  void _replaceHub(HarnessHub? supplied) {
++    final oldHub = _hubOrNull;
++    final oldOwned = _hubInitialized && _ownsHub;
++    _hub = supplied ?? _createFallbackHub();
++    _ownsHub = supplied == null;
++    if (oldOwned && oldHub != null) oldHub.dispose();
++    _hubInitialized = true;
++  }
++
++  bool _hubInitialized = false;
++  HarnessHub? get _hubOrNull => _hubInitialized ? _hub : null;
++
++  HarnessHub _createFallbackHub() => HarnessHub(
++    hosts: HarnessHosts.build(
++      HubHostContext(
++        auth: widget.auth,
++        projectStore: widget.store,
++        settings: widget.settings,
++        projectRoot: '',
++        desktop: AppPaths.isDesktop,
++      ),
++    ),
++    desktop: AppPaths.isDesktop,
++    hostBuildError: HarnessHosts.lastBuildError,
++  );
++
++  @override
++  void dispose() {
++    if (_ownsHub) _hub.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      WorkbenchSessionView(row: widget.row, hub: _hub, onClose: widget.onClose);
++}
++
+ /// 会话目录对应的本地项目。路径规范化后再比，云端项目不参与。
+-Project? _projectForSession(ProjectStore store, String? cwd) {
++Project? _projectForSession(
++  ProjectStore store,
++  String? cwd, {
++  bool onlyLocal = false,
++}) {
+   if (cwd == null || cwd.isEmpty) return null;
+   final wanted = p.normalize(p.absolute(cwd));
+   for (final project in store.projects) {
+-    if (project.isCloud) continue;
++    if (project.isCloud || (onlyLocal && project.isDevice)) continue;
+     if (p.equals(p.normalize(p.absolute(project.path)), wanted)) {
+       return project;
+     }
+diff --git a/lib/shell/workbench_session_view.dart b/lib/shell/workbench_session_view.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..45cc6a0d839660573d3636c233f8a4b63d9fe3b5
+--- /dev/null
++++ b/lib/shell/workbench_session_view.dart
+@@ -0,0 +1,210 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../harness/harness_host.dart';
++import '../harness/hub/agents_index.dart';
++import '../harness/hub/harness_hub.dart';
++import '../harness/ui/hub_chat_view.dart';
++
++/// Center-area chat for an Agent session that has no usable editor project.
++///
++/// The workbench owns the overlay. This view owns only the session view when it
++/// closes; it never stops the underlying Agent session.
++class WorkbenchSessionView extends StatefulWidget {
++  const WorkbenchSessionView({
++    super.key,
++    required this.row,
++    required this.hub,
++    required this.onClose,
++  });
++
++  final AgentsIndexRow row;
++  final HarnessHub hub;
++  final VoidCallback onClose;
++
++  @override
++  State<WorkbenchSessionView> createState() => _WorkbenchSessionViewState();
++}
++
++class _WorkbenchSessionViewState extends State<WorkbenchSessionView> {
++  HarnessSessionHandle? _handle;
++  Object? _error;
++  int _openGeneration = 0;
++  Future<HarnessSessionHandle>? _opening;
++  bool _closed = false;
++
++  @override
++  void initState() {
++    super.initState();
++    unawaited(_open());
++  }
++
++  @override
++  void didUpdateWidget(WorkbenchSessionView oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.hub == widget.hub &&
++        oldWidget.row.rowKey == widget.row.rowKey) {
++      return;
++    }
++    final oldHandle = _handle;
++    _handle = null;
++    _error = null;
++    if (oldHandle != null) {
++      final oldHub = oldWidget.hub;
++      scheduleMicrotask(() => _releaseHandle(oldHub, oldHandle));
++    }
++    unawaited(_open());
++  }
++
++  Future<void> _open() async {
++    final generation = ++_openGeneration;
++    if (mounted) {
++      setState(() {
++        _handle = null;
++        _error = null;
++      });
++    }
++    final hub = widget.hub;
++    final session = widget.row.session;
++    // Serialize replacement views within this widget. HarnessHub deliberately
++    // rejects concurrent opens; switching during an open should not strand the
++    // new selection on that temporary busy error.
++    final previous = _opening;
++    if (previous != null) {
++      try {
++        await previous;
++      } on Object {
++        // A failed previous selection does not prevent opening the new one.
++      }
++    }
++    if (!mounted || _closed || generation != _openGeneration) return;
++    try {
++      final pending = hub.openSession(session);
++      _opening = pending;
++      final handle = await pending;
++      if (!mounted || _closed || generation != _openGeneration) {
++        await _releaseHandle(hub, handle);
++        return;
++      }
++      setState(() => _handle = handle);
++    } on Object catch (error) {
++      if (!mounted || generation != _openGeneration) return;
++      setState(() => _error = error);
++    } finally {
++      if (generation == _openGeneration) _opening = null;
++    }
++  }
++
++  Future<void> _releaseHandle(
++    HarnessHub hub,
++    HarnessSessionHandle handle,
++  ) async {
++    if (identical(hub.activeHandle, handle)) await hub.closeActiveSession();
++  }
++
++  Future<void> _close() async {
++    if (_closed) return;
++    _closed = true;
++    _openGeneration++;
++    final handle = _handle;
++    _handle = null;
++    if (handle != null) unawaited(_releaseHandle(widget.hub, handle));
++    widget.onClose();
++  }
++
++  @override
++  void dispose() {
++    _openGeneration++;
++    final hub = widget.hub;
++    final handle = _handle;
++    if (handle != null) {
++      // Recheck identity after the frame: the editor may have opened another
++      // session through this shared hub while the overlay was being removed.
++      scheduleMicrotask(() => _releaseHandle(hub, handle));
++    }
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    final handle = _handle;
++    return Column(
++      key: const ValueKey('workbench-session-view'),
++      children: [
++        Material(
++          color: theme.colorScheme.surface,
++          child: SizedBox(
++            height: 56,
++            child: Row(
++              children: [
++                const SizedBox(width: 16),
++                const Icon(Icons.forum_outlined),
++                const SizedBox(width: 12),
++                Expanded(
++                  child: Column(
++                    mainAxisAlignment: MainAxisAlignment.center,
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Text(
++                        widget.row.session.title,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: theme.textTheme.titleSmall,
++                      ),
++                      Text(
++                        widget.row.hostLabel,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: theme.textTheme.bodySmall,
++                      ),
++                    ],
++                  ),
++                ),
++                IconButton(
++                  key: const ValueKey('workbench-session-close'),
++                  tooltip: '关闭会话',
++                  onPressed: _close,
++                  icon: const Icon(Icons.close),
++                ),
++                const SizedBox(width: 8),
++              ],
++            ),
++          ),
++        ),
++        const Divider(height: 1),
++        Expanded(
++          child: handle != null
++              ? HubChatView(handle: handle)
++              : _error == null
++              ? const Center(
++                  key: ValueKey('workbench-session-loading'),
++                  child: CircularProgressIndicator(),
++                )
++              : Center(
++                  child: Padding(
++                    padding: const EdgeInsets.all(24),
++                    child: Column(
++                      key: const ValueKey('workbench-session-open-error'),
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        const Icon(Icons.error_outline),
++                        const SizedBox(height: 8),
++                        Text('无法打开此会话：$_error', textAlign: TextAlign.center),
++                        const SizedBox(height: 12),
++                        FilledButton.icon(
++                          key: const ValueKey('workbench-session-retry'),
++                          onPressed: _open,
++                          icon: const Icon(Icons.refresh),
++                          label: const Text('重试'),
++                        ),
++                      ],
++                    ),
++                  ),
++                ),
++        ),
++      ],
++    );
++  }
++}
+diff --git a/test/harness/agents_entry_workbench_test.dart b/test/harness/agents_entry_workbench_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2019d23432907fc28f131855ebf12a64f138a9c
+--- /dev/null
++++ b/test/harness/agents_entry_workbench_test.dart
+@@ -0,0 +1,433 @@
++@TestOn('vm')
++library;
++
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:qfli_studio_core/editor/retained_editor_host.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/agents_index.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/harness/ui/agents_entry.dart';
++import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/workbench_chrome.dart';
++import 'package:qfli_studio_core/shell/workbench_session_view.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++import '../support/fake_harness_host.dart';
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  late Directory temp;
++  late ProjectStore store;
++  late AuthStore auth;
++  late SettingsStore settings;
++  Future<void>? pendingOpen;
++
++  setUp(() async {
++    temp = await Directory.systemTemp.createTemp('workbench_agents_entry_');
++    store = ProjectStore(storageFile: File(p.join(temp.path, 'projects.json')));
++    await store.load();
++    auth = AuthStore();
++    settings = SettingsStore();
++    pendingOpen = null;
++  });
++
++  tearDown(() async {
++    store.dispose();
++    auth.dispose();
++    settings.dispose();
++    await temp.delete(recursive: true);
++  });
++
++  AgentsIndexRow row({
++    String hostId = 'local',
++    HarnessHostKind kind = HarnessHostKind.local,
++    String? cwd,
++  }) => AgentsIndexRow(
++    session: fakeSession(hostId: hostId, id: 'session-1', cwd: cwd),
++    hostLabel: 'Test host',
++    hostKind: kind,
++  );
++
++  Future<Project> addProject(String name) async {
++    final dir = Directory(p.join(temp.path, name))..createSync(recursive: true);
++    final result = await store.addExisting(dir.path);
++    return result.project!;
++  }
++
++  test(
++    'workbench registers the original local directory and reuses it',
++    () async {
++      final dir = Directory(p.join(temp.path, 'unregistered'))..createSync();
++      final source = File(p.join(dir.path, 'keep.txt'))
++        ..writeAsStringSync('keep');
++      final session = row(cwd: dir.path);
++
++      final first = await resolveSessionProject(
++        store,
++        session,
++        workbench: true,
++      );
++      final again = await resolveSessionProject(
++        store,
++        session,
++        workbench: true,
++      );
++
++      expect(first, isNotNull);
++      expect(p.equals(first!.path, dir.path), isTrue);
++      expect(again?.id, first.id);
++      expect(store.projects, hasLength(1));
++      expect(source.readAsStringSync(), 'keep');
++      final reloaded = ProjectStore(
++        storageFile: File(p.join(temp.path, 'projects.json')),
++      );
++      await reloaded.load();
++      expect(reloaded.projects.single.id, first.id);
++      reloaded.dispose();
++    },
++  );
++
++  test('workbench reuses the exact registered local project', () async {
++    final project = await addProject('matched');
++    await addProject('unrelated');
++    final picked = await resolveSessionProject(
++      store,
++      row(cwd: p.join(project.path, '.', 'nested', '..')),
++      workbench: true,
++    );
++    expect(picked?.id, project.id);
++    expect(store.projects, hasLength(2));
++  });
++
++  test('missing cwd never falls back to another local project', () async {
++    await addProject('unrelated');
++    final picked = await resolveSessionProject(
++      store,
++      row(cwd: p.join(temp.path, 'missing')),
++      workbench: true,
++    );
++    expect(picked, isNull);
++    expect(store.projects, hasLength(1));
++  });
++
++  test('registered but deleted directory cannot open an editor', () async {
++    final project = await addProject('deleted');
++    await Directory(project.path).delete(recursive: true);
++    final picked = await resolveSessionProject(
++      store,
++      row(cwd: project.path),
++      workbench: true,
++    );
++    expect(picked, isNull);
++    expect(store.projects.single.id, project.id);
++  });
++
++  test(
++    'null, blank, relative and file cwd do not register a project',
++    () async {
++      final file = File(p.join(temp.path, 'not-a-directory'))
++        ..writeAsStringSync('x');
++      for (final cwd in <String?>[null, '', ' ', 'relative/path', file.path]) {
++        expect(
++          await resolveSessionProject(store, row(cwd: cwd), workbench: true),
++          isNull,
++        );
++      }
++      expect(store.projects, isEmpty);
++    },
++  );
++
++  test('failed registration leaves the existing directory intact', () async {
++    final directory = Directory(p.join(temp.path, 'cannot-register'))
++      ..createSync();
++    final source = File(p.join(directory.path, 'keep.txt'))
++      ..writeAsStringSync('keep');
++    final blocked = _RejectingProjectStore();
++    final picked = await resolveSessionProject(
++      blocked,
++      row(cwd: directory.path),
++      workbench: true,
++    );
++    expect(picked, isNull);
++    expect(blocked.projects, isEmpty);
++    expect(source.readAsStringSync(), 'keep');
++    blocked.dispose();
++  });
++
++  for (final kind in [HarnessHostKind.remote, HarnessHostKind.studio]) {
++    test(
++      '$kind never resolves a matching path to an unrelated local project',
++      () async {
++        final local = await addProject('local');
++        final hostId = kind == HarnessHostKind.studio ? 'studio' : 'remote:pc';
++        final placeholder = Project(
++          id: 'placeholder',
++          name: 'Session',
++          path: p.join(temp.path, 'session-cache'),
++          createdAt: DateTime(2026),
++          lastOpenedAt: DateTime(2026),
++          deviceHostId: hostId,
++          deviceSessionId: 'session-1',
++          placeholder: true,
++        );
++        await store.registerDeviceProject(placeholder);
++        final picked = await resolveSessionProject(
++          store,
++          row(hostId: hostId, kind: kind, cwd: local.path),
++          workbench: true,
++        );
++        expect(picked?.id, placeholder.id);
++        expect(picked?.id, isNot(local.id));
++        expect(store.projects, hasLength(2));
++      },
++    );
++  }
++
++  test('phone resolver keeps its existing fallback by default', () async {
++    final recent = await addProject('phone-project');
++    final picked = await resolveSessionProject(
++      store,
++      row(cwd: p.join(temp.path, 'missing')),
++    );
++    expect(picked?.id, recent.id);
++  });
++
++  Future<void> pumpEntry(
++    WidgetTester tester, {
++    required AgentsIndexRow session,
++    required LargeScreenController layout,
++    required HarnessHub hub,
++    required RetainedEditorController editors,
++  }) async {
++    await tester.pumpWidget(
++      MaterialApp(
++        home: LargeScreenScope(
++          controller: layout,
++          child: RetainedEditorScope(
++            controller: editors,
++            child: Scaffold(
++              body: Builder(
++                builder: (context) => Column(
++                  children: [
++                    TextButton(
++                      onPressed: () {
++                        pendingOpen = openAgentSession(
++                          context,
++                          row: session,
++                          auth: auth,
++                          store: store,
++                          settings: settings,
++                          harnessHub: hub,
++                        );
++                      },
++                      child: const Text('Open session'),
++                    ),
++                    Expanded(
++                      child: ListenableBuilder(
++                        listenable: layout,
++                        builder: (context, _) {
++                          final overlay = layout.centerOverlay;
++                          return overlay == null
++                              ? const Text('Original center')
++                              : Builder(builder: overlay);
++                        },
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++
++  testWidgets(
++    'missing project opens center chat and leaves navigation available',
++    (tester) async {
++      final unrelated = await tester.runAsync(() => addProject('unrelated'));
++      final session = row(cwd: p.join(temp.path, 'missing'));
++      final host = FakeHarnessHost(
++        id: 'local',
++        label: 'Local',
++        kind: HarnessHostKind.local,
++        initialSessions: [session.session],
++      );
++      final hub = HarnessHub(hosts: [host], desktop: true);
++      final layout = LargeScreenController();
++      final editors = RetainedEditorController();
++      editors.setRootBackHandling(false);
++      editors.open(
++        project: unrelated!,
++        auth: auth,
++        store: store,
++        settings: settings,
++      );
++      final activeEditor = editors.activeSessionKey;
++      await pumpEntry(
++        tester,
++        session: session,
++        layout: layout,
++        hub: hub,
++        editors: editors,
++      );
++      await tester.runAsync(() async {
++        await tester.tap(find.text('Open session'));
++        await pendingOpen;
++      });
++      await tester.pump();
++      await tester.pump();
++
++      expect(find.byType(WorkbenchSessionView), findsOneWidget);
++      expect(find.byType(HubChatView), findsOneWidget);
++      expect(find.byType(AlertDialog), findsNothing);
++      expect(find.text('先打开一个项目'), findsNothing);
++      expect(host.opened, ['session-1']);
++      expect(editors.activeSessionKey, activeEditor);
++      expect(store.projects.single.id, unrelated.id);
++      expect(find.text('Open session'), findsOneWidget);
++
++      await tester.tap(find.byKey(const ValueKey('workbench-session-close')));
++      await tester.pump();
++      expect(layout.centerOverlay, isNull);
++      expect(find.text('Original center'), findsOneWidget);
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++      editors.dispose();
++      layout.dispose();
++      await hub.shutdown();
++    },
++  );
++
++  testWidgets(
++    'desktop local session registers directory and opens retained editor',
++    (tester) async {
++      final directory = Directory(p.join(temp.path, 'desktop-local'))
++        ..createSync();
++      final session = row(cwd: directory.path);
++      final layout = LargeScreenController();
++      final editors = RetainedEditorController()..setRootBackHandling(false);
++      final hub = HarnessHub(hosts: const [], desktop: true);
++      layout.showCenterOverlay((_) => const Text('Old overlay'));
++      await pumpEntry(
++        tester,
++        session: session,
++        layout: layout,
++        hub: hub,
++        editors: editors,
++      );
++      await tester.runAsync(() async {
++        await tester.tap(find.text('Open session'));
++        await pendingOpen;
++      });
++      await tester.pump();
++      expect(store.projects, hasLength(1));
++      expect(editors.activeProject?.id, store.projects.single.id);
++      expect(p.equals(editors.activeProject!.path, directory.path), isTrue);
++      expect(layout.centerOverlay, isNull);
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++      editors.dispose();
++      layout.dispose();
++      await hub.shutdown();
++    },
++  );
++
++  testWidgets('registration exception opens chat without opening an editor', (
++    tester,
++  ) async {
++    final directory = Directory(p.join(temp.path, 'denied'))..createSync();
++    final originalStore = store;
++    store = _RejectingProjectStore(throwsOnRegistration: true);
++    final session = row(cwd: directory.path);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session.session],
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    final layout = LargeScreenController();
++    final editors = RetainedEditorController()..setRootBackHandling(false);
++    await pumpEntry(
++      tester,
++      session: session,
++      layout: layout,
++      hub: hub,
++      editors: editors,
++    );
++    await tester.runAsync(() async {
++      await tester.tap(find.text('Open session'));
++      await pendingOpen;
++    });
++    await tester.pump();
++    await tester.pump();
++    expect(find.byType(HubChatView), findsOneWidget);
++    expect(find.byType(AlertDialog), findsNothing);
++    expect(editors.activeProject, isNull);
++    expect(directory.existsSync(), isTrue);
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    editors.dispose();
++    layout.dispose();
++    await hub.shutdown();
++    store.dispose();
++    store = originalStore;
++  });
++
++  testWidgets(
++    'legacy Agents surface without projects selects workbench Agents',
++    (tester) async {
++      final layout = LargeScreenController();
++      await tester.pumpWidget(
++        MaterialApp(
++          home: LargeScreenScope(
++            controller: layout,
++            child: Scaffold(
++              body: Builder(
++                builder: (context) => TextButton(
++                  onPressed: () => openAgentsSurface(
++                    context,
++                    auth: auth,
++                    store: store,
++                    settings: settings,
++                  ),
++                  child: const Text('Agents'),
++                ),
++              ),
++            ),
++          ),
++        ),
++      );
++      await tester.tap(find.text('Agents'));
++      await tester.pump();
++      expect(layout.activity, WorkbenchActivity.agents);
++      expect(find.byType(AlertDialog), findsNothing);
++      await tester.pumpWidget(const SizedBox.shrink());
++      layout.dispose();
++    },
++  );
++}
++
++class _RejectingProjectStore extends ProjectStore {
++  _RejectingProjectStore({this.throwsOnRegistration = false});
++
++  final bool throwsOnRegistration;
++
++  @override
++  Future<ProjectResult> addExisting(String rawPath) async {
++    if (throwsOnRegistration) {
++      throw const FileSystemException('Permission denied');
++    }
++    return (error: 'Permission denied', project: null);
++  }
++}
+diff --git a/test/workbench_session_view_test.dart b/test/workbench_session_view_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..65a7ae7806f4ee1e58ff18dde5dee373c7336aa9
+--- /dev/null
++++ b/test/workbench_session_view_test.dart
+@@ -0,0 +1,398 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/harness_host.dart';
++import 'package:qfli_studio_core/harness/hub/agents_index.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/harness/ui/agents_entry.dart';
++import 'package:qfli_studio_core/harness/ui/hub_chat_view.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/workbench_session_view.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++
++import 'support/fake_harness_host.dart';
++
++void main() {
++  final session = fakeSession(hostId: 'local', id: 'a', title: 'Session A');
++  final row = AgentsIndexRow(
++    session: session,
++    hostLabel: 'Test computer',
++    hostKind: HarnessHostKind.local,
++  );
++
++  Future<void> mount(
++    WidgetTester tester,
++    HarnessHub hub, {
++    VoidCallback? onClose,
++    AgentsIndexRow? selected,
++  }) async {
++    await tester.pumpWidget(
++      MaterialApp(
++        home: Scaffold(
++          body: WorkbenchSessionView(
++            row: selected ?? row,
++            hub: hub,
++            onClose: onClose ?? () {},
++          ),
++        ),
++      ),
++    );
++    await tester.pump();
++    await tester.pump();
++  }
++
++  testWidgets('shows title, host and real chat handle without an editor', (
++    tester,
++  ) async {
++    final handle = FakeSessionHandle(info: session);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) async => handle,
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    var closes = 0;
++    await mount(tester, hub, onClose: () => closes++);
++    expect(find.text('Session A'), findsOneWidget);
++    expect(find.text('Test computer'), findsOneWidget);
++    expect(
++      tester.widget<HubChatView>(find.byType(HubChatView)).handle,
++      same(handle),
++    );
++
++    handle.addEvent(
++      const TranscriptEvent(
++        id: 'event-1',
++        role: TranscriptRole.assistant,
++        text: 'Real transcript',
++      ),
++    );
++    await tester.pump();
++    expect(find.text('Real transcript'), findsOneWidget);
++    await tester.tap(find.byKey(const ValueKey('workbench-session-close')));
++    await tester.pump();
++    expect(closes, 1);
++    expect(handle.detachCount, 1);
++    expect(handle.stopCount, 0);
++    expect(host.disposeCount, 0);
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    expect(handle.detachCount, 1);
++    await hub.shutdown();
++  });
++
++  testWidgets('failed handle shows reason and retry reconnects', (
++    tester,
++  ) async {
++    var attempts = 0;
++    final handle = FakeSessionHandle(info: session);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) async {
++        attempts++;
++        if (attempts == 1) throw StateError('Host is offline');
++        return handle;
++      },
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    await mount(tester, hub);
++    expect(find.textContaining('Host is offline'), findsOneWidget);
++    expect(find.byType(HubChatView), findsNothing);
++    await tester.tap(find.byKey(const ValueKey('workbench-session-retry')));
++    await tester.pump();
++    await tester.pump();
++    expect(attempts, 2);
++    expect(find.byType(HubChatView), findsOneWidget);
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    expect(handle.detachCount, 1);
++    expect(handle.stopCount, 0);
++    await hub.shutdown();
++  });
++
++  testWidgets(
++    'missing host gives actionable failure rather than a project dialog',
++    (tester) async {
++      final hub = HarnessHub(hosts: const [], desktop: true);
++      await mount(tester, hub);
++      expect(find.textContaining('找不到主机'), findsOneWidget);
++      expect(
++        find.byKey(const ValueKey('workbench-session-retry')),
++        findsOneWidget,
++      );
++      expect(find.byType(AlertDialog), findsNothing);
++      await tester.pumpWidget(const SizedBox.shrink());
++      await hub.shutdown();
++    },
++  );
++
++  testWidgets('center overlay follows a replacement shared hub', (
++    tester,
++  ) async {
++    final firstHandle = FakeSessionHandle(info: session);
++    final secondHandle = FakeSessionHandle(info: session);
++    FakeHarnessHost hostFor(FakeSessionHandle handle) => FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) async => handle,
++    );
++    final firstHub = HarnessHub(hosts: [hostFor(firstHandle)], desktop: true);
++    final secondHub = HarnessHub(hosts: [hostFor(secondHandle)], desktop: true);
++    final layout = LargeScreenController();
++    final auth = AuthStore();
++    final store = ProjectStore();
++    final settings = SettingsStore();
++    var selectedHub = firstHub;
++    Future<void>? pending;
++    await tester.pumpWidget(
++      MaterialApp(
++        home: LargeScreenScope(
++          controller: layout,
++          child: Scaffold(
++            body: Builder(
++              builder: (context) => Column(
++                children: [
++                  TextButton(
++                    onPressed: () {
++                      pending = openAgentSession(
++                        context,
++                        row: AgentsIndexRow(
++                          session: session,
++                          hostLabel: 'Local',
++                          hostKind: HarnessHostKind.local,
++                        ),
++                        auth: auth,
++                        store: store,
++                        settings: settings,
++                        harnessHub: selectedHub,
++                      );
++                    },
++                    child: const Text('Open session'),
++                  ),
++                  Expanded(
++                    child: ListenableBuilder(
++                      listenable: layout,
++                      builder: (context, _) {
++                        final overlay = layout.centerOverlay;
++                        return overlay == null
++                            ? const SizedBox.shrink()
++                            : Builder(builder: overlay);
++                      },
++                    ),
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ),
++      ),
++    );
++
++    Future<void> openSelectedHub() async {
++      await tester.runAsync(() async {
++        await tester.tap(find.text('Open session'));
++        await pending;
++      });
++      await tester.pump();
++      await tester.pump();
++    }
++
++    await openSelectedHub();
++    expect(firstHub.activeHandle, same(firstHandle));
++    selectedHub = secondHub;
++    await openSelectedHub();
++
++    expect(firstHandle.detachCount, 1);
++    expect(firstHub.activeHandle, isNull);
++    expect(secondHub.activeHandle, same(secondHandle));
++    expect(find.byType(HubChatView), findsOneWidget);
++    expect(tester.takeException(), isNull);
++
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    layout.dispose();
++    store.dispose();
++    auth.dispose();
++    settings.dispose();
++    await firstHub.shutdown();
++    await secondHub.shutdown();
++  });
++
++  testWidgets('removing overlay does not close a newer shared-hub session', (
++    tester,
++  ) async {
++    final other = fakeSession(hostId: 'local', id: 'b', title: 'Session B');
++    final first = FakeSessionHandle(info: session);
++    final second = FakeSessionHandle(info: other);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session, other],
++      openHandler: (id) async => id == session.id ? first : second,
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    await mount(tester, hub);
++    await hub.openSession(other);
++    await tester.pumpWidget(const SizedBox.shrink());
++    await tester.pump();
++    expect(hub.activeHandle, same(second));
++    expect(first.detachCount, 1);
++    expect(second.detachCount, 0);
++    await hub.shutdown();
++  });
++
++  testWidgets('an open completing after disposal detaches without stopping', (
++    tester,
++  ) async {
++    final opening = Completer<HarnessSessionHandle>();
++    final handle = FakeSessionHandle(info: session);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) => opening.future,
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    await mount(tester, hub);
++    expect(
++      find.byKey(const ValueKey('workbench-session-loading')),
++      findsOneWidget,
++    );
++    await tester.pumpWidget(const SizedBox.shrink());
++    opening.complete(handle);
++    await tester.pump();
++    await tester.pump();
++    expect(handle.detachCount, 1);
++    expect(handle.stopCount, 0);
++    expect(hub.activeHandle, isNull);
++    expect(tester.takeException(), isNull);
++    await hub.shutdown();
++  });
++
++  testWidgets('close during opening returns immediately and later detaches', (
++    tester,
++  ) async {
++    final opening = Completer<HarnessSessionHandle>();
++    final handle = FakeSessionHandle(info: session);
++    final host = FakeHarnessHost(
++      id: 'local',
++      label: 'Local',
++      kind: HarnessHostKind.local,
++      initialSessions: [session],
++      openHandler: (_) => opening.future,
++    );
++    final hub = HarnessHub(hosts: [host], desktop: true);
++    var closes = 0;
++    await mount(tester, hub, onClose: () => closes++);
++    await tester.tap(find.byKey(const ValueKey('workbench-session-close')));
++    expect(closes, 1);
++    opening.complete(handle);
++    await tester.pump();
++    await tester.pump();
++    expect(handle.detachCount, 1);
++    expect(handle.stopCount, 0);
++    expect(hub.activeHandle, isNull);
++    await tester.pumpWidget(const SizedBox.shrink());
++    await hub.shutdown();
++  });
++
++  testWidgets(
++    'switch during opening waits for the previous open and selects the new session',
++    (tester) async {
++      final opening = Completer<HarnessSessionHandle>();
++      final other = fakeSession(hostId: 'local', id: 'b', title: 'Session B');
++      final first = FakeSessionHandle(info: session);
++      final second = FakeSessionHandle(info: other);
++      final host = FakeHarnessHost(
++        id: 'local',
++        label: 'Local',
++        kind: HarnessHostKind.local,
++        initialSessions: [session, other],
++        openHandler: (id) =>
++            id == session.id ? opening.future : Future.value(second),
++      );
++      final hub = HarnessHub(hosts: [host], desktop: true);
++      await mount(tester, hub);
++      await mount(
++        tester,
++        hub,
++        selected: AgentsIndexRow(
++          session: other,
++          hostLabel: 'Test computer',
++          hostKind: HarnessHostKind.local,
++        ),
++      );
++      opening.complete(first);
++      await tester.pump();
++      await tester.pump();
++      expect(host.opened, ['a', 'b']);
++      expect(find.byType(HubChatView), findsOneWidget);
++      expect(
++        tester.widget<HubChatView>(find.byType(HubChatView)).handle,
++        same(second),
++      );
++      expect(first.detachCount, 1);
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++      await hub.shutdown();
++    },
++  );
++
++  testWidgets(
++    'changing sessions rebinds chat and clears the previous transcript',
++    (tester) async {
++      final other = fakeSession(hostId: 'local', id: 'b', title: 'Session B');
++      final first = FakeSessionHandle(info: session);
++      final second = FakeSessionHandle(info: other);
++      final host = FakeHarnessHost(
++        id: 'local',
++        label: 'Local',
++        kind: HarnessHostKind.local,
++        initialSessions: [session, other],
++        openHandler: (id) async => id == session.id ? first : second,
++      );
++      final hub = HarnessHub(hosts: [host], desktop: true);
++      await mount(tester, hub);
++      first.addEvent(
++        const TranscriptEvent(
++          id: 'old',
++          role: TranscriptRole.assistant,
++          text: 'Previous transcript',
++        ),
++      );
++      await tester.pump();
++      expect(find.text('Previous transcript'), findsOneWidget);
++      await mount(
++        tester,
++        hub,
++        selected: AgentsIndexRow(
++          session: other,
++          hostLabel: 'Test computer',
++          hostKind: HarnessHostKind.local,
++        ),
++      );
++      expect(find.text('Session B'), findsOneWidget);
++      expect(find.text('Previous transcript'), findsNothing);
++      expect(
++        tester.widget<HubChatView>(find.byType(HubChatView)).handle,
++        same(second),
++      );
++      expect(first.detachCount, 1);
++      await tester.pumpWidget(const SizedBox.shrink());
++      await tester.pump();
++      await hub.shutdown();
++    },
++  );
++}

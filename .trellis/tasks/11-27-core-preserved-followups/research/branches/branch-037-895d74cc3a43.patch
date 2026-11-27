@@ -1,0 +1,1849 @@
+diff --git a/lib/harness/local/README.md b/lib/harness/local/README.md
+index df05ee3348afdde6ea8ba302af64b654a583a9aa..c83784fe9fcfcf4a47b2c2122ad7bb7f16c162b5 100644
+--- a/lib/harness/local/README.md
++++ b/lib/harness/local/README.md
+@@ -49,14 +49,21 @@ transcript。`detach()` 只释放视图，`stop()` 才结束进程，调用方
+       "logDirectory": "~/.aider/sessions",
+       "logFormat": "claude",
+       "detectPaths": ["~/.local/bin/aider"],
+-      "enabled": true
++      "enabled": true,
++      "requiresTerminal": true
+     }
+   ]
+ }
+ ```
+ 
+-同 `id` 的用户项覆盖内置项。`logFormat` 只接受 `claude`、`codex`、`pi`；
+-未知值降级为无日志并记录诊断。文件上限 64 KiB，解析失败时保留内置项。
++同 `id` 的用户项覆盖内置项；把某个内置项写成 `"enabled": false` 就是不
++再提供它（例如禁用 `claude`）。`logFormat` 只接受 `claude`、`codex`、
++`pi`；未知值降级为无日志并记录诊断。文件上限 64 KiB，解析失败时保留
++内置项。
++
++`requiresTerminal` 默认为 `true`：这类 harness 在管道后端下不会出现在
++“新建会话”菜单里（见下一节），避免给出一个必定卡住的入口。shell 与
++批处理型 harness 可显式写 `false`。
+ 
+ ## PTY 后端
+ 
+@@ -66,6 +73,9 @@ transcript。`detach()` 只释放视图，`stop()` 才结束进程，调用方
+ | Windows | `pipe`（`.cmd`/`.bat` 经 `cmd.exe /c`） | 否 | 否 |
+ | 移动端 / Web / 鸿蒙 | `unsupported` | — | — |
+ 
+-Windows 目前没有 ConPTY 绑定，交互式 TUI 会退化成管道模式。会话层已经
+-通过 `PtyLauncher` 留出接口，补上原生实现即可获得真实终端与
++Windows 目前没有 ConPTY 绑定，交互式 TUI 会退化成管道模式。因此
++`providers()` 在 `allocatesTerminal == false` 时把需要真实终端的 harness
++（`claude`、`codex`、`pi` 等）标成 `available: false`，`launch()` 也会
++明确报错；shell 不受影响。会话层已经通过 `PtyLauncher` 留出接口，补上
++原生实现（或接上 Pi-B 的 `HarnessPtyFactory`）即可获得真实终端与
+ `ResizePseudoConsole`，无需改动 `StudioMux`。
+diff --git a/lib/harness/local/claude_code_log_reader.dart b/lib/harness/local/claude_code_log_reader.dart
+index d054853b971145dd3c9f46ca081c114bff790210..b644e808b2f12c89b398ed968a500a1810d8b121 100644
+--- a/lib/harness/local/claude_code_log_reader.dart
++++ b/lib/harness/local/claude_code_log_reader.dart
+@@ -67,7 +67,7 @@ class ClaudeCodeLogReader extends TranscriptLogReader {
+     }
+     return LogSessionRef(
+       providerId: providerId,
+-      id: logSessionId(providerId, file.path),
++      id: logSessionId(providerId, file.path, rootPath: rootPath),
+       title:
+           summary ?? titleFromCwd(cwd) ?? basenameWithoutExtension(file.path),
+       filePath: file.path,
+@@ -83,18 +83,18 @@ class ClaudeCodeLogReader extends TranscriptLogReader {
+     int maxEvents = 400,
+     int maxBytes = kLogTailBytes,
+   }) async {
+-    final lines = await readJsonlTail(filePath, maxBytes: maxBytes);
+-    final base = logSessionId(providerId, filePath);
++    final lines = await readJsonlTailLines(filePath, maxBytes: maxBytes);
++    final base = logSessionId(providerId, filePath, rootPath: rootPath);
+     final events = <TranscriptEvent>[];
+-    for (var index = 0; index < lines.length; index++) {
+-      events.addAll(_parseLine(lines[index], base, index));
++    for (final line in lines) {
++      events.addAll(_parseLine(line.text, base, line.offset));
+     }
+     if (events.length <= maxEvents) return events;
+     return events.sublist(events.length - maxEvents);
+   }
+ 
+   /// 解析一行；一段内容可能展开成多个事件（文本与多个工具调用）。
+-  List<TranscriptEvent> _parseLine(String line, String base, int index) {
++  List<TranscriptEvent> _parseLine(String line, String base, int offset) {
+     final decoded = decodeJsonLine(line);
+     if (decoded is! Map) return const <TranscriptEvent>[];
+     final type = decoded['type'];
+@@ -107,7 +107,7 @@ class ClaudeCodeLogReader extends TranscriptLogReader {
+       if (text.isEmpty) return const <TranscriptEvent>[];
+       return <TranscriptEvent>[
+         TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.system,
+           text: text,
+           at: at,
+@@ -126,7 +126,7 @@ class ClaudeCodeLogReader extends TranscriptLogReader {
+       if (text.isEmpty) return;
+       events.add(
+         TranscriptEvent(
+-          id: logEventId(base, index, part++),
++          id: logEventId(base, offset, part++),
+           role: as ?? role,
+           text: text,
+           at: at,
+diff --git a/lib/harness/local/codex_log_reader.dart b/lib/harness/local/codex_log_reader.dart
+index e10e6074e733772cc5323a0c04f2beada9263e31..d829954693406c3c2a2af40c049a538f6c331d86 100644
+--- a/lib/harness/local/codex_log_reader.dart
++++ b/lib/harness/local/codex_log_reader.dart
+@@ -56,7 +56,7 @@ class CodexLogReader extends TranscriptLogReader {
+     }
+     return LogSessionRef(
+       providerId: providerId,
+-      id: logSessionId(providerId, file.path),
++      id: logSessionId(providerId, file.path, rootPath: rootPath),
+       title: title ?? titleFromCwd(cwd) ?? basenameWithoutExtension(file.path),
+       filePath: file.path,
+       updatedAt: updatedAt,
+@@ -72,34 +72,34 @@ class CodexLogReader extends TranscriptLogReader {
+     int maxEvents = 400,
+     int maxBytes = kLogTailBytes,
+   }) async {
+-    final lines = await readJsonlTail(filePath, maxBytes: maxBytes);
+-    final base = logSessionId(providerId, filePath);
++    final lines = await readJsonlTailLines(filePath, maxBytes: maxBytes);
++    final base = logSessionId(providerId, filePath, rootPath: rootPath);
+     final events = <TranscriptEvent>[];
+-    for (var index = 0; index < lines.length; index++) {
+-      final event = _parseLine(lines[index], base, index);
++    for (final line in lines) {
++      final event = _parseLine(line.text, base, line.offset);
+       if (event != null) events.add(event);
+     }
+     if (events.length <= maxEvents) return events;
+     return events.sublist(events.length - maxEvents);
+   }
+ 
+-  TranscriptEvent? _parseLine(String line, String base, int index) {
++  TranscriptEvent? _parseLine(String line, String base, int offset) {
+     final decoded = decodeJsonLine(line);
+     if (decoded is! Map) return null;
+     final at = parseLogTimestamp(decoded['timestamp']);
+     final type = decoded['type'];
+     final payload = decoded['payload'];
+     if (type == 'response_item' && payload is Map) {
+-      return _responseItem(payload, base, index, at);
++      return _responseItem(payload, base, offset, at);
+     }
+     if (type == 'event_msg' && payload is Map) {
+-      return _eventMessage(payload, base, index, at);
++      return _eventMessage(payload, base, offset, at);
+     }
+     if (type == 'session_meta' && payload is Map) {
+       final cwd = payload['cwd'];
+       if (cwd is String && cwd.trim().isNotEmpty) {
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.system,
+           text: '会话目录：${cwd.trim()}',
+           at: at,
+@@ -112,7 +112,7 @@ class CodexLogReader extends TranscriptLogReader {
+   TranscriptEvent? _responseItem(
+     Map<dynamic, dynamic> payload,
+     String base,
+-    int index,
++    int offset,
+     DateTime? at,
+   ) {
+     switch (payload['type']) {
+@@ -121,7 +121,7 @@ class CodexLogReader extends TranscriptLogReader {
+         final text = summarizeText(textFromContent(payload['content']));
+         if (text.isEmpty) return null;
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: role == 'assistant'
+               ? TranscriptRole.assistant
+               : role == 'system'
+@@ -140,7 +140,7 @@ class CodexLogReader extends TranscriptLogReader {
+           maxChars: 240,
+         );
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.tool,
+           text: arguments.isEmpty ? name : '$name · $arguments',
+           at: at,
+@@ -150,7 +150,7 @@ class CodexLogReader extends TranscriptLogReader {
+         final text = summarizeText(textFromContent(payload['output']));
+         if (text.isEmpty) return null;
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.tool,
+           text: text,
+           at: at,
+@@ -163,7 +163,7 @@ class CodexLogReader extends TranscriptLogReader {
+   TranscriptEvent? _eventMessage(
+     Map<dynamic, dynamic> payload,
+     String base,
+-    int index,
++    int offset,
+     DateTime? at,
+   ) {
+     switch (payload['type']) {
+@@ -171,7 +171,7 @@ class CodexLogReader extends TranscriptLogReader {
+         final text = summarizeText(textFromContent(payload['message']));
+         if (text.isEmpty) return null;
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.user,
+           text: text,
+           at: at,
+@@ -180,7 +180,7 @@ class CodexLogReader extends TranscriptLogReader {
+         final text = summarizeText(textFromContent(payload['message']));
+         if (text.isEmpty) return null;
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.assistant,
+           text: text,
+           at: at,
+@@ -192,7 +192,7 @@ class CodexLogReader extends TranscriptLogReader {
+           maxChars: 240,
+         );
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.tool,
+           text: text.isEmpty ? 'exec_command' : text,
+           at: at,
+@@ -200,14 +200,14 @@ class CodexLogReader extends TranscriptLogReader {
+       case 'exec_approval_request':
+       case 'apply_patch_approval_request':
+       case 'request_permissions':
+-        final requestId = _requestId(payload, index);
++        final requestId = _requestId(payload, offset);
+         final command = payload['command'];
+         final detail = summarizeText(
+           command is List ? command.join(' ') : textFromContent(command),
+           maxChars: 240,
+         );
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.system,
+           text: detail.isEmpty ? '需要确认' : '需要确认：$detail',
+           at: at,
+@@ -218,7 +218,7 @@ class CodexLogReader extends TranscriptLogReader {
+         final text = summarizeText(textFromContent(payload['message']));
+         if (text.isEmpty) return null;
+         return TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.system,
+           text: text,
+           at: at,
+@@ -229,12 +229,12 @@ class CodexLogReader extends TranscriptLogReader {
+   }
+ 
+   /// 审批请求的 id。Codex 用 `call_id`，旧版本用 `id`。
+-  String? _requestId(Map<dynamic, dynamic> payload, int index) {
++  String? _requestId(Map<dynamic, dynamic> payload, int offset) {
+     for (final key in const <String>['call_id', 'id', 'request_id']) {
+       final value = payload[key];
+       if (value is String && value.trim().isNotEmpty) return value.trim();
+     }
+-    return 'codex-request-$index';
++    return 'codex-request-$offset';
+   }
+ 
+   static String? _userMessage(Map<dynamic, dynamic> decoded) {
+diff --git a/lib/harness/local/harness_provider.dart b/lib/harness/local/harness_provider.dart
+index 37d8f50f58f287e07767ace98e69fab85c7878f9..f65bc1656c9c5f7ea620c533ba8b67c0f5a4696e 100644
+--- a/lib/harness/local/harness_provider.dart
++++ b/lib/harness/local/harness_provider.dart
+@@ -42,6 +42,7 @@ class HarnessProviderSpec {
+     this.detectPaths = const <String>[],
+     this.builtIn = true,
+     this.enabled = true,
++    this.requiresTerminal = true,
+   });
+ 
+   final String id;
+@@ -61,6 +62,13 @@ class HarnessProviderSpec {
+   final bool builtIn;
+   final bool enabled;
+ 
++  /// 该 harness 是否需要真实终端才能工作。
++  ///
++  /// Claude Code、Codex、Pi 的默认界面是全屏 TUI，靠 `isTTY` 决定是否进入
++  /// 交互模式；管道后端下它们会拒绝启动或退化成一次性输出。界面据此隐藏
++  /// 启动入口，而不是给用户一个必定卡住的会话。
++  final bool requiresTerminal;
++
+   /// 是否提供结构化对话记录。
+   bool get hasTranscript => logDirectory != null && logFormat != null;
+ 
+@@ -119,6 +127,7 @@ class HarnessProviderSpec {
+       ),
+       builtIn: builtIn,
+       enabled: value['enabled'] != false,
++      requiresTerminal: value['requiresTerminal'] != false,
+     );
+   }
+ 
+@@ -127,6 +136,7 @@ class HarnessProviderSpec {
+     String? executable,
+     List<String>? args,
+     bool? enabled,
++    bool? requiresTerminal,
+     Map<String, String>? environment,
+   }) {
+     return HarnessProviderSpec(
+@@ -140,6 +150,7 @@ class HarnessProviderSpec {
+       detectPaths: detectPaths,
+       builtIn: builtIn,
+       enabled: enabled ?? this.enabled,
++      requiresTerminal: requiresTerminal ?? this.requiresTerminal,
+     );
+   }
+ 
+@@ -225,7 +236,12 @@ const List<HarnessProviderSpec> kBuiltInHarnessProviders =
+       ),
+       HarnessProviderSpec(id: 'zcode', label: 'ZCode', executable: 'zcode'),
+       HarnessProviderSpec(id: 'dsh', label: 'dsh', executable: 'dsh'),
+-      HarnessProviderSpec(id: 'shell', label: '终端', executable: ''),
++      HarnessProviderSpec(
++        id: 'shell',
++        label: '终端',
++        executable: '',
++        requiresTerminal: false,
++      ),
+     ];
+ 
+ /// 用户配置文件里解析出的提供方与诊断信息。
+@@ -273,7 +289,9 @@ class HarnessProviderConfig {
+         builtIn: false,
+         warnings: warnings,
+       );
+-      if (spec == null || !spec.enabled) continue;
++      // `enabled: false` 的项必须保留：同 id 时它就是“禁用这个内置项”的意思。
++      // 只有新增 id 的禁用项才直接丢弃。
++      if (spec == null) continue;
+       if (!seen.add(spec.id)) {
+         warnings.add('提供方 ${spec.id} 重复，保留先出现的项');
+         continue;
+diff --git a/lib/harness/local/live_log_follower.dart b/lib/harness/local/live_log_follower.dart
+index c2a346a0dcc3b88f8bf82171c64758095f98e950..3ae5dc5b38af1ad98b88a529dd0363395784c0f1 100644
+--- a/lib/harness/local/live_log_follower.dart
++++ b/lib/harness/local/live_log_follower.dart
+@@ -40,6 +40,13 @@ class LiveLogFollower {
+       StreamController<TranscriptEvent>.broadcast();
+   Timer? _timer;
+   String? _path;
++
++  /// 上一次轮询窗口里已经推过的事件 id。
++  ///
++  /// 不用“事件条数”做游标：读取器只返回尾部窗口（还有条数上限），窗口
++  /// 封顶后条数不再增长，条数游标会让推送永久停住。id 由字节偏移生成，
++  /// 同一行在两次读取里 id 相同，用集合去重既不丢事件也不会重推。
++  final Set<String> _deliveredIds = <String>{};
+   int _delivered = 0;
+   bool _polling = false;
+ 
+@@ -49,7 +56,7 @@ class LiveLogFollower {
+   /// 增量事件流。广播流，只推送发现之后的新事件。
+   Stream<TranscriptEvent> get events => _events.stream;
+ 
+-  /// 已推送的事件数。
++  /// 已推送的事件总数。
+   int get delivered => _delivered;
+ 
+   /// 开始轮询。
+@@ -67,15 +74,18 @@ class LiveLogFollower {
+       final path = _path;
+       if (path == null) return;
+       final events = await reader.read(path, maxEvents: maxEvents);
+-      if (events.length < _delivered) {
+-        // 尾部窗口滑走或文件被重写：重新对齐，避免重复推送。
+-        _delivered = 0;
+-      }
+-      for (var index = _delivered; index < events.length; index++) {
++      final windowIds = <String>{};
++      for (final event in events) {
++        windowIds.add(event.id);
++        if (_deliveredIds.contains(event.id)) continue;
+         if (_events.isClosed) return;
+-        _events.add(events[index]);
++        _events.add(event);
++        _delivered++;
+       }
+-      _delivered = events.length;
++      // 只保留当前窗口内的 id：窗口滑走的事件不可能再被读到。
++      _deliveredIds
++        ..clear()
++        ..addAll(windowIds);
+     } on Object {
+       // 读日志失败不应影响会话本身；下一轮再试。
+     } finally {
+diff --git a/lib/harness/local/local_harness_host.dart b/lib/harness/local/local_harness_host.dart
+index b1f0cb30036056e6f06431e228cb19a81500efef..1618c0a9f0fdd70e1e1cf0f3b76c5067d4620f52 100644
+--- a/lib/harness/local/local_harness_host.dart
++++ b/lib/harness/local/local_harness_host.dart
+@@ -41,15 +41,31 @@ class _LogEntry {
+ 
+ /// 本机终端会话句柄。
+ class _LiveSessionHandle implements HarnessSessionHandle {
+-  _LiveSessionHandle(this._session, {LiveLogFollower? follower})
+-    : _follower = follower;
++  _LiveSessionHandle(
++    this._session, {
++    LiveLogFollower? follower,
++    bool? hasTranscript,
++    Future<void> Function(_LiveSessionHandle handle)? onRelease,
++  }) : _follower = follower,
++       _hasTranscript = hasTranscript ?? follower != null,
++       _onRelease = onRelease;
+ 
+   final MuxSession _session;
+ 
+   /// 有可用日志时提供结构化对话，否则只有终端。
+-  final LiveLogFollower? _follower;
++  LiveLogFollower? _follower;
++
++  /// 这个会话是否有结构化对话（与当前是否挂着跟随器无关）。
++  final bool _hasTranscript;
++  final Future<void> Function(_LiveSessionHandle handle)? _onRelease;
+   bool _detached = false;
+ 
++  /// 重新接上一个跟随器（重新打开会话时由宿主建立）。
++  void attachFollower(LiveLogFollower follower) {
++    if (_detached) return;
++    _follower = follower;
++  }
++
+   @override
+   HarnessSessionInfo get info => HarnessSessionInfo(
+     id: _session.id,
+@@ -58,7 +74,7 @@ class _LiveSessionHandle implements HarnessSessionHandle {
+     title: _session.title,
+     cwd: _session.workingDirectory.isEmpty ? null : _session.workingDirectory,
+     status: _session.status.value,
+-    capabilities: _follower == null
++    capabilities: !_hasTranscript
+         ? const <HarnessCapability>{
+             HarnessCapability.terminal,
+             HarnessCapability.prompt,
+@@ -99,25 +115,42 @@ class _LiveSessionHandle implements HarnessSessionHandle {
+   /// 只释放视图。会话由 [StudioMux] 持有，进程继续运行。
+   @override
+   Future<void> detach() async {
++    if (_detached) return;
+     _detached = true;
+-    await _follower?.stop();
++    await _onRelease?.call(this);
+   }
+ 
+   @override
+   Future<void> stop() async {
+-    await _follower?.stop();
++    // detach 只释放视图；stop 无论如何都必须结束会话，所以不能因为已经
++    // detach 过就变成空操作。
++    if (!_detached) {
++      _detached = true;
++      await _onRelease?.call(this);
++    }
+     await _session.stop();
+   }
+ }
+ 
+ /// 历史日志会话句柄。只读，不能发送提示词。
+ class _LogSessionHandle implements HarnessSessionHandle {
+-  _LogSessionHandle(this._entry)
+-    : _status = ValueNotifier<HarnessSessionStatus>(_entry.status);
++  _LogSessionHandle(
++    this._entry, {
++    Future<void> Function(_LogSessionHandle handle)? onRelease,
++  }) : _onRelease = onRelease,
++       _status = ValueNotifier<HarnessSessionStatus>(_entry.status);
+ 
+   final _LogEntry _entry;
++  final Future<void> Function(_LogSessionHandle handle)? _onRelease;
+   final ValueNotifier<HarnessSessionStatus> _status;
+   StreamController<TranscriptEvent>? _controller;
++  bool _released = false;
++
++  /// 刷新时更新列表推断出的状态。
++  void updateStatus(HarnessSessionStatus status) {
++    if (_released) return;
++    _status.value = status;
++  }
+ 
+   @override
+   HarnessSessionInfo get info => _entry.info;
+@@ -135,6 +168,9 @@ class _LogSessionHandle implements HarnessSessionHandle {
+     late final StreamController<TranscriptEvent> controller;
+     controller = StreamController<TranscriptEvent>(
+       onListen: () => unawaited(_pump(controller)),
++      // 取消订阅就释放，避免把整窗事件缓冲在没有接收方的 controller 里；
++      // 也保证同一个句柄不会因为二次订阅而抛“已经监听过”。
++      onCancel: () => unawaited(controller.close()),
+     );
+     return controller;
+   }
+@@ -168,6 +204,9 @@ class _LogSessionHandle implements HarnessSessionHandle {
+     if (controller != null && !controller.isClosed) {
+       await controller.close();
+     }
++    if (_released) return;
++    _released = true;
++    await _onRelease?.call(this);
+   }
+ 
+   @override
+@@ -189,6 +228,7 @@ class LocalHarnessHost implements HarnessHost {
+   }) : _registry = registry ?? ProviderRegistry(),
+        _mux = mux,
+        _launcher = launcher ?? createPtyLauncher(),
++       _ownsLauncher = launcher == null,
+        _supported = supported ?? _platformSupportsLocalSessions() {
+     if (!_supported) _state.value = HarnessHostState.unsupported;
+   }
+@@ -207,6 +247,7 @@ class LocalHarnessHost implements HarnessHost {
+ 
+   final ProviderRegistry _registry;
+   final PtyLauncher _launcher;
++  final bool _ownsLauncher;
+   final bool _supported;
+   final ValueNotifier<HarnessHostState> _state =
+       ValueNotifier<HarnessHostState>(HarnessHostState.offline);
+@@ -214,6 +255,12 @@ class LocalHarnessHost implements HarnessHost {
+       StreamController<List<HarnessSessionInfo>>.broadcast();
+   final Map<String, _LogEntry> _logEntries = <String, _LogEntry>{};
+   final Map<String, LiveLogFollower> _followers = <String, LiveLogFollower>{};
++  final Map<String, _LiveSessionHandle> _liveHandles =
++      <String, _LiveSessionHandle>{};
++  final Map<String, _LogSessionHandle> _logHandles =
++      <String, _LogSessionHandle>{};
++
++  List<HarnessSessionInfo> _latest = const <HarnessSessionInfo>[];
+ 
+   StudioMux? _mux;
+   StreamSubscription<MuxEvent>? _muxEvents;
+@@ -253,13 +300,23 @@ class LocalHarnessHost implements HarnessHost {
+   @override
+   Stream<List<HarnessSessionInfo>> watchSessions() {
+     unawaited(_beginWatching());
+-    return _sessions.stream;
++    // 每个订阅者先拿一帧当前快照：广播流不重放，晚挂载的页面否则要等到
++    // 下一次刷新（最长 logRefreshInterval）才有内容。
++    return Stream.multi((MultiStreamController<List<HarnessSessionInfo>> c) {
++      c.add(_latest);
++      final subscription = _sessions.stream.listen(
++        c.add,
++        onError: c.addError,
++        onDone: c.close,
++      );
++      c.onCancel = subscription.cancel;
++    });
+   }
+ 
+   @override
+   Future<List<HarnessProviderInfo>> providers() async {
+     await _ensureStarted();
+-    return _registry.infos;
++    return _registry.infosFor(allocatesTerminal: _launcher.allocatesTerminal);
+   }
+ 
+   @override
+@@ -267,14 +324,50 @@ class LocalHarnessHost implements HarnessHost {
+     await _ensureStarted();
+     final live = _mux?.sessionFor(sessionId);
+     if (live != null) {
+-      return _LiveSessionHandle(live, follower: _followers[sessionId]);
++      final cached = _liveHandles[sessionId];
++      if (cached != null) return cached;
++      var follower = _followers[sessionId];
++      if (follower == null) {
++        // 上次 detach 关掉了跟随器；重新建一个，since 用会话启动时刻，
++        // 因此仍能找回同一个日志文件并补齐已有事件。
++        follower = _startFollower(
++          live.providerId,
++          live.workingDirectory,
++          since: live.startedAt,
++        );
++        if (follower != null) _followers[sessionId] = follower;
++      }
++      late final _LiveSessionHandle handle;
++      handle = _LiveSessionHandle(
++        live,
++        follower: follower,
++        onRelease: (released) async {
++          if (!identical(_liveHandles[sessionId], released)) return;
++          _liveHandles.remove(sessionId);
++          await _followers.remove(sessionId)?.stop();
++        },
++      );
++      _liveHandles[sessionId] = handle;
++      return handle;
+     }
+     await refreshLogSessions();
+     final entry = _logEntries[sessionId];
+     if (entry == null) {
+       throw StateError('会话不存在：$sessionId');
+     }
+-    return _LogSessionHandle(entry);
++    final cached = _logHandles[sessionId];
++    if (cached != null) return cached;
++    late final _LogSessionHandle handle;
++    handle = _LogSessionHandle(
++      entry,
++      onRelease: (released) async {
++        if (identical(_logHandles[sessionId], released)) {
++          _logHandles.remove(sessionId);
++        }
++      },
++    );
++    _logHandles[sessionId] = handle;
++    return handle;
+   }
+ 
+   @override
+@@ -294,6 +387,12 @@ class LocalHarnessHost implements HarnessHost {
+     if (!provider.available) {
+       throw StateError('未安装 ${provider.spec.label}');
+     }
++    if (provider.spec.requiresTerminal && !_launcher.allocatesTerminal) {
++      // 管道后端下全屏 TUI 无法工作；宁可拒绝，也不给一个假终端。
++      throw StateError(
++        '${provider.spec.label} 需要真实终端，当前后端（${_launcher.strategy}）只有管道',
++      );
++    }
+     final cwd = request.cwd.trim();
+     if (cwd.isEmpty || !Directory(cwd).existsSync()) {
+       throw ArgumentError.value(request.cwd, 'cwd', '工作目录不存在');
+@@ -309,14 +408,29 @@ class LocalHarnessHost implements HarnessHost {
+       environment: spec.environment.isEmpty ? null : spec.environment,
+       title: request.title ?? spec.label,
+     );
+-    final follower = _startFollower(spec.id, cwd);
++    final follower = _startFollower(spec.id, cwd, since: session.startedAt);
+     if (follower != null) _followers[session.id] = follower;
+     await _emitSessions();
+-    return _LiveSessionHandle(session, follower: follower);
++    late final _LiveSessionHandle handle;
++    handle = _LiveSessionHandle(
++      session,
++      follower: follower,
++      onRelease: (released) async {
++        if (!identical(_liveHandles[session.id], released)) return;
++        _liveHandles.remove(session.id);
++        await _followers.remove(session.id)?.stop();
++      },
++    );
++    _liveHandles[session.id] = handle;
++    return handle;
+   }
+ 
+   /// 为直播会话建立日志跟随；没有日志配置时返回 null。
+-  LiveLogFollower? _startFollower(String providerId, String cwd) {
++  LiveLogFollower? _startFollower(
++    String providerId,
++    String cwd, {
++    DateTime? since,
++  }) {
+     final format = _registry.byId(providerId)?.spec.logFormat;
+     if (format == null) return null;
+     final reader = createLogReader(
+@@ -328,7 +442,7 @@ class LocalHarnessHost implements HarnessHost {
+     final follower = LiveLogFollower(
+       reader: reader,
+       workingDirectory: cwd,
+-      since: DateTime.now(),
++      since: since ?? DateTime.now(),
+     );
+     follower.start();
+     return follower;
+@@ -367,6 +481,11 @@ class LocalHarnessHost implements HarnessHost {
+     _logEntries
+       ..clear()
+       ..addAll(entries);
++    // 已打开的日志句柄跟着刷新状态，列表与详情不会各说各话。
++    for (final entry in _logHandles.entries.toList()) {
++      final fresh = _logEntries[entry.key];
++      entry.value.updateStatus(fresh?.status ?? HarnessSessionStatus.exited);
++    }
+     await _emitSessions();
+   }
+ 
+@@ -382,8 +501,17 @@ class LocalHarnessHost implements HarnessHost {
+       await follower.stop();
+     }
+     _followers.clear();
++    for (final handle in _liveHandles.values.toList()) {
++      await handle.detach();
++    }
++    _liveHandles.clear();
++    for (final handle in _logHandles.values.toList()) {
++      await handle.detach();
++    }
++    _logHandles.clear();
+     await _mux?.dispose();
+     _mux = null;
++    if (_ownsLauncher) await _launcher.dispose();
+     _logEntries.clear();
+     if (!_sessions.isClosed) await _sessions.close();
+     _state.dispose();
+@@ -391,11 +519,15 @@ class LocalHarnessHost implements HarnessHost {
+ 
+   Future<void> _beginWatching() async {
+     if (_watching) {
++      // 已有扫描在跑：只等启动完成，不重复扫日志目录。
+       await _ensureStarted();
++      if (_disposed) return;
++      await _emitSessions();
+       return;
+     }
+     _watching = true;
+     await _ensureStarted();
++    if (_disposed) return;
+     _refreshTimer ??= Timer.periodic(
+       logRefreshInterval,
+       (Timer _) => unawaited(refreshLogSessions()),
+@@ -423,14 +555,18 @@ class LocalHarnessHost implements HarnessHost {
+     } on Object {
+       // 配置损坏不影响内置项；注册表保留诊断信息。
+     }
++    if (_disposed) return;
+     final mux = _mux ??= StudioMux(launcher: _launcher);
+-    _muxEvents = mux.events.listen((MuxEvent event) {
++    _muxEvents ??= mux.events.listen((MuxEvent event) {
+       if (event.kind == MuxEventKind.exited) {
+         // 会话结束后再读日志没有意义，释放轮询。
+-        unawaited(_followers.remove(event.session.id)?.stop());
++        final sessionId = event.session.id;
++        unawaited(_followers.remove(sessionId)?.stop());
++        _liveHandles.remove(sessionId);
+       }
+       unawaited(_emitSessions());
+     });
++    if (_disposed) return;
+     _state.value = HarnessHostState.online;
+     await _emitSessions();
+   }
+@@ -441,7 +577,7 @@ class LocalHarnessHost implements HarnessHost {
+     final mux = _mux;
+     if (mux != null) {
+       for (final session in mux.sessions) {
+-        infos.add(_LiveSessionHandle(session).info);
++        infos.add(_sessionInfo(session));
+       }
+     }
+     for (final entry in _logEntries.values) {
+@@ -452,13 +588,26 @@ class LocalHarnessHost implements HarnessHost {
+       final right = b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+       return right.compareTo(left);
+     });
+-    _sessions.add(
++    _latest = List<HarnessSessionInfo>.unmodifiable(
+       infos.length > maxSessionEntries
+           ? infos.sublist(0, maxSessionEntries)
+           : infos,
+     );
++    _sessions.add(_latest);
+   }
+ 
++  /// 列表行不需要跟随器；能力集取决于 provider 是否配置了可读日志，而不是
++  /// 此刻是否恰好有一个活着的跟随器（detach 后重开会重建）。
++  HarnessSessionInfo _sessionInfo(MuxSession session) => _LiveSessionHandle(
++    session,
++    hasTranscript: _hasTranscriptProvider(session.providerId),
++  ).info;
++
++  /// 该 provider 是否配置了可读日志。
++  bool _hasTranscriptProvider(String providerId) =>
++      _registry.byId(providerId)?.spec.logFormat != null &&
++      _registry.logDirectory(providerId) != null;
++
+   static bool _platformSupportsLocalSessions() {
+     if (kIsWeb) return false;
+     return switch (defaultTargetPlatform) {
+diff --git a/lib/harness/local/pi_log_reader.dart b/lib/harness/local/pi_log_reader.dart
+index 66c9fd5232f857339cd25866795bdad9a5eff234..51ee4a708d987a274fd20703fa0d6cca60c00ccc 100644
+--- a/lib/harness/local/pi_log_reader.dart
++++ b/lib/harness/local/pi_log_reader.dart
+@@ -57,7 +57,7 @@ class PiLogReader extends TranscriptLogReader {
+     }
+     return LogSessionRef(
+       providerId: providerId,
+-      id: logSessionId(providerId, file.path),
++      id: logSessionId(providerId, file.path, rootPath: rootPath),
+       title: title ?? titleFromCwd(cwd) ?? basenameWithoutExtension(file.path),
+       filePath: file.path,
+       updatedAt: updatedAt,
+@@ -73,17 +73,17 @@ class PiLogReader extends TranscriptLogReader {
+     int maxEvents = 400,
+     int maxBytes = kLogTailBytes,
+   }) async {
+-    final lines = await readJsonlTail(filePath, maxBytes: maxBytes);
+-    final base = logSessionId(providerId, filePath);
++    final lines = await readJsonlTailLines(filePath, maxBytes: maxBytes);
++    final base = logSessionId(providerId, filePath, rootPath: rootPath);
+     final events = <TranscriptEvent>[];
+-    for (var index = 0; index < lines.length; index++) {
+-      events.addAll(_parseLine(lines[index], base, index));
++    for (final line in lines) {
++      events.addAll(_parseLine(line.text, base, line.offset));
+     }
+     if (events.length <= maxEvents) return events;
+     return events.sublist(events.length - maxEvents);
+   }
+ 
+-  List<TranscriptEvent> _parseLine(String line, String base, int index) {
++  List<TranscriptEvent> _parseLine(String line, String base, int offset) {
+     final decoded = decodeJsonLine(line);
+     if (decoded is! Map) return const <TranscriptEvent>[];
+     final at = parseLogTimestamp(
+@@ -96,14 +96,14 @@ class PiLogReader extends TranscriptLogReader {
+         type == 'approval_request' ||
+         type == 'question' ||
+         type == 'request') {
+-      final requestId = _requestId(decoded, index);
++      final requestId = _requestId(decoded, offset);
+       final prompt = summarizeText(
+         _textOf(decoded).isEmpty ? '需要确认' : _textOf(decoded),
+         maxChars: 400,
+       );
+       return <TranscriptEvent>[
+         TranscriptEvent(
+-          id: logEventId(base, index),
++          id: logEventId(base, offset),
+           role: TranscriptRole.system,
+           text: prompt,
+           at: at,
+@@ -126,7 +126,7 @@ class PiLogReader extends TranscriptLogReader {
+       if (text.isEmpty) return;
+       events.add(
+         TranscriptEvent(
+-          id: logEventId(base, index, part++),
++          id: logEventId(base, offset, part++),
+           role: as ?? role,
+           text: text,
+           at: at,
+@@ -184,7 +184,7 @@ class PiLogReader extends TranscriptLogReader {
+     return textFromContent(content);
+   }
+ 
+-  String? _requestId(Map<dynamic, dynamic> decoded, int index) {
++  String? _requestId(Map<dynamic, dynamic> decoded, int offset) {
+     for (final key in const <String>[
+       'requestId',
+       'request_id',
+@@ -195,7 +195,7 @@ class PiLogReader extends TranscriptLogReader {
+       final value = decoded[key];
+       if (value is String && value.trim().isNotEmpty) return value.trim();
+     }
+-    return 'pi-request-$index';
++    return 'pi-request-$offset';
+   }
+ 
+   List<String> _optionsOf(Map<dynamic, dynamic> decoded) {
+diff --git a/lib/harness/local/provider_registry.dart b/lib/harness/local/provider_registry.dart
+index c96cba94801f68daa6e12d795b26f176e178ec0b..7d8c4b65d58ba741dca8449fb6a2c0fdf0e0af4d 100644
+--- a/lib/harness/local/provider_registry.dart
++++ b/lib/harness/local/provider_registry.dart
+@@ -61,16 +61,25 @@ class ProviderRegistry {
+       List<ResolvedHarnessProvider>.unmodifiable(_resolved);
+ 
+   /// 以契约类型暴露给界面。
+-  List<HarnessProviderInfo> get infos => <HarnessProviderInfo>[
+-    for (final provider in _resolved)
+-      HarnessProviderInfo(
+-        id: provider.spec.id,
+-        label: provider.spec.label,
+-        available: provider.available,
+-        executable: provider.executable,
+-        builtIn: provider.spec.builtIn,
+-      ),
+-  ];
++  List<HarnessProviderInfo> get infos => infosFor(allocatesTerminal: true);
++
++  /// 以契约类型暴露给界面，并按后端能力过滤。
++  ///
++  /// 需要真实终端的 harness（Claude、Codex、Pi 的全屏 TUI）在管道后端下
++  /// 标记为不可用，而不是让用户启动一个必定卡住的会话。
++  List<HarnessProviderInfo> infosFor({required bool allocatesTerminal}) =>
++      <HarnessProviderInfo>[
++        for (final provider in _resolved)
++          HarnessProviderInfo(
++            id: provider.spec.id,
++            label: provider.spec.label,
++            available:
++                provider.available &&
++                (!provider.spec.requiresTerminal || allocatesTerminal),
++            executable: provider.executable,
++            builtIn: provider.spec.builtIn,
++          ),
++      ];
+ 
+   ResolvedHarnessProvider? byId(String id) {
+     for (final provider in _resolved) {
+@@ -170,10 +179,20 @@ class ProviderRegistry {
+     }
+   }
+ 
+-  /// 平台默认 shell。Windows 用 PowerShell，其他平台按 SHELL 与常见路径。
++  /// 平台默认 shell。
++  ///
++  /// 用户在配置里给 `shell` 指定 `executable` 时优先用它；解析不到再回到
++  /// 平台默认值，避免一个写错的路径让终端完全不可用。
+   String? _resolveShell(Map<String, HarnessProviderSpec> merged) {
++    final spec = merged['shell'];
++    final configured = spec?.executable.trim() ?? '';
++    if (configured.isNotEmpty && spec != null) {
++      final hit = locator.exists(configured)
++          ? configured
++          : locator.locate(spec);
++      if (hit != null) return hit;
++    }
+     if (locator.isWindows) {
+-      final spec = merged['shell'];
+       return locator.locate(
+         HarnessProviderSpec(
+           id: 'shell',
+diff --git a/lib/harness/local/pty_process.dart b/lib/harness/local/pty_process.dart
+index 1d74bd6ed8eef402771ebfe77faee18294d0ebb3..80c5c5733427c195200f967b1e2e2734d232ad30 100644
+--- a/lib/harness/local/pty_process.dart
++++ b/lib/harness/local/pty_process.dart
+@@ -55,6 +55,9 @@ abstract class PtyLauncher {
+     int columns = 80,
+     int rows = 24,
+   });
++
++  /// 释放后端自己持有的资源（Supervisor 及其子进程）。幂等。
++  Future<void> dispose();
+ }
+ 
+ /// 当前平台没有可用后端。
+@@ -81,6 +84,9 @@ class UnsupportedPtyLauncher implements PtyLauncher {
+   }) {
+     throw UnsupportedError('当前平台不支持本机终端会话');
+   }
++
++  @override
++  Future<void> dispose() async {}
+ }
+ 
+ /// macOS 与 Linux 用系统 `script` 申请伪终端。
+@@ -94,10 +100,12 @@ class ScriptPtyLauncher implements PtyLauncher {
+     bool? isMacOS,
+     String? shellExecutable,
+   }) : _supervisor = supervisor ?? ProcessSupervisor(),
++       _ownsSupervisor = supervisor == null,
+        isMacOS = isMacOS ?? Platform.isMacOS,
+        shellExecutable = shellExecutable ?? '/bin/sh';
+ 
+   final ProcessSupervisor _supervisor;
++  final bool _ownsSupervisor;
+   final bool isMacOS;
+   final String shellExecutable;
+ 
+@@ -137,7 +145,7 @@ class ScriptPtyLauncher implements PtyLauncher {
+       environment: environment,
+       runInShell: false,
+     );
+-    return SupervisedPtyProcess(process);
++    return SupervisedPtyProcess(ManagedPtyChild(process));
+   }
+ 
+   /// 组装在 pty 里执行的 shell 命令。
+@@ -173,6 +181,12 @@ class ScriptPtyLauncher implements PtyLauncher {
+   }
+ 
+   static final RegExp _safeArgument = RegExp(r'^[A-Za-z0-9_@%+=:,./-]+$');
++
++  /// 只释放自己创建的 Supervisor；外部注入的由调用方负责。
++  @override
++  Future<void> dispose() async {
++    if (_ownsSupervisor) await _supervisor.dispose();
++  }
+ }
+ 
+ /// 用普通管道承载子进程。子进程看不到终端设备。
+@@ -182,9 +196,11 @@ class ScriptPtyLauncher implements PtyLauncher {
+ class PipePtyLauncher implements PtyLauncher {
+   PipePtyLauncher({ProcessSupervisor? supervisor, bool? isWindows})
+     : _supervisor = supervisor ?? ProcessSupervisor(),
++      _ownsSupervisor = supervisor == null,
+       isWindows = isWindows ?? Platform.isWindows;
+ 
+   final ProcessSupervisor _supervisor;
++  final bool _ownsSupervisor;
+   final bool isWindows;
+ 
+   @override
+@@ -217,7 +233,7 @@ class PipePtyLauncher implements PtyLauncher {
+       environment: environment,
+       runInShell: false,
+     );
+-    return SupervisedPtyProcess(process);
++    return SupervisedPtyProcess(ManagedPtyChild(process));
+   }
+ 
+   /// 解析实际启动的命令行。
+@@ -240,28 +256,98 @@ class PipePtyLauncher implements PtyLauncher {
+     final lower = executable.toLowerCase();
+     return lower.endsWith('.cmd') || lower.endsWith('.bat');
+   }
++
++  @override
++  Future<void> dispose() async {
++    if (_ownsSupervisor) await _supervisor.dispose();
++  }
+ }
+ 
+-/// 由 [ProcessSupervisor] 托管的 PTY 进程。
++/// [SupervisedPtyProcess] 需要的最小子进程能力。
++///
++/// 抽象出来是为了能用两个普通 stream 验证“stdout 与 stderr 都转发”，
++/// 不必真的启动一个进程。
++abstract class PtyChildProcess {
++  int get pid;
++  Stream<List<int>> get stdout;
++  Stream<List<int>> get stderr;
++  Future<int> get exitCode;
++
++  /// 子进程的标准输入。已退出时写会抛，调用方自行忽略。
++  StreamSink<List<int>> get stdin;
++
++  Future<void> cancel();
++}
++
++/// 把 [ManagedProcess] 接成 [PtyChildProcess]。
++class ManagedPtyChild implements PtyChildProcess {
++  ManagedPtyChild(this._process);
++
++  final ManagedProcess _process;
++
++  @override
++  int get pid => _process.pid;
++
++  @override
++  Stream<List<int>> get stdout => _process.stdout;
++
++  @override
++  Stream<List<int>> get stderr => _process.stderr;
++
++  @override
++  Future<int> get exitCode => _process.exitCode;
++
++  @override
++  StreamSink<List<int>> get stdin => _process.stdin;
++
++  @override
++  Future<void> cancel() => _process.cancel();
++}
++
++/// 由子进程托管的 PTY 进程。
+ ///
+ /// 取消路径沿用 process-lifecycle：Windows 先 `taskkill /T /F`，POSIX 先
+ /// TERM 再 KILL，并等待退出码。
+ class SupervisedPtyProcess implements PtyProcess {
+-  SupervisedPtyProcess(this._process) {
+-    _subscription = _process.stdout.listen(
+-      (List<int> chunk) => _output.add(Uint8List.fromList(chunk)),
+-      onError: (Object error, StackTrace stackTrace) =>
+-          _output.addError(error, stackTrace),
+-      onDone: () => unawaited(_output.close()),
++  SupervisedPtyProcess(PtyChildProcess process) : _process = process {
++    _stdoutSubscription = _process.stdout.listen(
++      (List<int> chunk) => _append(chunk),
++      onError: _streamError,
++      onDone: _streamFinished,
++    );
++    // 真实 pty 下 stdout 与 stderr 是同一设备，但 Windows 的 pipe 后端把它们
++    // 分成两个管道。不订阅 stderr 就等于丢掉 CLI 的报错与进度，因此两个都转发。
++    _stderrSubscription = _process.stderr.listen(
++      (List<int> chunk) => _append(chunk),
++      onError: _streamError,
++      onDone: _streamFinished,
+     );
+   }
+ 
+-  final ManagedProcess _process;
++  final PtyChildProcess _process;
+   final StreamController<Uint8List> _output =
+       StreamController<Uint8List>.broadcast();
+-  StreamSubscription<List<int>>? _subscription;
++  StreamSubscription<List<int>>? _stdoutSubscription;
++  StreamSubscription<List<int>>? _stderrSubscription;
++  int _openStreams = 2;
+   bool _terminated = false;
+ 
++  void _append(List<int> chunk) {
++    if (_terminated || _output.isClosed || chunk.isEmpty) return;
++    _output.add(Uint8List.fromList(chunk));
++  }
++
++  void _streamError(Object error, StackTrace stackTrace) {
++    if (_terminated || _output.isClosed) return;
++    _output.addError(error, stackTrace);
++  }
++
++  /// 两个管道都结束才关闭输出，避免 stderr 尾巴被截掉。
++  void _streamFinished() {
++    _openStreams--;
++    if (_openStreams <= 0 && !_output.isClosed) unawaited(_output.close());
++  }
++
+   @override
+   int get pid => _process.pid;
+ 
+@@ -291,11 +377,10 @@ class SupervisedPtyProcess implements PtyProcess {
+     if (_terminated) return;
+     _terminated = true;
+     await _process.cancel();
+-    final subscription = _subscription;
+-    if (subscription != null) {
+-      await subscription.cancel();
+-      _subscription = null;
+-    }
++    await _stdoutSubscription?.cancel();
++    _stdoutSubscription = null;
++    await _stderrSubscription?.cancel();
++    _stderrSubscription = null;
+     if (!_output.isClosed) await _output.close();
+   }
+ }
+diff --git a/lib/harness/local/studio_mux.dart b/lib/harness/local/studio_mux.dart
+index 7c9c5a0a2039d1f5c2f95894fa76a98086d55d51..f50137065a5b4babfcdc5810194589c05008936e 100644
+--- a/lib/harness/local/studio_mux.dart
++++ b/lib/harness/local/studio_mux.dart
+@@ -8,6 +8,7 @@
+ library;
+ 
+ import 'dart:async';
++import 'dart:convert';
+ 
+ import 'package:flutter/foundation.dart';
+ 
+@@ -155,8 +156,12 @@ class MuxSession implements HarnessTerminalChannel {
+   }
+ 
+   /// 写入一段文本并回车，等价于在终端里输入一行。
++  ///
++  /// 必须按 UTF-8 编码：`String.codeUnits` 是 UTF-16 码元，直接塞进
++  /// [Uint8List] 只保留低 8 位，中文会被截成乱码（'复' 的低字节恰好是 0x0D，
++  /// 也就是回车）。
+   void sendLine(String text) {
+-    write(Uint8List.fromList(<int>[...text.codeUnits, 13]));
++    write(Uint8List.fromList(<int>[...utf8.encode(text), 13]));
+   }
+ 
+   /// 调整终端尺寸。
+@@ -222,21 +227,30 @@ class StudioMux {
+     int scrollbackBytes = kDefaultScrollbackBytes,
+     Duration idleAfter = const Duration(milliseconds: 900),
+     String Function()? idFactory,
++    this.maxExitedSessions = 8,
+   }) : _scrollbackBytes = scrollbackBytes,
+        _idleAfter = idleAfter,
+        _idFactory =
+            idFactory ??
+            (() =>
+                'mux-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}'),
+-       _ownsSupervisor = launcher == null {
++       _ownsSupervisor = launcher == null,
++       _ownsLauncher = launcher == null {
+     _supervisor = supervisor ?? ProcessSupervisor();
+     _launcher = launcher ?? createPtyLauncher(supervisor: _supervisor);
+   }
+ 
++  /// 保留多少个已退出的会话（含各自的滚动缓冲）。
++  ///
++  /// 每个会话持有一份滚动缓冲，不设上限就是单调增长的泄漏；已退出会话只
++  /// 用于“刚结束还能回看”，超过这个数量按退出顺序淘汰。
++  final int maxExitedSessions;
++
+   final int _scrollbackBytes;
+   final Duration _idleAfter;
+   final String Function() _idFactory;
+   final bool _ownsSupervisor;
++  final bool _ownsLauncher;
+   final Map<String, MuxSession> _sessions = <String, MuxSession>{};
+   final StreamController<MuxEvent> _events =
+       StreamController<MuxEvent>.broadcast();
+@@ -308,10 +322,30 @@ class StudioMux {
+   }
+ 
+   void _emitEvent(MuxSession session, MuxEventKind kind) {
++    if (kind == MuxEventKind.exited) _pruneExited(except: session);
+     if (_events.isClosed) return;
+     _events.add(MuxEvent(kind: kind, session: session));
+   }
+ 
++  /// 只保留最近 [maxExitedSessions] 个已退出会话。
++  ///
++  /// 淘汰时释放滚动缓冲（每个会话默认 512 KiB），但不 dispose 会话对象：
++  /// 界面可能还拿着它的句柄在渲染。进程已经结束，定时器与订阅也都已释放，
++  /// 丢引用后剩下的内存由 GC 回收。
++  /// [except] 是刚发出事件的那个会话，不能在自己回调里被回收。
++  void _pruneExited({MuxSession? except}) {
++    final exited = <MuxSession>[
++      for (final session in _sessions.values)
++        if (!session.isRunning && !identical(session, except)) session,
++    ];
++    if (exited.length <= maxExitedSessions) return;
++    final removeCount = exited.length - maxExitedSessions;
++    for (final session in exited.take(removeCount)) {
++      _sessions.remove(session.id);
++      session.scrollback.clear();
++    }
++  }
++
+   /// 结束一个会话并等待进程退出。
+   Future<void> stop(String sessionId) async {
+     final session = _sessions[sessionId];
+@@ -319,7 +353,7 @@ class StudioMux {
+     await session.stop();
+   }
+ 
+-  /// 释放全部会话与 Supervisor。
++  /// 释放全部会话与后端。
+   Future<void> dispose() async {
+     if (_disposed) return;
+     _disposed = true;
+@@ -329,6 +363,11 @@ class StudioMux {
+     }
+     _sessions.clear();
+     await _events.close();
+-    if (_ownsSupervisor) await _supervisor.dispose();
++    if (_ownsLauncher) {
++      // 自建 launcher 也拥有那个共享的 Supervisor。
++      await _launcher.dispose();
++    } else if (_ownsSupervisor) {
++      await _supervisor.dispose();
++    }
+   }
+ }
+diff --git a/lib/harness/local/transcript_log_reader.dart b/lib/harness/local/transcript_log_reader.dart
+index 8b18a2ce89782656b9d1326aad3f44bffa690a9d..abe7cd4ffa5c39dda1df6ac06d00ade444612ea5 100644
+--- a/lib/harness/local/transcript_log_reader.dart
++++ b/lib/harness/local/transcript_log_reader.dart
+@@ -106,8 +106,65 @@ Future<List<String>> readJsonlTail(
+   int maxBytes = kLogTailBytes,
+   int maxLineChars = kLogMaxLineChars,
+ }) async {
+-  final text = await _readWindow(path, maxBytes: maxBytes, fromEnd: true);
+-  return _splitLines(text, maxLineChars: maxLineChars);
++  final lines = await readJsonlTailLines(
++    path,
++    maxBytes: maxBytes,
++    maxLineChars: maxLineChars,
++  );
++  return <String>[for (final line in lines) line.text];
++}
++
++/// 一行 jsonl 及其在文件里的字节偏移。
++///
++/// 偏移用于生成稳定的事件 id：尾部窗口滑动后下标会变，字节偏移不会（日志
++/// 只追加不重写），因此同一条消息重读后 id 仍然一样。
++class JsonlLine {
++  const JsonlLine({required this.text, required this.offset});
++
++  final String text;
++
++  /// 该行第一个字节在文件中的绝对偏移。
++  final int offset;
++}
++
++/// 与 [readJsonlTail] 相同，但保留每行的字节偏移。
++Future<List<JsonlLine>> readJsonlTailLines(
++  String path, {
++  int maxBytes = kLogTailBytes,
++  int maxLineChars = kLogMaxLineChars,
++}) async {
++  RandomAccessFile? handle;
++  try {
++    handle = await File(path).open();
++    final length = await handle.length();
++    if (length == 0) return const <JsonlLine>[];
++    final start = length > maxBytes ? length - maxBytes : 0;
++    await handle.setPosition(start);
++    final bytes = await handle.read(length - start);
++    final result = <JsonlLine>[];
++    var cursor = start;
++    var index = 0;
++    while (cursor < length) {
++      final newline = bytes.indexOf(0x0a, index);
++      final end = newline < 0 ? bytes.length : newline;
++      final lineBytes = bytes.sublist(index, end);
++      final lineStart = cursor;
++      index = end + 1;
++      cursor = lineStart + lineBytes.length + 1;
++      // 第一行可能是被截断的半行，不能当作完整事件。
++      if (start > 0 && lineStart == start) continue;
++      final text = const Utf8Decoder(
++        allowMalformed: true,
++      ).convert(lineBytes).trim();
++      if (text.isEmpty || text.length > maxLineChars) continue;
++      result.add(JsonlLine(text: text, offset: lineStart));
++    }
++    return result;
++  } on FileSystemException {
++    return const <JsonlLine>[];
++  } finally {
++    await handle?.close();
++  }
+ }
+ 
+ /// 读取 jsonl 文件开头的若干字节并切行，用于取元数据。
+@@ -259,12 +316,26 @@ String? titleFromCwd(String? cwd) {
+ }
+ 
+ /// 稳定的会话 id。
+-String logSessionId(String providerId, String filePath) =>
+-    'log:$providerId:${p.basename(filePath)}';
++///
++/// 用相对日志根目录的路径，避免不同项目目录下的同名文件互相覆盖。
++String logSessionId(String providerId, String filePath, {String? rootPath}) {
++  var relative = filePath;
++  if (rootPath != null && rootPath.isNotEmpty) {
++    final normalizedRoot = p.normalize(rootPath);
++    final normalizedFile = p.normalize(filePath);
++    if (p.isWithin(normalizedRoot, normalizedFile)) {
++      relative = p.relative(normalizedFile, from: normalizedRoot);
++    }
++  }
++  return 'log:$providerId:${relative.replaceAll(r'\', '/')}';
++}
+ 
+ /// 为一行日志生成事件 id。
+-String logEventId(String sessionBase, int index, [int part = 0]) =>
+-    part == 0 ? '$sessionBase#$index' : '$sessionBase#$index/$part';
++///
++/// [offset] 是 [JsonlLine.offset]（文件内字节偏移），不是窗口内下标，
++/// 因此尾部窗口滑动后同一条消息的 id 不变。
++String logEventId(String sessionBase, int offset, [int part = 0]) =>
++    part == 0 ? '$sessionBase#$offset' : '$sessionBase#$offset/$part';
+ 
+ /// 由头部行推断工作目录；没有则返回 null。
+ String? cwdFromLines(List<String> lines, {String key = 'cwd'}) {
+diff --git a/test/harness/local/claude_code_log_reader_test.dart b/test/harness/local/claude_code_log_reader_test.dart
+index 5f48d5556c9b0af6dd23ba4f77330e2889759dc3..2c83a712e10dcb4cf6004179c1914534f687d6d6 100644
+--- a/test/harness/local/claude_code_log_reader_test.dart
++++ b/test/harness/local/claude_code_log_reader_test.dart
+@@ -56,8 +56,13 @@ void main() {
+       final events = await _reader.read(_session);
+ 
+       expect(events.first.at, DateTime.utc(2026, 11, 20, 10));
+-      expect(events.first.id, endsWith('#1'));
+       expect(events.map((TranscriptEvent e) => e.id).toSet(), hasLength(5));
++      // id 由文件内字节偏移生成，重读同一个文件必须完全一致。
++      final again = await _reader.read(_session);
++      expect(
++        again.map((TranscriptEvent e) => e.id),
++        events.map((TranscriptEvent e) => e.id),
++      );
+     });
+ 
+     test('没有 requestId，因为 Claude 不把确认写进日志', () async {
+diff --git a/test/harness/local/codex_log_reader_test.dart b/test/harness/local/codex_log_reader_test.dart
+index 62e82beca92ff007710abaa8160c664b6698e18d..27d6d545067fef3f097aace515f0887205cd3abf 100644
+--- a/test/harness/local/codex_log_reader_test.dart
++++ b/test/harness/local/codex_log_reader_test.dart
+@@ -70,7 +70,12 @@ void main() {
+       final events = await _reader.read(_sessionPath('abc'));
+ 
+       expect(events.map((TranscriptEvent e) => e.id).toSet(), hasLength(5));
+-      expect(events.first.id, endsWith('#0'));
++      final again = await _reader.read(_sessionPath('abc'));
++      expect(
++        again.map((TranscriptEvent e) => e.id),
++        events.map((TranscriptEvent e) => e.id),
++        reason: 'id 用字节偏移，重读不能变',
++      );
+     });
+ 
+     test('maxEvents 只保留尾部事件', () async {
+diff --git a/test/harness/local/executable_locator_test.dart b/test/harness/local/executable_locator_test.dart
+index 5dca7c010c12369d0c676b3f77fac07b3ce05039..7cfd33640b55fd93485eb29b2718063147f69a5b 100644
+--- a/test/harness/local/executable_locator_test.dart
++++ b/test/harness/local/executable_locator_test.dart
+@@ -214,19 +214,34 @@ void main() {
+       expect(config.warnings.single, contains('重复'));
+     });
+ 
+-    test('enabled 为 false 的项被丢弃', () {
++    test('同 id 的 enabled:false 覆盖项会禁用内置项', () {
+       final config = HarnessProviderConfig.parse(<Object?>[
+         <String, Object?>{
+-          'id': 'aider',
+-          'executable': 'aider',
++          'id': 'claude',
++          'executable': 'claude',
+           'enabled': false,
+         },
+       ]);
+ 
+-      expect(config.providers, isEmpty);
++      // 解析阶段必须保留，否则“禁用内置项”永远做不到。
++      expect(config.providers.single.enabled, isFalse);
+       expect(config.warnings, isEmpty);
+     });
+ 
++    test('requiresTerminal 默认为 true，可显式关掉', () {
++      final config = HarnessProviderConfig.parse(<Object?>[
++        <String, Object?>{'id': 'aider', 'executable': 'aider'},
++        <String, Object?>{
++          'id': 'tui-free',
++          'executable': 'tui-free',
++          'requiresTerminal': false,
++        },
++      ]);
++
++      expect(config.providers.first.requiresTerminal, isTrue);
++      expect(config.providers.last.requiresTerminal, isFalse);
++    });
++
+     test('未知 logFormat 降级为无日志', () {
+       final config = HarnessProviderConfig.parse(<Object?>[
+         <String, Object?>{
+diff --git a/test/harness/local/local_harness_host_test.dart b/test/harness/local/local_harness_host_test.dart
+index 98a25c38d8316bf9f2eaab6e0ebf5ce9757d892c..bb5962da4bf1eeb39eca4038392d7a7ad8a4c9d1 100644
+--- a/test/harness/local/local_harness_host_test.dart
++++ b/test/harness/local/local_harness_host_test.dart
+@@ -23,7 +23,8 @@ ProviderRegistry registryFor({String home = ''}) {
+       fileExists: (String path) =>
+           path == '/usr/local/bin/claude' ||
+           path == '/usr/local/bin/pi' ||
+-          path == '/usr/local/bin/opencode',
++          path == '/usr/local/bin/opencode' ||
++          path == '/bin/sh',
+     ),
+     configPathResolver: () async => null,
+   );
+@@ -132,6 +133,112 @@ void main() {
+ 
+       final reopened = await host.open(handle.info.id);
+       expect(reopened.info.id, handle.info.id);
++      expect(identical(reopened, handle), isTrue, reason: '同一个会话只应有一个已打开的句柄');
++    });
++
++    test('detach 之后重开，对话记录仍能继续推送', () async {
++      final launcher = FakePtyLauncher();
++      final host = LocalHarnessHost(
++        registry: registryFor(),
++        mux: StudioMux(launcher: launcher),
++        launcher: launcher,
++        supported: true,
++      );
++      addTearDown(host.dispose);
++      final cwd = Directory.systemTemp.createTempSync('harness_host_');
++      addTearDown(() => cwd.deleteSync(recursive: true));
++
++      final handle = await host.launch(
++        HarnessLaunchRequest(providerId: 'claude', cwd: cwd.path),
++      );
++      expect(handle.transcript, isNotNull);
++      await handle.detach();
++
++      final reopened = await host.open(handle.info.id);
++      expect(reopened.transcript, isNotNull);
++      // 旧的 detach 把广播流关掉了；新句柄必须是活的流（订阅后不会立刻 done）。
++      var done = false;
++      final subscription = reopened.transcript!.listen(
++        (_) {},
++        onDone: () => done = true,
++      );
++      await Future<void>.delayed(const Duration(milliseconds: 50));
++      expect(done, isFalse, reason: '重开后拿到的是已关闭的旧流');
++      await subscription.cancel();
++      await reopened.detach();
++    });
++
++    test('detach 之后再 stop 仍然结束会话', () async {
++      final launcher = FakePtyLauncher();
++      final mux = StudioMux(launcher: launcher);
++      addTearDown(mux.dispose);
++      final host = LocalHarnessHost(
++        registry: registryFor(),
++        mux: mux,
++        launcher: launcher,
++        supported: true,
++      );
++      addTearDown(host.dispose);
++      final cwd = Directory.systemTemp.createTempSync('harness_host_');
++      addTearDown(() => cwd.deleteSync(recursive: true));
++
++      final handle = await host.launch(
++        HarnessLaunchRequest(providerId: 'shell', cwd: cwd.path),
++      );
++      await handle.detach();
++      await handle.stop();
++
++      expect(launcher.spawned.single.terminateCount, 1);
++    });
++
++    test('晚挂载的订阅者也能拿到当前列表', () async {
++      final launcher = FakePtyLauncher();
++      final host = LocalHarnessHost(
++        registry: registryFor(),
++        mux: StudioMux(launcher: launcher),
++        launcher: launcher,
++        supported: true,
++      );
++      addTearDown(host.dispose);
++
++      await host.refreshLogSessions();
++      final first = await host.watchSessions().first;
++      final second = await host.watchSessions().first;
++
++      expect(first, isNotEmpty);
++      expect(
++        second.map((HarnessSessionInfo s) => s.id),
++        first.map((HarnessSessionInfo s) => s.id),
++        reason: '第二个订阅者不应看到空列表',
++      );
++    });
++
++    test('管道后端不提供需要终端的 harness', () async {
++      final launcher = FakePtyLauncher(allocatesTerminal: false);
++      final host = LocalHarnessHost(
++        registry: registryFor(),
++        mux: StudioMux(launcher: launcher),
++        launcher: launcher,
++        supported: true,
++      );
++      addTearDown(host.dispose);
++      final cwd = Directory.systemTemp.createTempSync('harness_host_');
++      addTearDown(() => cwd.deleteSync(recursive: true));
++
++      final providers = await host.providers();
++      expect(providers.firstWhere((p) => p.id == 'claude').available, isFalse);
++      expect(
++        providers.firstWhere((p) => p.id == 'opencode').available,
++        isFalse,
++        reason: '默认 requiresTerminal 为 true',
++      );
++      expect(providers.firstWhere((p) => p.id == 'shell').available, isTrue);
++
++      await expectLater(
++        host.launch(HarnessLaunchRequest(providerId: 'claude', cwd: cwd.path)),
++        throwsA(isA<StateError>()),
++      );
++      expect(launcher.spawned, isEmpty);
+     });
+ 
+     test('没有日志配置的 provider 只有终端', () async {
+diff --git a/test/harness/local/provider_registry_test.dart b/test/harness/local/provider_registry_test.dart
+index ad5a82272a9f2e073ff3526349fd66802b603f17..13cfcb5f54313b17ee3a0d5316e310ed0d942085 100644
+--- a/test/harness/local/provider_registry_test.dart
++++ b/test/harness/local/provider_registry_test.dart
+@@ -233,6 +233,61 @@ void main() {
+       expect(registry.resolved, hasLength(8));
+     });
+ 
++    test('同 id 的 enabled:false 覆盖项禁用内置 provider', () async {
++      final registry = registryFor(
++        config: '''
++{"providers": [{"id": "claude", "executable": "claude", "enabled": false}]}
++''',
++      );
++      await registry.load();
++
++      expect(registry.byId('claude'), isNull);
++      expect(registry.resolved, hasLength(7));
++    });
++
++    test('用户给 shell 指定的可执行文件优先', () async {
++      final registry = registryFor(
++        existing: <String>{'/opt/custom/sh'},
++        config: '''
++{"providers": [{"id": "shell", "executable": "/opt/custom/sh"}]}
++''',
++      );
++      await registry.load();
++
++      expect(registry.byId('shell')?.executable, '/opt/custom/sh');
++    });
++
++    test('需要终端的 provider 在管道后端下标记不可用', () async {
++      final registry = registryFor(
++        existing: <String>{'/usr/local/bin/claude', '/bin/sh'},
++      );
++      await registry.load();
++
++      final withTerminal = registry.infosFor(allocatesTerminal: true);
++      final pipeOnly = registry.infosFor(allocatesTerminal: false);
++
++      expect(
++        withTerminal
++            .firstWhere((HarnessProviderInfo p) => p.id == 'claude')
++            .available,
++        isTrue,
++      );
++      expect(
++        pipeOnly
++            .firstWhere((HarnessProviderInfo p) => p.id == 'claude')
++            .available,
++        isFalse,
++        reason: 'TUI 在管道下跑不起来，不能给用户一个必定卡住的入口',
++      );
++      expect(
++        pipeOnly
++            .firstWhere((HarnessProviderInfo p) => p.id == 'shell')
++            .available,
++        isTrue,
++        reason: 'shell 不需要 TUI',
++      );
++    });
++
+     test('reload 丢弃上一轮结果', () async {
+       var config = '''
+ {"providers": [{"id": "aider", "executable": "aider"}]}
+diff --git a/test/harness/local/pty_process_test.dart b/test/harness/local/pty_process_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..22183de0554cb1c6c4a4cdc07b73eb5d7a109ba9
+--- /dev/null
++++ b/test/harness/local/pty_process_test.dart
+@@ -0,0 +1,124 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/harness/local/pty_process.dart';
++
++/// 两个独立管道的最小假子进程，用来验证 stderr 也会被转发。
++class _FakeChild implements PtyChildProcess {
++  final StreamController<List<int>> out = StreamController<List<int>>();
++  final StreamController<List<int>> err = StreamController<List<int>>();
++  final Completer<int> exit = Completer<int>();
++  final List<List<int>> writes = <List<int>>[];
++
++  /// 真实的 stdin 管道；用 sink 记录收到的字节。
++  @override
++  late final StreamSink<List<int>> stdin = _RecordingSink(writes);
++  int cancelCount = 0;
++
++  @override
++  int get pid => 4242;
++
++  @override
++  Stream<List<int>> get stdout => out.stream;
++
++  @override
++  Stream<List<int>> get stderr => err.stream;
++
++  @override
++  Future<int> get exitCode => exit.future;
++
++  @override
++  Future<void> cancel() async {
++    cancelCount++;
++    if (!exit.isCompleted) exit.complete(0);
++  }
++}
++
++/// 把写入原样记录下来，供断言使用。
++class _RecordingSink implements StreamSink<List<int>> {
++  _RecordingSink(this.writes);
++
++  final List<List<int>> writes;
++
++  @override
++  void add(List<int> event) => writes.add(List<int>.of(event));
++
++  @override
++  void addError(Object error, [StackTrace? stackTrace]) {}
++
++  @override
++  Future<void> addStream(Stream<List<int>> stream) async {
++    await for (final chunk in stream) {
++      writes.add(List<int>.of(chunk));
++    }
++  }
++
++  @override
++  Future<void> close() async {}
++
++  @override
++  Future<void> get done => Future<void>.value();
++}
++
++String _text(Uint8List bytes) => utf8.decode(bytes, allowMalformed: true);
++
++void main() {
++  group('SupervisedPtyProcess', () {
++    test('stdout 与 stderr 都进入 output', () async {
++      final child = _FakeChild();
++      final process = SupervisedPtyProcess(child);
++      final chunks = <String>[];
++      final subscription = process.output.listen(
++        (Uint8List data) => chunks.add(_text(data)),
++      );
++
++      child.out.add(utf8.encode('正在编译\n'));
++      child.err.add(utf8.encode('warning: unused variable\n'));
++      await Future<void>.delayed(Duration.zero);
++
++      expect(chunks, <String>['正在编译\n', 'warning: unused variable\n']);
++      expect(process.pid, 4242);
++
++      await subscription.cancel();
++      await process.terminate();
++    });
++
++    test('terminate 幂等且写入在结束后被忽略', () async {
++      final child = _FakeChild();
++      final process = SupervisedPtyProcess(child);
++
++      process.write(<int>[0x61]);
++      expect(child.writes.single, <int>[0x61]);
++
++      await process.terminate();
++      await process.terminate();
++      expect(child.cancelCount, 1);
++
++      process.write(<int>[0x62]);
++      expect(child.writes, hasLength(1));
++    });
++
++    test('两个管道都结束后才关闭 output', () async {
++      final child = _FakeChild();
++      final process = SupervisedPtyProcess(child);
++      var done = false;
++      final subscription = process.output.listen(
++        (_) {},
++        onDone: () => done = true,
++      );
++
++      await child.out.close();
++      await Future<void>.delayed(Duration.zero);
++      expect(done, isFalse, reason: 'stderr 尾巴仍可能到达');
++
++      await child.err.close();
++      await Future<void>.delayed(Duration.zero);
++      expect(done, isTrue);
++
++      await subscription.cancel();
++      await process.terminate();
++    });
++  });
++}
+diff --git a/test/harness/local/studio_mux_test.dart b/test/harness/local/studio_mux_test.dart
+index 449f77b2122b8898c69b5e696552061bb3bb0771..63c1c9e2b81542a5430ba1db55e7b00fa2f2c0e1 100644
+--- a/test/harness/local/studio_mux_test.dart
++++ b/test/harness/local/studio_mux_test.dart
+@@ -1,3 +1,4 @@
++import 'dart:convert';
+ import 'dart:typed_data';
+ 
+ import 'package:flutter_test/flutter_test.dart';
+@@ -127,6 +128,58 @@ void main() {
+       expect(launcher.spawned.single.writes.single, <int>[0x6c, 0x73, 13]);
+     });
+ 
++    test('sendLine 按 UTF-8 编码，中文不会被截断', () async {
++      final launcher = FakePtyLauncher();
++      final mux = StudioMux(launcher: launcher);
++      addTearDown(mux.dispose);
++      final session = await mux.start(
++        providerId: 'shell',
++        executable: '/bin/sh',
++        workingDirectory: '/tmp',
++      );
++
++      session.sendLine('你好');
++
++      final written = launcher.spawned.single.writes.single;
++      expect(written, <int>[...utf8.encode('你好'), 13]);
++      // 旧实现用 UTF-16 码元，'复' 这类字符的低字节恰好是 0x0D（回车），
++      // 一条中文提示词会被拆成多行。除了末尾那一个回车，中间不能出现 0x0D。
++      expect(written.sublist(0, written.length - 1), isNot(contains(0x0d)));
++    });
++
++    test('外部注入的 launcher 不由 mux 释放', () async {
++      final launcher = FakePtyLauncher();
++      final mux = StudioMux(launcher: launcher);
++
++      await mux.dispose();
++
++      expect(launcher.disposeCount, 0, reason: '谁创建谁释放，mux 不能替调用方关掉共享后端');
++    });
++
++    test('退出会话超过保留上限后被回收', () async {
++      final launcher = FakePtyLauncher();
++      final mux = StudioMux(launcher: launcher, maxExitedSessions: 1);
++      addTearDown(mux.dispose);
++
++      final first = await mux.start(providerId: 'shell', executable: '/bin/sh');
++      await first.stop();
++      final second = await mux.start(
++        providerId: 'shell',
++        executable: '/bin/sh',
++      );
++      await second.stop();
++      final third = await mux.start(providerId: 'shell', executable: '/bin/sh');
++      await third.stop();
++      // 第四个会话启动前，最旧的两个已退出会话应被淘汰。
++      await mux.start(providerId: 'shell', executable: '/bin/sh');
++
++      expect(
++        mux.sessions.map((MuxSession s) => s.id),
++        isNot(contains(first.id)),
++      );
++      expect(mux.sessions.map((MuxSession s) => s.id), contains(third.id));
++    });
++
+     test('后端不支持改尺寸时 resize 返回 false 且不改记录', () async {
+       final launcher = FakePtyLauncher();
+       final mux = StudioMux(launcher: launcher);
+diff --git a/test/harness/local/support/fake_pty.dart b/test/harness/local/support/fake_pty.dart
+index b10da68b52b13093a957db27eb494b5861493fc5..c9b7852e06f1860060204d76aed546c0e3d1b9db 100644
+--- a/test/harness/local/support/fake_pty.dart
++++ b/test/harness/local/support/fake_pty.dart
+@@ -67,21 +67,33 @@ class FakePtyProcess implements PtyProcess {
+ 
+ /// 记录启动参数的假 launcher。
+ class FakePtyLauncher implements PtyLauncher {
+-  FakePtyLauncher({this.resizeSupported = false});
++  FakePtyLauncher({
++    this.resizeSupported = false,
++    this.allocatesTerminal = true,
++  });
+ 
+   final bool resizeSupported;
++
++  @override
++  final bool allocatesTerminal;
++
+   final List<FakePtyProcess> spawned = <FakePtyProcess>[];
+   final List<Map<String, Object?>> launches = <Map<String, Object?>>[];
+ 
+-  @override
+-  String get strategy => 'fake';
++  /// dispose 被调用的次数。
++  int disposeCount = 0;
+ 
+   @override
+-  bool get allocatesTerminal => true;
++  String get strategy => allocatesTerminal ? 'fake' : 'pipe';
+ 
+   @override
+   bool get supportsResize => resizeSupported;
+ 
++  @override
++  Future<void> dispose() async {
++    disposeCount++;
++  }
++
+   @override
+   Future<PtyProcess> spawn({
+     required String executable,

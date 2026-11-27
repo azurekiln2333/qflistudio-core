@@ -1,0 +1,2257 @@
+diff --git a/lib/editor/agent/agent_dock.dart b/lib/editor/agent/agent_dock.dart
+index 5bec98b79c0d510970f240e5fb1c01f492228b17..15376439d54007748d5ba15c4f009f0441686f6d 100644
+--- a/lib/editor/agent/agent_dock.dart
++++ b/lib/editor/agent/agent_dock.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../shell/large_screen_controller.dart';
+ import '../../shell/workbench_agent_pane.dart';
+ import '../../chat/composer_draft.dart';
+ import '../../chat/composer_state.dart';
+@@ -21,6 +22,7 @@ class AgentEntryButton extends StatelessWidget {
+     required this.active,
+     required this.onPressed,
+     this.switchesPane = false,
++    this.shortcut,
+   });
+ 
+   final EditorAgentHost host;
+@@ -33,6 +35,9 @@ class AgentEntryButton extends StatelessWidget {
+   /// 窄屏和中屏切回编辑器。宽屏收起右栏。
+   final bool switchesPane;
+ 
++  /// Workbench-only label; phone tooltips retain their existing text.
++  final String? shortcut;
++
+   @override
+   Widget build(BuildContext context) {
+     return AnimatedBuilder(
+@@ -50,7 +55,8 @@ class AgentEntryButton extends StatelessWidget {
+ 
+   Widget _button(int badge) => IconButton(
+     key: const ValueKey('editor-agent-toggle'),
+-    tooltip: active ? (switchesPane ? '返回编辑器' : '收起 Agent 面板') : '打开 Agent 面板',
++    tooltip:
++        '${active ? (switchesPane ? '返回编辑器' : '收起 Agent 面板') : '打开 Agent 面板'}${shortcut == null ? '' : ' ($shortcut)'}',
+     onPressed: onPressed,
+     icon: AgentBadgeIcon(
+       badgeCount: badge,
+@@ -102,6 +108,7 @@ class AgentDock extends StatelessWidget {
+     required this.onCollapse,
+     required this.onCreateSession,
+     required this.child,
++    this.showCollapse = true,
+   });
+ 
+   final AgentRuntime runtime;
+@@ -109,6 +116,9 @@ class AgentDock extends StatelessWidget {
+ 
+   final VoidCallback onCollapse;
+ 
++  /// The workbench uses its top-bar Agent toggle as the sole collapse control.
++  final bool showCollapse;
++
+   /// 新建会话并把 Agent 面板切到它上面。
+   final Future<void> Function() onCreateSession;
+ 
+@@ -119,59 +129,63 @@ class AgentDock extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final theme = Theme.of(context);
+     final scheme = theme.colorScheme;
++    final showHeader = LargeScreenScope.maybeOf(context) == null;
+     return Material(
+       color: scheme.surfaceContainerLow,
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+         children: [
+-          SizedBox(
+-            height: 52,
+-            child: AnimatedBuilder(
+-              animation: Listenable.merge([
+-                runtime.sessions,
+-                runtime.liveChanges,
+-              ]),
+-              builder: (context, _) {
+-                final sessionId = state.sessionId;
+-                final title = sessionId == null
+-                    ? 'Agent 面板'
+-                    : (runtime.sessions.metaOf(sessionId)?.title ?? '新会话');
+-                return Row(
+-                  children: [
+-                    const SizedBox(width: 12),
+-                    Icon(
+-                      Icons.smart_toy_outlined,
+-                      size: 18,
+-                      color: scheme.primary,
+-                    ),
+-                    const SizedBox(width: 8),
+-                    Expanded(
+-                      child: Text(
+-                        title,
+-                        maxLines: 1,
+-                        overflow: TextOverflow.ellipsis,
+-                        style: theme.textTheme.titleSmall,
++          if (showHeader) ...[
++            SizedBox(
++              height: 52,
++              child: AnimatedBuilder(
++                animation: Listenable.merge([
++                  runtime.sessions,
++                  runtime.liveChanges,
++                ]),
++                builder: (context, _) {
++                  final sessionId = state.sessionId;
++                  final title = sessionId == null
++                      ? 'Agent 面板'
++                      : (runtime.sessions.metaOf(sessionId)?.title ?? '新会话');
++                  return Row(
++                    children: [
++                      const SizedBox(width: 12),
++                      Icon(
++                        Icons.smart_toy_outlined,
++                        size: 18,
++                        color: scheme.primary,
+                       ),
+-                    ),
+-                    IconButton(
+-                      key: const ValueKey('editor-agent-new-session'),
+-                      tooltip: '新会话',
+-                      onPressed: () => onCreateSession(),
+-                      icon: const Icon(Icons.add_comment_outlined, size: 20),
+-                    ),
+-                    IconButton(
+-                      key: const ValueKey('editor-agent-collapse'),
+-                      tooltip: '收起 Agent 面板',
+-                      onPressed: onCollapse,
+-                      icon: const Icon(Icons.chevron_right),
+-                    ),
+-                    const SizedBox(width: 4),
+-                  ],
+-                );
+-              },
++                      const SizedBox(width: 8),
++                      Expanded(
++                        child: Text(
++                          title,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: theme.textTheme.titleSmall,
++                        ),
++                      ),
++                      IconButton(
++                        key: const ValueKey('editor-agent-new-session'),
++                        tooltip: '新会话',
++                        onPressed: () => onCreateSession(),
++                        icon: const Icon(Icons.add_comment_outlined, size: 20),
++                      ),
++                      if (showCollapse)
++                        IconButton(
++                          key: const ValueKey('editor-agent-collapse'),
++                          tooltip: '收起 Agent 面板',
++                          onPressed: onCollapse,
++                          icon: const Icon(Icons.chevron_right),
++                        ),
++                      const SizedBox(width: 4),
++                    ],
++                  );
++                },
++              ),
+             ),
+-          ),
+-          const Divider(height: 1),
++            const Divider(height: 1),
++          ],
+           Expanded(child: child),
+         ],
+       ),
+diff --git a/lib/editor/editor_page.dart b/lib/editor/editor_page.dart
+index 0cf637f20ec37a8ffed2b844613c028794bcd6d4..88a70559ced72b6160483cbfd96df103885b01ed 100644
+--- a/lib/editor/editor_page.dart
++++ b/lib/editor/editor_page.dart
+@@ -24,6 +24,7 @@ import 'editor_delete_fix.dart';
+ import 'editor_selection_toolbar.dart';
+ import '../services/cloud_sync_service.dart';
+ import '../services/file_encoding.dart';
++import '../services/project_file_access.dart';
+ import '../services/code_formatter.dart';
+ import '../services/local_web_server.dart';
+ import '../services/runner_service.dart';
+@@ -51,6 +52,7 @@ import 'editor_output_panel.dart';
+ import 'editor_diagnostics.dart';
+ import 'editor_find_panel.dart';
+ import 'file_explorer.dart';
++import 'new_file_dialog.dart';
+ import 'highlight_themes.dart';
+ import 'open_file.dart';
+ import 'editor_problems_bar.dart';
+@@ -80,7 +82,7 @@ import 'agent/agent_pane_switcher.dart';
+ import 'agent/editor_agent_host.dart';
+ import 'agent/editor_sidebar_tabs.dart';
+ import '../shell/large_screen_controller.dart';
+-import '../shell/workbench_chrome.dart';
++import '../shell/shortcut_label.dart';
+ import 'agent/session_list_view.dart';
+ import '../harness/harness_host.dart';
+ import '../harness/harness_session_target.dart';
+@@ -119,6 +121,37 @@ class FormatIntent extends Intent {
+   const FormatIntent();
+ }
+ 
++enum _EditorCommand {
++  terminal,
++  bottomPanel,
++  agent,
++  closeTab,
++  nextTab,
++  previousTab,
++  newFile,
++  run,
++}
++
++class _EditorCommandIntent extends Intent {
++  const _EditorCommandIntent(this.command);
++
++  final _EditorCommand command;
++}
++
++/// Let the page handle Agent and save shortcuts while retaining all other
++/// code-editor bindings. In particular, Ctrl/Cmd+L must not select a line.
++class _PageCodeShortcuts extends DefaultCodeShortcutsActivatorsBuilder {
++  const _PageCodeShortcuts();
++
++  @override
++  List<ShortcutActivator>? build(CodeShortcutType type) {
++    if (type == CodeShortcutType.lineSelect || type == CodeShortcutType.save) {
++      return const [];
++    }
++    return super.build(type);
++  }
++}
++
+ /// Borrows one controller and overrides only its newline entry point.
+ class _InlineSourceController extends CodeLineEditingControllerDelegate {
+   _InlineSourceController({
+@@ -345,7 +378,15 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   double _terminalDragAnchor = 0;
+ 
+   bool _aiCollapsed = false;
+-  _BottomPanel _bottomPanel = _BottomPanel.none;
++  _BottomPanel _selectedBottomPanel = _BottomPanel.none;
++  _BottomPanel _lastBottomPanel = _BottomPanel.terminal;
++
++  _BottomPanel get _bottomPanel => _selectedBottomPanel;
++  set _bottomPanel(_BottomPanel panel) {
++    if (panel != _BottomPanel.none) _lastBottomPanel = panel;
++    _selectedBottomPanel = panel;
++  }
++
+   bool get _terminalVisible => _bottomPanel == _BottomPanel.terminal;
+ 
+   /// agent 宿主：持有侧边栏分段、主体分段和对话流收起状态。
+@@ -1746,10 +1787,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   }
+ 
+   void _toggleExplorer() {
+-    if (_largeScreen case final largeScreen?) {
+-      largeScreen.select(WorkbenchActivity.files);
+-      return;
+-    }
++    // The workbench owns explorer navigation; it never calls this phone action.
++    if (_largeScreen != null) return;
+     final wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
+     if (wide) {
+       // 侧栏默认隐藏，第一次点击为展开。
+@@ -2088,6 +2127,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+               runtime: runtime,
+               state: host.state,
+               onCollapse: _collapseAgentPanel,
++              showCollapse: _largeScreen == null,
+               onCreateSession: _createAgentSession,
+               child: pane ?? const SizedBox.shrink(),
+             ),
+@@ -2100,9 +2140,26 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+           top: 0,
+           bottom: 0,
+           width: Breakpoints.agentPaneWidth,
+-          child: Offstage(offstage: collapsed, child: content),
++          child: Offstage(
++            offstage: collapsed,
++            child: _largeScreen == null
++                ? content
++                : TickerMode(
++                    enabled: !collapsed,
++                    child: ExcludeFocus(
++                      excluding: collapsed,
++                      child: ExcludeSemantics(
++                        excluding: collapsed,
++                        child: IgnorePointer(
++                          ignoring: collapsed,
++                          child: content,
++                        ),
++                      ),
++                    ),
++                  ),
++          ),
+         ),
+-        if (collapsed)
++        if (collapsed && _largeScreen == null)
+           AgentDockRail(
+             onExpand: _showAgentPanel,
+             badgeCount: _agentBadgeCount(),
+@@ -2118,7 +2175,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+   /// 抽屉和桌面侧边栏共用这里。
+   Widget _buildSidebar(BuildContext context, {VoidCallback? onFileOpened}) {
+     final host = _agentHost;
+-    if (host == null) {
++    if (host == null || _largeScreen != null) {
+       return _buildExplorerCard(context, onFileOpened: onFileOpened);
+     }
+     final runtime = host.runtime;
+@@ -2291,6 +2348,94 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     );
+   }
+ 
++  void _toggleBottomPanel() {
++    final next = _bottomPanel == _BottomPanel.none
++        ? _lastBottomPanel
++        : _BottomPanel.none;
++    if (next == _BottomPanel.terminal) _terminalCollapsed = false;
++    _showPanel(next);
++  }
++
++  void _invokeEditorCommand(_EditorCommand command) {
++    switch (command) {
++      case _EditorCommand.terminal:
++        if (_terminalVisible) _terminalKey.currentState?.unfocusInput();
++        if (!_terminalVisible) _terminalCollapsed = false;
++        _toggleTerminalPanel();
++      case _EditorCommand.bottomPanel:
++        _toggleBottomPanel();
++      case _EditorCommand.agent:
++        _toggleAgentPanel();
++      case _EditorCommand.closeTab:
++        if (_editor.current != null) {
++          unawaited(_closeTab(_editor.currentIndex));
++        }
++      case _EditorCommand.nextTab:
++      case _EditorCommand.previousTab:
++        if (_editor.files.isEmpty) return;
++        final delta = command == _EditorCommand.nextTab ? 1 : -1;
++        _editor.select((_editor.currentIndex + delta) % _editor.files.length);
++      case _EditorCommand.newFile:
++        unawaited(_newFile());
++      case _EditorCommand.run:
++        if (!_runningProject && !_debugger.busy) unawaited(_runProject());
++    }
++  }
++
++  Future<void> _newFile() async {
++    final current = _editor.current;
++    final owner = current == null ? widget.project : _gitOwnerOf(current);
++    if (owner == null || !_isProjectAvailable(owner.path)) {
++      _showSnack('项目文件夹已不可用');
++      return;
++    }
++    final name = await showNewFileDialog(
++      context,
++      settings: widget.settings,
++      projectLanguage: owner.language,
++    );
++    if (!mounted || name == null) return;
++    if (!_isProjectAvailable(owner.path)) {
++      _showSnack('项目文件夹已不可用');
++      return;
++    }
++    final path = p.normalize(p.join(owner.path, name));
++    if (p.isAbsolute(name) || !p.isWithin(owner.path, path)) {
++      _showSnack('文件名必须位于当前项目内');
++      return;
++    }
++    try {
++      if (!ProjectFileAccess.isExternal(owner.path) &&
++          !await Directory(owner.path).exists()) {
++        if (mounted) _showSnack('项目文件夹已不可用');
++        return;
++      }
++      if (await FileSystemEntity.type(path, followLinks: false) !=
++          FileSystemEntityType.notFound) {
++        if (mounted) _showSnack('“$name”已存在');
++        return;
++      }
++      await ProjectFileAccess.writeBytes(path, const <int>[]);
++      if (!mounted) return;
++      _treeRefresh.value++;
++      final error = await _editor.openPath(
++        path,
++        ownerProjectName: owner.name,
++        ownerProjectPath: owner.path,
++        ownerProjectType: owner.type,
++        shouldOpen: () => mounted && _isProjectAvailable(owner.path),
++      );
++      if (!mounted) return;
++      if (error != null) {
++        _showSnack(error);
++      } else {
++        _showEditorPane(recheckDisk: false);
++      }
++    } on FileSystemException catch (error) {
++      if (mounted) _showSnack('创建失败：${error.message}');
++    }
++  }
++
+   void _openSettings() {
+     Navigator.of(context).push(
+       MaterialPageRoute(
+@@ -3386,24 +3531,76 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+         layoutOf(MediaQuery.sizeOf(context).width) == WorkbenchLayout.wide;
+     // 窄屏用原撤销按钮的位置切换面板。
+     // 标题保留原宽度。
+-    final undoInMenu = _agentHost != null && !wide;
++    final undoInMenu = _largeScreen != null || (_agentHost != null && !wide);
+     final editorVisible = wideAgentPane || !_agentPanelActive;
+     final focusMode = _inlineFocusDocuments.contains(_editor.current);
+     final sidebarVisible = !focusMode && (_explorerVisible ?? false);
+     // Android 的窗口铺到屏幕底边，导航条会压住最后一屏内容，由编辑器自己让位。
+     final bottomInset = EditorBottomInset.insetOf(context);
+     return Shortcuts(
+-      shortcuts: const {
+-        SingleActivator(LogicalKeyboardKey.keyS, control: true): SaveIntent(),
+-        SingleActivator(LogicalKeyboardKey.keyS, meta: true): SaveIntent(),
+-        SingleActivator(LogicalKeyboardKey.keyF, control: true): FindIntent(),
+-        SingleActivator(LogicalKeyboardKey.keyF, meta: true): FindIntent(),
+-        SingleActivator(LogicalKeyboardKey.keyG, control: true):
+-            GotoLineIntent(),
+-        SingleActivator(LogicalKeyboardKey.keyI, control: true): FormatIntent(),
++      shortcuts: {
++        const SingleActivator(LogicalKeyboardKey.keyS, control: true):
++            const SaveIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyS, meta: true):
++            const SaveIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
++            const FindIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
++            const FindIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyG, control: true):
++            const GotoLineIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyI, control: true):
++            const FormatIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyG, meta: true):
++            const GotoLineIntent(),
++        const SingleActivator(LogicalKeyboardKey.keyI, meta: true):
++            const FormatIntent(),
++        const SingleActivator(LogicalKeyboardKey.backquote, control: true):
++            const _EditorCommandIntent(_EditorCommand.terminal),
++        const SingleActivator(LogicalKeyboardKey.backquote, meta: true):
++            const _EditorCommandIntent(_EditorCommand.terminal),
++        if (!_terminalInputHasFocus) ...{
++          const SingleActivator(LogicalKeyboardKey.keyJ, control: true):
++              const _EditorCommandIntent(_EditorCommand.bottomPanel),
++          const SingleActivator(LogicalKeyboardKey.keyJ, meta: true):
++              const _EditorCommandIntent(_EditorCommand.bottomPanel),
++          const SingleActivator(LogicalKeyboardKey.keyL, control: true):
++              const _EditorCommandIntent(_EditorCommand.agent),
++          const SingleActivator(LogicalKeyboardKey.keyL, meta: true):
++              const _EditorCommandIntent(_EditorCommand.agent),
++          const SingleActivator(LogicalKeyboardKey.keyW, control: true):
++              const _EditorCommandIntent(_EditorCommand.closeTab),
++          const SingleActivator(LogicalKeyboardKey.keyW, meta: true):
++              const _EditorCommandIntent(_EditorCommand.closeTab),
++        },
++        const SingleActivator(LogicalKeyboardKey.tab, control: true):
++            const _EditorCommandIntent(_EditorCommand.nextTab),
++        const SingleActivator(
++          LogicalKeyboardKey.tab,
++          control: true,
++          shift: true,
++        ): const _EditorCommandIntent(
++          _EditorCommand.previousTab,
++        ),
++        const SingleActivator(LogicalKeyboardKey.tab, meta: true):
++            const _EditorCommandIntent(_EditorCommand.nextTab),
++        const SingleActivator(LogicalKeyboardKey.tab, meta: true, shift: true):
++            const _EditorCommandIntent(_EditorCommand.previousTab),
++        const SingleActivator(LogicalKeyboardKey.keyN, control: true):
++            const _EditorCommandIntent(_EditorCommand.newFile),
++        const SingleActivator(LogicalKeyboardKey.keyN, meta: true):
++            const _EditorCommandIntent(_EditorCommand.newFile),
++        const SingleActivator(LogicalKeyboardKey.f5):
++            const _EditorCommandIntent(_EditorCommand.run),
+       },
+       child: Actions(
+         actions: {
++          _EditorCommandIntent: CallbackAction<_EditorCommandIntent>(
++            onInvoke: (intent) {
++              _invokeEditorCommand(intent.command);
++              return null;
++            },
++          ),
+           SaveIntent: CallbackAction<SaveIntent>(
+             onInvoke: (_) {
+               _saveCurrent();
+@@ -3477,7 +3674,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                   statusBarBrightness: scheme.brightness,
+                                 )
+                               : null,
+-                          leading: selected != null
++                          leading: selected != null || _largeScreen != null
+                               ? null
+                               : IconButton(
+                                   tooltip: sidebarVisible ? '收起文件树' : '打开文件树',
+@@ -3509,8 +3706,12 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                           active: _agentPanelActive,
+                                           switchesPane: !wideAgentPane,
+                                           onPressed: _toggleAgentPanel,
++                                          shortcut: _largeScreen == null
++                                              ? null
++                                              : shortcutLabel('Ctrl+L'),
+                                         ),
+-                                      if (widget.onMinimize != null)
++                                      if (_largeScreen == null &&
++                                          widget.onMinimize != null)
+                                         IconButton(
+                                           tooltip: '暂时收起编辑器',
+                                           onPressed: widget.onMinimize,
+@@ -3556,7 +3757,9 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                         // configured project entry, a long press runs
+                                         // the file that is active when it fires.
+                                         Tooltip(
+-                                          message: _runButtonTooltip,
++                                          message: _largeScreen == null
++                                              ? _runButtonTooltip
++                                              : '$_runButtonTooltip (${shortcutLabel('F5')})',
+                                           child: Semantics(
+                                             button: true,
+                                             enabled:
+@@ -3622,6 +3825,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                             );
+                                             return;
+                                           }
++                                          if (value.startsWith('workbench:')) {
++                                            final id = value.substring(10);
++                                            for (final action
++                                                in _workbenchMenuActions(
++                                                  context,
++                                                )) {
++                                              if (action.id == id) {
++                                                action.onPressed?.call();
++                                                break;
++                                              }
++                                            }
++                                            return;
++                                          }
+                                           switch (value) {
+                                             case 'recover_orphan':
+                                               unawaited(_recoverOrphanedFile());
+@@ -3636,6 +3852,32 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                           }
+                                         },
+                                         itemBuilder: (context) => [
++                                          if (_largeScreen != null) ...[
++                                            for (final action
++                                                in _workbenchMenuActions(
++                                                  context,
++                                                ))
++                                              PopupMenuItem<String>(
++                                                key: ValueKey(
++                                                  'workbench-menu-${action.id}',
++                                                ),
++                                                value: 'workbench:${action.id}',
++                                                enabled:
++                                                    action.onPressed != null,
++                                                child: Row(
++                                                  children: [
++                                                    Icon(action.icon, size: 20),
++                                                    const SizedBox(width: 12),
++                                                    Flexible(
++                                                      child: Text(
++                                                        action.tooltip,
++                                                      ),
++                                                    ),
++                                                  ],
++                                                ),
++                                              ),
++                                            const PopupMenuDivider(),
++                                          ],
+                                           for (final action in inlineMenu)
+                                             PopupMenuItem<String>(
+                                               key: ValueKey(
+@@ -3787,7 +4029,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                                               ),
+                                             ),
+                                           // 矮窗口下快捷栏让位，这一批动作回到菜单，一个都不丢。
+-                                          if (!focusMode &&
++                                          if (_largeScreen == null &&
++                                              !focusMode &&
+                                               !_quickBarFits(context)) ...[
+                                             const PopupMenuDivider(),
+                                             for (final action
+@@ -4079,7 +4322,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                         if (agentEnabled && layout == WorkbenchLayout.wide)
+                           SizedBox(
+                             width: agentCollapsed
+-                                ? _agentRailWidth
++                                ? (_largeScreen == null ? _agentRailWidth : 0)
+                                 : Breakpoints.agentPaneWidth,
+                             child: Listener(
+                               behavior: HitTestBehavior.translucent,
+@@ -4097,6 +4340,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                     // 快捷栏整个不画（与标签栏、符号栏、状态栏的让位规则一致）。
+                     // 25 dp 的条要的就是 25 dp，不再按 36 dp 留位置。
+                     final showQuickBar =
++                        _largeScreen == null &&
+                         !focusMode &&
+                         bodyHeight >=
+                             minEditorHeight +
+@@ -4491,8 +4735,96 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     );
+   }
+ 
++  /// Workbench menus reuse action enablement, not the phone fallback list.
++  List<EditorQuickBarAction> _workbenchMenuActions(BuildContext context) {
++    const ids = {
++      'undo',
++      'save',
++      'find',
++      'goto',
++      'format',
++      'content_tool',
++      'minimap',
++      'git',
++      'cloud_pull',
++      'online_terminal',
++      'close_editor',
++    };
++    final shortcuts = {
++      'undo': 'Ctrl+Z',
++      'save': 'Ctrl+S',
++      'find': 'Ctrl+F',
++      'goto': 'Ctrl+G',
++      'format': 'Ctrl+I',
++    };
++    return [
++      for (final action in _quickBarEditorActions(context))
++        if (ids.contains(action.id))
++          EditorQuickBarAction(
++            id: action.id,
++            icon: action.icon,
++            tooltip: shortcuts.containsKey(action.id)
++                ? action.tooltip.replaceAll(
++                    shortcuts[action.id]!,
++                    shortcutLabel(shortcuts[action.id]!),
++                  )
++                : action.tooltip,
++            onPressed: action.onPressed,
++            active: action.active,
++          ),
++    ];
++  }
++
++  Widget _buildWorkbenchPanels() {
++    final scheme = Theme.of(context).colorScheme;
++    const panels = [
++      (_BottomPanel.terminal, Icons.terminal_outlined, '终端'),
++      (_BottomPanel.output, Icons.output, '输出'),
++      (_BottomPanel.problems, Icons.warning_amber_outlined, '问题'),
++      (_BottomPanel.debug, Icons.bug_report_outlined, '调试'),
++      (_BottomPanel.debugConsole, Icons.data_object, '调试控制台'),
++      (_BottomPanel.ports, Icons.router_outlined, '端口'),
++    ];
++    return Row(
++      key: const ValueKey('workbench-panel-buttons'),
++      mainAxisSize: MainAxisSize.min,
++      children: [
++        for (final (panel, icon, label) in panels)
++          IconButton(
++            key: ValueKey('workbench-panel-${panel.name}'),
++            tooltip: panel == _BottomPanel.terminal
++                ? '$label (${shortcutLabel('Ctrl+`')})'
++                : _bottomPanel == panel
++                ? '$label (${shortcutLabel('Ctrl+J')})'
++                : label,
++            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
++            style: IconButton.styleFrom(
++              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++            ),
++            padding: EdgeInsets.zero,
++            visualDensity: VisualDensity.compact,
++            iconSize: 16,
++            color: _bottomPanel == panel
++                ? scheme.primary
++                : scheme.onSurfaceVariant,
++            onPressed: () {
++              if (panel == _BottomPanel.terminal) {
++                if (_terminalVisible) _terminalKey.currentState?.unfocusInput();
++                if (!_terminalVisible) _terminalCollapsed = false;
++                _toggleTerminalPanel();
++              } else {
++                _showPanel(_bottomPanel == panel ? _BottomPanel.none : panel);
++              }
++            },
++            icon: Icon(icon),
++          ),
++      ],
++    );
++  }
++
+   /// 快捷栏没有空间时（矮窗口），同一批动作回到「更多」菜单。
+   List<EditorQuickBarAction> _quickBarFallbackActions(BuildContext context) {
++    if (_largeScreen != null) return const [];
+     final agentMode = _quickBarAgentMode;
+     final actions = agentMode
+         ? _quickBarAgentActions()
+@@ -4531,7 +4863,8 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+       readOnly: open?.readOnly == true,
+       brokenProject: open != null && _isOrphaned(open),
+       undoInMenu:
+-          host != null && MediaQuery.sizeOf(context).width < _wideBreakpoint,
++          _largeScreen != null ||
++          (host != null && MediaQuery.sizeOf(context).width < _wideBreakpoint),
+       minimapVisible: widget.settings.minimap,
+       terminalVisible: _terminalVisible,
+       contentPanelOpen: panelOpen,
+@@ -4599,7 +4932,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     final scheme = Theme.of(context).colorScheme;
+     final open = _editor.current;
+     if (open == null || _tabController == null) {
+-      return Center(
++      final empty = Center(
+         child: Column(
+           mainAxisSize: MainAxisSize.min,
+           children: [
+@@ -4618,6 +4951,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+           ],
+         ),
+       );
++      if (_largeScreen == null) return empty;
++      return Column(
++        children: [
++          Expanded(child: empty),
++          Align(
++            alignment: Alignment.centerRight,
++            child: _buildWorkbenchPanels(),
++          ),
++        ],
++      );
+     }
+     return LayoutBuilder(
+       builder: (context, constraints) {
+@@ -4631,6 +4974,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+             !focused && widget.settings.showEditorTabs && available >= 220;
+         final showSymbols =
+             !focused &&
++            (_largeScreen == null || widget.settings.largeScreenSymbolBar) &&
+             available >= 160 &&
+             (contribution?.showCoreSymbols ?? true);
+         final showStatus =
+@@ -4740,14 +5084,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                 ),
+               )
+             else
+-              GestureDetector(
+-                onTap: () => _closeTab(_editor.files.indexOf(open)),
+-                child: Icon(
+-                  Icons.close,
+-                  size: 15,
+-                  color: scheme.onSurfaceVariant,
+-                ),
+-              ),
++              _buildTabCloseButton(open, scheme),
+           ],
+         ),
+       ),
+@@ -4760,6 +5097,16 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+     );
+   }
+ 
++  Widget _buildTabCloseButton(OpenFile open, ColorScheme scheme) {
++    final button = GestureDetector(
++      onTap: () => _closeTab(_editor.files.indexOf(open)),
++      child: Icon(Icons.close, size: 15, color: scheme.onSurfaceVariant),
++    );
++    return _largeScreen == null
++        ? button
++        : Tooltip(message: '关闭标签 (${shortcutLabel('Ctrl+W')})', child: button);
++  }
++
+   Future<void> _showTabMenu(OpenFile open, Offset position) async {
+     final index = _editor.files.indexOf(open);
+     final action = await showMenu<String>(
+@@ -4910,6 +5257,7 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                 focusNode: open.focusNode,
+                 scrollController: open.scrollController,
+                 findController: open.findController,
++                shortcutsActivatorsBuilder: const _PageCodeShortcuts(),
+                 shortcutOverrideActions: {
+                   ...editorShortcutOverrides(open.controller),
+                   ...?contribution?.shortcutOverrideActions,
+@@ -5163,7 +5511,19 @@ class _EditorPageState extends State<EditorPage> with TickerProviderStateMixin {
+                     ),
+                   ],
+                 ],
+-                if (open.dirty && !widget.project.isCloud) ...[
++                if (_largeScreen != null) ...[
++                  const Spacer(),
++                  SizedBox(
++                    width: (constraints.maxWidth * 0.55).clamp(0.0, 168.0),
++                    child: SingleChildScrollView(
++                      scrollDirection: Axis.horizontal,
++                      child: _buildWorkbenchPanels(),
++                    ),
++                  ),
++                ],
++                if (open.dirty &&
++                    !widget.project.isCloud &&
++                    (_largeScreen == null || constraints.maxWidth >= 400)) ...[
+                   const SizedBox(width: 12),
+                   Text(
+                     '未保存',
+diff --git a/lib/harness/ui/hub_agents_surface.dart b/lib/harness/ui/hub_agents_surface.dart
+index 4a895dfe8cc9cd678a1f3095b1246f3d88a8775a..fd138e62f8ba27fb4452336c54d6d874c1d711bb 100644
+--- a/lib/harness/ui/hub_agents_surface.dart
++++ b/lib/harness/ui/hub_agents_surface.dart
+@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
+ 
+ import '../harness_host.dart';
+ import '../hub/harness_hub.dart';
++import '../../shell/large_screen_controller.dart';
++import '../../shell/shortcut_label.dart';
+ import 'hub_host_switcher.dart';
+ import 'hub_session_list.dart';
+ import 'hub_session_view.dart';
+@@ -107,6 +109,7 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
+     return AnimatedBuilder(
+       animation: hub,
+       builder: (context, _) {
++        final workbench = LargeScreenScope.maybeOf(context) != null;
+         final host = hub.currentHost;
+         final active = hub.activeSession;
+         final showsHubSession =
+@@ -125,22 +128,38 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
+                 remoteConnecting: _remoteConnecting,
+                 remoteUnavailable: _remoteUnavailable,
+                 compact: widget.compact,
++                workbench: workbench,
+                 projectRoot: widget.projectRoot,
+               ),
+             if (host == null)
+-              // 一台可见主机都没有（手机端未配对）：主机条无处可挂，
+-              // 这里自己占一行，不然用户找不到“已绑定电脑”和“添加电脑”。
+-              Padding(
+-                padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+-                child: HubHostSwitcher(
+-                  hub: hub,
+-                  onAddComputer: widget.onAddComputer,
+-                  onOpenRemote: _remoteEntry,
+-                  remoteConnecting: _remoteConnecting,
+-                  remoteUnavailable: _remoteUnavailable,
+-                  dense: widget.compact,
+-                ),
+-              ),
++              // The workbench host row is one shared surface with its actions.
++              // Phone keeps the existing standalone switcher presentation.
++              workbench
++                  ? Material(
++                      key: const ValueKey('hub-agents-header-surface'),
++                      color: Theme.of(context).colorScheme.surfaceContainerLow,
++                      child: _SwitcherRow(
++                        hub: hub,
++                        onAddComputer: widget.onAddComputer,
++                        onOpenRemote: _remoteEntry,
++                        remoteConnecting: _remoteConnecting,
++                        remoteUnavailable: _remoteUnavailable,
++                        compact: widget.compact,
++                        workbench: true,
++                        projectRoot: widget.projectRoot,
++                      ),
++                    )
++                  : Padding(
++                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
++                      child: HubHostSwitcher(
++                        hub: hub,
++                        onAddComputer: widget.onAddComputer,
++                        onOpenRemote: _remoteEntry,
++                        remoteConnecting: _remoteConnecting,
++                        remoteUnavailable: _remoteUnavailable,
++                        dense: widget.compact,
++                      ),
++                    ),
+             if (_remoteConnecting) const _RemoteConnectingBanner(),
+             if (host == null && hub.hostBuildError != null)
+               _HostBuildFailure(error: hub.hostBuildError!),
+@@ -158,6 +177,7 @@ class _HubAgentsSurfaceState extends State<HubAgentsSurface> {
+                       hub: hub,
+                       host: host,
+                       projectRoot: widget.projectRoot,
++                      workbench: workbench,
+                     ),
+             ),
+           ],
+@@ -230,6 +250,7 @@ class _HostHeader extends StatelessWidget {
+     required this.remoteConnecting,
+     required this.remoteUnavailable,
+     required this.compact,
++    required this.workbench,
+     required this.projectRoot,
+   });
+ 
+@@ -240,6 +261,7 @@ class _HostHeader extends StatelessWidget {
+   final bool remoteConnecting;
+   final bool remoteUnavailable;
+   final bool compact;
++  final bool workbench;
+   final String projectRoot;
+ 
+   @override
+@@ -248,17 +270,18 @@ class _HostHeader extends StatelessWidget {
+     final scheme = theme.colorScheme;
+     final state = hub.stateOf(host.id);
+     final hint = hub.hintOf(host.id);
+-    return Column(
++    final header = Column(
+       crossAxisAlignment: CrossAxisAlignment.stretch,
++      mainAxisSize: MainAxisSize.min,
+       children: [
+         _SwitcherRow(
+           hub: hub,
+-          host: host,
+           onAddComputer: onAddComputer,
+           onOpenRemote: onOpenRemote,
+           remoteConnecting: remoteConnecting,
+           remoteUnavailable: remoteUnavailable,
+           compact: compact,
++          workbench: workbench,
+           projectRoot: projectRoot,
+         ),
+         if (hint != null && hint.isNotEmpty)
+@@ -291,103 +314,112 @@ class _HostHeader extends StatelessWidget {
+           ),
+       ],
+     );
++    return workbench
++        ? Material(
++            key: const ValueKey('hub-agents-header-surface'),
++            color: scheme.surfaceContainerLow,
++            child: header,
++          )
++        : header;
+   }
+ }
+ 
+ class _SwitcherRow extends StatelessWidget {
+   const _SwitcherRow({
+     required this.hub,
+-    required this.host,
+     required this.onAddComputer,
+     required this.onOpenRemote,
+     required this.remoteConnecting,
+     required this.remoteUnavailable,
+     required this.compact,
++    required this.workbench,
+     required this.projectRoot,
+   });
+ 
+   final HarnessHub hub;
+-  final HarnessHost host;
+   final VoidCallback? onAddComputer;
+   final VoidCallback? onOpenRemote;
+   final bool remoteConnecting;
+   final bool remoteUnavailable;
+   final bool compact;
++  final bool workbench;
+   final String projectRoot;
+ 
+   @override
+   Widget build(BuildContext context) {
+     final scheme = Theme.of(context).colorScheme;
+-    return Row(
++    final desktop = workbench && LargeScreenScope.isDesktop(context);
++    final actionSize = desktop ? 32.0 : 48.0;
++    final hostChips = HubHostSwitcher(
++      hub: hub,
++      onAddComputer: onAddComputer,
++      onOpenRemote: onOpenRemote,
++      remoteConnecting: remoteConnecting,
++      remoteUnavailable: remoteUnavailable,
++      dense: compact,
++      surface: !workbench,
++      touchTargets: workbench && !desktop,
++    );
++    final actions = Row(
++      mainAxisSize: MainAxisSize.min,
+       children: [
+-        Expanded(
+-          child: _HostChips(
+-            hub: hub,
+-            onAddComputer: onAddComputer,
+-            onOpenRemote: onOpenRemote,
+-            remoteConnecting: remoteConnecting,
+-            remoteUnavailable: remoteUnavailable,
+-            compact: compact,
+-          ),
+-        ),
+         IconButton(
+           key: const ValueKey('hub-sessions-refresh'),
+           tooltip: '刷新会话',
+           iconSize: 18,
+           padding: EdgeInsets.zero,
+-          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
++          constraints: BoxConstraints.tightFor(
++            width: workbench ? actionSize : 36,
++            height: workbench ? actionSize : 36,
++          ),
++          style: workbench
++              ? IconButton.styleFrom(
++                  visualDensity: VisualDensity.standard,
++                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++                )
++              : null,
+           onPressed: hub.refresh,
+           icon: const Icon(Icons.refresh),
+         ),
+-        SizedBox(width: 2),
++        const SizedBox(width: 2),
+         Container(width: 1, height: 20, color: scheme.outlineVariant),
+-        SizedBox(width: 2),
+-        HubNewSessionButton(hub: hub, cwd: projectRoot, dense: true),
++        const SizedBox(width: 2),
++        HubNewSessionButton(
++          hub: hub,
++          cwd: projectRoot,
++          dense: true,
++          buttonSize: workbench ? actionSize : null,
++        ),
++      ],
++    );
++    final row = Row(
++      children: [
++        Expanded(child: hostChips),
++        actions,
+       ],
+     );
++    if (!workbench) return row;
++    return SizedBox(
++      key: const ValueKey('hub-agents-header'),
++      height: desktop ? 40 : 48,
++      child: row,
++    );
+   }
+ }
+ 
+-/// 主机选择条：直接复用 [HubHostSwitcher]，这里只是一个不滚动的窄容器。
+-class _HostChips extends StatelessWidget {
+-  const _HostChips({
+-    required this.hub,
+-    required this.onAddComputer,
+-    required this.onOpenRemote,
+-    required this.remoteConnecting,
+-    required this.remoteUnavailable,
+-    required this.compact,
+-  });
+-
+-  final HarnessHub hub;
+-  final VoidCallback? onAddComputer;
+-  final VoidCallback? onOpenRemote;
+-  final bool remoteConnecting;
+-  final bool remoteUnavailable;
+-  final bool compact;
+-
+-  @override
+-  Widget build(BuildContext context) => HubHostSwitcher(
+-    hub: hub,
+-    onAddComputer: onAddComputer,
+-    onOpenRemote: onOpenRemote,
+-    remoteConnecting: remoteConnecting,
+-    remoteUnavailable: remoteUnavailable,
+-    dense: compact,
+-  );
+-}
+-
+ /// 当前主机没有会话时的说明与启动入口。
+ class _HostEmptyState extends StatelessWidget {
+   const _HostEmptyState({
+     required this.hub,
+     required this.host,
+     required this.projectRoot,
++    required this.workbench,
+   });
+ 
+   final HarnessHub hub;
+   final HarnessHost host;
+   final String projectRoot;
++  final bool workbench;
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -422,14 +454,18 @@ class _HostEmptyState extends StatelessWidget {
+               unsupported
+                   ? (hub.hintOf(host.id) ?? '检查这台电脑上是否已安装对应程序。')
+                   : hasSessions
+-                  ? '从左侧会话列表选一个，或新建会话。'
++                  ? workbench
++                        ? '从左侧 Agents 入口选择会话（${shortcutLabel('Ctrl+Shift+A')}）。'
++                        : '从左侧会话列表选一个，或新建会话。'
++                  : workbench
++                  ? '从左侧 Agents 查看会话（${shortcutLabel('Ctrl+Shift+A')}）。\n点击顶部按钮新建会话。'
+                   : '从右上角的新建会话启动一个 harness，或先刷新。',
+               textAlign: TextAlign.center,
+               style: theme.textTheme.bodySmall?.copyWith(
+                 color: scheme.onSurfaceVariant,
+               ),
+             ),
+-            if (!unsupported) ...[
++            if (!unsupported && !workbench) ...[
+               const SizedBox(height: 12),
+               HubNewSessionButton(hub: hub, cwd: projectRoot),
+             ],
+diff --git a/lib/harness/ui/hub_host_switcher.dart b/lib/harness/ui/hub_host_switcher.dart
+index 8a8d996cb6e7ca4fe4204e45e4bd377abf71c312..bba1d61e20d7012aa7f986ab8256f436d1349242 100644
+--- a/lib/harness/ui/hub_host_switcher.dart
++++ b/lib/harness/ui/hub_host_switcher.dart
+@@ -17,6 +17,8 @@ class HubHostSwitcher extends StatelessWidget {
+     this.remoteConnecting = false,
+     this.remoteUnavailable = false,
+     this.dense = false,
++    this.surface = true,
++    this.touchTargets = false,
+   });
+ 
+   final HarnessHub hub;
+@@ -39,61 +41,73 @@ class HubHostSwitcher extends StatelessWidget {
+   /// 窄屏会话视图里用更紧的高度。
+   final bool dense;
+ 
++  /// Standalone switchers paint a surface and divider.
++  final bool surface;
++
++  /// Give chips a 48dp height on tablet without changing chip density.
++  final bool touchTargets;
++
+   @override
+-  Widget build(BuildContext context) {
+-    return AnimatedBuilder(
+-      animation: hub,
+-      builder: (context, _) {
+-        final hosts = hub.hosts;
+-        if (hosts.isEmpty && onAddComputer == null && onOpenRemote == null) {
+-          return const SizedBox.shrink();
+-        }
+-        final scheme = Theme.of(context).colorScheme;
+-        return Container(
+-          key: const ValueKey('hub-host-switcher'),
+-          decoration: BoxDecoration(
+-            color: scheme.surfaceContainerLow,
+-            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+-          ),
+-          child: SingleChildScrollView(
+-            scrollDirection: Axis.horizontal,
+-            padding: EdgeInsets.symmetric(
+-              horizontal: 8,
+-              vertical: dense ? 4 : 6,
+-            ),
+-            child: Row(
+-              children: [
+-                for (final host in hosts) ...[
+-                  _HostChip(
+-                    key: ValueKey('hub-host-${host.id}'),
+-                    label: host.label,
+-                    icon: _iconFor(host.kind),
+-                    selected: host.id == hub.currentHostId,
+-                    state: hub.stateOf(host.id),
+-                    hint: hub.hintOf(host.id),
+-                    dense: dense,
+-                    onTap: () => hub.selectHost(host.id),
+-                  ),
+-                  const SizedBox(width: 6),
+-                ],
+-                if (onOpenRemote != null) ...[
+-                  _RemotePendingChip(
+-                    dense: dense,
+-                    connecting: remoteConnecting,
+-                    unavailable: remoteUnavailable,
+-                    onTap: onOpenRemote!,
+-                  ),
+-                  const SizedBox(width: 6),
+-                ],
+-                if (onAddComputer != null)
+-                  _AddComputerChip(dense: dense, onTap: onAddComputer!),
+-              ],
+-            ),
+-          ),
+-        );
+-      },
+-    );
+-  }
++  Widget build(BuildContext context) => AnimatedBuilder(
++    animation: hub,
++    builder: (context, _) {
++      final hosts = hub.hosts;
++      if (hosts.isEmpty && onAddComputer == null && onOpenRemote == null) {
++        return const SizedBox.shrink();
++      }
++      final scheme = Theme.of(context).colorScheme;
++      final chips = SingleChildScrollView(
++        scrollDirection: Axis.horizontal,
++        padding: EdgeInsets.symmetric(
++          horizontal: 8,
++          vertical: surface ? (dense ? 4 : 6) : 0,
++        ),
++        child: Row(
++          children: [
++            for (final host in hosts) ...[
++              _HostChip(
++                key: ValueKey('hub-host-${host.id}'),
++                label: host.label,
++                icon: _iconFor(host.kind),
++                selected: host.id == hub.currentHostId,
++                state: hub.stateOf(host.id),
++                hint: hub.hintOf(host.id),
++                dense: dense,
++                touchTarget: touchTargets,
++                onTap: () => hub.selectHost(host.id),
++              ),
++              const SizedBox(width: 6),
++            ],
++            if (onOpenRemote != null) ...[
++              _RemotePendingChip(
++                dense: dense,
++                connecting: remoteConnecting,
++                unavailable: remoteUnavailable,
++                touchTarget: touchTargets,
++                onTap: onOpenRemote!,
++              ),
++              const SizedBox(width: 6),
++            ],
++            if (onAddComputer != null)
++              _AddComputerChip(
++                dense: dense,
++                touchTarget: touchTargets,
++                onTap: onAddComputer!,
++              ),
++          ],
++        ),
++      );
++      if (!surface) return chips;
++      return Container(
++        key: const ValueKey('hub-host-switcher'),
++        decoration: BoxDecoration(
++          color: scheme.surfaceContainerLow,
++          border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
++        ),
++        child: chips,
++      );
++    },
++  );
+ 
+   static IconData _iconFor(HarnessHostKind kind) => switch (kind) {
+     HarnessHostKind.local => Icons.computer_outlined,
+@@ -142,6 +156,7 @@ class _HostChip extends StatelessWidget {
+     required this.state,
+     required this.hint,
+     required this.dense,
++    required this.touchTarget,
+     required this.onTap,
+   });
+ 
+@@ -151,6 +166,7 @@ class _HostChip extends StatelessWidget {
+   final HarnessHostState state;
+   final String? hint;
+   final bool dense;
++  final bool touchTarget;
+   final VoidCallback onTap;
+ 
+   @override
+@@ -161,6 +177,7 @@ class _HostChip extends StatelessWidget {
+       onTap: onTap,
+       borderRadius: BorderRadius.circular(999),
+       child: Container(
++        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
+         padding: EdgeInsets.symmetric(
+           horizontal: dense ? 8 : 10,
+           vertical: dense ? 4 : 6,
+@@ -219,12 +236,14 @@ class _RemotePendingChip extends StatelessWidget {
+     required this.dense,
+     required this.connecting,
+     required this.unavailable,
++    required this.touchTarget,
+     required this.onTap,
+   });
+ 
+   final bool dense;
+   final bool connecting;
+   final bool unavailable;
++  final bool touchTarget;
+   final VoidCallback onTap;
+ 
+   @override
+@@ -239,6 +258,7 @@ class _RemotePendingChip extends StatelessWidget {
+       onTap: connecting ? null : onTap,
+       borderRadius: BorderRadius.circular(999),
+       child: Container(
++        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
+         padding: EdgeInsets.symmetric(
+           horizontal: dense ? 8 : 10,
+           vertical: dense ? 4 : 6,
+@@ -278,9 +298,14 @@ class _RemotePendingChip extends StatelessWidget {
+ }
+ 
+ class _AddComputerChip extends StatelessWidget {
+-  const _AddComputerChip({required this.dense, required this.onTap});
++  const _AddComputerChip({
++    required this.dense,
++    required this.touchTarget,
++    required this.onTap,
++  });
+ 
+   final bool dense;
++  final bool touchTarget;
+   final VoidCallback onTap;
+ 
+   @override
+@@ -292,6 +317,7 @@ class _AddComputerChip extends StatelessWidget {
+       onTap: onTap,
+       borderRadius: BorderRadius.circular(999),
+       child: Container(
++        constraints: touchTarget ? const BoxConstraints(minHeight: 48) : null,
+         padding: EdgeInsets.symmetric(
+           horizontal: dense ? 8 : 10,
+           vertical: dense ? 4 : 6,
+diff --git a/lib/harness/ui/hub_session_list.dart b/lib/harness/ui/hub_session_list.dart
+index c6f55e5ec18b7b4b7a04dc8ecf3c416f8cfce9d1..8b0303751e51f56f635d7ecbf33e773858c6f459 100644
+--- a/lib/harness/ui/hub_session_list.dart
++++ b/lib/harness/ui/hub_session_list.dart
+@@ -20,6 +20,7 @@ class HubNewSessionButton extends StatefulWidget {
+     this.onLaunched,
+     this.onError,
+     this.dense = false,
++    this.buttonSize,
+   });
+ 
+   final HarnessHub hub;
+@@ -31,6 +32,9 @@ class HubNewSessionButton extends StatefulWidget {
+   final void Function(Object error)? onError;
+   final bool dense;
+ 
++  /// Explicit workbench trigger and menu-row size; null preserves phone sizing.
++  final double? buttonSize;
++
+   @override
+   State<HubNewSessionButton> createState() => _HubNewSessionButtonState();
+ }
+@@ -99,24 +103,37 @@ class _HubNewSessionButtonState extends State<HubNewSessionButton> {
+           tooltip: '新建会话',
+           iconSize: 20,
+           padding: EdgeInsets.zero,
+-          constraints: BoxConstraints.tightFor(
+-            width: widget.dense ? 32 : 44,
+-            height: widget.dense ? 32 : 44,
+-          ),
++          // PopupMenuButton.constraints sizes the menu, not its icon trigger.
++          constraints: widget.buttonSize == null
++              ? BoxConstraints.tightFor(
++                  width: widget.dense ? 32 : 44,
++                  height: widget.dense ? 32 : 44,
++                )
++              : null,
++          style: widget.buttonSize == null
++              ? null
++              : IconButton.styleFrom(
++                  fixedSize: Size.square(widget.buttonSize!),
++                  minimumSize: Size.square(widget.buttonSize!),
++                  maximumSize: Size.square(widget.buttonSize!),
++                  padding: EdgeInsets.zero,
++                  visualDensity: VisualDensity.standard,
++                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++                ),
+           icon: const Icon(Icons.add_comment_outlined),
+           itemBuilder: (context) => [
+             if (providers.isEmpty)
+-              const PopupMenuItem<String>(
++              PopupMenuItem<String>(
+                 value: '__none__',
+                 enabled: false,
+-                height: 44,
++                height: widget.buttonSize ?? 44,
+                 child: Text('没有检测到可启动的 harness'),
+               ),
+             for (final provider in providers)
+               PopupMenuItem<String>(
+                 value: provider.id,
+                 enabled: provider.available,
+-                height: 44,
++                height: widget.buttonSize ?? 44,
+                 child: Row(
+                   children: [
+                     Expanded(
+diff --git a/test/editor_workbench_cleanup_test.dart b/test/editor_workbench_cleanup_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bc55f638d431cf94ee20e794c4519649b78fece
+--- /dev/null
++++ b/test/editor_workbench_cleanup_test.dart
+@@ -0,0 +1,514 @@
++@TestOn('vm')
++library;
++
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:path/path.dart' as p;
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:qfli_studio_core/chat/composer_state.dart';
++import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
++import 'package:qfli_studio_core/editor/agent/agent_pane_switcher.dart';
++import 'package:qfli_studio_core/editor/editor_controller.dart';
++import 'package:qfli_studio_core/editor/editor_output_panel.dart';
++import 'package:qfli_studio_core/editor/editor_page.dart';
++import 'package:qfli_studio_core/editor/editor_problems_bar.dart';
++import 'package:qfli_studio_core/editor/editor_quick_bar.dart';
++import 'package:qfli_studio_core/editor/symbols_bar.dart';
++import 'package:qfli_studio_core/editor/terminal_pane.dart';
++import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
++import 'package:qfli_studio_core/models/project.dart';
++import 'package:qfli_studio_core/services/app_paths.dart';
++import 'package:qfli_studio_core/services/studio_profile.dart';
++import 'package:qfli_studio_core/services/task_activity_service.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/store/auth_store.dart';
++import 'package:qfli_studio_core/store/project_store.dart';
++import 'package:qfli_studio_core/store/settings_store.dart';
++import 'package:re_editor/re_editor.dart';
++
++import 'support/fake_agent.dart';
++
++void main() {
++  late Directory root;
++  late Project project;
++  late ProjectStore store;
++  late SettingsStore settings;
++  late AuthStore auth;
++  late LargeScreenController shell;
++  late FakeAgentRuntime runtime;
++  late HarnessHub hub;
++  late _RecordingRunner runner;
++  late StudioProfile? previousProfile;
++  late Directory support;
++  late PathProviderPlatform previousPaths;
++
++  setUpAll(() async {
++    support = await Directory.systemTemp.createTemp('qfli_workbench_support_');
++    previousPaths = PathProviderPlatform.instance;
++    PathProviderPlatform.instance = _TemporaryPaths(support.path);
++    // Save reporting uses the application-owned service. Resolve its provider
++    // timeout and real filesystem I/O outside the widget test's fake clock.
++    await AppPaths.storageDirectory();
++    await TaskActivityService.instance.initialize();
++  });
++
++  tearDownAll(() async {
++    PathProviderPlatform.instance = previousPaths;
++    await support.delete(recursive: true);
++  });
++
++  setUp(() async {
++    root = await Directory.systemTemp.createTemp('qfli_editor_workbench_');
++    File(p.join(root.path, 'main.dart')).writeAsStringSync('void main() {}\n');
++    File(
++      p.join(root.path, 'other.dart'),
++    ).writeAsStringSync('const other = 1;\n');
++    project = Project.create(
++      name: 'Workbench demo',
++      path: root.path,
++      language: 'Dart',
++    );
++    store = ProjectStore(storageFile: File(p.join(root.path, 'projects.json')));
++    settings = SettingsStore(
++      storageFile: File(p.join(root.path, 'settings.json')),
++    );
++    auth = AuthStore();
++    shell = LargeScreenController();
++    runtime = FakeAgentRuntime(sessions: MemoryAgentSessionStore());
++    // No host discovery, native process probes or network access in this fixture.
++    hub = HarnessHub(hosts: [], desktop: true);
++    runner = _RecordingRunner();
++    previousProfile = StudioProfile.current;
++    StudioProfile.current = StudioProfile(
++      id: 'editor-workbench-cleanup-test',
++      appTitle: 'Editor test',
++      templates: const [],
++      productKey: StudioProductCatalog.qfliStudioKey,
++      supportedFileExtensions: const ['.dart'],
++      entryFileNames: const ['main.dart'],
++      runner: runner,
++    );
++  });
++
++  tearDown(() async {
++    StudioProfile.current = previousProfile;
++    shell.dispose();
++    hub.dispose();
++    await runtime.fileEvents.close();
++    store.dispose();
++    settings.dispose();
++    auth.dispose();
++    try {
++      root.deleteSync(recursive: true);
++    } on FileSystemException {
++      // Editor history writes can still be releasing a Windows handle.
++    }
++  });
++
++  Future<void> mount(
++    WidgetTester tester, {
++    bool workbench = true,
++    bool agent = false,
++    Size size = const Size(1280, 900),
++  }) async {
++    tester.view.physicalSize = size;
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.reset);
++    addTearDown(() async {
++      FocusManager.instance.primaryFocus?.unfocus();
++      await tester.pumpWidget(const SizedBox.shrink());
++      await _frames(tester);
++    });
++    Widget editor = EditorPage(
++      project: project,
++      auth: auth,
++      store: store,
++      settings: settings,
++      initialOpenPath: p.join(root.path, 'main.dart'),
++      onMinimize: () {},
++      onClose: () {},
++      agentEnabled: agent,
++      agentRuntime: runtime,
++      harnessHub: hub,
++      ownsHarnessHub: false,
++      composerDefaults: _MemoryDefaults(),
++    );
++    if (workbench) {
++      editor = LargeScreenScope(controller: shell, child: editor);
++    }
++    await tester.pumpWidget(MaterialApp(home: editor));
++    await _waitFor(tester, () => find.byType(CodeEditor).evaluate().isNotEmpty);
++    await _frames(tester);
++  }
++
++  EditorController editor(WidgetTester tester) => tester
++      .widget<EditorProblemsBar>(find.byType(EditorProblemsBar).first)
++      .analysis
++      .editor;
++
++  Future<void> focusEditor(WidgetTester tester) async {
++    editor(tester).current!.focusNode.requestFocus();
++    await tester.pump();
++  }
++
++  testWidgets(
++    'workbench hides duplicate chrome and follows symbol preference',
++    (tester) async {
++      await mount(tester);
++      expect(find.byType(EditorQuickBar), findsNothing);
++      expect(find.byType(SymbolsBar), findsNothing);
++      expect(find.byTooltip('打开文件树'), findsNothing);
++      expect(find.byTooltip('暂时收起编辑器'), findsNothing);
++      expect(find.byIcon(Icons.undo), findsNothing);
++      for (final id in ['terminal', 'output', 'problems', 'debug', 'ports']) {
++        expect(find.byKey(ValueKey('workbench-panel-$id')), findsOneWidget);
++      }
++      expect(
++        find.byKey(const ValueKey('workbench-panel-buttons')),
++        findsOneWidget,
++      );
++
++      final changed = settings.setLargeScreenSymbolBar(true);
++      await _frames(tester);
++      await changed;
++      expect(find.byType(SymbolsBar), findsOneWidget);
++      final hidden = settings.setLargeScreenSymbolBar(false);
++      await _frames(tester);
++      await hidden;
++      expect(find.byType(SymbolsBar), findsNothing);
++
++      await tester.tap(find.byTooltip('更多'));
++      await tester.pumpAndSettle();
++      for (final id in [
++        'undo',
++        'save',
++        'find',
++        'goto',
++        'format',
++        'git',
++        'online_terminal',
++        'close_editor',
++      ]) {
++        expect(find.byKey(ValueKey('workbench-menu-$id')), findsOneWidget);
++      }
++      for (final id in ['terminal', 'ai', 'settings', 'output', 'debug']) {
++        expect(find.byKey(ValueKey('workbench-menu-$id')), findsNothing);
++      }
++      expect(
++        find.byKey(const ValueKey('quick-fallback-terminal')),
++        findsNothing,
++      );
++      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++      await tester.pumpAndSettle();
++      expect(tester.takeException(), isNull);
++    },
++  );
++
++  testWidgets('workbench save menu invokes the enabled editor action', (
++    tester,
++  ) async {
++    await mount(tester);
++    const changed = 'void main() { /* saved through menu */ }\n';
++    editor(tester).current!.controller.text = changed;
++    await tester.pump();
++    expect(editor(tester).current!.dirty, isTrue);
++    await tester.tap(find.byTooltip('更多'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byKey(const ValueKey('workbench-menu-save')));
++    await _waitFor(tester, () => !editor(tester).current!.dirty);
++    expect(File(p.join(root.path, 'main.dart')).readAsStringSync(), changed);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('phone retains quick bar, symbols and editor navigation', (
++    tester,
++  ) async {
++    await mount(tester, workbench: false, size: const Size(500, 900));
++    expect(find.byType(EditorQuickBar), findsOneWidget);
++    expect(find.byType(SymbolsBar), findsOneWidget);
++    expect(find.byTooltip('打开文件树'), findsOneWidget);
++    expect(find.byTooltip('暂时收起编辑器'), findsOneWidget);
++    expect(find.byKey(const ValueKey('workbench-panel-buttons')), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('large-screen scope still hides chrome below tablet width', (
++    tester,
++  ) async {
++    await mount(tester, size: const Size(500, 900));
++    expect(find.byType(EditorQuickBar), findsNothing);
++    expect(find.byType(SymbolsBar), findsNothing);
++    expect(find.byTooltip('打开文件树'), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('Agent collapse releases all width and retains its pane', (
++    tester,
++  ) async {
++    await mount(tester, agent: true);
++    final column = find.byKey(const ValueKey('editor-right-column'));
++    final collapsedWidth = tester.getSize(column).width;
++    expect(find.byType(AgentDockRail), findsNothing);
++    expect(find.byKey(const ValueKey('editor-agent-expand')), findsNothing);
++
++    await focusEditor(tester);
++    final selection = editor(tester).current!.controller.selection;
++    await _shortcut(tester, LogicalKeyboardKey.keyL);
++    await _frames(tester);
++    expect(find.byType(AgentDock), findsOneWidget);
++    expect(find.byKey(const ValueKey('editor-agent-collapse')), findsNothing);
++    expect(tester.getSize(column).width, closeTo(collapsedWidth - 400, 0.1));
++    expect(
++      editor(tester).current!.controller.selection,
++      selection,
++      reason: 'Ctrl+L must not be consumed by re_editor line selection',
++    );
++    final dock = tester.element(find.byType(AgentDock));
++
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyL, meta: true);
++    await _frames(tester);
++    expect(tester.getSize(column).width, closeTo(collapsedWidth, 0.1));
++    expect(find.byType(AgentDockRail), findsNothing);
++    expect(
++      tester.element(find.byType(AgentDock, skipOffstage: false)),
++      same(dock),
++    );
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('medium workbench switches Agent and editor in place', (
++    tester,
++  ) async {
++    await mount(tester, agent: true, size: const Size(900, 900));
++    expect(find.byType(AgentPaneSwitcher), findsOneWidget);
++    final source = editor(tester).current!.controller;
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyL);
++    await _frames(tester);
++    expect(find.byType(CodeEditor), findsNothing);
++    await tester.tap(find.byKey(const ValueKey('editor-agent-toggle')));
++    await _frames(tester);
++    expect(find.byType(CodeEditor), findsOneWidget);
++    expect(editor(tester).current!.controller, same(source));
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('panel shortcuts restore last panel and retain terminal state', (
++    tester,
++  ) async {
++    await mount(tester);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyJ);
++    await _frames(tester);
++    final terminal = tester.state<TerminalPaneState>(find.byType(TerminalPane));
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyJ);
++    await _frames(tester);
++    expect(find.byType(TerminalPane), findsNothing);
++
++    await tester.tap(find.byKey(const ValueKey('workbench-panel-output')));
++    await _frames(tester);
++    expect(find.byType(EditorOutputPanel), findsOneWidget);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyJ);
++    await _frames(tester);
++    expect(find.byType(EditorOutputPanel), findsNothing);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyJ, meta: true);
++    await _frames(tester);
++    expect(find.byType(EditorOutputPanel), findsOneWidget);
++
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.backquote);
++    await _frames(tester);
++    expect(
++      tester.state<TerminalPaneState>(find.byType(TerminalPane)),
++      same(terminal),
++    );
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.backquote, meta: true);
++    await _frames(tester);
++    expect(find.byType(TerminalPane), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('terminal focus keeps W J L away from editor actions', (
++    tester,
++  ) async {
++    await mount(tester, agent: true);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.backquote);
++    await _frames(tester);
++    final terminal = tester.state<TerminalPaneState>(find.byType(TerminalPane));
++    terminal.requestInputFocus();
++    await _frames(tester);
++    expect(terminal.inputHasFocus, isTrue);
++    for (final key in [
++      LogicalKeyboardKey.keyW,
++      LogicalKeyboardKey.keyJ,
++      LogicalKeyboardKey.keyL,
++    ]) {
++      // The page must not even register these chords while the prompt owns focus.
++      final pageShortcuts = find
++          .descendant(
++            of: find.byType(EditorPage),
++            matching: find.byType(Shortcuts),
++          )
++          .first;
++      final mapping = tester.widget<Shortcuts>(pageShortcuts).shortcuts;
++      expect(mapping.containsKey(SingleActivator(key, control: true)), isFalse);
++      expect(mapping.containsKey(SingleActivator(key, meta: true)), isFalse);
++      await _shortcut(tester, key);
++      await _frames(tester);
++      expect(editor(tester).files, hasLength(1));
++      expect(find.byType(TerminalPane), findsOneWidget);
++      expect(find.byType(AgentDock), findsNothing);
++      expect(terminal.inputHasFocus, isTrue);
++    }
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('Ctrl and Cmd tab navigation wrap and close uses dirty guard', (
++    tester,
++  ) async {
++    await mount(tester);
++    final controller = editor(tester);
++    final opening = controller.openPath(p.join(root.path, 'other.dart'));
++    await _frames(tester);
++    expect(await opening, isNull);
++    expect(controller.currentIndex, 1);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.tab);
++    await _frames(tester);
++    expect(controller.currentIndex, 0);
++    await _shortcut(tester, LogicalKeyboardKey.tab, shift: true, meta: true);
++    await _frames(tester);
++    expect(controller.currentIndex, 1);
++    controller.current!.controller.text = 'const changed = true;\n';
++    await tester.pump();
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyW);
++    await tester.pumpAndSettle();
++    expect(find.text('未保存的更改'), findsOneWidget);
++    await tester.tap(find.text('取消'));
++    await tester.pumpAndSettle();
++    expect(controller.files, hasLength(2));
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyW, meta: true);
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('不保存'));
++    await _frames(tester);
++    expect(controller.files, hasLength(1));
++    expect(tester.takeException(), isNull);
++  });
++
++  testWidgets('new file shortcut creates and opens a file; F5 uses runner', (
++    tester,
++  ) async {
++    await mount(tester);
++    await focusEditor(tester);
++    await _shortcut(tester, LogicalKeyboardKey.keyN);
++    await tester.pumpAndSettle();
++    expect(find.text('新建文件'), findsOneWidget);
++    await tester.enterText(find.byType(TextField).first, 'created');
++    await tester.tap(find.text('创建'));
++    await _waitFor(tester, () => editor(tester).files.length == 2);
++    expect(editor(tester).current!.name, 'created.dart');
++    expect(File(p.join(root.path, 'created.dart')).existsSync(), isTrue);
++    await focusEditor(tester);
++    await tester.sendKeyEvent(LogicalKeyboardKey.f5);
++    await _waitFor(tester, () => runner.entries.isNotEmpty);
++    expect(runner.entries.single, p.join(root.path, 'main.dart'));
++    await _frames(tester);
++    expect(tester.takeException(), isNull);
++  });
++}
++
++Future<void> _shortcut(
++  WidgetTester tester,
++  LogicalKeyboardKey key, {
++  bool shift = false,
++  bool meta = false,
++}) async {
++  final modifier = meta
++      ? LogicalKeyboardKey.metaLeft
++      : LogicalKeyboardKey.controlLeft;
++  await tester.sendKeyDownEvent(modifier);
++  if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
++  await tester.sendKeyEvent(key);
++  if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
++  await tester.sendKeyUpEvent(modifier);
++  await tester.pump();
++}
++
++Future<void> _frames(WidgetTester tester, [int count = 20]) async {
++  for (var i = 0; i < count; i++) {
++    await tester.pump(const Duration(milliseconds: 20));
++    await tester.runAsync(
++      () => Future<void>.delayed(const Duration(milliseconds: 3)),
++    );
++  }
++}
++
++Future<void> _waitFor(WidgetTester tester, bool Function() condition) async {
++  for (var i = 0; i < 200; i++) {
++    if (condition()) return;
++    await _frames(tester, 1);
++  }
++  fail('Timed out waiting for editor I/O');
++}
++
++class _TemporaryPaths extends PathProviderPlatform {
++  _TemporaryPaths(this.root);
++
++  final String root;
++
++  @override
++  Future<String?> getApplicationSupportPath() async => root;
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => root;
++
++  @override
++  Future<String?> getTemporaryPath() async => root;
++}
++
++class _TrackedVisibility extends ValueNotifier<bool> {
++  _TrackedVisibility(super.value);
++
++  bool get listening => hasListeners;
++}
++
++class _MemoryDefaults implements ComposerDefaultsStore {
++  final _values = <String, ComposerDefaults>{};
++
++  @override
++  Future<ComposerDefaults?> read(String projectId) async => _values[projectId];
++
++  @override
++  Future<void> write(String projectId, ComposerDefaults defaults) async {
++    _values[projectId] = defaults;
++  }
++}
++
++class _RecordingRunner implements ProgramRunner {
++  final entries = <String>[];
++
++  @override
++  Future<ProgramRunResult?> run({
++    required String projectPath,
++    required String entryFile,
++  }) async {
++    entries.add(entryFile);
++    return ProgramRunResult(
++      title: 'test run',
++      stdout: const Stream.empty(),
++      stderr: const Stream.empty(),
++      exitCode: Future.value(0),
++    );
++  }
++}
+diff --git a/test/harness/hub_ui_test.dart b/test/harness/hub_ui_test.dart
+index ec8818cc3beef848dcaa63b8dcb74de0ad276291..736d720e1070131228d65a8fd1cc4a39ed272147 100644
+--- a/test/harness/hub_ui_test.dart
++++ b/test/harness/hub_ui_test.dart
+@@ -13,6 +13,7 @@ import 'dart:async';
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
++import 'package:qfli_studio_core/editor/agent/agent_dock.dart';
+ import 'package:qfli_studio_core/harness/harness_host.dart';
+ import 'package:qfli_studio_core/harness/hub/harness_hub.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_agents_surface.dart';
+@@ -22,8 +23,14 @@ import 'package:qfli_studio_core/harness/ui/hub_session_list.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_session_view.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_terminal_key_bar.dart';
+ import 'package:qfli_studio_core/harness/ui/hub_terminal_view.dart';
++import 'package:qfli_studio_core/layout/app_form_factor.dart';
++import 'package:qfli_studio_core/shell/large_screen_controller.dart';
++import 'package:qfli_studio_core/shell/shortcut_label.dart';
++import 'package:qfli_studio_core/shell/workbench_state.dart';
++import 'package:qfli_studio_core/shell/workbench_theme.dart';
+ import 'package:xterm/xterm.dart';
+ 
++import '../support/fake_agent.dart';
+ import '../support/fake_harness_host.dart';
+ 
+ Widget _wrap(Widget child) => MaterialApp(
+@@ -347,6 +354,324 @@ void main() {
+     },
+   );
+ 
++  for (final viewport in [
++    (
++      formFactor: AppFormFactor.desktop,
++      size: const Size(1440, 900),
++      paneWidth: 400.0,
++    ),
++    (
++      formFactor: AppFormFactor.desktop,
++      size: const Size(1024, 768),
++      paneWidth: 944.0,
++    ),
++    (
++      formFactor: AppFormFactor.tablet,
++      size: const Size(1180, 820),
++      paneWidth: 400.0,
++    ),
++  ]) {
++    for (final brightness in Brightness.values) {
++      testWidgets(
++        'workbench Agent header has one surface/action: ${viewport.size}, $brightness',
++        (tester) async {
++          final formFactor = viewport.formFactor;
++          final desktop = formFactor == AppFormFactor.desktop;
++          final expectedHeight = desktop ? 40.0 : 48.0;
++          final actionSize = desktop ? 32.0 : 48.0;
++          tester.view.devicePixelRatio = 1;
++          tester.view.physicalSize = viewport.size;
++          addTearDown(tester.view.resetPhysicalSize);
++          addTearDown(tester.view.resetDevicePixelRatio);
++          final host = FakeHarnessHost(
++            id: 'local',
++            label: '本机',
++            kind: HarnessHostKind.local,
++            initialSessions: [
++              fakeSession(hostId: 'local', id: 'idle', title: '未选择的会话'),
++            ],
++            providerList: const [
++              HarnessProviderInfo(
++                id: 'claude',
++                label: 'Claude Code',
++                available: true,
++              ),
++            ],
++          );
++          final hub = HarnessHub(hosts: [host], desktop: true);
++          final layout = LargeScreenController();
++          final state = WorkbenchState(projectId: 'project');
++          final runtime = FakeAgentRuntime(sessions: MemoryAgentSessionStore());
++          addTearDown(hub.dispose);
++          addTearDown(layout.dispose);
++          addTearDown(state.dispose);
++          addTearDown(runtime.sessions.dispose);
++          addTearDown(runtime.fileEvents.close);
++          await tester.pumpWidget(
++            MaterialApp(
++              theme: WorkbenchTheme.from(
++                ThemeData(useMaterial3: true, brightness: brightness),
++                formFactor: formFactor,
++              ),
++              home: LargeScreenScope(
++                controller: layout,
++                formFactor: formFactor,
++                child: Scaffold(
++                  body: Align(
++                    alignment: Alignment.topLeft,
++                    child: SizedBox(
++                      width: viewport.paneWidth,
++                      height: 720,
++                      child: AgentDock(
++                        runtime: runtime,
++                        state: state,
++                        onCollapse: () {},
++                        onCreateSession: () async {},
++                        child: HubAgentsSurface(
++                          hub: hub,
++                          studioPane: const SizedBox.shrink(),
++                          projectRoot: 'D:/project',
++                          onAddComputer: () {},
++                          openRemoteHost: () async => null,
++                        ),
++                      ),
++                    ),
++                  ),
++                ),
++              ),
++            ),
++          );
++          await tester.pump();
++          await tester.pump();
++
++          final header = find.byKey(const ValueKey('hub-agents-header'));
++          final surface = find.byKey(
++            const ValueKey('hub-agents-header-surface'),
++          );
++          expect(tester.getSize(header).height, expectedHeight);
++          expect(tester.getSize(surface).width, viewport.paneWidth);
++          final scheme = Theme.of(tester.element(surface)).colorScheme;
++          expect(
++            tester.widget<Material>(surface).color,
++            scheme.surfaceContainerLow,
++          );
++          expect(
++            find.byKey(const ValueKey('hub-host-switcher')),
++            findsNothing,
++            reason: 'The host chips must not paint a second surface block.',
++          );
++          expect(
++            find.ancestor(
++              of: find.byKey(const ValueKey('hub-sessions-refresh')),
++              matching: surface,
++            ),
++            findsOneWidget,
++          );
++          expect(
++            find.ancestor(
++              of: find.byKey(const ValueKey('hub-host-local')),
++              matching: surface,
++            ),
++            findsOneWidget,
++          );
++          expect(find.byKey(const ValueKey('hub-new-session')), findsOneWidget);
++          expect(
++            find.byKey(const ValueKey('editor-agent-new-session')),
++            findsNothing,
++            reason: 'The host-row action replaces the legacy title-row action.',
++          );
++          expect(find.text('Agent 面板'), findsNothing);
++          expect(
++            find.byKey(const ValueKey('editor-agent-collapse')),
++            findsNothing,
++          );
++          for (final key in ['hub-sessions-refresh', 'hub-new-session']) {
++            final action = find.byKey(ValueKey(key));
++            expect(tester.getSize(action), Size.square(actionSize));
++            expect(
++              tester.getRect(surface).contains(tester.getCenter(action)),
++              isTrue,
++            );
++          }
++          final chipTapTargets = [
++            find.descendant(
++              of: find.byKey(const ValueKey('hub-host-local')),
++              matching: find.byType(InkWell),
++            ),
++            find.byKey(const ValueKey('hub-host-pending-remote')),
++            find.byKey(const ValueKey('hub-add-computer')),
++          ];
++          for (final chip in chipTapTargets) {
++            expect(
++              tester.getSize(chip).height,
++              desktop ? lessThanOrEqualTo(expectedHeight) : expectedHeight,
++            );
++            // Narrow panes intentionally scroll host chips, not header actions.
++            await tester.ensureVisible(chip);
++            await tester.pump();
++            expect(
++              tester.getRect(surface).contains(tester.getCenter(chip)),
++              isTrue,
++            );
++          }
++          expect(
++            find.text('从左侧 Agents 入口选择会话（${shortcutLabel('Ctrl+Shift+A')}）。'),
++            findsOneWidget,
++          );
++          expect(find.text('从左侧会话列表选一个，或新建会话。'), findsNothing);
++          expect(find.byType(HubNewSessionButton), findsOneWidget);
++          final newSession = find.byKey(const ValueKey('hub-new-session'));
++          expect(
++            tester.widget<PopupMenuButton<String>>(newSession).constraints,
++            isNull,
++          );
++          await tester.tap(newSession);
++          await _settle(tester);
++          final provider = find.widgetWithText(
++            PopupMenuItem<String>,
++            'Claude Code',
++          );
++          expect(provider, findsOneWidget);
++          expect(tester.getSize(provider).width, greaterThan(actionSize));
++          expect(
++            tester.widget<PopupMenuItem<String>>(provider).height,
++            actionSize,
++          );
++          if (!desktop) {
++            expect(tester.getSize(provider).height, greaterThanOrEqualTo(48));
++          }
++          await tester.tap(find.text('Claude Code'));
++          await _settle(tester);
++          expect(hub.activeSession?.providerId, 'claude');
++          expect(hub.activeSession?.cwd, 'D:/project');
++          final close = find.byKey(const ValueKey('hub-session-close'));
++          expect(close, findsOneWidget);
++          expect(
++            tester.getTopLeft(close).dy,
++            greaterThanOrEqualTo(tester.getBottomLeft(header).dy),
++          );
++          expect(tester.getSize(header).height, expectedHeight);
++          expect(find.byType(HubNewSessionButton), findsOneWidget);
++          expect(
++            find.byKey(const ValueKey('editor-agent-new-session')),
++            findsNothing,
++          );
++
++          await tester.tap(close);
++          await _settle(tester);
++          host.emitSessions([]);
++          await _settle(tester);
++          expect(find.text('本机 还没有会话'), findsOneWidget);
++          expect(
++            find.text(
++              '从左侧 Agents 查看会话（${shortcutLabel('Ctrl+Shift+A')}）。\n点击顶部按钮新建会话。',
++            ),
++            findsOneWidget,
++          );
++          expect(find.byType(HubNewSessionButton), findsOneWidget);
++          expect(tester.takeException(), isNull);
++          await tester.pumpWidget(const SizedBox.shrink());
++        },
++      );
++    }
++  }
++
++  testWidgets('phone host header keeps its existing new-session entry', (
++    tester,
++  ) async {
++    final hub = buildHub();
++    final state = WorkbenchState(projectId: 'project');
++    final runtime = FakeAgentRuntime(sessions: MemoryAgentSessionStore());
++    addTearDown(hub.dispose);
++    addTearDown(state.dispose);
++    addTearDown(runtime.sessions.dispose);
++    addTearDown(runtime.fileEvents.close);
++    await awaitSessions(tester);
++    await tester.pumpWidget(
++      _wrap(
++        AgentDock(
++          runtime: runtime,
++          state: state,
++          onCollapse: () {},
++          onCreateSession: () async {},
++          child: HubAgentsSurface(
++            hub: hub,
++            studioPane: const Center(child: Text('STUDIO-PANE')),
++            projectRoot: 'D:/proj/alpha',
++          ),
++        ),
++      ),
++    );
++    await tester.pump();
++
++    // Phone still keeps both historical launch affordances; only workbench R5
++    // removes the empty-state button in favor of its Agents rail guidance.
++    expect(find.byType(HubNewSessionButton), findsNWidgets(2));
++    expect(find.text('Agent 面板'), findsOneWidget);
++    expect(
++      find.byKey(const ValueKey('editor-agent-new-session')),
++      findsOneWidget,
++    );
++    expect(find.byKey(const ValueKey('editor-agent-collapse')), findsOneWidget);
++    expect(find.byKey(const ValueKey('hub-host-switcher')), findsOneWidget);
++    expect(find.byKey(const ValueKey('hub-agents-header')), findsNothing);
++    expect(find.text('从左侧会话列表选一个，或新建会话。'), findsOneWidget);
++    expect(tester.takeException(), isNull);
++    await tester.pumpWidget(const SizedBox.shrink());
++  });
++
++  for (final formFactor in [AppFormFactor.desktop, AppFormFactor.tablet]) {
++    testWidgets(
++      'workbench keeps its host header before hosts arrive: $formFactor',
++      (tester) async {
++        final hub = HarnessHub(hosts: const [], desktop: true);
++        final layout = LargeScreenController();
++        addTearDown(hub.dispose);
++        addTearDown(layout.dispose);
++        await tester.pumpWidget(
++          MaterialApp(
++            theme: WorkbenchTheme.from(
++              ThemeData(useMaterial3: true),
++              formFactor: formFactor,
++            ),
++            home: LargeScreenScope(
++              controller: layout,
++              formFactor: formFactor,
++              child: Scaffold(
++                body: HubAgentsSurface(
++                  hub: hub,
++                  studioPane: const Text('STUDIO-PANE'),
++                  projectRoot: 'D:/project',
++                  onAddComputer: () {},
++                ),
++              ),
++            ),
++          ),
++        );
++        await tester.pump();
++        expect(
++          tester
++              .getSize(find.byKey(const ValueKey('hub-agents-header')))
++              .height,
++          formFactor == AppFormFactor.desktop ? 40 : 48,
++        );
++        expect(
++          find.byKey(const ValueKey('hub-agents-header-surface')),
++          findsOneWidget,
++        );
++        expect(find.byKey(const ValueKey('hub-new-session')), findsOneWidget);
++        expect(
++          find.byKey(const ValueKey('hub-sessions-refresh')),
++          findsOneWidget,
++        );
++        expect(find.byKey(const ValueKey('hub-add-computer')), findsOneWidget);
++        expect(find.text('STUDIO-PANE'), findsOneWidget);
++        expect(tester.takeException(), isNull);
++        await tester.pumpWidget(const SizedBox.shrink());
++      },
++    );
++  }
++
+   testWidgets('the paired computer is only opened when the user asks for it', (
+     tester,
+   ) async {
